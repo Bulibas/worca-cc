@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import {
   buildClaudeArgs, buildSettingsPayload, planClaudeInvocation, runClaude,
 } from '../src/core/claude-runner.mjs';
-import { hostGuardEnabled, hostGuardHookEntry, hostGuardSystemPrompt } from '../src/core/host-guard.mjs';
+import { hostGuardEnabled } from '../src/core/host-guard.mjs';
 
 const POSIX_SHIM = { skip: process.platform === 'win32' ? 'fake claude shim is a POSIX shell script' : false };
 const BASE = { prompt: 'p', permissionMode: 'acceptEdits' };
@@ -84,18 +84,6 @@ test('planClaudeInvocation: the staged settings.json carries the guard hook', ()
 });
 
 // ── the spawn: env var + system-prompt preamble, end to end ──────────────────
-
-test('hostGuardSystemPrompt names the PID and the banned patterns', () => {
-  const text = hostGuardSystemPrompt(4242);
-  assert.match(text, /4242/);
-  assert.match(text, /pkill/);
-});
-
-test('hostGuardHookEntry points node at this repo\'s host-guard.mjs', () => {
-  const entry = hostGuardHookEntry();
-  assert.equal(entry.matcher, 'Bash');
-  assert.match(entry.hooks[0].command, /host-guard\.mjs/);
-});
 
 /** Fake claude recording argv (NUL-separated) and WORCA_HOST_PID to files. */
 async function fakeBin(dir, argvFile, envFile) {

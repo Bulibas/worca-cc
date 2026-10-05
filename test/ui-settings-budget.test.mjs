@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { fieldErrorText, cardAlertOf, edit } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -125,30 +126,34 @@ test('client validation: 0.001 -> no POST + an error on each bad field', async (
   assert.equal(window.document.activeElement, $('#budgetTotal'), 'focus on the first bad field');
 });
 
-test('server 400 error text lands verbatim on the field it names', async () => {
-  const { window, $, tick, openSettings } = await boot({
-    onPost: () => Promise.resolve({
-      ok: false, status: 400,
-      json: async () => ({ error: '“Limit for all runs” must be a positive number of USD.', field: 'totalCostLimitUsd' }),
-    }),
-  });
-  await openSettings();
-  edit(window, $('#budgetTotal'), '60');
-  $('#budgetSave').click();
-  await settle(tick);
-  assert.equal(fieldErrorText($('#budgetTotal')), '“Limit for all runs” must be a positive number of USD.');
-  assert.equal($('#budgetSave').disabled, false, 'still dirty: Save re-enabled after a rejection');
-});
-
-test('a server error with no field is a card alert', async () => {
-  const { window, $, tick, openSettings } = await boot({
-    onPost: () => Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'Settings were not saved: EACCES.' }) }),
-  });
-  await openSettings();
-  edit(window, $('#budgetTotal'), '60');
-  $('#budgetSave').click();
-  await settle(tick);
-  assert.deepEqual(cardAlertOf($('#budget-settings-card')), { title: 'Not saved', detail: 'Settings were not saved: EACCES.' });
+// Each response boots its own page (cuts the count, not the time).
+test('a server 400 naming a field lands verbatim on it (Save re-enabled); a field-less error is a card alert', async () => {
+  await checkRows([
+    { name: 'server 400 error text lands verbatim on the field it names', run: async () => {
+      const { window, $, tick, openSettings } = await boot({
+        onPost: () => Promise.resolve({
+          ok: false, status: 400,
+          json: async () => ({ error: '“Limit for all runs” must be a positive number of USD.', field: 'totalCostLimitUsd' }),
+        }),
+      });
+      await openSettings();
+      edit(window, $('#budgetTotal'), '60');
+      $('#budgetSave').click();
+      await settle(tick);
+      assert.equal(fieldErrorText($('#budgetTotal')), '“Limit for all runs” must be a positive number of USD.');
+      assert.equal($('#budgetSave').disabled, false, 'still dirty: Save re-enabled after a rejection');
+    } },
+    { name: 'a server error with no field is a card alert', run: async () => {
+      const { window, $, tick, openSettings } = await boot({
+        onPost: () => Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'Settings were not saved: EACCES.' }) }),
+      });
+      await openSettings();
+      edit(window, $('#budgetTotal'), '60');
+      $('#budgetSave').click();
+      await settle(tick);
+      assert.deepEqual(cardAlertOf($('#budget-settings-card')), { title: 'Not saved', detail: 'Settings were not saved: EACCES.' });
+    } },
+  ]);
 });
 
 test('Clear limits posts nulls for both limits and leaves the period untouched', async () => {

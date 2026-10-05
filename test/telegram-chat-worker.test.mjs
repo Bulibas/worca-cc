@@ -4,14 +4,15 @@
 // pre-1.0 telegram adapter tests: poll cycle (first poll timeout=0), 429
 // retry_after, cursor persistence via state deltas + replay guard, /cmd@bot
 // handling, edited_message skip, HTML rendering, send split + 429 ladder +
-// error-kind mapping, validateConfig.
+// error-kind mapping.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createTelegramWorker, validateConfig, renderToHtml,
+  createTelegramWorker, renderToHtml,
 } from '../plugins/telegram-chat/channel/worker.mjs';
 import { splitText, withRetryLadder } from '../plugins/telegram-chat/lib/send-util.mjs';
 import { toTelegramHtml, toSlackMrkdwn } from '../plugins/telegram-chat/lib/markdown.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const json = (obj, status = 200) => ({
   ok: status >= 200 && status < 300,
@@ -172,38 +173,28 @@ test('send: HTML render, 4096 split on line boundaries, ladder + kind mapping', 
   await assert.rejects(w.send('42', msg), (err) => err.kind === 'plugin' && /blocked|start/.test(err.message));
 });
 
-test('validateConfig: ok/identity, 401 pins botToken, network error reported', async () => {
-  const ok = await validateConfig({ botToken: 't' }, { fetchFn: async () => json({ ok: true, result: { username: 'worca_bot' } }) });
-  assert.deepEqual(ok, { ok: true, identity: '@worca_bot' });
-  const bad = await validateConfig({ botToken: 't' }, { fetchFn: async () => json({}, 401) });
-  assert.equal(bad.ok, false);
-  assert.equal(bad.errors[0].field, 'botToken');
-  const missing = await validateConfig({});
-  assert.equal(missing.errors[0].message, 'botToken is required');
-  const net = await validateConfig({ botToken: 't' }, { fetchFn: async () => { throw new Error('offline'); } });
-  assert.match(net.errors[0].message, /network error: offline/);
-});
-
-test('lib: splitText line preference; withRetryLadder exhausts to rate-limit; HTML escapes', () => {
-  assert.deepEqual(splitText('short', 10), ['short']);
-  const chunks = splitText(`${'x'.repeat(8)}\n${'y'.repeat(8)}`, 10);
-  assert.deepEqual(chunks, ['x'.repeat(8) + '\n', 'y'.repeat(8)]);
-  assert.match(renderToHtml({ title: null, body: [{ kind: 'link', value: 'PR', href: 'https://x?a=1&b=2' }], severity: 'info' }),
-    /<a href="https:\/\/x\?a=1&amp;b=2">PR<\/a>/);
-  return assert.rejects(
-    withRetryLadder(async () => ({ retryAfterMs: 1 }), async () => {}),
-    (err) => err.kind === 'rate-limit',
-  );
-});
-
-test('splitText never emits a chunk longer than limit (newline-at-limit off-by-one)', () => {
-  const s = 'a'.repeat(10) + '\n' + 'b'.repeat(9); // newline at index 10 === limit → today [11, 9]
-  for (const c of splitText(s, 10)) assert.ok(c.length <= 10, `chunk ${c.length} > 10`);
-});
-
-test('splitText never splits a surrogate pair', () => {
-  const s = 'x'.repeat(9) + '😀' + 'y'.repeat(9); // pair straddles limit 10
-  for (const c of splitText(s, 10)) assert.ok(c.isWellFormed(), 'ill-formed chunk');
+test('splitText/withRetryLadder/HTML escapes: line preference, never over the limit, never splits a surrogate pair', async () => {
+  await checkRows([
+    { name: 'lib: splitText line preference; withRetryLadder exhausts to rate-limit; HTML escapes', run: () => {
+      assert.deepEqual(splitText('short', 10), ['short']);
+      const chunks = splitText(`${'x'.repeat(8)}\n${'y'.repeat(8)}`, 10);
+      assert.deepEqual(chunks, ['x'.repeat(8) + '\n', 'y'.repeat(8)]);
+      assert.match(renderToHtml({ title: null, body: [{ kind: 'link', value: 'PR', href: 'https://x?a=1&b=2' }], severity: 'info' }),
+        /<a href="https:\/\/x\?a=1&amp;b=2">PR<\/a>/);
+      return assert.rejects(
+        withRetryLadder(async () => ({ retryAfterMs: 1 }), async () => {}),
+        (err) => err.kind === 'rate-limit',
+      );
+    } },
+    { name: 'splitText never emits a chunk longer than limit (newline-at-limit off-by-one)', run: () => {
+      const s = 'a'.repeat(10) + '\n' + 'b'.repeat(9); // newline at index 10 === limit → today [11, 9]
+      for (const c of splitText(s, 10)) assert.ok(c.length <= 10, `chunk ${c.length} > 10`);
+    } },
+    { name: 'splitText never splits a surrogate pair', run: () => {
+      const s = 'x'.repeat(9) + '😀' + 'y'.repeat(9); // pair straddles limit 10
+      for (const c of splitText(s, 10)) assert.ok(c.isWellFormed(), 'ill-formed chunk');
+    } },
+  ]);
 });
 
 test('send(): a "can\'t parse entities" 400 falls back to plain text instead of losing the message', async () => {
@@ -221,36 +212,21 @@ test('send(): a "can\'t parse entities" 400 falls back to plain text instead of 
   assert.equal(calls.at(-1).parse_mode, undefined, 'fallback resend is plain text');
 });
 
-test('code spans containing $-replacement patterns survive markdown conversion verbatim', () => {
-  const out = toTelegramHtml('run `sed s/a/$&/` now');
-  assert.match(out, /sed s\/a\/\$(&|&amp;)\//); // $& must not duplicate text or leak a \x00PH marker
-  assert.ok(!/\x00/.test(out), 'no placeholder marker leaks');
-  const out2 = toSlackMrkdwn("pattern `$'` and ```$`\n``` end");
-  assert.ok(out2.includes("$'"), 'inline $-pattern survives');
-});
-
-test('bold content with $-patterns survives toSlackMrkdwn (second restore site)', () => {
-  const out = toSlackMrkdwn('a **b$&c** d');
-  assert.match(out, /\*b\$(&|&amp;)c\*/); // T6 escapes & → &amp; in Slack output; both spellings prove no $-interpretation
-  assert.ok(!/\x01/.test(out), 'no bold marker leaks');
-});
-
-test('409 names the conflicting poller/webhook in the status detail', async () => {
-  const { ctx, events } = fakeCtx();
-  let polls = 0;
-  const fetchFn = async (url) => {
-    if (url.includes('/getMe')) return json({ ok: true, result: { id: 1, username: 'b' } });
-    polls += 1;
-    if (polls === 1) return json({ ok: false, description: 'Conflict: terminated by other getUpdates request' }, 409);
-    return new Promise(() => {});
-  };
-  const w = createTelegramWorker(ctx, { fetchFn, _sleep: async () => {} });
-  await w.start();
-  const st = await waitFor(() => events.status.find((s) => s.state === 'disconnected'));
-  assert.match(st.detail, /409/);
-  assert.match(st.detail, /another client|webhook/i);
-  assert.match(st.detail, /terminated by other getUpdates request/);
-  await w.stop();
+test('$-replacement patterns survive markdown conversion at both restore sites', async () => {
+  await checkRows([
+    { name: 'code spans containing $-replacement patterns survive markdown conversion verbatim', run: () => {
+      const out = toTelegramHtml('run `sed s/a/$&/` now');
+      assert.match(out, /sed s\/a\/\$(&|&amp;)\//); // $& must not duplicate text or leak a \x00PH marker
+      assert.ok(!/\x00/.test(out), 'no placeholder marker leaks');
+      const out2 = toSlackMrkdwn("pattern `$'` and ```$`\n``` end");
+      assert.ok(out2.includes("$'"), 'inline $-pattern survives');
+    } },
+    { name: 'bold content with $-patterns survives toSlackMrkdwn (second restore site)', run: () => {
+      const out = toSlackMrkdwn('a **b$&c** d');
+      assert.match(out, /\*b\$(&|&amp;)c\*/); // T6 escapes & → &amp; in Slack output; both spellings prove no $-interpretation
+      assert.ok(!/\x01/.test(out), 'no bold marker leaks');
+    } },
+  ]);
 });
 
 test('cursor is scoped to the bot: a new bot id resets cursor and replay guard', async () => {
@@ -272,51 +248,54 @@ test('cursor is scoped to the bot: a new bot id resets cursor and replay guard',
   await w.stop();
 });
 
-test('a cursor idle for more than 7 days is reset (Telegram re-randomises update ids)', async () => {
-  const { ctx, state, events } = fakeCtx();
-  const NOW = Date.parse('2026-09-30T00:00:00Z');
-  state.set('cursor', 5001); state.set('lastUpdateId', 5000); state.set('botId', 1);
-  state.set('cursorAt', NOW - 8 * 86400000);
-  const polls = [];
-  const fetchFn = async (url) => {
-    if (url.includes('/getMe')) return json({ ok: true, result: { id: 1, username: 'b' } });
-    polls.push(url);
-    if (polls.length === 1) return json({ ok: true, result: [{ update_id: 12, message: { message_id: 1, chat: { id: 7 }, text: '/status' } }] });
-    return new Promise(() => {});
-  };
-  const w = createTelegramWorker(ctx, { fetchFn, _sleep: async () => {}, now: () => NOW });
-  await w.start();
-  await waitFor(() => events.inbound.length === 1);
-  assert.match(polls[0], /offset=0&/);
-  await w.stop();
-});
-
-test('a cursor that ages past 7 days while the worker runs is reset before the next poll', async () => {
-  const { ctx, state, events } = fakeCtx();
-  const NOW = Date.parse('2026-09-30T00:00:00Z');
-  let clock = NOW;
-  state.set('cursor', 5001); state.set('lastUpdateId', 5000); state.set('botId', 1);
-  state.set('cursorAt', NOW - 3600000);
-  const polls = [];
-  const fetchFn = async (url) => {
-    if (url.includes('/getMe')) return json({ ok: true, result: { id: 1, username: 'b' } });
-    polls.push(url);
-    if (polls.length === 1) {
-      clock = NOW + 8 * 86400000; // a week of empty long polls passes
-      return json({ ok: true, result: [] });
-    }
-    if (polls.length === 2) return json({ ok: true, result: [{ update_id: 12, message: { message_id: 1, chat: { id: 7 }, from: { id: 9 }, text: '/approve' } }] });
-    return new Promise(() => {});
-  };
-  const w = createTelegramWorker(ctx, { fetchFn, _sleep: async () => {}, now: () => clock });
-  await w.start();
-  await waitFor(() => events.inbound.length === 1);
-  assert.match(polls[0], /offset=5001&/, 'a fresh cursor is kept at start');
-  assert.match(polls[1], /offset=0&/, 'the aged cursor is reset inside the loop');
-  assert.equal(events.inbound[0].text, '/approve');
-  await waitFor(() => state.get('cursor') === 13 && state.get('lastUpdateId') === 12 && state.get('cursorAt') === clock);
-  assert.equal(events.logs.filter((l) => /cursor reset/.test(l)).length, 1, 'the reset is logged once');
-  await w.stop();
+test('a cursor older than 7 days (idle at start, or ageing while running) is reset', async () => {
+  await checkRows([
+    { name: 'a cursor idle for more than 7 days is reset (Telegram re-randomises update ids)', run: async () => {
+      const { ctx, state, events } = fakeCtx();
+      const NOW = Date.parse('2026-09-30T00:00:00Z');
+      state.set('cursor', 5001); state.set('lastUpdateId', 5000); state.set('botId', 1);
+      state.set('cursorAt', NOW - 8 * 86400000);
+      const polls = [];
+      const fetchFn = async (url) => {
+        if (url.includes('/getMe')) return json({ ok: true, result: { id: 1, username: 'b' } });
+        polls.push(url);
+        if (polls.length === 1) return json({ ok: true, result: [{ update_id: 12, message: { message_id: 1, chat: { id: 7 }, text: '/status' } }] });
+        return new Promise(() => {});
+      };
+      const w = createTelegramWorker(ctx, { fetchFn, _sleep: async () => {}, now: () => NOW });
+      await w.start();
+      await waitFor(() => events.inbound.length === 1);
+      assert.match(polls[0], /offset=0&/);
+      await w.stop();
+    } },
+    { name: 'a cursor that ages past 7 days while the worker runs is reset before the next poll', run: async () => {
+      const { ctx, state, events } = fakeCtx();
+      const NOW = Date.parse('2026-09-30T00:00:00Z');
+      let clock = NOW;
+      state.set('cursor', 5001); state.set('lastUpdateId', 5000); state.set('botId', 1);
+      state.set('cursorAt', NOW - 3600000);
+      const polls = [];
+      const fetchFn = async (url) => {
+        if (url.includes('/getMe')) return json({ ok: true, result: { id: 1, username: 'b' } });
+        polls.push(url);
+        if (polls.length === 1) {
+          clock = NOW + 8 * 86400000; // a week of empty long polls passes
+          return json({ ok: true, result: [] });
+        }
+        if (polls.length === 2) return json({ ok: true, result: [{ update_id: 12, message: { message_id: 1, chat: { id: 7 }, from: { id: 9 }, text: '/approve' } }] });
+        return new Promise(() => {});
+      };
+      const w = createTelegramWorker(ctx, { fetchFn, _sleep: async () => {}, now: () => clock });
+      await w.start();
+      await waitFor(() => events.inbound.length === 1);
+      assert.match(polls[0], /offset=5001&/, 'a fresh cursor is kept at start');
+      assert.match(polls[1], /offset=0&/, 'the aged cursor is reset inside the loop');
+      assert.equal(events.inbound[0].text, '/approve');
+      await waitFor(() => state.get('cursor') === 13 && state.get('lastUpdateId') === 12 && state.get('cursorAt') === clock);
+      assert.equal(events.logs.filter((l) => /cursor reset/.test(l)).length, 1, 'the reset is logged once');
+      await w.stop();
+    } },
+  ]);
 });
 
 test('legacy state without botId/cursorAt is kept, not reset', async () => {

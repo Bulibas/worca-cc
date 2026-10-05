@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { settingsErrorReply, SETTINGS_FIELD_LABELS } from '../src/core/settings-errors.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const NO_KEY = /\b[a-z]+[A-Z][a-z]\w*\b|\b(?:askWeb|memoryDefrag|workspaceScan|nightMode|actions|sync|schedule|criteria|chat|search)\.\w+/;
 // [raw validator message (verbatim from src/core), ctx, field, error]
@@ -27,21 +28,26 @@ const cases = [
   ['theme must be system, light or dark', 'theme', 'theme', '“Theme” must be system, light or dark.'],
   ['uiLevel must be simple, advanced or expert', 'uiLevel', 'uiLevel', '“Interface mode” must be simple, advanced or expert.'],
 ];
-for (const [raw, ctx, field, error] of cases) {
-  test(`settingsErrorReply: ${raw}`, () => {
-    assert.deepEqual(settingsErrorReply(new Error(raw), ctx), { error, field });
-  });
-}
-test('settingsErrorReply: no validator context → not a bad value, raw text, no field', () => {
-  assert.deepEqual(settingsErrorReply(new Error('ENOSPC: no space left on device'), null),
-    { error: 'Settings were not saved: ENOSPC: no space left on device.', field: null });
-});
-test('settingsErrorReply never leaks a camelCase or dotted key (ctx is the top-level body key)', () => {
-  for (const path of Object.keys(SETTINGS_FIELD_LABELS)) {
-    const { error } = settingsErrorReply(new Error(`${path} must be one of a | b`), path.split('.')[0]);
-    assert.doesNotMatch(error, NO_KEY, `${path}: ${error}`);
-  }
-});
-test('ordinary dotted text is not mistaken for a key', () => {
-  assert.match(settingsErrorReply(new Error('sync.remote must be a remote NAME (e.g. origin), never a URL'), 'sync').error, /e\.g\. origin/);
+test('settingsErrorReply: table of validator messages → {error, field}; no-ctx raw text; never leaks a key; e.g. text is not a key', async () => {
+  await checkRows([
+    ...cases.map(([raw, ctx, field, error]) => ({
+      name: `settingsErrorReply: ${raw}`,
+      run: () => {
+        assert.deepEqual(settingsErrorReply(new Error(raw), ctx), { error, field });
+      },
+    })),
+    { name: 'settingsErrorReply: no validator context → not a bad value, raw text, no field', run: () => {
+      assert.deepEqual(settingsErrorReply(new Error('ENOSPC: no space left on device'), null),
+        { error: 'Settings were not saved: ENOSPC: no space left on device.', field: null });
+    } },
+    { name: 'settingsErrorReply never leaks a camelCase or dotted key (ctx is the top-level body key)', run: () => {
+      for (const path of Object.keys(SETTINGS_FIELD_LABELS)) {
+        const { error } = settingsErrorReply(new Error(`${path} must be one of a | b`), path.split('.')[0]);
+        assert.doesNotMatch(error, NO_KEY, `${path}: ${error}`);
+      }
+    } },
+    { name: 'ordinary dotted text is not mistaken for a key', run: () => {
+      assert.match(settingsErrorReply(new Error('sync.remote must be a remote NAME (e.g. origin), never a URL'), 'sync').error, /e\.g\. origin/);
+    } },
+  ]);
 });

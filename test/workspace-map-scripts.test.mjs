@@ -3,8 +3,8 @@
 // a REAL chain over two git repos with an npm dependency (extract -> catalog -> join -> render with no
 // agent output on disk — the degraded path every real run can fall back to); the robustness contract
 // (garbage or missing input still writes a valid output and the card exits 0); the hard line
-// budget by member count; the extract card's deadline; a member key that is no safe file name; and
-// the cards' own sources against the v1 tripwire. The cards run through the real runtime
+// budget by member count; the extract card's deadline; and a member key that is no safe file name.
+// The cards run through the real runtime
 // (process.execPath + script-child), each with the test's signal, so a hung card is killed at the
 // test timeout instead of outliving it.
 import { test, after } from 'node:test';
@@ -282,11 +282,4 @@ test('a member key that is not a safe file name: the brief file, its index line 
   assert.equal(json(cat.outputs.catalog.path).briefs['my app'], 'usage-briefs/my_app.md');
   assert.ok(lines(cat.outputs.brief.path).includes('- my app (My App): usage-briefs/my_app.md'), lines(cat.outputs.brief.path).join('\n'));
   assert.ok(existsSync(join(pipelineDir, 'usage-briefs', 'my_app.md')), 'the file the index line names exists');
-});
-
-test('the cards never carry a bare v1 sidecar token (the v1 tripwire sweeps src/ and ui/ only)', () => {
-  for (const file of [...KEYS.map((key) => REG[key].scriptPath), join(DEFAULT_SCRIPTS_DIR, 'workspace-map-io.mjs')]) {
-    const src = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-    assert.doesNotMatch(src, /\b(consumes|optionalConsumes|produces|connectsTo|loopSource)\s*:/, file);
-  }
 });

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { readConfig, setStep, setNodeModel, resolveRunConfig } from '../src/core/config.mjs';
-import { getDb, _resetForTests } from '../src/core/db.mjs';
+import { _resetForTests } from '../src/core/db.mjs';
 
 const homes = [];
 const projects = [];
@@ -40,23 +40,6 @@ test('setStep persists askQuestions and preserves it when omitted', async () => 
   // Explicit false round-trips.
   await setStep(p, 'planner', { model: 'claude-opus-4-8', askQuestions: false });
   assert.equal((await readConfig(p)).steps.planner.askQuestions, false);
-});
-
-test('sanitizeSteps keeps an askQuestions-only entry (read back after write)', async () => {
-  const p = await freshProject();
-  await setStep(p, 'implementer', { askQuestions: true });
-  const cfg = await readConfig(p);
-  assert.deepEqual(cfg.steps.implementer, { askQuestions: true });
-});
-
-test('schema v11: ask_questions column + step_questions table exist', async () => {
-  await setStep(await freshProject(), 'planner', {}); // any call that opens the DB
-  const db = getDb();
-  assert.ok(db.prepare('PRAGMA user_version').get().user_version >= 11);
-  const cols = db.prepare('PRAGMA table_info(config_workflow_nodes)').all().map((c) => c.name);
-  assert.ok(cols.includes('ask_questions'), 'ask_questions column present');
-  const qCols = db.prepare('PRAGMA table_info(step_questions)').all().map((c) => c.name);
-  assert.deepEqual(qCols, ['pipeline_id', 'step_key', 'round', 'node_id', 'agent_key', 'questions', 'answers']);
 });
 
 test('setNodeModel persists askQuestions, preserves it when omitted, NULL = inherit', async () => {

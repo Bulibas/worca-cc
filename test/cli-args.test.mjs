@@ -13,7 +13,9 @@ import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { checkRows } from './helpers/rows.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 import { getDb } from '../src/core/db.mjs';
 
 const CLI = resolve(fileURLToPath(import.meta.url), '..', '..', 'src', 'cli', 'worca-cc.mjs');
@@ -25,15 +27,8 @@ const scratch = [];
 after(() => Promise.all(scratch.map((d) => rm(d, { recursive: true, force: true }))));
 
 function freshRepo() {
-  const dir = mkdtempSync(join(tmpdir(), 'worca-cc-cliargs-repo-'));
+  const dir = templateRepo('cliargs-repo', { branch: 'main', user: true, files: { 'seed.txt': 'seed\n' } });
   scratch.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  writeFileSync(join(dir, 'seed.txt'), 'seed\n');
-  g(['add', '-A']);
-  g(['commit', '-qm', 'init']);
   return dir;
 }
 
@@ -51,25 +46,28 @@ const branchesOf = (repo) =>
 // Before the fix this ran a whole 10-execution pipeline on prompt "" and exited 0:
 // a typo'd path spent tokens and cut a worktree + feature branch for an empty task.
 
-test('MAJ-9: --file pointing at a missing file fails, names the path, and starts nothing', () => {
-  const repo = freshRepo();
-  const before = pipelineCount();
-  const r = runCli(['--project', repo, '--file', 'nope/missing.md', '--yes']);
-  assert.notEqual(r.status, 0, `expected a non-zero exit\n${r.stdout}`);
-  assert.match(r.stderr, /^worca: cannot read prompt file /m);
-  assert.ok(r.stderr.includes(join(repo, 'nope', 'missing.md')), r.stderr);
-  assert.equal(pipelineCount(), before, 'no pipeline row was created');
-  assert.equal(/Pipeline complete\./.test(r.stdout), false, r.stdout);
-});
-
-test('MAJ-9: an absolute --file that does not exist fails the same way', () => {
-  const repo = freshRepo();
-  const missing = join(tmpdir(), 'worca-cc-cliargs-never-here.md');
-  const before = pipelineCount();
-  const r = runCli(['--project', repo, '--file', missing, '--yes']);
-  assert.notEqual(r.status, 0, r.stdout);
-  assert.ok(r.stderr.includes(missing), r.stderr);
-  assert.equal(pipelineCount(), before);
+test('MAJ-9: a relative or absolute --file that does not exist fails, names the path, and starts nothing', async () => {
+  await checkRows([
+    { name: 'MAJ-9: --file pointing at a missing file fails, names the path, and starts nothing', run: () => {
+      const repo = freshRepo();
+      const before = pipelineCount();
+      const r = runCli(['--project', repo, '--file', 'nope/missing.md', '--yes']);
+      assert.notEqual(r.status, 0, `expected a non-zero exit\n${r.stdout}`);
+      assert.match(r.stderr, /^worca: cannot read prompt file /m);
+      assert.ok(r.stderr.includes(join(repo, 'nope', 'missing.md')), r.stderr);
+      assert.equal(pipelineCount(), before, 'no pipeline row was created');
+      assert.equal(/Pipeline complete\./.test(r.stdout), false, r.stdout);
+    } },
+    { name: 'MAJ-9: an absolute --file that does not exist fails the same way', run: () => {
+      const repo = freshRepo();
+      const missing = join(tmpdir(), 'worca-cc-cliargs-never-here.md');
+      const before = pipelineCount();
+      const r = runCli(['--project', repo, '--file', missing, '--yes']);
+      assert.notEqual(r.status, 0, r.stdout);
+      assert.ok(r.stderr.includes(missing), r.stderr);
+      assert.equal(pipelineCount(), before);
+    } },
+  ]);
 });
 
 test('MAJ-9: a readable --file still runs the pipeline from its contents', () => {
@@ -103,68 +101,64 @@ test('MIN-51: a near-miss subcommand is refused with a suggestion, and starts no
   assert.equal(worktrees.length, 1, worktrees.join(' | '));
 });
 
-test('MIN-51: a strict prefix of a subcommand is refused too', () => {
-  const repo = freshRepo();
-  const r = runCli(['plug'], repo);
-  assert.equal(r.status, 2, r.stdout);
-  assert.equal(
-    r.stderr.trim(),
-    'worca: unknown subcommand "plug" — did you mean "plugin"? (to run a prompt, use --prompt "…")',
-  );
+// One fresh repo per row: a refusal must leave it with no pipeline row and only `main`.
+test('MIN-51: near-miss tokens (plug, metrcs, versoin, hlep) are refused with the suggestion and start nothing', async () => {
+  await checkRows([
+    ['MIN-51: a strict prefix of a subcommand is refused too', ['plug'], 'plugin'],
+    ['MIN-51: a typo of `metrics` is refused, not run as a prompt', ['metrcs'], 'metrics'],
+    ['--version: a typo of `version` is refused, not run as a prompt', ['versoin', '--yes'], 'version'],
+    ['MIN-51: a typo of `help` itself is refused, not run as a prompt', ['hlep', '--yes'], 'help'],
+  ].map(([name, argv, meant]) => ({ name, run: () => {
+    const repo = freshRepo();
+    const before = pipelineCount();
+    const r = runCli(argv, repo);
+    assert.equal(r.status, 2, `expected the fail() exit code\n${r.stdout}\n${r.stderr}`);
+    assert.equal(
+      r.stderr.trim(),
+      `worca: unknown subcommand "${argv[0]}" — did you mean "${meant}"? (to run a prompt, use --prompt "…")`,
+    );
+    assert.equal(pipelineCount(), before, 'no pipeline row');
+    assert.equal(branchesOf(repo).trim(), 'main', 'no feature branch');
+  } })));
 });
 
-test('MIN-51: a typo of `metrics` is refused, not run as a prompt', () => {
-  const repo = freshRepo();
-  const before = pipelineCount();
-  const r = runCli(['metrcs'], repo);
-  assert.equal(r.status, 2, `expected the fail() exit code\n${r.stdout}\n${r.stderr}`);
-  assert.equal(
-    r.stderr.trim(),
-    'worca: unknown subcommand "metrcs" — did you mean "metrics"? (to run a prompt, use --prompt "…")',
-  );
-  assert.equal(pipelineCount(), before, 'no pipeline row');
+test('MIN-51: a multi-word positional, a non-near-miss single token and --prompt resume are all prompts', async () => {
+  await checkRows([
+    ['MIN-51: a multi-word bare positional is still a prompt', (repo) => runCli(['fix the login bug', '--yes'], repo), 'fix the login bug'],
+    ['MIN-51: a single-token prompt that is NOT a near-miss still runs', (repo) => runCli(['refactor', '--yes'], repo), 'refactor'],
+    ['MIN-51: --prompt resume is a prompt, never a subcommand', (repo) => runCli(['--project', repo, '--prompt', 'resume', '--yes']), 'resume'],
+  ].map(([name, start, prompt]) => ({ name, run: () => {
+    const r = start(freshRepo());
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /Pipeline complete\./);
+    const row = getDb().prepare('SELECT prompt FROM pipelines ORDER BY rowid DESC LIMIT 1').get();
+    assert.equal(row.prompt, prompt);
+  } })));
 });
 
-test('MIN-51: a multi-word bare positional is still a prompt', () => {
-  const repo = freshRepo();
-  const r = runCli(['fix the login bug', '--yes'], repo);
-  assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-  assert.match(r.stdout, /Pipeline complete\./);
-  const row = getDb().prepare('SELECT prompt FROM pipelines ORDER BY rowid DESC LIMIT 1').get();
-  assert.equal(row.prompt, 'fix the login bug');
-});
-
-test('MIN-51: a single-token prompt that is NOT a near-miss still runs', () => {
-  const repo = freshRepo();
-  const r = runCli(['refactor', '--yes'], repo);
-  assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-  assert.match(r.stdout, /Pipeline complete\./);
-});
-
-test('MIN-51: --prompt resume is a prompt, never a subcommand', () => {
-  const repo = freshRepo();
-  const r = runCli(['--project', repo, '--prompt', 'resume', '--yes']);
-  assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-  assert.match(r.stdout, /Pipeline complete\./);
-  const row = getDb().prepare('SELECT prompt FROM pipelines ORDER BY rowid DESC LIMIT 1').get();
-  assert.equal(row.prompt, 'resume');
-});
-
-test('MIN-51: HELP documents the bare-positional prompt form', () => {
-  const r = spawnSync(process.execPath, [CLI, '--help'], { encoding: 'utf8' });
-  assert.equal(r.status, 0);
-  assert.match(r.stdout, /worca "<task>"/);
-});
-
-test('MIN-51: bare `worca help` prints the help and starts nothing', () => {
-  const repo = freshRepo();
-  const before = pipelineCount();
-  const r = runCli(['help'], repo);
-  assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-  assert.match(r.stdout, /^worca — node-graph multi-agent pipelines/);
-  assert.match(r.stdout, /Usage:/);
-  assert.equal(pipelineCount(), before, 'no pipeline row');
-  assert.equal(branchesOf(repo).trim(), 'main', 'no feature branch');
+test('HELP (--help and bare `worca help`) documents the bare-positional prompt form and --version, and starts nothing', async () => {
+  const help = spawnSync(process.execPath, [CLI, '--help'], { encoding: 'utf8' });
+  await checkRows([
+    { name: 'MIN-51: HELP documents the bare-positional prompt form', run: () => {
+      assert.equal(help.status, 0);
+      assert.match(help.stdout, /worca "<task>"/);
+    } },
+    { name: '--version: HELP documents the flag and the bare word', run: () => {
+      assert.equal(help.status, 0);
+      assert.match(help.stdout, /-v, -V, --version/);
+      assert.match(help.stdout, /^  version\s+Print the version/m);
+    } },
+    { name: 'MIN-51: bare `worca help` prints the help and starts nothing', run: () => {
+      const repo = freshRepo();
+      const before = pipelineCount();
+      const r = runCli(['help'], repo);
+      assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+      assert.match(r.stdout, /^worca — node-graph multi-agent pipelines/);
+      assert.match(r.stdout, /Usage:/);
+      assert.equal(pipelineCount(), before, 'no pipeline row');
+      assert.equal(branchesOf(repo).trim(), 'main', 'no feature branch');
+    } },
+  ]);
 });
 
 // ── --version ──────────────────────────────────────────────────────────────────
@@ -173,66 +167,32 @@ test('MIN-51: bare `worca help` prints the help and starts nothing', () => {
 
 const PKG_VERSION = JSON.parse(readFileSync(resolve(CLI, '..', '..', '..', 'package.json'), 'utf8')).version;
 
-for (const spelling of [['-v'], ['-V'], ['--version'], ['version']]) {
-  test(`--version: \`worca ${spelling.join(' ')}\` prints "worca <semver>" and exits 0`, () => {
-    const r = spawnSync(process.execPath, [CLI, ...spelling], { encoding: 'utf8' });
-    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-    assert.equal(r.stdout, `worca ${PKG_VERSION}\n`);
-    assert.equal(r.stderr, '');
-  });
-}
-
-test('--version: matches package.json (semver shape)', () => {
-  assert.match(PKG_VERSION, /^\d+\.\d+\.\d+/);
-});
-
-test('--version: wins over an otherwise-bad command line', () => {
-  const r = spawnSync(process.execPath, [CLI, '--bogus-flag', '--version'], { encoding: 'utf8' });
-  assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-  assert.equal(r.stdout, `worca ${PKG_VERSION}\n`);
-});
-
-test('--version: bare `worca version` starts nothing', () => {
-  const repo = freshRepo();
-  const before = pipelineCount();
-  const r = runCli(['version'], repo);
-  assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-  assert.equal(r.stdout, `worca ${PKG_VERSION}\n`);
-  assert.equal(pipelineCount(), before, 'no pipeline row');
-  assert.equal(branchesOf(repo).trim(), 'main', 'no feature branch');
-});
-
-test('--version: a typo of `version` is refused, not run as a prompt', () => {
-  const repo = freshRepo();
-  const before = pipelineCount();
-  const r = runCli(['versoin', '--yes'], repo);
-  assert.equal(r.status, 2, `expected the fail() exit code\n${r.stdout}\n${r.stderr}`);
-  assert.equal(
-    r.stderr.trim(),
-    'worca: unknown subcommand "versoin" — did you mean "version"? (to run a prompt, use --prompt "…")',
-  );
-  assert.equal(pipelineCount(), before, 'no pipeline row');
-  assert.equal(branchesOf(repo).trim(), 'main', 'no feature branch');
-});
-
-test('--version: HELP documents the flag and the bare word', () => {
-  const r = spawnSync(process.execPath, [CLI, '--help'], { encoding: 'utf8' });
-  assert.equal(r.status, 0);
-  assert.match(r.stdout, /-v, -V, --version/);
-  assert.match(r.stdout, /^  version\s+Print the version/m);
-});
-
-test('MIN-51: a typo of `help` itself is refused, not run as a prompt', () => {
-  const repo = freshRepo();
-  const before = pipelineCount();
-  const r = runCli(['hlep', '--yes'], repo);
-  assert.equal(r.status, 2, `expected the fail() exit code\n${r.stdout}\n${r.stderr}`);
-  assert.equal(
-    r.stderr.trim(),
-    'worca: unknown subcommand "hlep" — did you mean "help"? (to run a prompt, use --prompt "…")',
-  );
-  assert.equal(pipelineCount(), before, 'no pipeline row');
-  assert.equal(branchesOf(repo).trim(), 'main', 'no feature branch');
+test('--version: -v / -V / --version / version (and after a bad flag) print "worca <semver>", exit 0, start nothing', async () => {
+  await checkRows([
+    ...[['-v'], ['-V'], ['--version'], ['version']].map((spelling) => ({
+      name: `--version: \`worca ${spelling.join(' ')}\` prints "worca <semver>" and exits 0`,
+      run: () => {
+        const r = spawnSync(process.execPath, [CLI, ...spelling], { encoding: 'utf8' });
+        assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+        assert.equal(r.stdout, `worca ${PKG_VERSION}\n`);
+        assert.equal(r.stderr, '');
+      },
+    })),
+    { name: '--version: wins over an otherwise-bad command line', run: () => {
+      const r = spawnSync(process.execPath, [CLI, '--bogus-flag', '--version'], { encoding: 'utf8' });
+      assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+      assert.equal(r.stdout, `worca ${PKG_VERSION}\n`);
+    } },
+    { name: '--version: bare `worca version` starts nothing', run: () => {
+      const repo = freshRepo();
+      const before = pipelineCount();
+      const r = runCli(['version'], repo);
+      assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+      assert.equal(r.stdout, `worca ${PKG_VERSION}\n`);
+      assert.equal(pipelineCount(), before, 'no pipeline row');
+      assert.equal(branchesOf(repo).trim(), 'main', 'no feature branch');
+    } },
+  ]);
 });
 
 test('--memory-scope: enum-checked, workflow-checked, documented; the prompt is synthesised so no --prompt is needed', () => {

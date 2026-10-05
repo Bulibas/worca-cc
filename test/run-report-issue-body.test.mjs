@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import {
   renderIssueBodyFull, repoSlugFromBugsUrl, ISSUE_BODY_MAX,
 } from '../src/core/run-report.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 function payload(over = {}) {
   return {
@@ -68,30 +69,33 @@ test('the fence widens past any backtick run inside the payload', () => {
   assert.match(body, /^`{4,}json$/m, 'the opening fence is longer than the longest run inside');
 });
 
-test('a payload too big for a GitHub issue degrades rather than overflowing', () => {
-  const steps = Array.from({ length: 4000 }, (_, i) => ({
-    nodeId: `node-${i}`, agentKey: 'implementer', cycle: 1, status: 'done',
-    activeMs: 1234, costUsd: 0.5, note: 'x'.repeat(40),
-  }));
-  const body = renderIssueBodyFull(payload({ steps }));
-  assert.ok(body.length <= ISSUE_BODY_MAX,
-    `body is ${body.length} chars; GitHub rejects anything over ${ISSUE_BODY_MAX}`);
-  assert.match(body, /Copy JSON/,
-    'an oversized report falls back to asking for the paste, naming the button that provides it');
-});
-
-test('a big-but-legal payload is embedded minified rather than dropped', () => {
-  // Pretty-printing costs ~50% on a step-heavy run. A payload that overflows only
-  // because of indentation must still ship whole.
-  const steps = Array.from({ length: 600 }, (_, i) => ({
-    nodeId: `node-${i}`, agentKey: 'implementer', cycle: 1, status: 'done', activeMs: 1234,
-  }));
-  const p = payload({ steps });
-  assert.ok(JSON.stringify(p, null, 2).length > ISSUE_BODY_MAX, 'the fixture really is too big pretty');
-  assert.ok(JSON.stringify(p).length < ISSUE_BODY_MAX, 'and really does fit minified');
-  const body = renderIssueBodyFull(p);
-  assert.ok(body.length <= ISSUE_BODY_MAX);
-  assert.deepEqual(embeddedJson(body), p, 'the complete payload still round-trips');
+test('payload size: a big-but-legal payload ships minified, a too-big one degrades to the paste request', async () => {
+  await checkRows([
+    { name: 'a payload too big for a GitHub issue degrades rather than overflowing', run: () => {
+      const steps = Array.from({ length: 4000 }, (_, i) => ({
+        nodeId: `node-${i}`, agentKey: 'implementer', cycle: 1, status: 'done',
+        activeMs: 1234, costUsd: 0.5, note: 'x'.repeat(40),
+      }));
+      const body = renderIssueBodyFull(payload({ steps }));
+      assert.ok(body.length <= ISSUE_BODY_MAX,
+        `body is ${body.length} chars; GitHub rejects anything over ${ISSUE_BODY_MAX}`);
+      assert.match(body, /Copy JSON/,
+        'an oversized report falls back to asking for the paste, naming the button that provides it');
+    } },
+    { name: 'a big-but-legal payload is embedded minified rather than dropped', run: () => {
+      // Pretty-printing costs ~50% on a step-heavy run. A payload that overflows only
+      // because of indentation must still ship whole.
+      const steps = Array.from({ length: 600 }, (_, i) => ({
+        nodeId: `node-${i}`, agentKey: 'implementer', cycle: 1, status: 'done', activeMs: 1234,
+      }));
+      const p = payload({ steps });
+      assert.ok(JSON.stringify(p, null, 2).length > ISSUE_BODY_MAX, 'the fixture really is too big pretty');
+      assert.ok(JSON.stringify(p).length < ISSUE_BODY_MAX, 'and really does fit minified');
+      const body = renderIssueBodyFull(p);
+      assert.ok(body.length <= ISSUE_BODY_MAX);
+      assert.deepEqual(embeddedJson(body), p, 'the complete payload still round-trips');
+    } },
+  ]);
 });
 
 test('repoSlugFromBugsUrl reduces package.json bugs.url to OWNER/REPO', () => {

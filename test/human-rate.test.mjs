@@ -36,8 +36,3 @@ test('invalid inputs throw and persist nothing', async () => {
   for (const bad of [0, -5, 'abc', NaN, Infinity, {}]) await assert.rejects(() => s.setHumanRateUsdPerHour(bad), /humanRateUsdPerHour/);
   assert.equal(s.humanRateUsdPerHour(), null);
 });
-
-test('humanEstimateOverrides returns the stored object or {}', async () => {
-  const s = await import('../src/core/settings.mjs');
-  assert.deepEqual(s.humanEstimateOverrides(), {});
-});

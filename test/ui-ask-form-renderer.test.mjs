@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { renderAskForm } from '../ui/public/ask/form-renderer.mjs';
-import { h, fmtBytes, extOf } from '../ui/public/ask/dom.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const doc = new JSDOM('<!doctype html><body></body>').window.document;
 
@@ -35,40 +35,30 @@ const ASK = {
 // above exercises `when` through a value set directly on the engine.
 const mount = (ask, opts = {}) => renderAskForm(ask, { doc, ...opts });
 
-test('dom helpers: h sets class and text, fmtBytes and extOf', () => {
-  const n = h(doc, 'div', 'af-x', 'hi');
-  assert.equal(n.tagName, 'DIV');
-  assert.equal(n.className, 'af-x');
-  assert.equal(n.textContent, 'hi');
-  assert.equal(fmtBytes(0), '0 B');
-  assert.equal(fmtBytes(2048), '2 KB');
-  assert.equal(fmtBytes(1572864), '1.5 MB');
-  assert.equal(extOf('a/b/c.PNG'), 'PNG');
-  assert.equal(extOf('noext'), 'FILE');
-});
-
-test('defaults seed the values; a text field renders a labelled, id-linked input', () => {
-  const f = mount(ASK);
-  assert.deepEqual(f.snapshot(), { verdict: 'approve' }, 'only the declared default is seeded');
-  const input = f.el.querySelector('input[type="text"]');
-  assert.ok(input);
-  const label = f.el.querySelector(`label[for="${input.id}"]`);
-  assert.ok(label, 'the label points at the control');
-  assert.match(label.textContent, /Reviewer/);
-  assert.ok(label.querySelector('.af-req'), 'a required field carries the marker');
-  assert.equal(input.getAttribute('aria-required'), 'true');
-  assert.equal(f.el.querySelectorAll('.af-help').length, 0, 'no host prose');
-});
-
-test('typing writes the value, fires onChange, and never remounts the node', () => {
+test('defaults seed the values; a labelled text input writes on typing, fires onChange and never remounts', async () => {
   const seen = [];
   const f = mount(ASK, { onChange: (r) => seen.push(r) });
-  const input = f.el.querySelector('input[type="text"]');
-  input.value = 'dp';
-  input.dispatchEvent(new doc.defaultView.Event('input'));
-  assert.equal(f.snapshot().who, 'dp');
-  assert.ok(seen.length >= 1, 'onChange ran');
-  assert.equal(f.el.querySelector('input[type="text"]'), input, 'the same node is still mounted');
+  await checkRows([
+    { name: 'defaults seed the values; a text field renders a labelled, id-linked input', run: async () => {
+      assert.deepEqual(f.snapshot(), { verdict: 'approve' }, 'only the declared default is seeded');
+      const input = f.el.querySelector('input[type="text"]');
+      assert.ok(input);
+      const label = f.el.querySelector(`label[for="${input.id}"]`);
+      assert.ok(label, 'the label points at the control');
+      assert.match(label.textContent, /Reviewer/);
+      assert.ok(label.querySelector('.af-req'), 'a required field carries the marker');
+      assert.equal(input.getAttribute('aria-required'), 'true');
+      assert.equal(f.el.querySelectorAll('.af-help').length, 0, 'no host prose');
+    } },
+    { name: 'typing writes the value, fires onChange, and never remounts the node', run: async () => {
+      const input = f.el.querySelector('input[type="text"]');
+      input.value = 'dp';
+      input.dispatchEvent(new doc.defaultView.Event('input'));
+      assert.equal(f.snapshot().who, 'dp');
+      assert.ok(seen.length >= 1, 'onChange ran');
+      assert.equal(f.el.querySelector('input[type="text"]'), input, 'the same node is still mounted');
+    } },
+  ]);
 });
 
 test('`when` hides and shows WITHOUT remounting, so half-typed text survives', () => {

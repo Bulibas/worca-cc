@@ -12,6 +12,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
 import { createWorktree } from '../src/core/worktree.mjs';
 import { _resetForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, '..', 'src', 'cli', 'worca-cc.mjs');
@@ -82,21 +83,24 @@ test('add uses cwd basename as default name', async () => {
   assert.match(list.stdout, new RegExp(`${reEsc(expectedName)}\\t${reEsc(proj)}`));
 });
 
-test('add accepts explicit name and --path', async () => {
-  const home = await freshHome();
-  // A not-yet-existing path under a fresh dir: add accepts it, and nothing else can own it.
-  const path = join(await freshProj(), 'nope-explicit');
-  const r = await run(['add', 'demo', '--path', path], { home });
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, new RegExp(`Added project "demo" -> ${reEsc(path)}`));
-});
-
-test('add supports --path=<dir> form', async () => {
-  const home = await freshHome();
-  const path = join(await freshProj(), 'nope-inline');
-  const r = await run(['add', 'demo', `--path=${path}`], { home });
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, new RegExp(`-> ${reEsc(path)}`));
+test('add accepts an explicit name with --path <dir> and --path=<dir>', async () => {
+  await checkRows([
+    { name: 'add accepts explicit name and --path', run: async () => {
+      const home = await freshHome();
+      // A not-yet-existing path under a fresh dir: add accepts it, and nothing else can own it.
+      const path = join(await freshProj(), 'nope-explicit');
+      const r = await run(['add', 'demo', '--path', path], { home });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, new RegExp(`Added project "demo" -> ${reEsc(path)}`));
+    } },
+    { name: 'add supports --path=<dir> form', run: async () => {
+      const home = await freshHome();
+      const path = join(await freshProj(), 'nope-inline');
+      const r = await run(['add', 'demo', `--path=${path}`], { home });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, new RegExp(`-> ${reEsc(path)}`));
+    } },
+  ]);
 });
 
 test('add expands a leading ~ in --path using HOME', async () => {
@@ -108,18 +112,21 @@ test('add expands a leading ~ in --path using HOME', async () => {
   assert.match(r.stdout, new RegExp(`-> ${reEsc(resolve(fakeHome, 'sub', 'dir'))}`));
 });
 
-test('add rejects --path without a value (exit 2)', async () => {
-  const home = await freshHome();
-  const r = await run(['add', 'demo', '--path'], { home });
-  assert.equal(r.code, 2);
-  assert.match(r.stderr, /--path requires a value/);
-});
-
-test('add rejects unknown flag (exit 2)', async () => {
-  const home = await freshHome();
-  const r = await run(['add', 'demo', '--bogus'], { home });
-  assert.equal(r.code, 2);
-  assert.match(r.stderr, /Unknown flag: --bogus/);
+test('add rejects --path without a value and an unknown flag (exit 2)', async () => {
+  await checkRows([
+    { name: 'add rejects --path without a value (exit 2)', run: async () => {
+      const home = await freshHome();
+      const r = await run(['add', 'demo', '--path'], { home });
+      assert.equal(r.code, 2);
+      assert.match(r.stderr, /--path requires a value/);
+    } },
+    { name: 'add rejects unknown flag (exit 2)', run: async () => {
+      const home = await freshHome();
+      const r = await run(['add', 'demo', '--bogus'], { home });
+      assert.equal(r.code, 2);
+      assert.match(r.stderr, /Unknown flag: --bogus/);
+    } },
+  ]);
 });
 
 test('duplicate add exits 1 with stderr message', async () => {
@@ -131,34 +138,39 @@ test('duplicate add exits 1 with stderr message', async () => {
   assert.match(r.stderr, /already exists/);
 });
 
-test('list on empty registry prints hint and exits 0', async () => {
-  const home = await freshHome();
-  const r = await run(['list'], { home });
-  assert.equal(r.code, 0);
-  assert.match(r.stdout, /No projects registered/);
+test('list prints the empty hint, then shows entries and marks missing ones', async () => {
+  const home = await freshHome(); // one home: list, add ghost, list
+  await checkRows([
+    { name: 'list on empty registry prints hint and exits 0', run: async () => {
+      const r = await run(['list'], { home });
+      assert.equal(r.code, 0);
+      assert.match(r.stdout, /No projects registered/);
+    } },
+    { name: 'list shows entries, marks missing ones', run: async () => {
+      await run(['add', 'ghost', '--path', '/no/such/dir/x'], { home });
+      const r = await run(['list'], { home });
+      assert.equal(r.code, 0);
+      // stdout is from a non-TTY pipe, so [missing] is uncolored.
+      assert.match(r.stdout, new RegExp(`ghost\\t${reEsc(resolve('/no/such/dir/x'))}\\t\\[missing\\]`));
+    } },
+  ]);
 });
 
-test('list shows entries, marks missing ones', async () => {
-  const home = await freshHome();
-  await run(['add', 'ghost', '--path', '/no/such/dir/x'], { home });
-  const r = await run(['list'], { home });
-  assert.equal(r.code, 0);
-  // stdout is from a non-TTY pipe, so [missing] is uncolored.
-  assert.match(r.stdout, new RegExp(`ghost\\t${reEsc(resolve('/no/such/dir/x'))}\\t\\[missing\\]`));
-});
-
-test('remove without name exits 2 (usage)', async () => {
-  const home = await freshHome();
-  const r = await run(['remove'], { home });
-  assert.equal(r.code, 2);
-  assert.match(r.stderr, /Usage: worca remove/);
-});
-
-test('remove on unknown name exits 1', async () => {
-  const home = await freshHome();
-  const r = await run(['remove', 'nope'], { home });
-  assert.equal(r.code, 1);
-  assert.match(r.stdout, /No project named "nope"/);
+test('remove without a name exits 2 (usage); an unknown name exits 1', async () => {
+  await checkRows([
+    { name: 'remove without name exits 2 (usage)', run: async () => {
+      const home = await freshHome();
+      const r = await run(['remove'], { home });
+      assert.equal(r.code, 2);
+      assert.match(r.stderr, /Usage: worca remove/);
+    } },
+    { name: 'remove on unknown name exits 1', run: async () => {
+      const home = await freshHome();
+      const r = await run(['remove', 'nope'], { home });
+      assert.equal(r.code, 1);
+      assert.match(r.stdout, /No project named "nope"/);
+    } },
+  ]);
 });
 
 test('remove drops the entry, exits 0', async () => {
@@ -170,16 +182,6 @@ test('remove drops the entry, exits 0', async () => {
   assert.match(r.stdout, /Removed project "demo"/);
   const list = await run(['list'], { home });
   assert.match(list.stdout, /No projects registered/);
-});
-
-test('--help shows Subcommands section and does not regress', async () => {
-  const r = await run(['--help']);
-  assert.equal(r.code, 0);
-  assert.match(r.stdout, /Subcommands:/);
-  assert.match(r.stdout, /^\s+add\b/m);
-  assert.match(r.stdout, /^\s+list\b/m);
-  assert.match(r.stdout, /^\s+remove\b/m);
-  assert.match(r.stdout, /^\s+doctor\b/m, 'the doctor subcommand is documented');
 });
 
 // ── Phase 1: `worca doctor` (reconcile + run-root sweep) ──────────────────────

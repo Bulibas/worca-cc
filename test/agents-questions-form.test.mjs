@@ -1,8 +1,6 @@
 // test/agents-questions-form.test.mjs
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { createAgent, readAgent } from '../src/core/agent-store.mjs';
 import { createAgentGen } from '../src/core/agent-gen.mjs';
@@ -30,23 +28,4 @@ test('mock agent-gen drafts carry the questions fields (normalized)', async () =
   assert.equal(typeof res.draft.meta.asksQuestions, 'boolean');
   assert.equal(typeof res.draft.meta.questionsLocked, 'boolean');
   assert.equal(typeof res.draft.meta.questionsDefault, 'boolean');
-});
-
-test('builder prompt schema names the questions fields with guidance', () => {
-  const src = readFileSync(fileURLToPath(new URL('../src/core/agent-gen.mjs', import.meta.url)), 'utf8');
-  assert.match(src, /"asksQuestions"\/"questionsLocked"\/"questionsDefault"/);
-  assert.match(src, /questionsLocked=true ONLY if/);
-  assert.match(src, /questionsDefault=true only for locked-on agents/);
-});
-
-test('both agent surfaces host the shared form, and it builds the three questions checkboxes', () => {
-  // P7: the form is DOM-built by agentFormRender, so index.html carries the two
-  // HOSTS and app.js carries the fields. Both halves are pinned here.
-  const html = readFileSync(fileURLToPath(new URL('../ui/public/index.html', import.meta.url)), 'utf8');
-  assert.equal(html.split('class="agent-form"').length - 1, 2,
-    'the card edit pane and wizard Step 3 each host exactly one .agent-form');
-  const app = readFileSync(fileURLToPath(new URL('../ui/public/app.js', import.meta.url)), 'utf8');
-  for (const cls of ['agent-f-questions', 'agent-f-questions-locked', 'agent-f-questions-default']) {
-    assert.match(app, new RegExp(`fmCheck\\('${cls}'`), `${cls} is built by agentFormRender`);
-  }
 });

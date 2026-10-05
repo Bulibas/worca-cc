@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp as boot, helloRun, runCard, runPanel, openRunPanel } from './helpers/run-page-boot.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Behavior tests for the clarify/gate question panel. The panel mounts ONLY on
 // the run page (#running/<id>, `#run-detail .rd-questions .qpanel`); the Runs
@@ -48,53 +49,54 @@ function answerRecorder() {
   return { captured, fetchHandler };
 }
 
-test('clarify question renders on the run page; the list row is in Needs you and reads "Question", no panel', async () => {
+test('clarify question renders on the run page with lettered options (empty slots filtered); the list row is in Needs you and reads "Question", no panel', async () => {
   const ctx = await boot();
   const panel = await openRunPanel(ctx, { runId: RUN_ID, question: clarifyEvent() });
-  assert.ok(panel, 'qpanel present on the run page');
-  assert.equal(panel.classList.contains('hidden'), false, 'qpanel is visible (not hidden)');
-
+  // Captured before the first row leaves for the Runs list (a static NodeList keeps the blocks).
   const blocks = panel.querySelectorAll('.qblock');
-  assert.equal(blocks.length, 2, 'one .qblock per question');
+  await checkRows([
+    { name: 'clarify question renders on the run page; the list row is in Needs you and reads "Question", no panel', run: async () => {
+      assert.ok(panel, 'qpanel present on the run page');
+      assert.equal(panel.classList.contains('hidden'), false, 'qpanel is visible (not hidden)');
 
-  // q1 has 2 real options, q2 has 1 (the '' slots are filtered) => 3 total.
-  const opts = panel.querySelectorAll('.qopt');
-  assert.equal(opts.length, 3, 'empty option slots are filtered out');
+      const blocks = panel.querySelectorAll('.qblock');
+      assert.equal(blocks.length, 2, 'one .qblock per question');
 
-  // Head: count chip + title with the phase label (defaults to phaseKey label).
-  assert.ok(panel.querySelector('.qcount'), 'qcount chip present');
-  assert.match(panel.querySelector('.qcount').textContent, /2 questions/);
-  assert.ok(panel.querySelector('.qpanel-foot .btn-go'), 'submit button present');
+      // q1 has 2 real options, q2 has 1 (the '' slots are filtered) => 3 total.
+      const opts = panel.querySelectorAll('.qopt');
+      assert.equal(opts.length, 3, 'empty option slots are filtered out');
 
-  // The list row only points at it (Needs you + its word) — the panel is not mounted there.
-  ctx.showRunning();
-  await ctx.settle();
-  const card = runCard(ctx, RUN_ID);
-  assert.ok(card, 'run row exists in its project group');
-  assert.ok(needsRow(ctx, RUN_ID), 'the run is in Needs you');
-  assert.equal(card.querySelector('.qpanel'), null, 'no question panel on the list row');
-  assert.equal(needsRow(ctx, RUN_ID).querySelector('.qpanel'), null, 'nor on its Needs-you copy');
-  assert.equal(rowWord(card), 'Question', 'the row names the wait');
-});
+      // Head: count chip + title with the phase label (defaults to phaseKey label).
+      assert.ok(panel.querySelector('.qcount'), 'qcount chip present');
+      assert.match(panel.querySelector('.qcount').textContent, /2 questions/);
+      assert.ok(panel.querySelector('.qpanel-foot .btn-go'), 'submit button present');
 
-test('each option carries a letter key (A, B, ...) so it can be referenced by name', async () => {
-  const ctx = await boot();
-  const panel = await openRunPanel(ctx, { runId: RUN_ID, question: clarifyEvent() });
-  const blocks = panel.querySelectorAll('.qblock');
+      // The list row only points at it (Needs you + its word) — the panel is not mounted there.
+      ctx.showRunning();
+      await ctx.settle();
+      const card = runCard(ctx, RUN_ID);
+      assert.ok(card, 'run row exists in its project group');
+      assert.ok(needsRow(ctx, RUN_ID), 'the run is in Needs you');
+      assert.equal(card.querySelector('.qpanel'), null, 'no question panel on the list row');
+      assert.equal(needsRow(ctx, RUN_ID).querySelector('.qpanel'), null, 'nor on its Needs-you copy');
+      assert.equal(rowWord(card), 'Question', 'the row names the wait');
+    } },
+    { name: 'each option carries a letter key (A, B, ...) so it can be referenced by name', run: async () => {
+      // The letter rides data-key (the stylesheet draws it as the option's key square);
+      // the text node is the option itself, so the key is never printed twice.
+      // q1: 2 real options -> A Redis, B Postgres.
+      const q1opts = blocks[0].querySelectorAll('.qopt');
+      assert.equal(q1opts[0].dataset.key, 'A');
+      assert.equal(q1opts[0].textContent, 'Redis');
+      assert.equal(q1opts[1].dataset.key, 'B');
+      assert.equal(q1opts[1].textContent, 'Postgres');
 
-  // The letter rides data-key (the stylesheet draws it as the option's key square);
-  // the text node is the option itself, so the key is never printed twice.
-  // q1: 2 real options -> A Redis, B Postgres.
-  const q1opts = blocks[0].querySelectorAll('.qopt');
-  assert.equal(q1opts[0].dataset.key, 'A');
-  assert.equal(q1opts[0].textContent, 'Redis');
-  assert.equal(q1opts[1].dataset.key, 'B');
-  assert.equal(q1opts[1].textContent, 'Postgres');
-
-  // q2: 1 real option, letters restart per-question -> A Fail fast.
-  const q2opts = blocks[1].querySelectorAll('.qopt');
-  assert.equal(q2opts[0].dataset.key, 'A');
-  assert.equal(q2opts[0].textContent, 'Fail fast');
+      // q2: 1 real option, letters restart per-question -> A Fail fast.
+      const q2opts = blocks[1].querySelectorAll('.qopt');
+      assert.equal(q2opts[0].dataset.key, 'A');
+      assert.equal(q2opts[0].textContent, 'Fail fast');
+    } },
+  ]);
 });
 
 test('selecting an option marks it + submit posts {runId,id,payload:{answers}} with the choice', async () => {
@@ -251,45 +253,130 @@ test('a question-resolved for a STALE id leaves a newer pending question untouch
   assert.equal(rowWord(runCard(ctx, RUN_ID)), 'Question', 'and its row still names the question');
 });
 
-test('a pending question puts the run in Needs you reading "Question", and its row opens the run page', async () => {
-  const ctx = await boot();
-  helloRun(ctx, { runId: RUN_ID });
-  ctx.dispatch({ type: 'question', runId: RUN_ID, ...clarifyEvent() });
-  ctx.showRunning();
-  await ctx.settle();
+test('the row names the wait ("Question" with the ask icon, "Workflow review" for a workflow ask), sits in Needs you, and opens the run page without posting', async () => {
+  // Each row boots its own app (a clarify ask, then a workflow ask).
+  await checkRows([
+    { name: 'a pending question puts the run in Needs you reading "Question", and its row opens the run page', run: async () => {
+      const ctx = await boot();
+      helloRun(ctx, { runId: RUN_ID });
+      ctx.dispatch({ type: 'question', runId: RUN_ID, ...clarifyEvent() });
+      ctx.showRunning();
+      await ctx.settle();
 
-  const card = runCard(ctx, RUN_ID);
-  assert.ok(card, 'the run is listed in its project group');
-  assert.equal(card.dataset.icon, 'ask', 'a question gives the row the ask icon');
-  assert.equal(rowWord(card), 'Question', 'clarify row word');
-  assert.equal(card.querySelector('.qpanel'), null, 'the panel is not mounted on the row');
-  const needs = needsRow(ctx, RUN_ID);
-  assert.ok(needs, 'and repeated in Needs you');
-  assert.equal(rowWord(needs), 'Question');
+      const card = runCard(ctx, RUN_ID);
+      assert.ok(card, 'the run is listed in its project group');
+      assert.equal(card.dataset.icon, 'ask', 'a question gives the row the ask icon');
+      assert.equal(rowWord(card), 'Question', 'clarify row word');
+      assert.equal(card.querySelector('.qpanel'), null, 'the panel is not mounted on the row');
+      const needs = needsRow(ctx, RUN_ID);
+      assert.ok(needs, 'and repeated in Needs you');
+      assert.equal(rowWord(needs), 'Question');
 
-  click(ctx, needs);
-  assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`, 'the row opens the run page');
-  await ctx.settle();
-  assert.ok(runPanel(ctx).querySelector('.qblock'), 'and the question is there');
-  assert.match(runPanel(ctx).querySelector('.qcount').textContent, /2 questions/, 'the page counts them');
-  assert.equal(ctx.calls.filter((c) => c.url.includes('/api/answer')).length, 0, 'navigating never POSTs an answer');
+      click(ctx, needs);
+      assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`, 'the row opens the run page');
+      await ctx.settle();
+      assert.ok(runPanel(ctx).querySelector('.qblock'), 'and the question is there');
+      assert.match(runPanel(ctx).querySelector('.qcount').textContent, /2 questions/, 'the page counts them');
+      assert.equal(ctx.calls.filter((c) => c.url.includes('/api/answer')).length, 0, 'navigating never POSTs an answer');
+    } },
+    { name: 'the row reads "Workflow review" for a workflow question and leaves Needs you with no question', run: async () => {
+      const ctx = await boot();
+      helloRun(ctx, { runId: RUN_ID });
+      ctx.showRunning();
+      await ctx.settle();
+      assert.equal(needsRow(ctx, RUN_ID), null, 'not in Needs you while nothing waits');
+      assert.equal(rowWord(runCard(ctx, RUN_ID)), 'Running', 'a plain running row');
+
+      ctx.dispatch({
+        type: 'question', runId: RUN_ID, id: 'wf-1', kind: 'workflow',
+        workflow: { name: 'web-task', agents: [] },
+      });
+      await ctx.settle();
+      const card = runCard(ctx, RUN_ID);
+      assert.ok(needsRow(ctx, RUN_ID), 'the workflow ask puts it in Needs you');
+      assert.equal(rowWord(card), 'Workflow review');
+      assert.equal(card.dataset.icon, 'ask');
+    } },
+  ]);
 });
 
-test('the row reads "Workflow review" for a workflow question and leaves Needs you with no question', async () => {
-  const ctx = await boot();
-  helloRun(ctx, { runId: RUN_ID });
-  ctx.showRunning();
-  await ctx.settle();
-  assert.equal(needsRow(ctx, RUN_ID), null, 'not in Needs you while nothing waits');
-  assert.equal(rowWord(runCard(ctx, RUN_ID)), 'Running', 'a plain running row');
+// kind:'questions' (per-agent user questions) in the question panel on the run page.
+function questionsEvent() {
+  return {
+    id: 'questions-1:s0_0-r1',
+    kind: 'questions',
+    agent: 'Plan',
+    nodeId: 's0_0',
+    questions: [{ id: 'q1', question: 'Which storage?', options: ['Redis', 'Postgres'], allowFreeText: true }],
+  };
+}
 
-  ctx.dispatch({
-    type: 'question', runId: RUN_ID, id: 'wf-1', kind: 'workflow',
-    workflow: { name: 'web-task', agents: [] },
+test('kind:questions renders the clarify-style body with the agent name in the head', async () => {
+  const ctx = await boot({
+    fetchHandler: (url, opts) => {
+      if (url.includes('/api/answer') && opts && opts.method === 'POST') {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+      }
+      return null;
+    },
   });
-  await ctx.settle();
-  const card = runCard(ctx, RUN_ID);
-  assert.ok(needsRow(ctx, RUN_ID), 'the workflow ask puts it in Needs you');
-  assert.equal(rowWord(card), 'Workflow review');
-  assert.equal(card.dataset.icon, 'ask');
+  const panel = await openRunPanel(ctx, { runId: RUN_ID, question: questionsEvent() });
+  assert.equal(panel.querySelector('.qpanel-head b').textContent, 'Plan has questions');
+  assert.equal(panel.querySelectorAll('.qopt').length, 2, 'options rendered');
+  assert.ok(panel.querySelector('.qfree'), 'free text rendered');
+  // Submit posts the standard answers payload.
+  panel.querySelector('.qopt').click();
+  panel.querySelector('.qpanel-foot .btn-go').click();
+  await new Promise((r) => setTimeout(r, 0));
+  const post = ctx.calls.find((c) => c.url.includes('/api/answer'));
+  assert.ok(post, 'POST /api/answer fired');
+  const body = JSON.parse(post.opts.body);
+  assert.equal(body.runId, RUN_ID);
+  assert.equal(body.id, 'questions-1:s0_0-r1');
+  assert.equal(body.payload.answers[0].choice, 'Redis');
+});
+
+// The clarify panel shows the agent's confidence per option and preselects its recommendation
+// (night mode, Step 14). Each row boots its own app; the runs here use their own id.
+test('a recommendation shows confidence bars and a Recommended badge, is preselected and posted without a click, a real click confirms it; no confidence renders plain options with nothing preselected', async () => {
+  const RUN_ID = 'run-rec-1';
+  await checkRows([
+    { name: 'confidence bars per option, a Recommended badge, and the recommendation is preselected', run: async () => {
+      const ctx = await boot({ fetchHandler: (url) => (url.includes('/api/answer') ? Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) }) : null) });
+      const panel = await openRunPanel(ctx, { runId: RUN_ID, question: { id: 'clarify-1', kind: 'clarify',
+        questions: [{ id: 'q1', question: 'Pick?', options: ['A', 'B'], confidence: [70, 30], recommended: 'B', allowFreeText: true }] } });
+      const opts = [...panel.querySelectorAll('.qopt')];
+      assert.equal(opts.length, 2);
+      assert.deepEqual(opts.map((b) => b.dataset.key), ['A', 'B'], 'the letter keys stay');
+      assert.deepEqual(opts.map((b) => b.querySelector('.qconf-fill').style.width), ['70%', '30%'], 'bars keyed by option order');
+      assert.equal(opts[0].querySelector('.qrec'), null);
+      assert.equal(opts[1].querySelector('.qrec').textContent, 'Recommended');
+      assert.ok(opts[1].classList.contains('sel'));
+      assert.equal(opts[1].getAttribute('aria-pressed'), 'true');
+      assert.equal(opts[0].getAttribute('aria-pressed'), 'false');
+      // Preselected is not answered: the "Answered" pill waits for a real click.
+      assert.equal(opts[1].dataset.preset, '1');
+      panel.querySelector('.btn-go').dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      const post = ctx.calls.find((c) => c.url.includes('/api/answer'));
+      assert.ok(post, 'the answer was posted without a click on an option');
+      assert.equal(JSON.parse(post.opts.body).payload.answers[0].choice, 'B');
+    } },
+    { name: 'a real click turns the preselected recommendation into an answer', run: async () => {
+      const ctx = await boot();
+      const panel = await openRunPanel(ctx, { runId: RUN_ID, question: { id: 'clarify-3', kind: 'clarify',
+        questions: [{ id: 'q1', question: 'Pick?', options: ['A', 'B'], confidence: [30, 70], recommended: 'B', allowFreeText: true }] } });
+      const opts = [...panel.querySelectorAll('.qopt')];
+      opts[1].dispatchEvent(new ctx.window.Event('click', { bubbles: true }));
+      assert.ok(opts.every((b) => b.dataset.preset === undefined), 'clicking the recommendation itself confirms it');
+      assert.ok(opts[1].classList.contains('sel'));
+    } },
+    { name: 'a question without confidence renders plain options, nothing preselected', run: async () => {
+      const ctx = await boot();
+      const panel = await openRunPanel(ctx, { runId: RUN_ID, question: { id: 'clarify-2', kind: 'clarify',
+        questions: [{ id: 'q1', question: 'Pick?', options: ['A', 'B'], allowFreeText: true }] } });
+      assert.equal(panel.querySelectorAll('.qconf, .qrec, .qopt.sel').length, 0);
+      assert.equal([...panel.querySelectorAll('.qopt .qopt-txt')].map((s) => s.textContent).join(','), 'A,B');
+    } },
+  ]);
 });

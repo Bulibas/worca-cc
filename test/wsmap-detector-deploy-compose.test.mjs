@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeWorkspace, runDetector, assertEvidence } from './helpers/wsmap-fixtures.mjs';
 import detector from '../src/core/workspace-map/detectors/deploy-compose.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // The web repo runs its own service plus images of its peers for local dev.
 const WEB_COMPOSE = `x-common-env: &common
@@ -69,38 +70,36 @@ before(async () => {
 after(() => ws.cleanup());
 const member = (k) => ws.members.find((m) => m.key === k);
 
-test('deploy-compose: build: . → aliases for this member (name, container_name); image repo → alias for that member', async () => {
+test('deploy-compose (member web): aliases, own-service consumes, placeholder unresolved, test-path files', async () => {
   const r = await runDetector(detector, member('web'), ws.members);
-  const own = [...new Set(r.aliases.filter((a) => a.member === 'web').map((a) => a.value))].sort();
-  assert.deepEqual(own, ['web', 'web-app']);
-  const billing = r.aliases.filter((a) => a.member === 'billing-api').map((a) => a.value).sort();
-  assert.deepEqual(billing, ['billing', 'billing-svc']);
-  assert.ok(!r.aliases.some((a) => a.value === 'db'), 'postgres:16 matches no member → no alias');
-});
-
-test('deploy-compose: own service consumes depends_on, links, env URLs (merge keys expanded)', async () => {
-  const r = await runDetector(detector, member('web'), ws.members);
-  const prod = r.facts.filter((f) => f.file === 'docker-compose.yml');
-  assert.deepEqual(prod.filter((f) => f.kind === 'service').map((f) => f.key).sort(), ['auth', 'billing', 'cache', 'db'], 'one fact per (dir, key) per file');
-  assert.deepEqual(prod.filter((f) => f.kind === 'http').map((f) => [f.key, f.target]).sort(), [['/api/v1', 'billing:8080'], ['/ledger/v1', 'LEDGER_URL'], ['/oauth/token', 'auth:9000']]);
-  assert.equal(prod.find((f) => f.key === '/ledger/v1').confidence, 'heuristic', 'no usable host: the variable names the peer (P1 envStems)');
-  assert.deepEqual(prod.filter((f) => f.kind === 'db').map((f) => [f.key, f.target]), [['db:shop', 'db:5432']]);
-  const billingUrl = prod.find((f) => f.kind === 'http' && f.key === '/api/v1');
-  assert.deepEqual([billingUrl.line, billingUrl.detail], [11, 'BILLING_URL (web)']);
-  assert.equal(prod.find((f) => f.key === '/oauth/token').line, 3, 'a merged value cites its anchor line');
-  assertEvidence(member('web'), r);
-});
-
-test('deploy-compose: a peer-looking placeholder env value is unresolved', async () => {
-  const r = await runDetector(detector, member('web'), ws.members);
-  assert.deepEqual(r.unresolved.map((u) => [u.raw, u.reason, u.line]), [['ORDERS_URL=${ORDERS_URL}', 'placeholder', 13]]);
-});
-
-test('deploy-compose: test-path compose files still emit facts (marked test) but never alias — a stub never claims a peer\'s name', async () => {
-  const r = await runDetector(detector, member('web'), ws.members);
-  const t = r.facts.filter((f) => f.file === 'e2e/compose.test.yaml');
-  assert.ok(t.length > 0 && t.every((f) => f.test === true));
-  assert.ok(!r.aliases.some((a) => a.value === 'billing' && a.member === 'web'), 'the e2e stub `billing` (build: ./stubs/billing) aliases nobody');
+  await checkRows([
+    { name: 'deploy-compose: build: . → aliases for this member (name, container_name); image repo → alias for that member', run: () => {
+      const own = [...new Set(r.aliases.filter((a) => a.member === 'web').map((a) => a.value))].sort();
+      assert.deepEqual(own, ['web', 'web-app']);
+      const billing = r.aliases.filter((a) => a.member === 'billing-api').map((a) => a.value).sort();
+      assert.deepEqual(billing, ['billing', 'billing-svc']);
+      assert.ok(!r.aliases.some((a) => a.value === 'db'), 'postgres:16 matches no member → no alias');
+    } },
+    { name: 'deploy-compose: own service consumes depends_on, links, env URLs (merge keys expanded)', run: () => {
+      const prod = r.facts.filter((f) => f.file === 'docker-compose.yml');
+      assert.deepEqual(prod.filter((f) => f.kind === 'service').map((f) => f.key).sort(), ['auth', 'billing', 'cache', 'db'], 'one fact per (dir, key) per file');
+      assert.deepEqual(prod.filter((f) => f.kind === 'http').map((f) => [f.key, f.target]).sort(), [['/api/v1', 'billing:8080'], ['/ledger/v1', 'LEDGER_URL'], ['/oauth/token', 'auth:9000']]);
+      assert.equal(prod.find((f) => f.key === '/ledger/v1').confidence, 'heuristic', 'no usable host: the variable names the peer (P1 envStems)');
+      assert.deepEqual(prod.filter((f) => f.kind === 'db').map((f) => [f.key, f.target]), [['db:shop', 'db:5432']]);
+      const billingUrl = prod.find((f) => f.kind === 'http' && f.key === '/api/v1');
+      assert.deepEqual([billingUrl.line, billingUrl.detail], [11, 'BILLING_URL (web)']);
+      assert.equal(prod.find((f) => f.key === '/oauth/token').line, 3, 'a merged value cites its anchor line');
+      assertEvidence(member('web'), r);
+    } },
+    { name: 'deploy-compose: a peer-looking placeholder env value is unresolved', run: () => {
+      assert.deepEqual(r.unresolved.map((u) => [u.raw, u.reason, u.line]), [['ORDERS_URL=${ORDERS_URL}', 'placeholder', 13]]);
+    } },
+    { name: 'deploy-compose: test-path compose files still emit facts (marked test) but never alias — a stub never claims a peer\'s name', run: () => {
+      const t = r.facts.filter((f) => f.file === 'e2e/compose.test.yaml');
+      assert.ok(t.length > 0 && t.every((f) => f.test === true));
+      assert.ok(!r.aliases.some((a) => a.value === 'billing' && a.member === 'web'), 'the e2e stub `billing` (build: ./stubs/billing) aliases nobody');
+    } },
+  ]);
 });
 
 test('deploy-compose (deploy repo, CRLF): aliases go to the members the contexts point into; no consumes are attributed to deploy', async () => {
@@ -117,15 +116,17 @@ test('deploy-compose: a service built from a sub-directory (a local db image, a 
   assert.equal(detector.claims('docs/compose.yml'), false);
 });
 
-test('deploy-compose: plain YAML over 256 KiB is refused (unresolved), other compose files still read', async () => {
+test('deploy-compose (member big): >256 KiB refused, duplicated key last-wins', async () => {
   const r = await runDetector(detector, member('big'), ws.members);
-  assert.deepEqual(r.unresolved.map((u) => [u.file, u.reason]), [['docker-compose.yml', 'yaml parse error: yaml too large']]);
-  assert.ok(r.facts.length > 0);
-});
-
-test('deploy-compose: a duplicated key (hand-merged file) → the last one wins, no error', async () => {
-  const r = await runDetector(detector, member('big'), ws.members);
-  assert.deepEqual(r.facts.filter((f) => f.file === 'docker-compose.override.yml').map((f) => f.key), ['second']);
+  await checkRows([
+    { name: 'deploy-compose: plain YAML over 256 KiB is refused (unresolved), other compose files still read', run: () => {
+      assert.deepEqual(r.unresolved.map((u) => [u.file, u.reason]), [['docker-compose.yml', 'yaml parse error: yaml too large']]);
+      assert.ok(r.facts.length > 0);
+    } },
+    { name: 'deploy-compose: a duplicated key (hand-merged file) → the last one wins, no error', run: () => {
+      assert.deepEqual(r.facts.filter((f) => f.file === 'docker-compose.override.yml').map((f) => f.key), ['second']);
+    } },
+  ]);
 });
 
 test('deploy-compose: malformed YAML → partial result + unresolved, never throws; compose file-name variants are claimed', async () => {

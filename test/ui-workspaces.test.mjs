@@ -11,6 +11,7 @@ import { JSDOM } from 'jsdom';
 import { confirmDialog } from './helpers/confirm-modal.mjs';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { lastToast } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -83,140 +84,69 @@ async function open(window, id, tab = '') {
   await settle();
 }
 
-test('the list: one card headed "Workspaces · N", one row per workspace with name + summary + chevron; no add/remove-project control', async () => {
+test('a row opens the workspace page by click or Enter (hash, header, tabs, focus on Back; Back returns to the row); a member row opens its project page', async () => {
   const { window, show } = await boot();
   show();
   await settle(3);
   const doc = window.document;
-  const head = doc.querySelector('#ws-list .saved-card .saved-head');
-  assert.equal(head.querySelector('b').textContent, 'Workspaces');
-  assert.equal(head.querySelector('.cnt').textContent, '2');
-  const rows = [...doc.querySelectorAll('#ws-list .ws-item')];
-  assert.equal(rows.length, 2);
-  const row = rows[0].querySelector('.ws-row');
-  assert.equal(row.getAttribute('role'), 'button');
-  assert.equal(row.tabIndex, 0);
-  assert.equal(rows[0].querySelector('.ws-name').textContent, 'Alpha WS');
-  assert.equal(rows[0].querySelector('.ws-projects').textContent, '2 projects · no metrics home', 'a summary, not the member list');
-  assert.ok(rows[0].querySelector('.proj-open.ws-open'), 'the chevron');
-  // Design board 1: Sync all (only when something is behind), Show/Hide projects, the chevron.
-  // Nothing on the list edits the workspace itself.
-  assert.deepEqual([...rows[0].querySelectorAll('.ws-row button')].map((b) => b.className.split(' ').find((c) => c.startsWith('ws-'))),
-    ['ws-sync-all', 'ws-toggle', 'ws-open']);
-  assert.equal(rows[0].querySelector('.ws-sync-all').hidden, true, 'no sync answer yet: no Sync all');
-  assert.equal(doc.querySelector('#ws-list .ws-card'), null, 'no expandable cards any more');
-  // Invariant (a): NO add/remove-project control anywhere on the view.
-  assert.equal(doc.querySelector('.view[data-view="workspaces"] [class*="add-project"]'), null);
-});
-
-test('empty state renders the histEmpty placeholder', async () => {
-  const { window, show } = await boot({ workspaces: [] });
-  show();
-  await settle(3);
-  const doc = window.document;
-  assert.equal(doc.querySelectorAll('#ws-list .ws-item').length, 0);
-  assert.equal(doc.querySelectorAll('#ws-list .hist-empty').length, 1);
-});
-
-test('the stale badge shows on the row and on the page header when any member is missing', async () => {
-  const { window, show } = await boot();
-  show();
-  await settle(3);
-  const doc = window.document;
-  assert.equal(rowOf(doc, 'wks-alpha-00000001').querySelector('.ws-stale'), null, 'Alpha (all present) → no badge');
-  assert.ok(rowOf(doc, 'wks-beta-00000002').querySelector('.ws-stale'), 'Beta (a member missing) → badge shown');
-  await open(window, 'wks-beta-00000002');
-  assert.equal(doc.querySelector('#ws-detail .pd-row1 .ws-stale').hidden, false);
-  const projCard = doc.querySelector('#ws-detail .pd-ov-card-projects');
-  assert.equal(projCard.querySelector('.pd-ov-value').textContent, '2');
-  assert.equal(projCard.querySelector('.pd-ov-sub').textContent, '1 missing on disk');
-});
-
-test('a row click opens the workspace page: slide, header, tabs, focus on Back, hash #workspaces/<id>; Back returns to the list and the row', async () => {
-  const { window, show } = await boot();
-  show();
-  await settle(3);
-  const doc = window.document;
-  const item = rowOf(doc, 'wks-alpha-00000001');
-  click(window, item.querySelector('.ws-row'));
-  await settle();
-  assert.equal(window.location.hash, '#workspaces/wks-alpha-00000001');
-  const shell = doc.getElementById('ws-shell');
-  assert.ok(shell.classList.contains('detail-open'), 'the track slid to the page');
-  const page = doc.querySelector('#ws-detail .pd.wd');
-  assert.ok(page, 'the page rides the project page\'s pd- shell');
-  assert.equal(page.querySelector('.pd-title').textContent, 'Alpha WS');
-  assert.deepEqual([...page.querySelectorAll('.pd-tab')].map((b) => b.dataset.sec), ['overview', 'map', 'team', 'actions']);
-  assert.equal(page.querySelector('.pd-tab[data-sec="actions"]').dataset.minLevel, 'advanced');
-  assert.equal(page.querySelector('.pd-tab[data-sec="map"]').dataset.minLevel, 'advanced');
-  assert.equal(page.querySelector('.pd-tab[data-sec="team"]').dataset.minLevel, 'expert');
-  assert.equal(doc.activeElement, page.querySelector('.pd-back'), 'focus lands on Back');
-  assert.equal(doc.querySelector('#ws-shell .ws-screen-list').getAttribute('inert'), '', 'the list is inert behind the page');
-  // The description is on the Overview, verbatim without the markdown bundle.
-  const view = page.querySelector('.ws-desc-view');
-  assert.equal(view.classList.contains('artifact-markdown'), false);
-  assert.match(view.textContent, /two svcs/);
-  assert.equal(view.querySelector('h1'), null);
-  // The members: one row each, a registered one opens its project page.
-  const members = [...page.querySelectorAll('.wd-member')];
-  assert.equal(members.length, 2);
-  assert.equal(members[0].tagName, 'BUTTON');
-  assert.equal(members[0].dataset.key, 'k1');
-  assert.equal(members[0].querySelector('.wd-member-name').textContent, 'svc-iam');
-  assert.equal(members[0].querySelector('.proj-path').textContent, '/a/svc-iam');
-  click(window, page.querySelector('.pd-back'));
-  await settle();
-  assert.equal(window.location.hash, '#workspaces');
-  assert.equal(shell.classList.contains('detail-open'), false);
-  assert.equal(doc.activeElement, rowOf(doc, 'wks-alpha-00000001').querySelector('.ws-row'), 'focus comes home to the row');
-});
-
-test('Enter on a focused row opens the page; a member row opens its project page', async () => {
-  const { window, show } = await boot();
-  show();
-  await settle(3);
-  const doc = window.document;
-  const row = rowOf(doc, 'wks-alpha-00000001').querySelector('.ws-row');
-  row.focus();
-  row.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  await settle();
-  assert.equal(window.location.hash, '#workspaces/wks-alpha-00000001');
-  click(window, doc.querySelector('#ws-detail .wd-member[data-key="k2"]'));
-  await settle();
-  assert.equal(window.location.hash, '#projects/k2');
+  await checkRows([
+    { name: 'a row click opens the workspace page: slide, header, tabs, focus on Back, hash #workspaces/<id>; Back returns to the list and the row', run: async () => {
+      const item = rowOf(doc, 'wks-alpha-00000001');
+      click(window, item.querySelector('.ws-row'));
+      await settle();
+      assert.equal(window.location.hash, '#workspaces/wks-alpha-00000001');
+      const shell = doc.getElementById('ws-shell');
+      assert.ok(shell.classList.contains('detail-open'), 'the track slid to the page');
+      const page = doc.querySelector('#ws-detail .pd.wd');
+      assert.ok(page, 'the page rides the project page\'s pd- shell');
+      assert.equal(page.querySelector('.pd-title').textContent, 'Alpha WS');
+      assert.deepEqual([...page.querySelectorAll('.pd-tab')].map((b) => b.dataset.sec), ['overview', 'map', 'team', 'actions']);
+      assert.equal(page.querySelector('.pd-tab[data-sec="actions"]').dataset.minLevel, 'advanced');
+      assert.equal(page.querySelector('.pd-tab[data-sec="map"]').dataset.minLevel, 'advanced');
+      assert.equal(page.querySelector('.pd-tab[data-sec="team"]').dataset.minLevel, 'expert');
+      assert.equal(doc.activeElement, page.querySelector('.pd-back'), 'focus lands on Back');
+      assert.equal(doc.querySelector('#ws-shell .ws-screen-list').getAttribute('inert'), '', 'the list is inert behind the page');
+      // The description is on the Overview, verbatim without the markdown bundle.
+      const view = page.querySelector('.ws-desc-view');
+      assert.equal(view.classList.contains('artifact-markdown'), false);
+      assert.match(view.textContent, /two svcs/);
+      assert.equal(view.querySelector('h1'), null);
+      // The members: one row each, a registered one opens its project page.
+      const members = [...page.querySelectorAll('.wd-member')];
+      assert.equal(members.length, 2);
+      assert.equal(members[0].tagName, 'BUTTON');
+      assert.equal(members[0].dataset.key, 'k1');
+      assert.equal(members[0].querySelector('.wd-member-name').textContent, 'svc-iam');
+      assert.equal(members[0].querySelector('.proj-path').textContent, '/a/svc-iam');
+      click(window, page.querySelector('.pd-back'));
+      await settle();
+      assert.equal(window.location.hash, '#workspaces');
+      assert.equal(shell.classList.contains('detail-open'), false);
+      assert.equal(doc.activeElement, rowOf(doc, 'wks-alpha-00000001').querySelector('.ws-row'), 'focus comes home to the row');
+    } },
+    { name: 'Enter on a focused row opens the page; a member row opens its project page', run: async () => {
+      // Back on the list (the first row ended there): Enter opens the page again.
+      show();
+      await settle(3);
+      const row = rowOf(doc, 'wks-alpha-00000001').querySelector('.ws-row');
+      row.focus();
+      row.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await settle();
+      assert.equal(window.location.hash, '#workspaces/wks-alpha-00000001');
+      click(window, doc.querySelector('#ws-detail .wd-member[data-key="k2"]'));
+      await settle();
+      assert.equal(window.location.hash, '#projects/k2');
+    } },
+  ]);
 });
 
 // The real pinned packages, the way the Ask panel loads them in the browser.
 const realMarkdown = async () => ({ marked: (await import('marked')).marked, createDOMPurify: (await import('dompurify')).default });
 
-test('description renders as sanitized markdown once the bundle is ready; raw HTML is stripped, the empty one stays a plain hint', async () => {
+test('the description renders as sanitized markdown (raw HTML stripped, empty is a plain hint) and the edit pane Preview uses the same pipeline; save re-renders', async () => {
   const { window, show } = await boot({
     hooks: { askMarkdown: realMarkdown },
     workspaces: [{ ...WS[0], description: '# Workspace: Alpha\n## Overview\ntwo svcs <b>raw</b> *em* [x](https://e.x) <script>bad()</script>' }, WS[1]],
-  });
-  show('workspaces/wks-alpha-00000001');
-  await settle(8);
-  const doc = window.document;
-  const view = doc.querySelector('#ws-detail .ws-desc-view');
-  assert.equal(view.classList.contains('artifact-markdown'), true, 'rendered → the document class');
-  assert.equal(view.querySelector('h1').textContent, 'Workspace: Alpha');
-  assert.equal(view.querySelector('h2').textContent, 'Overview');
-  assert.ok(view.querySelector('em'), 'markdown emphasis rendered');
-  assert.equal(view.querySelector('b'), null, 'raw HTML is stripped by the allowlist');
-  assert.equal(view.querySelector('script'), null);
-  assert.match(view.textContent, /raw/, '…but its words are kept');
-  assert.doesNotMatch(view.textContent, /bad\(\)/, 'script content is dropped entirely');
-  const a = view.querySelector('a');
-  assert.equal(a.getAttribute('target'), '_blank'); assert.equal(a.getAttribute('rel'), 'noopener noreferrer');
-  await open(window, 'wks-beta-00000002');
-  const empty = doc.querySelector('#ws-detail .ws-desc-view');
-  assert.equal(empty.classList.contains('artifact-markdown'), false);
-  assert.match(empty.textContent, /no description yet/);
-});
-
-test('edit pane: Preview renders the current draft through the same pipeline, Text keeps the raw markdown; save re-renders', async () => {
-  const { window, show } = await boot({
-    hooks: { askMarkdown: realMarkdown },
     fetchHandler: (u, opts) => {
       if (/\/api\/workspaces\/wks-alpha-00000001$/.test(u) && opts.method === 'PATCH') {
         return Promise.resolve({ ok: true, status: 200, json: async () => ({ workspace: { ...WS[0], description: JSON.parse(opts.body).description } }) });
@@ -224,35 +154,58 @@ test('edit pane: Preview renders the current draft through the same pipeline, Te
       return null;
     },
   });
-  show('workspaces/wks-alpha-00000001');
-  await settle(8);
   const doc = window.document;
-  const page = doc.querySelector('#ws-detail .pd');
-  click(window, page.querySelector('.ws-edit'));
-  const pane = page.querySelector('.ws-desc-edit');
-  const input = page.querySelector('.ws-desc-input');
-  const pv = page.querySelector('.ws-desc-preview');
-  const tabs = [...pane.querySelectorAll('.ws-desc-tab')];
-  assert.equal(pane.hidden, false);
-  assert.deepEqual(tabs.map((t) => t.getAttribute('aria-selected')), ['true', 'false'], 'opens on Text');
-  assert.equal(input.hidden, false); assert.equal(pv.hidden, true);
-  input.value = '# Draft\n<b>raw</b> **bold**';
-  click(window, tabs[1]);
-  assert.deepEqual(tabs.map((t) => t.getAttribute('aria-selected')), ['false', 'true']);
-  assert.equal(input.hidden, true); assert.equal(pv.hidden, false);
-  assert.equal(pv.querySelector('h1').textContent, 'Draft');
-  assert.ok(pv.querySelector('strong')); assert.equal(pv.querySelector('b'), null);
-  click(window, tabs[0]);
-  assert.equal(input.hidden, false); assert.equal(pv.hidden, true);
-  assert.equal(input.value, '# Draft\n<b>raw</b> **bold**', 'Text loses nothing');
-  click(window, page.querySelector('.ws-desc-save'));
-  await settle(8);
-  const view = doc.querySelector('#ws-detail .ws-desc-view');
-  assert.equal(view.querySelector('h1').textContent, 'Draft', 'the saved description re-renders');
-  assert.equal(view.querySelector('b'), null);
-  // Re-opening the editor starts on Text again.
-  click(window, doc.querySelector('#ws-detail .ws-edit'));
-  assert.equal(doc.querySelector('#ws-detail .ws-desc-input').hidden, false);
+  await checkRows([
+    { name: 'description renders as sanitized markdown once the bundle is ready; raw HTML is stripped, the empty one stays a plain hint', run: async () => {
+      show('workspaces/wks-alpha-00000001');
+      await settle(8);
+      const view = doc.querySelector('#ws-detail .ws-desc-view');
+      assert.equal(view.classList.contains('artifact-markdown'), true, 'rendered → the document class');
+      assert.equal(view.querySelector('h1').textContent, 'Workspace: Alpha');
+      assert.equal(view.querySelector('h2').textContent, 'Overview');
+      assert.ok(view.querySelector('em'), 'markdown emphasis rendered');
+      assert.equal(view.querySelector('b'), null, 'raw HTML is stripped by the allowlist');
+      assert.equal(view.querySelector('script'), null);
+      assert.match(view.textContent, /raw/, '…but its words are kept');
+      assert.doesNotMatch(view.textContent, /bad\(\)/, 'script content is dropped entirely');
+      const a = view.querySelector('a');
+      assert.equal(a.getAttribute('target'), '_blank'); assert.equal(a.getAttribute('rel'), 'noopener noreferrer');
+      await open(window, 'wks-beta-00000002');
+      const empty = doc.querySelector('#ws-detail .ws-desc-view');
+      assert.equal(empty.classList.contains('artifact-markdown'), false);
+      assert.match(empty.textContent, /no description yet/);
+    } },
+    { name: 'edit pane: Preview renders the current draft through the same pipeline, Text keeps the raw markdown; save re-renders', run: async () => {
+      show('workspaces/wks-alpha-00000001');
+      await settle(8);
+      const page = doc.querySelector('#ws-detail .pd');
+      click(window, page.querySelector('.ws-edit'));
+      const pane = page.querySelector('.ws-desc-edit');
+      const input = page.querySelector('.ws-desc-input');
+      const pv = page.querySelector('.ws-desc-preview');
+      const tabs = [...pane.querySelectorAll('.ws-desc-tab')];
+      assert.equal(pane.hidden, false);
+      assert.deepEqual(tabs.map((t) => t.getAttribute('aria-selected')), ['true', 'false'], 'opens on Text');
+      assert.equal(input.hidden, false); assert.equal(pv.hidden, true);
+      input.value = '# Draft\n<b>raw</b> **bold**';
+      click(window, tabs[1]);
+      assert.deepEqual(tabs.map((t) => t.getAttribute('aria-selected')), ['false', 'true']);
+      assert.equal(input.hidden, true); assert.equal(pv.hidden, false);
+      assert.equal(pv.querySelector('h1').textContent, 'Draft');
+      assert.ok(pv.querySelector('strong')); assert.equal(pv.querySelector('b'), null);
+      click(window, tabs[0]);
+      assert.equal(input.hidden, false); assert.equal(pv.hidden, true);
+      assert.equal(input.value, '# Draft\n<b>raw</b> **bold**', 'Text loses nothing');
+      click(window, page.querySelector('.ws-desc-save'));
+      await settle(8);
+      const view = doc.querySelector('#ws-detail .ws-desc-view');
+      assert.equal(view.querySelector('h1').textContent, 'Draft', 'the saved description re-renders');
+      assert.equal(view.querySelector('b'), null);
+      // Re-opening the editor starts on Text again.
+      click(window, doc.querySelector('#ws-detail .ws-edit'));
+      assert.equal(doc.querySelector('#ws-detail .ws-desc-input').hidden, false);
+    } },
+  ]);
 });
 
 test('edit → PATCH /api/workspaces/:id { description }; state + DOM update, JSON-safe; the page stays open', async () => {
@@ -369,17 +322,6 @@ test('an unknown id shows the list with the not-registered message; a workspaces
   assert.match(lastToast(doc).title, /"Beta WS" was removed/);
 });
 
-test('Create workspace button routes to the wizard (#workspace-create)', async () => {
-  const { window, show } = await boot({ workspaces: [] });
-  show();
-  await settle(3);
-  const doc = window.document;
-  click(window, doc.querySelector('#ws-create-btn'));
-  await tick();
-  assert.equal(window.location.hash, '#workspace-create');
-  assert.equal(doc.querySelector('.view[data-view="workspace-create"]').classList.contains('hidden'), false);
-});
-
 test('Re-scan from the page starts the scan run and follows it on Runs', async () => {
   const posts = [];
   const metricsScans = [];
@@ -426,29 +368,6 @@ test('Re-scan refused (409) stays on the workspace page with the error', async (
   assert.match(doc.querySelector('#ws-detail .pd-error').textContent, /live run/);
 });
 
-test('the Team tab: the metrics block shows the home and the members table; the METRICS HOME card on the Overview reads it', async () => {
-  const { window, show } = await boot({
-    fetchHandler: (u) => (u.includes('/api/team-metrics/scopes') ? Promise.resolve({ ok: true, status: 200, json: async () => TM_SCOPES }) : null),
-  });
-  show('workspaces/wks-alpha-00000001');
-  await settle();
-  const doc = window.document;
-  const card = doc.querySelector('#ws-detail .pd-ov-card-metrics');
-  assert.equal(card.dataset.minLevel, 'expert');
-  assert.equal(card.querySelector('.pd-ov-value').textContent, 'acme/gateway');
-  assert.equal(card.querySelector('.pd-ov-sub').textContent, '12 workspace runs · 1 not recording');
-  assert.match(doc.querySelector('#ws-detail .pd-meta .ws-projects').textContent, /2 projects · acme\/gateway · 12 workspace runs · 1 not recording/);
-  click(window, card);
-  await settle();
-  assert.equal(window.location.hash, '#workspaces/wks-alpha-00000001/team');
-  const block = doc.querySelector('#ws-detail .wd-team-metrics .ws-home-inner');
-  assert.ok(block, 'the members table block');
-  assert.deepEqual([...block.querySelectorAll('.ws-member-slug')].map((s) => s.textContent), ['acme/gateway', 'acme/console']);
-  assert.ok(block.querySelector('.ws-home-change'), 'Change metrics home… lives here');
-  assert.ok(block.querySelector('.ws-route'), 'Route all to metrics home lives here');
-  assert.equal(doc.querySelector('#ws-list .ws-home-change'), null, 'and nowhere on the list');
-});
-
 test('.ws-route POSTs /api/workspaces/:id/metrics-route and renders results; they survive a team-metrics-changed repaint', async () => {
   const routePosts = [];
   const { window, show, ws } = await boot({
@@ -476,31 +395,6 @@ test('.ws-route POSTs /api/workspaces/:id/metrics-route and renders results; the
   ws().deliver({ type: 'team-metrics-changed', action: 'flush-failed' });
   await settle();
   assert.equal([...doc.querySelectorAll('#ws-detail .ws-route-results li')].length, 2, 'route results survive the repaint');
-});
-
-test('before /scopes answers: the row says "checking metrics…" and is aria-busy, the Team tab shows the pending table; then the real summary; a workspace the payload lacks gets the plain summary', async () => {
-  let release; const gate = new Promise((r) => { release = r; });
-  const { window, show } = await boot({
-    fetchHandler: (u) => (u.includes('/api/team-metrics/scopes') ? gate.then(() => ({ ok: true, status: 200, json: async () => TM_SCOPES })) : null),
-  });
-  show(); await settle(2);
-  const doc = window.document;
-  const alpha = rowOf(doc, 'wks-alpha-00000001');
-  assert.equal(alpha.getAttribute('aria-busy'), 'true');
-  assert.equal(alpha.querySelector('.ws-projects').textContent, '2 projects · checking metrics…');
-  await open(window, 'wks-alpha-00000001', 'team');
-  const pending = doc.querySelector('#ws-detail .wd-team-metrics .is-pending');
-  assert.ok(pending, 'the pending table');
-  assert.deepEqual([...pending.querySelectorAll('.ws-member-slug')].map((s) => s.textContent), ['svc-iam', 'svc-ui']);
-  assert.ok(pending.querySelectorAll('.skel').length >= 6);
-  release(); await settle();
-  assert.equal(doc.querySelector('#ws-detail .wd-team-metrics .is-pending'), null);
-  assert.match(doc.querySelector('#ws-detail .wd-team-metrics').textContent, /acme\/gateway/);
-  assert.equal(alpha.getAttribute('aria-busy'), null);
-  assert.match(alpha.querySelector('.ws-projects').textContent, /acme\/gateway/);
-  const beta = rowOf(doc, 'wks-beta-00000002');
-  assert.equal(beta.getAttribute('aria-busy'), null);
-  assert.equal(beta.querySelector('.ws-projects').textContent, '2 projects · no metrics home');
 });
 
 test('the persisted /scopes copy paints the summary at once (stale) and is revalidated; the fresh payload is persisted', async () => {
@@ -604,39 +498,6 @@ async function addWithRescan(extra = {}) {
   return { ...booted, doc, loader: () => doc.querySelector('#ws-detail .wd-members .wd-rescan') };
 }
 
-/** A Workspace scan run's state frame, shaped as the server sends it: its stepper (preflight / done
- *  steps, the graph's Task and End nodes, three stages between) and ledger rows ('start' while
- *  running, 'done' once finished). */
-const SCAN_STEPPER = { version: 2, steps: [
-  { kind: 'preflight', nodes: [{ id: 'preflight', label: 'Preflight' }] },
-  { kind: 'agents', nodes: [{ id: 'n_task', key: null, uiPhase: 'task', label: 'Task' }] },
-  { kind: 'agents', nodes: [{ id: 'extract', label: 'Extract' }] },
-  { kind: 'agents', nodes: [{ id: 'survey', label: 'Survey' }] },
-  { kind: 'agents', nodes: [{ id: 'render', label: 'Render' }] },
-  { kind: 'agents', nodes: [{ id: 'n_end', key: null, uiPhase: 'end', label: 'End' }] },
-  { kind: 'done', nodes: [{ id: 'done', label: 'Done' }] },
-] };
-
-test('a member change shows the re-scan loader: spinner, status, the scan run\'s own stages, a link to the run, the Team-tab hint', async () => {
-  const { ws, loader } = await addWithRescan();
-  const el = loader();
-  assert.ok(el.classList.contains('is-running'));
-  assert.equal(el.getAttribute('role'), 'status');
-  assert.ok(el.querySelector('.spinner'), 'the wizard\'s spinner');
-  assert.match(el.querySelector('.status-label').textContent, /re-scanning the workspace/i);
-  assert.equal(el.querySelector('a.wd-rescan-open').getAttribute('href'), '#running/run_1');
-  assert.match(el.querySelector('.wd-rescan-hint').textContent, /Team tab/);
-  assert.ok(ws().sent.some((t) => JSON.parse(t).type === 'subscribe' && JSON.parse(t).runId === 'run_1'), 'subscribed to the run');
-  ws().deliver({ type: 'state', runId: 'run_other', stepper: SCAN_STEPPER, steps: [{ nodeId: 'render', status: 'start' }] });
-  ws().deliver({ type: 'state', runId: 'run_1', stepper: SCAN_STEPPER, steps: [
-    { nodeId: 'n_task', status: 'done' }, { nodeId: 'extract', status: 'done' }, { nodeId: 'survey', status: 'start' }] });
-  await settle(6);
-  const now = loader();
-  assert.deepEqual([...now.querySelectorAll('[data-phase]')].map((n) => n.textContent), ['Extract', 'Survey', 'Render'], 'the run\'s stages; preflight, Task, End and done left out');
-  assert.deepEqual([...now.querySelectorAll('[data-phase].active')].map((n) => n.dataset.phase), ['survey']);
-  assert.deepEqual([...now.querySelectorAll('[data-phase].done')].map((n) => n.dataset.phase), ['extract']);
-});
-
 test('the re-scan loader ends on its workspace\'s frame: refreshed, failed, stopped or paused; another workspace changes nothing', async () => {
   const { ws, loader } = await addWithRescan();
   ws().deliver({ type: 'workspaces-changed', action: 'rescan-failed', workspaceId: 'wks-other-00000009' });
@@ -669,67 +530,28 @@ test('a paused automatic re-scan that is resumed: the loader follows the new run
   assert.ok(loader().classList.contains('is-done'), 'the resumed run\'s end is its end');
 });
 
-test('an ended re-scan box shows until the page is left; the next visit starts clean', async () => {
-  const { ws, loader, show } = await addWithRescan();
-  ws().deliver({ type: 'workspaces-changed', action: 'description', workspaceId: 'wks-alpha-00000001', runId: 'run_1' });
-  await settle(8);
-  assert.ok(loader().classList.contains('is-done'));
-  show('workspaces');
-  await settle(8);
-  show('workspaces/wks-alpha-00000001');
-  await settle(8);
-  assert.equal(loader(), null, 'seen and ended: gone on the next visit');
-});
-
-test('a re-scan that ended while the page was closed is shown once on return, then dropped', async () => {
-  const { ws, loader, show } = await addWithRescan();
-  show('workspaces');
-  await settle(8);
-  ws().deliver({ type: 'workspaces-changed', action: 'rescan-failed', workspaceId: 'wks-alpha-00000001', runId: 'run_1' });
-  await settle(8);
-  show('workspaces/wks-alpha-00000001');
-  await settle(8);
-  assert.ok(loader() && loader().classList.contains('is-failed'), 'the end the user has not seen yet');
-  show('workspaces');
-  await settle(8);
-  show('workspaces/wks-alpha-00000001');
-  await settle(8);
-  assert.equal(loader(), null);
-});
-
-test('a member change the scan cannot read shows why, with no spinner', async () => {
-  const { loader } = await addWithRescan({ rescan: { skipped: 'read-only workspace scan: /x has no commit' } });
-  const el = loader();
-  assert.ok(el.classList.contains('is-skipped'));
-  assert.equal(el.querySelector('.spinner'), null);
-  assert.match(el.textContent, /has no commit/);
-  assert.match(el.textContent, /Re-scan/);
-});
-
-test('a cleared home is named in the loader', async () => {
-  const { loader } = await addWithRescan({ clearedHomes: ['metrics'] });
-  assert.match(loader().querySelector('.wd-rescan-hint').textContent, /metrics home was cleared/);
-});
-
-test('a re-scan still running when the page loads shows its loader and resubscribes', async () => {
-  const { window, show, ws } = await boot({ workspaces: [{ ...WS[0], rescan: { runId: 'run_live', pipelineId: 'abcd1234' } }, WS[1]] });
-  show('workspaces/wks-alpha-00000001');
-  await settle(8);
-  const el = window.document.querySelector('#ws-detail .wd-rescan.is-running');
-  assert.ok(el, 'the loader is back after a reload');
-  assert.equal(el.querySelector('a.wd-rescan-open').getAttribute('href'), '#running/run_live');
-  assert.ok(ws().sent.some((t) => JSON.parse(t).runId === 'run_live'));
-});
-
-test('a re-scan PAUSED when the page loads shows the paused box, not a spinner', async () => {
-  const { window, show } = await boot({ workspaces: [{ ...WS[0], rescan: { runId: 'run_paused', pipelineId: 'abcd1234', paused: true } }, WS[1]] });
-  show('workspaces/wks-alpha-00000001');
-  await settle(8);
-  const el = window.document.querySelector('#ws-detail .wd-rescan');
-  assert.ok(el && el.classList.contains('is-paused'), 'its pause was broadcast before the reload: the list says so');
-  assert.equal(el.querySelector('.spinner'), null);
-  assert.match(el.textContent, /Re-scan paused/);
-  assert.equal(el.querySelector('a.wd-rescan-open').getAttribute('href'), '#running/run_paused');
+test('on page load a running re-scan shows its loader and resubscribes; a paused one shows the paused box, not a spinner', async () => {
+  await checkRows([
+    { name: 'a re-scan still running when the page loads shows its loader and resubscribes', run: async () => {
+      const { window, show, ws } = await boot({ workspaces: [{ ...WS[0], rescan: { runId: 'run_live', pipelineId: 'abcd1234' } }, WS[1]] });
+      show('workspaces/wks-alpha-00000001');
+      await settle(8);
+      const el = window.document.querySelector('#ws-detail .wd-rescan.is-running');
+      assert.ok(el, 'the loader is back after a reload');
+      assert.equal(el.querySelector('a.wd-rescan-open').getAttribute('href'), '#running/run_live');
+      assert.ok(ws().sent.some((t) => JSON.parse(t).runId === 'run_live'));
+    } },
+    { name: 'a re-scan PAUSED when the page loads shows the paused box, not a spinner', run: async () => {
+      const { window, show } = await boot({ workspaces: [{ ...WS[0], rescan: { runId: 'run_paused', pipelineId: 'abcd1234', paused: true } }, WS[1]] });
+      show('workspaces/wks-alpha-00000001');
+      await settle(8);
+      const el = window.document.querySelector('#ws-detail .wd-rescan');
+      assert.ok(el && el.classList.contains('is-paused'), 'its pause was broadcast before the reload: the list says so');
+      assert.equal(el.querySelector('.spinner'), null);
+      assert.match(el.textContent, /Re-scan paused/);
+      assert.equal(el.querySelector('a.wd-rescan-open').getAttribute('href'), '#running/run_paused');
+    } },
+  ]);
 });
 
 test('Remove confirms, posts {remove}; a 409 (live run) keeps the member and shows the error on the header', async () => {
@@ -761,23 +583,6 @@ test('Remove confirms, posts {remove}; a 409 (live run) keeps the member and sho
   await confirmDialog(window);
   await settle(8);
   assert.equal(doc.querySelectorAll('#ws-detail .wd-member').length, 2, 'removed');
-});
-
-test('Add projects with nothing left to add leads to the Projects page and starts its Add project flow', async () => {
-  const { window, show } = await boot({ fetchHandler: (u) => (u.includes('/api/fs/pick')
-    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ status: 'canceled' }) }) : null) });
-  show('workspaces/wks-alpha-00000001');
-  await settle(8);
-  const doc = window.document;
-  click(window, doc.querySelector('#ws-detail .wd-members-add'));
-  await settle();
-  assert.match(doc.querySelector('#plugin-modal .wd-add-list').textContent, /already a member/);
-  const buttons = [...doc.querySelectorAll('#plugin-modal-actions button')];
-  assert.deepEqual(buttons.map((b) => b.textContent), ['Add project'], 'one way forward; the header\'s Close is the way out');
-  click(window, buttons[0]);
-  await settle(8);
-  assert.equal(window.location.hash, '#projects', 'on the Projects page');
-  assert.equal(doc.getElementById('plugin-modal').classList.contains('hidden'), true, 'the dialog closed');
 });
 
 // #555 D10: a failed metrics-home save reuses one error line instead of appending

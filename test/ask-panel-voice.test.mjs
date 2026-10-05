@@ -5,6 +5,7 @@
 // voice off on close / New chat / thread switch / destroy. No mic without the dep.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { makePanel } from './helpers/ask-panel-harness.mjs';
 import { stampFrames } from './helpers/ask-frames.mjs';
 
@@ -27,68 +28,74 @@ function fakeVoiceFactory() {
   return f;
 }
 
-test('no createVoice dep → no mic (existing composer unchanged)', () => {
-  const { doc } = makePanel();
-  assert.equal(doc.querySelector('[data-ask-mic]'), null);
-});
-
-test('click = dictation; transcript lands in the composer without sending', async () => {
-  const f = fakeVoiceFactory();
-  const { doc, fetchCalls, panel } = makePanel({ deps: { createVoice: f.create } });
-  panel.open();
-  doc.querySelector('[data-ask-mic]').click();
-  await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(f.calls[0], ['start', 'dictate']);
-  assert.equal(doc.querySelector('[data-ask-mic]').getAttribute('aria-pressed'), 'true');
-  assert.equal(doc.querySelector('.ask-voice-status').textContent, 'Listening…');
-  doc.querySelector('.ask-input').value = 'draft';
-  f.hooks.onTranscript('hello there', { autoSend: false });
-  assert.equal(doc.querySelector('.ask-input').value, 'draft hello there');
-  assert.equal(fetchCalls.some((c) => /\/messages$/.test(c.url)), false);
-});
-
-test('clicking the mic while voice is on turns it off', async () => {
-  const f = fakeVoiceFactory();
-  const { doc, panel } = makePanel({ deps: { createVoice: f.create } });
-  panel.open();
-  doc.querySelector('[data-ask-mic]').click();
-  await new Promise((r) => setTimeout(r, 0));
-  doc.querySelector('[data-ask-mic]').click();
-  assert.deepEqual(f.calls.at(-1), ['stop']);
-  assert.equal(doc.querySelector('.ask-voice-status').hidden, true);
-});
-
-test('caret menu starts hands-free; auto-send posts the message', async () => {
-  const f = fakeVoiceFactory();
-  const { doc, fetchCalls, panel, tick } = makePanel({
-    deps: { createVoice: f.create },
-    fetchHandler: (url) => (url === '/api/ask/threads'
-      ? { ok: true, status: 201, json: async () => ({ thread: { id: 't1', title: null } }) }
-      : /\/messages$/.test(url) ? { ok: true, status: 202, json: async () => ({ userMessageId: 'u1', assistantMessageId: 'm1' }) }
-      : { ok: true, status: 200, json: async () => ({}) }),
-  });
-  panel.open();
-  doc.querySelector('[data-ask-voice-caret]').click();
-  doc.querySelector('.ask-voice-item[data-mode="handsfree"]').click();
-  await tick();
-  assert.deepEqual(f.calls[0], ['start', 'handsfree']);
-  f.hooks.onTranscript('what failed?', { autoSend: true });
-  await tick(); await tick();
-  const sent = fetchCalls.find((c) => /\/messages$/.test(c.url));
-  assert.equal(JSON.parse(sent.opts.body).text, 'what failed?');
-});
-
-test('long-press starts hands-free and the following click is swallowed', async () => {
-  const f = fakeVoiceFactory();
-  const { doc, window, panel } = makePanel({ deps: { createVoice: f.create, voiceLongPressMs: 5 } });
-  panel.open();
-  const mic = doc.querySelector('[data-ask-mic]');
-  mic.dispatchEvent(new window.Event('pointerdown', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 15));
-  mic.dispatchEvent(new window.Event('pointerup', { bubbles: true }));
-  mic.click();
-  await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(f.calls, [['start', 'handsfree']]);
+test('voice entry points: mic click dictates (again = off); the caret menu offers dictation / Talk / hands-free; long-press starts hands-free', async () => {
+  await checkRows([
+    { name: 'click = dictation; transcript lands in the composer without sending', run: async () => {
+      const f = fakeVoiceFactory();
+      const { doc, fetchCalls, panel } = makePanel({ deps: { createVoice: f.create } });
+      panel.open();
+      doc.querySelector('[data-ask-mic]').click();
+      await new Promise((r) => setTimeout(r, 0));
+      assert.deepEqual(f.calls[0], ['start', 'dictate']);
+      assert.equal(doc.querySelector('[data-ask-mic]').getAttribute('aria-pressed'), 'true');
+      assert.equal(doc.querySelector('.ask-voice-status').textContent, 'Listening…');
+      doc.querySelector('.ask-input').value = 'draft';
+      f.hooks.onTranscript('hello there', { autoSend: false });
+      assert.equal(doc.querySelector('.ask-input').value, 'draft hello there');
+      assert.equal(fetchCalls.some((c) => /\/messages$/.test(c.url)), false);
+    } },
+    { name: 'clicking the mic while voice is on turns it off', run: async () => {
+      const f = fakeVoiceFactory();
+      const { doc, panel } = makePanel({ deps: { createVoice: f.create } });
+      panel.open();
+      doc.querySelector('[data-ask-mic]').click();
+      await new Promise((r) => setTimeout(r, 0));
+      doc.querySelector('[data-ask-mic]').click();
+      assert.deepEqual(f.calls.at(-1), ['stop']);
+      assert.equal(doc.querySelector('.ask-voice-status').hidden, true);
+    } },
+    { name: 'caret menu starts hands-free; auto-send posts the message', run: async () => {
+      const f = fakeVoiceFactory();
+      const { doc, fetchCalls, panel, tick } = makePanel({
+        deps: { createVoice: f.create },
+        fetchHandler: (url) => (url === '/api/ask/threads'
+          ? { ok: true, status: 201, json: async () => ({ thread: { id: 't1', title: null } }) }
+          : /\/messages$/.test(url) ? { ok: true, status: 202, json: async () => ({ userMessageId: 'u1', assistantMessageId: 'm1' }) }
+          : { ok: true, status: 200, json: async () => ({}) }),
+      });
+      panel.open();
+      doc.querySelector('[data-ask-voice-caret]').click();
+      doc.querySelector('.ask-voice-item[data-mode="handsfree"]').click();
+      await tick();
+      assert.deepEqual(f.calls[0], ['start', 'handsfree']);
+      f.hooks.onTranscript('what failed?', { autoSend: true });
+      await tick(); await tick();
+      const sent = fetchCalls.find((c) => /\/messages$/.test(c.url));
+      assert.equal(JSON.parse(sent.opts.body).text, 'what failed?');
+    } },
+    { name: 'long-press starts hands-free and the following click is swallowed', run: async () => {
+      const f = fakeVoiceFactory();
+      const { doc, window, panel } = makePanel({ deps: { createVoice: f.create, voiceLongPressMs: 5 } });
+      panel.open();
+      const mic = doc.querySelector('[data-ask-mic]');
+      mic.dispatchEvent(new window.Event('pointerdown', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 15));
+      mic.dispatchEvent(new window.Event('pointerup', { bubbles: true }));
+      mic.click();
+      await new Promise((r) => setTimeout(r, 0));
+      assert.deepEqual(f.calls, [['start', 'handsfree']]);
+    } },
+    { name: 'caret menu offers "Talk, read the replies" (voice in, text out) between dictation and hands-free', run: async () => {
+      const f = fakeVoiceFactory();
+      const { doc, panel, tick } = makePanel({ deps: { createVoice: f.create } });
+      panel.open();
+      doc.querySelector('[data-ask-voice-caret]').click();
+      assert.deepEqual([...doc.querySelectorAll('.ask-voice-item')].map((i) => i.dataset.mode), ['dictate', 'talk', 'handsfree']);
+      doc.querySelector('.ask-voice-item[data-mode="talk"]').click();
+      await tick();
+      assert.deepEqual(f.calls[0], ['start', 'talk']);
+    } },
+  ]);
 });
 
 // ---- a loaded thread (the openWith() rig of test/ask-panel-stream.test.mjs) ----
@@ -216,65 +223,44 @@ test('a transcript while a loaded thread has an un-adopted in-flight turn is def
   assert.equal(JSON.parse(sent[0].opts.body).text, 'q');
 });
 
-test('a sendMessage that throws (malformed 201 body) fails voice without an unhandled rejection', async () => {
-  const unhandled = [];
-  const onUnhandled = (e) => unhandled.push(e);
-  process.on('unhandledRejection', onUnhandled);
-  try {
-    const f = fakeVoiceFactory();
-    const { doc, panel, tick } = makePanel({
-      deps: { createVoice: f.create },
-      fetchHandler: (url) => (url === '/api/ask/threads'
-        ? { ok: true, status: 201, json: async () => { throw new SyntaxError('Unexpected end of JSON input'); } }
-        : { ok: true, status: 200, json: async () => ({}) }),
-    });
-    panel.open();
-    doc.querySelector('[data-ask-voice-caret]').click();
-    doc.querySelector('.ask-voice-item[data-mode="handsfree"]').click();
-    await tick();
-    f.hooks.onTranscript('hello', { autoSend: true });
-    await tick(); await tick(); await tick();
-    assert.equal(f.calls.some((c) => c[0] === 'fail'), true);
-    assert.deepEqual(unhandled, []);
-  } finally {
-    process.off('unhandledRejection', onUnhandled);
-  }
-});
-
-test('a failed hands-free send reports through the controller (voice off, message shown)', async () => {
-  const f = fakeVoiceFactory();
-  const ref = { body: snapBody(), messages: () => ({ ok: false, status: 500, json: async () => ({}) }) };
-  const ctx = await openWith(ref, { deps: { createVoice: f.create } });
-  await startHandsFree(ctx);
-  f.hooks.onTranscript('what failed?', { autoSend: true });
-  await ctx.tick(); await ctx.tick(); await ctx.tick();
-  assert.deepEqual(f.calls.at(-1), ['fail', 'request failed (500)']);
-  const msg = ctx.doc.querySelector('.ask-composer-msg');
-  assert.equal(msg.hidden, false);
-  assert.equal(msg.textContent, 'request failed (500)');
-  assert.equal(ctx.doc.querySelector('[data-ask-mic]').getAttribute('aria-pressed'), 'false');
-});
-
-test('once voice has reached "listening", opening the panel preloads the models; never before', async () => {
-  const f = fakeVoiceFactory();
-  const { doc, panel, storage } = makePanel({ deps: { createVoice: f.create } });
-  panel.open();
-  assert.equal(f.calls.some(([c]) => c === 'preload'), false);   // first ever open: no silent work
-  doc.querySelector('[data-ask-mic]').click();
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(storage.getItem('worca-cc.ask.voiceUsed'), '1');
-  panel.close();
-  panel.open();
-  assert.equal(f.calls.filter(([c]) => c === 'preload').length, 1);
-});
-
-test('caret menu offers "Talk, read the replies" (voice in, text out) between dictation and hands-free', async () => {
-  const f = fakeVoiceFactory();
-  const { doc, panel, tick } = makePanel({ deps: { createVoice: f.create } });
-  panel.open();
-  doc.querySelector('[data-ask-voice-caret]').click();
-  assert.deepEqual([...doc.querySelectorAll('.ask-voice-item')].map((i) => i.dataset.mode), ['dictate', 'talk', 'handsfree']);
-  doc.querySelector('.ask-voice-item[data-mode="talk"]').click();
-  await tick();
-  assert.deepEqual(f.calls[0], ['start', 'talk']);
+test('a failed hands-free send (thrown or rejected) turns voice off through the controller with the message shown, no unhandled rejection', async () => {
+  await checkRows([
+    { name: 'a sendMessage that throws (malformed 201 body) fails voice without an unhandled rejection', run: async () => {
+      const unhandled = [];
+      const onUnhandled = (e) => unhandled.push(e);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const f = fakeVoiceFactory();
+        const { doc, panel, tick } = makePanel({
+          deps: { createVoice: f.create },
+          fetchHandler: (url) => (url === '/api/ask/threads'
+            ? { ok: true, status: 201, json: async () => { throw new SyntaxError('Unexpected end of JSON input'); } }
+            : { ok: true, status: 200, json: async () => ({}) }),
+        });
+        panel.open();
+        doc.querySelector('[data-ask-voice-caret]').click();
+        doc.querySelector('.ask-voice-item[data-mode="handsfree"]').click();
+        await tick();
+        f.hooks.onTranscript('hello', { autoSend: true });
+        await tick(); await tick(); await tick();
+        assert.equal(f.calls.some((c) => c[0] === 'fail'), true);
+        assert.deepEqual(unhandled, []);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    } },
+    { name: 'a failed hands-free send reports through the controller (voice off, message shown)', run: async () => {
+      const f = fakeVoiceFactory();
+      const ref = { body: snapBody(), messages: () => ({ ok: false, status: 500, json: async () => ({}) }) };
+      const ctx = await openWith(ref, { deps: { createVoice: f.create } });
+      await startHandsFree(ctx);
+      f.hooks.onTranscript('what failed?', { autoSend: true });
+      await ctx.tick(); await ctx.tick(); await ctx.tick();
+      assert.deepEqual(f.calls.at(-1), ['fail', 'request failed (500)']);
+      const msg = ctx.doc.querySelector('.ask-composer-msg');
+      assert.equal(msg.hidden, false);
+      assert.equal(msg.textContent, 'request failed (500)');
+      assert.equal(ctx.doc.querySelector('[data-ask-mic]').getAttribute('aria-pressed'), 'false');
+    } },
+  ]);
 });

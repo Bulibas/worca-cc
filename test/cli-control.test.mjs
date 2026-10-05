@@ -22,6 +22,7 @@ import { graphResumePoint } from './helpers/graph-templates.mjs';
 import { projectKey } from '../src/core/store.mjs';
 import { addProject } from '../src/core/projects.mjs';
 import { createTicket, resumeTicketsFor } from '../src/core/scheduler.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, '..', 'src', 'cli', 'worca-cc.mjs');
@@ -81,48 +82,54 @@ test('migration: the mailbox table and its pending index exist on a fresh store'
   assert.ok(db.prepare('PRAGMA user_version').get().user_version >= 44);
 });
 
-test('claim is at-most-once and FIFO; the losing side of a race gets null', () => {
-  insertPipeline({ id: 'ccc10001', title: 'mailbox demo', status: 'running' });
-  const a = enqueuePipelineCommand('ccc10001', 'stop', { by: 'alice' });
-  const b = enqueuePipelineCommand('ccc10001', 'pause');
-  assert.ok(b.id > a.id, 'FIFO arrival order');
-  const first = claimPipelineCommand('ccc10001');
-  assert.equal(first.action, 'stop');
-  assert.equal(first.by, 'alice', "the command's actor rides through");
-  const second = claimPipelineCommand('ccc10001');
-  assert.equal(second.action, 'pause');
-  assert.equal(claimPipelineCommand('ccc10001'), null, 'nothing left to claim');
-  assert.ok(commandsOf('ccc10001').every((r) => r.consumed_at), 'both rows are consumed');
+test('claim is at-most-once and FIFO, carries actor and JSON payload; the losing side of a race gets null', async () => {
+  await checkRows([
+    { name: 'claim is at-most-once and FIFO; the losing side of a race gets null', run: async () => {
+      insertPipeline({ id: 'ccc10001', title: 'mailbox demo', status: 'running' });
+      const a = enqueuePipelineCommand('ccc10001', 'stop', { by: 'alice' });
+      const b = enqueuePipelineCommand('ccc10001', 'pause');
+      assert.ok(b.id > a.id, 'FIFO arrival order');
+      const first = claimPipelineCommand('ccc10001');
+      assert.equal(first.action, 'stop');
+      assert.equal(first.by, 'alice', "the command's actor rides through");
+      const second = claimPipelineCommand('ccc10001');
+      assert.equal(second.action, 'pause');
+      assert.equal(claimPipelineCommand('ccc10001'), null, 'nothing left to claim');
+      assert.ok(commandsOf('ccc10001').every((r) => r.consumed_at), 'both rows are consumed');
+    } },
+    { name: 'payload round-trips as JSON (the reserved column the answer action will use)', run: async () => {
+      enqueuePipelineCommand('ccc10001', 'pause', { payload: { choice: 'approve' } });
+      const cmd = claimPipelineCommand('ccc10001');
+      assert.deepEqual(cmd.payload, { choice: 'approve' });
+      assert.equal(claimPipelineCommand('ccc10001'), null);
+    } },
+  ]);
 });
 
-test('payload round-trips as JSON (the reserved column the answer action will use)', () => {
-  enqueuePipelineCommand('ccc10001', 'pause', { payload: { choice: 'approve' } });
-  const cmd = claimPipelineCommand('ccc10001');
-  assert.deepEqual(cmd.payload, { choice: 'approve' });
-  assert.equal(claimPipelineCommand('ccc10001'), null);
-});
-
-test('reap drops commands whose run settled and keeps the live ones', () => {
-  insertPipeline({ id: 'ccc10002', title: 'finished', status: 'done' });
-  insertPipeline({ id: 'ccc10003', title: 'still live', status: 'running' });
-  enqueuePipelineCommand('ccc10002', 'stop');
-  const keep = enqueuePipelineCommand('ccc10003', 'pause');
-  reapPipelineCommands();
-  assert.equal(commandsOf('ccc10002').length, 0, 'a settled run can never execute a command');
-  assert.equal(commandsOf('ccc10003').length, 1);
-  assert.equal(commandsOf('ccc10003')[0].id, keep.id);
-});
-
-test('discard drops only the UNCLAIMED commands of one pipeline', () => {
-  insertPipeline({ id: 'ccc10004', title: 'discard demo', status: 'running' });
-  insertPipeline({ id: 'ccc10005', title: 'bystander', status: 'running' });
-  enqueuePipelineCommand('ccc10004', 'stop');
-  claimPipelineCommand('ccc10004');                 // executed: stays as the audit trail
-  enqueuePipelineCommand('ccc10004', 'pause');      // pending: dropped
-  enqueuePipelineCommand('ccc10005', 'stop');       // another run's: untouched
-  assert.equal(discardPendingPipelineCommands('ccc10004'), 1);
-  assert.deepEqual(commandsOf('ccc10004').map((r) => Boolean(r.consumed_at)), [true]);
-  assert.equal(commandsOf('ccc10005').length, 1);
+test('reap drops commands of settled runs; discard drops only one pipeline\'s UNCLAIMED commands', async () => {
+  await checkRows([
+    { name: 'reap drops commands whose run settled and keeps the live ones', run: async () => {
+      insertPipeline({ id: 'ccc10002', title: 'finished', status: 'done' });
+      insertPipeline({ id: 'ccc10003', title: 'still live', status: 'running' });
+      enqueuePipelineCommand('ccc10002', 'stop');
+      const keep = enqueuePipelineCommand('ccc10003', 'pause');
+      reapPipelineCommands();
+      assert.equal(commandsOf('ccc10002').length, 0, 'a settled run can never execute a command');
+      assert.equal(commandsOf('ccc10003').length, 1);
+      assert.equal(commandsOf('ccc10003')[0].id, keep.id);
+    } },
+    { name: 'discard drops only the UNCLAIMED commands of one pipeline', run: async () => {
+      insertPipeline({ id: 'ccc10004', title: 'discard demo', status: 'running' });
+      insertPipeline({ id: 'ccc10005', title: 'bystander', status: 'running' });
+      enqueuePipelineCommand('ccc10004', 'stop');
+      claimPipelineCommand('ccc10004');                 // executed: stays as the audit trail
+      enqueuePipelineCommand('ccc10004', 'pause');      // pending: dropped
+      enqueuePipelineCommand('ccc10005', 'stop');       // another run's: untouched
+      assert.equal(discardPendingPipelineCommands('ccc10004'), 1);
+      assert.deepEqual(commandsOf('ccc10004').map((r) => Boolean(r.consumed_at)), [true]);
+      assert.equal(commandsOf('ccc10005').length, 1);
+    } },
+  ]);
 });
 
 // ── the harness: ownership start discards stale commands, then the slot executes ──
@@ -159,16 +166,23 @@ test('a stop left pending before a resume does NOT stop the resumed run', () => 
   } finally { RunHarness.prototype._stopHeartbeat.call(owner); }
 });
 
-test("the owner's control timer picks a command up within its ~1s interval", { timeout: 10000 }, async () => {
+test("the owner's control timer picks a command up within one poll interval", { timeout: 10000 }, async () => {
   insertPipeline({ id: 'ggg10002', title: 'timer run', status: 'running' });
   const owner = fakeOwner('ggg10002');
-  RunHarness.prototype._startHeartbeat.call(owner);
+  // The poll period is read when _startHeartbeat arms the timer: 25 ms here, not 1 s.
+  const prevControlCheckMs = process.env.WORCA_CONTROL_CHECK_MS;
+  process.env.WORCA_CONTROL_CHECK_MS = '25';
   try {
+    RunHarness.prototype._startHeartbeat.call(owner);
     enqueuePipelineCommand('ggg10002', 'stop', { by: 'bob' });
     const deadline = Date.now() + 3000;
     while (!owner.calls.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
     assert.deepEqual(owner.calls, [['stop', 'bob']]);
-  } finally { RunHarness.prototype._stopHeartbeat.call(owner); }
+  } finally {
+    RunHarness.prototype._stopHeartbeat.call(owner);
+    if (prevControlCheckMs === undefined) delete process.env.WORCA_CONTROL_CHECK_MS;
+    else process.env.WORCA_CONTROL_CHECK_MS = prevControlCheckMs;
+  }
 });
 
 // ── the CLI: the live boundary, the refusals, the dispatch ───────────────────────
@@ -181,33 +195,48 @@ test('stop on an already-stopped run succeeds — idempotent, for scripts', asyn
   assert.equal(commandsOf('ddd10001').length, 0, 'nothing is enqueued for a settled run');
 });
 
-test('pause refuses a paused run and points at resume', async () => {
-  insertPipeline({ id: 'ddd10002', title: 'parked', status: 'paused' });
-  const r = await run(['pause', 'ddd10002']);
-  assert.equal(r.code, 1, r.stderr);
-  assert.match(r.stderr, /is "paused" — pause targets a live run — resume it with: worca resume ddd10002/);
+test('pause refuses a paused run (points at resume) and both verbs refuse a done run', async () => {
+  await checkRows([
+    { name: 'pause refuses a paused run and points at resume', run: async () => {
+      insertPipeline({ id: 'ddd10002', title: 'parked', status: 'paused' });
+      const r = await run(['pause', 'ddd10002']);
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /is "paused" — pause targets a live run — resume it with: worca resume ddd10002/);
+    } },
+    { name: 'a done run is refused for both verbs', run: async () => {
+      insertPipeline({ id: 'ddd10003', title: 'finished run', status: 'done' });
+      for (const verb of ['stop', 'pause']) {
+        const r = await run([verb, 'ddd10003']);
+        assert.equal(r.code, 1, r.stderr);
+        assert.match(r.stderr, new RegExp(`is "done" — ${verb} targets a live ${verb === 'stop' ? 'or paused ' : ''}run`));
+      }
+    } },
+  ]);
 });
 
-test('stop a PAUSED run: settled right here — stopped, no resume point, nothing enqueued', async () => {
-  await insertParked({ id: 'hhh10001', title: 'parked work' });
-  const r = await run(['stop', 'hhh10001']);
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /Stopped parked work/);
-  const row = getDb().prepare('SELECT status, resume_point FROM pipelines WHERE id = ?').get('hhh10001');
-  assert.equal(row.status, 'stopped');
-  assert.equal(row.resume_point, null);
-  assert.equal(commandsOf('hhh10001').length, 0, 'a paused run has no owner to mail');
-});
-
-test('stop --json on a paused run reports the outcome', async () => {
-  await insertParked({ id: 'hhh10002', title: 'parked json' });
-  const r = await run(['stop', '--json', 'hhh10002']);
-  assert.equal(r.code, 0, r.stderr);
-  const out = JSON.parse(r.stdout);
-  assert.equal(out.outcome, 'stop');
-  assert.equal(out.status, 'stopped');
-  assert.equal(out.commandId, null, 'same keys as a live stop: no command was mailed');
-  assert.equal(out.consumed, null);
+test('stop a PAUSED run: settled right here (stopped, no resume point, nothing enqueued); --json reports the outcome', async () => {
+  await checkRows([
+    { name: 'stop a PAUSED run: settled right here — stopped, no resume point, nothing enqueued', run: async () => {
+      await insertParked({ id: 'hhh10001', title: 'parked work' });
+      const r = await run(['stop', 'hhh10001']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /Stopped parked work/);
+      const row = getDb().prepare('SELECT status, resume_point FROM pipelines WHERE id = ?').get('hhh10001');
+      assert.equal(row.status, 'stopped');
+      assert.equal(row.resume_point, null);
+      assert.equal(commandsOf('hhh10001').length, 0, 'a paused run has no owner to mail');
+    } },
+    { name: 'stop --json on a paused run reports the outcome', run: async () => {
+      await insertParked({ id: 'hhh10002', title: 'parked json' });
+      const r = await run(['stop', '--json', 'hhh10002']);
+      assert.equal(r.code, 0, r.stderr);
+      const out = JSON.parse(r.stdout);
+      assert.equal(out.outcome, 'stop');
+      assert.equal(out.status, 'stopped');
+      assert.equal(out.commandId, null, 'same keys as a live stop: no command was mailed');
+      assert.equal(out.consumed, null);
+    } },
+  ]);
 });
 
 test('stop refuses an INTERRUPTED run and points at resume — it stays resumable', async () => {
@@ -276,15 +305,6 @@ test('stop a PAUSED run: Ctrl+C is held while the stop commits the work, and rel
   assert.equal(getDb().prepare('SELECT status FROM pipelines WHERE id = ?').get('hhh10007').status, 'stopped');
 });
 
-test('a done run is refused for both verbs', async () => {
-  insertPipeline({ id: 'ddd10003', title: 'finished run', status: 'done' });
-  for (const verb of ['stop', 'pause']) {
-    const r = await run([verb, 'ddd10003']);
-    assert.equal(r.code, 1, r.stderr);
-    assert.match(r.stderr, new RegExp(`is "done" — ${verb} targets a live ${verb === 'stop' ? 'or paused ' : ''}run`));
-  }
-});
-
 test('dead owner: no command is enqueued for a run nobody can execute', async () => {
   // A pid that cannot exist on this host: kill(pid, 0) answers ESRCH -> dead.
   insertPipeline({ id: 'ddd10004', title: 'orphaned', status: 'running', ownerPid: 999_999_999, ownerHost: HOST, heartbeatAt: new Date().toISOString() });
@@ -295,11 +315,11 @@ test('dead owner: no command is enqueued for a run nobody can execute', async ()
   assert.equal(commandsOf('ddd10004').length, 0, 'never enqueue a command nobody will read');
 });
 
-test('unknown options, missing id, ambiguous prefix and help all fail cleanly', async () => {
+// The usage refusals (unknown option, missing id, ambiguous prefix) are pinned in-process in
+// test/cli-verbs-inproc.test.mjs; the ambiguous prefix stays here end to end.
+test('an ambiguous prefix fails cleanly and help prints the usage', async () => {
   insertPipeline({ id: 'fff10001', title: 'one', status: 'running' });
   insertPipeline({ id: 'fff10002', title: 'two', status: 'running' });
-  assert.equal((await run(['stop', '--watch', 'fff10001'])).code, 2, 'unknown option');
-  assert.equal((await run(['stop'])).code, 2, 'an id is required');
   const amb = await run(['pause', 'fff1']);
   assert.equal(amb.code, 2, 'ambiguous prefix');
   assert.match(amb.stderr, /matches 2 runs/);

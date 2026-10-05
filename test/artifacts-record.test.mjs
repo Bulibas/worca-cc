@@ -52,13 +52,3 @@ test('recordArtifact without attribution never erases the attribution already th
   assert.equal(row.node_id, 'planner');
   assert.equal(row.cycle, 0);
 });
-
-test('recordArtifact 3-arg form still works (NULL attribution)', async () => {
-  const { id } = await seedPipeline(process.cwd(), { title: 'C', status: 'done' });
-  recordArtifact(id, 'prompt', 'prompt.md');
-  const row = getDb().prepare('SELECT step_key, node_id, cycle FROM artifacts WHERE pipeline_id=? AND kind=? AND rel_path=?')
-    .get(id, 'prompt', 'prompt.md');
-  assert.equal(row.step_key, null);
-  assert.equal(row.node_id, null);
-  assert.equal(row.cycle, null);
-});

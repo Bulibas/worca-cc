@@ -1,6 +1,7 @@
 // test/cost-breakdown.test.mjs — the pure run cost breakdown every surface reads.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { runCostBreakdown, stepAux, floorText, auxLabelForSubagent, fmtAuxCalls, AUX_ORDER } from '../src/shared/cost/breakdown.mjs';
 
 const r4 = (n) => Math.round(n * 1e4) / 1e4;
@@ -75,14 +76,17 @@ test('old runs (no auxCosts, no stoppedTurns) → no lines, agents = total; junk
   assert.doesNotMatch(bad, /NOT-FINITE/, 'no NaN anywhere');
 });
 
-test('aux larger than its step (rounding) clamps agents at 0', () => {
-  assert.equal(runCostBreakdown([{ key: 'a', costUsd: 0.05, auxCosts: { away: { usd: 0.05004, calls: 1 } } }], 0.05).agents, 0);
-});
-
-test('a $0 review (mock / free model) is still a line with its call count', () => {
-  const b = runCostBreakdown([{ key: 'a', costUsd: 0, auxCosts: { away: { usd: 0, calls: 1 } } }], 0);
-  assert.deepEqual(b.lines.map((l) => [l.kind, l.usd, l.calls]), [['away', 0, 1]]);
-  assert.deepEqual(stepAux({ auxCosts: { away: { usd: 0, calls: 1 } } }).away, { usd: 0, calls: 1, floorUsd: null, stopped: 0 });
+test('edge lines: aux above its step clamps agents at 0; a $0 review is still a line with its call count', async () => {
+  await checkRows([
+    { name: 'aux larger than its step (rounding) clamps agents at 0', run: () => {
+      assert.equal(runCostBreakdown([{ key: 'a', costUsd: 0.05, auxCosts: { away: { usd: 0.05004, calls: 1 } } }], 0.05).agents, 0);
+    } },
+    { name: 'a $0 review (mock / free model) is still a line with its call count', run: () => {
+      const b = runCostBreakdown([{ key: 'a', costUsd: 0, auxCosts: { away: { usd: 0, calls: 1 } } }], 0);
+      assert.deepEqual(b.lines.map((l) => [l.kind, l.usd, l.calls]), [['away', 0, 1]]);
+      assert.deepEqual(stepAux({ auxCosts: { away: { usd: 0, calls: 1 } } }).away, { usd: 0, calls: 1, floorUsd: null, stopped: 0 });
+    } },
+  ]);
 });
 
 test('labels for worca-owned sub-agent rows; other types are not relabelled', () => {

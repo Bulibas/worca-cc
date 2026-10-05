@@ -262,12 +262,17 @@ test('runOpts: the registry env joins the fan-out env; redaction values and with
   assert.deepEqual(o.disallowedTools, ['mcp__pg_billing__a_very_long_tool']);
 });
 
-test('every dispatch whose mcp.json carries a ${MCPSECRET_…} ref gets its env, and a scrubbed spawn with a stdio copy keeps the launcher keep-list', async () => {
+// Also: pipelines give registry servers 2 minutes to start, so every dispatch with the
+// config gets MCP_TIMEOUT 120000, and worca's own MCP_TIMEOUT wins. The scrub guardrail
+// only sets claudeOpts.envAllowlist, so it leaves spawnEnv.MCP_TIMEOUT alone.
+test('every dispatch whose mcp.json carries a ${MCPSECRET_…} ref gets its env and MCP_TIMEOUT 120000 (worca\'s own wins); a scrubbed spawn with a stdio copy keeps the launcher keep-list', async () => {
   const { dir, set } = await fixture();
   const gr = await writeGuardrailSet({ name: `Scrub ${set.id}`, settings: { honorProjectSettings: true, envScrub: true, envAllowlist: ['NPM_TOKEN'], protectedPaths: [], deny: [] } });
   const seen = [];
-  const orch = createOrchestrator({ projectDir: dir, prompt: 'x', auto: true, claude: { mock: true }, runners: runners(seen), guardrailsId: gr.id });
-  assert.equal((await orch.run()).status, 'done');
+  await withEnv({ MCP_TIMEOUT: undefined }, async () => {   // a worca spawn may set it
+    const orch = createOrchestrator({ projectDir: dir, prompt: 'x', auto: true, claude: { mock: true }, runners: runners(seen), guardrailsId: gr.id });
+    assert.equal((await orch.run()).status, 'done');
+  });
   const withConfig = seen.filter((r) => r.file);
   assert.ok(withConfig.length >= 2, 'several dispatches carried the config');
   for (const { ctx, file } of withConfig) {
@@ -277,12 +282,18 @@ test('every dispatch whose mcp.json carries a ${MCPSECRET_…} ref gets its env,
     for (const r of refs) assert.ok(o.spawnEnv?.[r], `${r} reaches the spawn env`);
     assert.deepEqual([...o.redactValues].sort(), [PG_SECRET, SENTRY_SECRET].sort());
     assert.deepEqual(ctx.claudeOpts.envAllowlist, ['NPM_TOKEN', ...keepListNames()]);
+    assert.equal(runOpts(ctx, RO).spawnEnv.MCP_TIMEOUT, '120000');
   }
 
   const httpOnly = [];
   const orch2 = createOrchestrator({ projectDir: dir, prompt: 'x', auto: true, claude: { mock: true }, runners: runners(httpOnly), guardrailsId: gr.id, mcpOptOut: [`${set.id}|manual:pg`] });
   assert.equal((await orch2.run()).status, 'done');
   assert.deepEqual(httpOnly[0].ctx.claudeOpts.envAllowlist, ['NPM_TOKEN'], 'no stdio copy ⇒ the set\'s own allowlist');
+
+  await withEnv({ MCP_TIMEOUT: '300000' }, async () => {
+    const { result } = await createOrchestrator({ projectDir: dir, claude: { mock: true } })._resolveMcp([]);
+    assert.equal(result.env.MCP_TIMEOUT, '300000');
+  });
 });
 
 test('runOpts: a bridged model keeps its own withheld tools beside the registry ones', () => withGw(() => {
@@ -346,34 +357,32 @@ test('§10: a run.json write still queued on the MCP chain when the run ends lan
   const { dir } = await fixture();
   const base = runners([]);
   let orch = null;
+  // The queued write is held until the run's teardown reads the chain's tail to drain it: it is
+  // still on the chain when the run ends, and a teardown that copied run.json without draining
+  // would leave it out (never a timer: a short one can land before the end and prove nothing).
+  let release;
+  const drained = new Promise((r) => { release = r; });
   const late = {
     ...base,
     verifier: async (ctx) => {
-      orch._mcpChain(() => new Promise((r) => setTimeout(r, 1000)).then(() => orch._recordRunWarning('late MCP line')));
+      orch._mcpChain(() => drained.then(() => orch._recordRunWarning('late MCP line')));
       return base.verifier(ctx);
     },
   };
   orch = createOrchestrator({ projectDir: dir, prompt: 'x', auto: true, claude: { mock: true }, runners: late });
+  const teardown = orch._teardownRunRoot.bind(orch);
+  let tearingDown = false;
+  orch._teardownRunRoot = (...a) => { tearingDown = true; return teardown(...a); };
+  let tail = orch._mcpTail;
+  Object.defineProperty(orch, '_mcpTail', {
+    configurable: true, enumerable: true,
+    get: () => { if (tearingDown) release(); return tail; },
+    set: (v) => { tail = v; },
+  });
   assert.equal((await orch.run()).status, 'done');
   assert.ok((await readRunManifest(orch.getState().pipelineDir)).warnings.includes('late MCP line'), 'teardown waited for the chain');
   // A late init (a sibling still streaming after the run ended): the closed chain writes nothing.
   orch._onAgentEvent('planner', init([{ name: orch.mcpLayer.copies[0].name, status: 'failed' }]));
   await orch._mcpTail;
   assert.equal(existsSync(orch.runRoot), false, 'the removed run root is never recreated');
-});
-
-test('pipelines give registry servers 2 minutes to start: every dispatch with the config gets MCP_TIMEOUT 120000; worca\'s own wins', async () => {
-  const { dir } = await fixture();
-  const seen = [];
-  await withEnv({ MCP_TIMEOUT: undefined }, async () => {   // a worca spawn may set it
-    const orch = createOrchestrator({ projectDir: dir, prompt: 'x', auto: true, claude: { mock: true }, runners: runners(seen) });
-    assert.equal((await orch.run()).status, 'done');
-  });
-  const withConfig = seen.filter((r) => r.file);
-  assert.ok(withConfig.length >= 2, 'several dispatches carried the config');
-  for (const { ctx } of withConfig) assert.equal(runOpts(ctx, RO).spawnEnv.MCP_TIMEOUT, '120000');
-  await withEnv({ MCP_TIMEOUT: '300000' }, async () => {
-    const { result } = await createOrchestrator({ projectDir: dir, claude: { mock: true } })._resolveMcp([]);
-    assert.equal(result.env.MCP_TIMEOUT, '300000');
-  });
 });

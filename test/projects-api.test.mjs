@@ -6,6 +6,7 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { _resetForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let homeDir, srv, base, prevHome;
 
@@ -32,63 +33,80 @@ after(async () => {
   await rm(homeDir, { recursive: true, force: true });
 });
 
-test('projects API: list empty, add, reject duplicate, delete', async () => {
-  let r = await fetch(`${base}/api/projects`);
-  assert.equal(r.status, 200);
-  assert.deepEqual((await r.json()).projects, []);
+test('projects API: list empty, add, reject duplicate and no-name (400), delete', async () => {
+  await checkRows([
+    { name: 'projects API: list empty, add, reject duplicate, delete', run: async () => {
+      let r = await fetch(`${base}/api/projects`);
+      assert.equal(r.status, 200);
+      assert.deepEqual((await r.json()).projects, []);
 
-  r = await fetch(`${base}/api/projects`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: 'demo', path: homeDir }),
-  });
-  assert.equal(r.status, 200);
-  let j = await r.json();
-  assert.equal(j.projects.length, 1);
-  assert.equal(j.projects[0].name, 'demo');
-  assert.equal(j.projects[0].exists, true);
+      r = await fetch(`${base}/api/projects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'demo', path: homeDir }),
+      });
+      assert.equal(r.status, 200);
+      let j = await r.json();
+      assert.equal(j.projects.length, 1);
+      assert.equal(j.projects[0].name, 'demo');
+      assert.equal(j.projects[0].exists, true);
 
-  r = await fetch(`${base}/api/projects`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: 'demo', path: homeDir }),
-  });
-  assert.equal(r.status, 400);
+      r = await fetch(`${base}/api/projects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'demo', path: homeDir }),
+      });
+      assert.equal(r.status, 400);
 
-  r = await fetch(`${base}/api/projects?name=${encodeURIComponent('demo')}`, { method: 'DELETE' });
-  assert.equal(r.status, 200);
-  assert.deepEqual((await r.json()).projects, []);
+      r = await fetch(`${base}/api/projects?name=${encodeURIComponent('demo')}`, { method: 'DELETE' });
+      assert.equal(r.status, 200);
+      assert.deepEqual((await r.json()).projects, []);
+    } },
+    { name: 'POST /api/projects with no name is a 400', run: async () => {
+      const r = await fetch(`${base}/api/projects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: homeDir }),
+      });
+      assert.equal(r.status, 400);
+    } },
+  ]);
 });
 
-test('POST /api/projects with no name is a 400', async () => {
-  const r = await fetch(`${base}/api/projects`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: homeDir }),
-  });
-  assert.equal(r.status, 400);
-});
-
-test('POST /api/projects/bulk adds the valid folders and reports the skipped ones', async () => {
-  const a = join(homeDir, 'bulk-a');
-  const b = join(homeDir, 'bulk-b');
-  await mkdir(a); await mkdir(b);
-  const r = await fetch(`${base}/api/projects/bulk`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ projects: [
-      { name: 'bulk-a', path: a },
-      { name: 'bulk-a', path: b },                          // duplicate name in the batch
-      { name: 'ghost', path: join(homeDir, 'missing') },    // vanished
-    ] }),
-  });
-  assert.equal(r.status, 200);
-  const j = await r.json();
-  assert.deepEqual(j.results.map((x) => x.status), ['added', 'skipped', 'skipped']);
-  assert.match(j.results[1].reason, /already exists/);
-  assert.equal(j.results[2].reason, 'folder does not exist');
-  assert.ok(j.projects.some((p) => p.name === 'bulk-a' && p.path === a));
-  // cleanup so the other tests in this file see their expected registry
-  await fetch(`${base}/api/projects?name=bulk-a`, { method: 'DELETE' });
+test('POST /api/projects/bulk: adds valid folders, reports skipped rows with reasons, 200 even when every row is skipped', async () => {
+  await checkRows([
+    { name: 'POST /api/projects/bulk adds the valid folders and reports the skipped ones', run: async () => {
+      const a = join(homeDir, 'bulk-a');
+      const b = join(homeDir, 'bulk-b');
+      await mkdir(a); await mkdir(b);
+      const r = await fetch(`${base}/api/projects/bulk`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projects: [
+          { name: 'bulk-a', path: a },
+          { name: 'bulk-a', path: b },                          // duplicate name in the batch
+          { name: 'ghost', path: join(homeDir, 'missing') },    // vanished
+        ] }),
+      });
+      assert.equal(r.status, 200);
+      const j = await r.json();
+      assert.deepEqual(j.results.map((x) => x.status), ['added', 'skipped', 'skipped']);
+      assert.match(j.results[1].reason, /already exists/);
+      assert.equal(j.results[2].reason, 'folder does not exist');
+      assert.ok(j.projects.some((p) => p.name === 'bulk-a' && p.path === a));
+      // cleanup so the other tests in this file see their expected registry
+      await fetch(`${base}/api/projects?name=bulk-a`, { method: 'DELETE' });
+    } },
+    { name: 'POST /api/projects/bulk answers 200 even when every row is skipped', run: async () => {
+      const r = await fetch(`${base}/api/projects/bulk`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projects: [{ name: '', path: homeDir }] }),
+      });
+      assert.equal(r.status, 200);
+      const j = await r.json();
+      assert.equal(j.results[0].status, 'skipped');
+      assert.equal(j.results[0].reason, 'project name is required');
+    } },
+  ]);
 });
 
 test('POST /api/projects/bulk rejects a missing, empty or oversized list with 400', async () => {
@@ -99,15 +117,4 @@ test('POST /api/projects/bulk rejects a missing, empty or oversized list with 40
     assert.equal(r.status, 400, JSON.stringify(body).slice(0, 40));
     assert.ok((await r.json()).error);
   }
-});
-
-test('POST /api/projects/bulk answers 200 even when every row is skipped', async () => {
-  const r = await fetch(`${base}/api/projects/bulk`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ projects: [{ name: '', path: homeDir }] }),
-  });
-  assert.equal(r.status, 200);
-  const j = await r.json();
-  assert.equal(j.results[0].status, 'skipped');
-  assert.equal(j.results[0].reason, 'project name is required');
 });

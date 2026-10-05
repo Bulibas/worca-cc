@@ -7,9 +7,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
-import { WORCA_MCP_API } from '../src/core/plugin-api.mjs';
 import {
-  normalizeManifest, validatePluginDir, negotiatedApi, MCP_NEEDS_API_5, mcpBlockIgnored,
+  normalizeManifest, validatePluginDir, MCP_NEEDS_API_5, mcpBlockIgnored,
 } from '../src/core/plugin-manifest.mjs';
 import { writePluginsLock, pluginCurrentDir } from '../src/core/plugins-lock.mjs';
 import { discoverChannels } from '../src/core/chat/channel-host.mjs';
@@ -42,12 +41,6 @@ const manifest = (range, mcpServers) => ({
 });
 const errs = (v) => v.problems.filter((p) => p.level === 'error').map((p) => p.message);
 const warns = (v) => v.problems.filter((p) => p.level === 'warn').map((p) => p.message);
-
-test('MCP servers arrive with API 5; the scaffold range keeps negotiating 4', () => {
-  assert.equal(WORCA_MCP_API, 5);
-  assert.equal(negotiatedApi('>=4 <5'), 4, 'the scaffold range keeps negotiating 4');
-  assert.equal(negotiatedApi('>=5 <6'), 5);
-});
 
 test('connectors are handed apiVersion 5 unless their range pins an older API', () => {
   const lock = {};

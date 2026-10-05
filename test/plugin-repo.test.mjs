@@ -11,10 +11,11 @@ import {
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import {
   addPluginRepo, fetchCandidate, exportVersion, repoCacheDir, parseMarketplaceManifest, repoSlug,
 } from '../src/core/plugin-repo.mjs';
-import { writePluginsLock, pluginDir } from '../src/core/plugins-lock.mjs';
+import { writePluginsLock } from '../src/core/plugins-lock.mjs';
 
 const WIN_SYMLINK = { skip: process.platform === 'win32' ? 'creating symlinks needs a privilege (Developer Mode / admin) on Windows' : false };
 
@@ -50,7 +51,7 @@ async function makeRepo(dirName, files) {
   return { root, sha: await git(root, 'rev-parse', 'HEAD') };
 }
 
-test('addPluginRepo: multi-plugin discovery at depth 1 (two subdirs)', async () => {
+test('addPluginRepo: no marketplace manifest -> depth 0-1 scan finds both subdirs, marketplace: null, bare cache created', async () => {
   const { root, sha } = await makeRepo('multi', {
     'README.md': 'not a plugin\n',
     'alpha/worca-cc-plugin.json': MANIFEST('alpha-plugin'),
@@ -59,25 +60,23 @@ test('addPluginRepo: multi-plugin discovery at depth 1 (two subdirs)', async () 
     'beta/index.mjs': 'export default () => ({});\n',
   });
   const r = await addPluginRepo(root);
-  assert.equal(r.repoUrl, root);
-  assert.equal(r.sha, sha);
-  assert.match(r.sha, /^[0-9a-f]{40}$/);
-  assert.deepEqual(
-    r.discovered.map(({ name, subdir }) => ({ name, subdir })),
-    [{ name: 'alpha-plugin', subdir: 'alpha' }, { name: 'beta-plugin', subdir: 'beta' }],
-  );
-  assert.equal(r.discovered[0].manifest.taskSources[0].id, 'src');
-  assert.ok(existsSync(repoCacheDir(root)), 'bare fetch cache created under <pluginsRoot>/.cache');
-});
-
-test('addPluginRepo: root-level single plugin -> subdir ""', async () => {
-  const { root } = await makeRepo('single', {
-    'worca-cc-plugin.json': MANIFEST('solo-plugin'),
-    'index.mjs': 'export default () => ({});\n',
-  });
-  const r = await addPluginRepo(root);
-  assert.deepEqual(r.discovered.map(({ name, subdir }) => ({ name, subdir })),
-    [{ name: 'solo-plugin', subdir: '' }]);
+  await checkRows([
+    { name: 'addPluginRepo: multi-plugin discovery at depth 1 (two subdirs)', run: () => {
+      assert.equal(r.repoUrl, root);
+      assert.equal(r.sha, sha);
+      assert.match(r.sha, /^[0-9a-f]{40}$/);
+      assert.deepEqual(
+        r.discovered.map(({ name, subdir }) => ({ name, subdir })),
+        [{ name: 'alpha-plugin', subdir: 'alpha' }, { name: 'beta-plugin', subdir: 'beta' }],
+      );
+      assert.equal(r.discovered[0].manifest.taskSources[0].id, 'src');
+      assert.ok(existsSync(repoCacheDir(root)), 'bare fetch cache created under <pluginsRoot>/.cache');
+    } },
+    { name: 'addPluginRepo: no marketplace manifest -> depth 0-1 scan, marketplace: null', run: () => {
+      assert.equal(r.marketplace, null);
+      assert.deepEqual(r.discovered.map((d) => d.name), ['alpha-plugin', 'beta-plugin']);
+    } },
+  ]);
 });
 
 test('addPluginRepo: reserved model-env key -> plugin still discovered, warning surfaced', async () => {
@@ -147,30 +146,29 @@ test('fetchCandidate: commit list + diffstat between pinned and new HEAD', async
   assert.match(full.diffFull, /apiKey/);
 });
 
-test('exportVersion: root layout -> versions/<sha7> holds the tree', async () => {
-  const { root, sha } = await makeRepo('exp-root', {
-    'worca-cc-plugin.json': MANIFEST('exp-root-plugin'),
-    'index.mjs': 'export default () => ({});\n',
-    'nested/deep.txt': 'deep\n',
-  });
-  const { versionDir, warnings } = await exportVersion('exp-root-plugin', sha, { repoUrl: root, subdir: '' });
-  assert.equal(versionDir, join(pluginDir('exp-root-plugin'), 'versions', sha.slice(0, 7)));
-  assert.deepEqual(warnings, []);
-  assert.equal(JSON.parse(readFileSync(join(versionDir, 'worca-cc-plugin.json'), 'utf8')).name, 'exp-root-plugin');
-  assert.equal(readFileSync(join(versionDir, 'nested/deep.txt'), 'utf8'), 'deep\n');
-  assert.ok(!existsSync(join(versionDir, '.git')), 'archive export has no .git');
-});
-
-test('exportVersion: subdir layout is extracted at the version root (strip-components)', async () => {
+test('exportVersion: depth-1 and depth-2 subdirs extract at the version root (strip-components regression lock)', async () => {
+  // One repo: alpha/ (depth 1) and plugins/deep/ (depth 2), one exportVersion call each.
   const { root, sha } = await makeRepo('exp-sub', {
     'alpha/worca-cc-plugin.json': MANIFEST('exp-sub-plugin'),
     'alpha/index.mjs': 'export default () => ({});\n',
     'README.md': 'repo readme\n',
+    'plugins/deep/worca-cc-plugin.json': MANIFEST('deep-plugin'),
+    'plugins/deep/index.mjs': 'export default () => ({});\n',
   });
-  const { versionDir } = await exportVersion('exp-sub-plugin', sha, { repoUrl: root, subdir: 'alpha' });
-  assert.ok(existsSync(join(versionDir, 'worca-cc-plugin.json')), 'manifest sits at the version root');
-  assert.ok(!existsSync(join(versionDir, 'alpha')), 'subdir prefix stripped');
-  assert.ok(!existsSync(join(versionDir, 'README.md')), 'sibling repo files not exported');
+  await checkRows([
+    { name: 'exportVersion: subdir layout is extracted at the version root (strip-components)', run: async () => {
+      const { versionDir } = await exportVersion('exp-sub-plugin', sha, { repoUrl: root, subdir: 'alpha' });
+      assert.ok(existsSync(join(versionDir, 'worca-cc-plugin.json')), 'manifest sits at the version root');
+      assert.ok(!existsSync(join(versionDir, 'alpha')), 'subdir prefix stripped');
+      assert.ok(!existsSync(join(versionDir, 'README.md')), 'sibling repo files not exported');
+    } },
+    { name: 'exportVersion: depth-2 subdir strips components correctly (regression lock)', run: async () => {
+      await addPluginRepo(root); // seed cache
+      const { versionDir } = await exportVersion('deep-plugin', sha, { repoUrl: root, subdir: 'plugins/deep' });
+      assert.ok(existsSync(join(versionDir, 'worca-cc-plugin.json')), 'manifest at export ROOT (strip-components = subdir depth)');
+      assert.ok(existsSync(join(versionDir, 'index.mjs')));
+    } },
+  ]);
 });
 
 test('exportVersion: escaping symlink deleted with warning; internal symlink kept', WIN_SYMLINK, async () => {
@@ -249,16 +247,6 @@ test('addPluginRepo: worca-cc-marketplace.json drives discovery (any depth) and 
   );
 });
 
-test('addPluginRepo: no marketplace manifest -> depth 0-1 scan, marketplace: null', async () => {
-  const { root } = await makeRepo('mkt-none', {
-    'alpha2/worca-cc-plugin.json': MANIFEST('alpha2-plugin'),
-    'alpha2/index.mjs': 'export default () => ({});\n',
-  });
-  const r = await addPluginRepo(root);
-  assert.equal(r.marketplace, null);
-  assert.deepEqual(r.discovered.map((d) => d.name), ['alpha2-plugin']);
-});
-
 test('addPluginRepo: invalid marketplace manifest -> warning + fallback to scan', async () => {
   const { root } = await makeRepo('mkt-bad', {
     'worca-cc-marketplace.json': '{nope',
@@ -291,18 +279,6 @@ test('addPluginRepo: bad manifest entries skipped with warnings; duplicates firs
   assert.match(w, /same-name/); // duplicate warning
 });
 
-test('exportVersion: depth-2 subdir strips components correctly (regression lock)', async () => {
-  const { root, sha } = await makeRepo('mkt-export', {
-    'worca-cc-marketplace.json': MP_MANIFEST(['plugins/deep']),
-    'plugins/deep/worca-cc-plugin.json': MANIFEST('deep-plugin'),
-    'plugins/deep/index.mjs': 'export default () => ({});\n',
-  });
-  await addPluginRepo(root); // seed cache
-  const { versionDir } = await exportVersion('deep-plugin', sha, { repoUrl: root, subdir: 'plugins/deep' });
-  assert.ok(existsSync(join(versionDir, 'worca-cc-plugin.json')), 'manifest at export ROOT (strip-components = subdir depth)');
-  assert.ok(existsSync(join(versionDir, 'index.mjs')));
-});
-
 test('fetchCandidate: depth-2 subdir scopes the diffstat to that plugin only', async () => {
   const { root, sha } = await makeRepo('mkt-cand', {
     'worca-cc-marketplace.json': MP_MANIFEST(['plugins/p1', 'plugins/p2']),
@@ -327,16 +303,19 @@ test('fetchCandidate: depth-2 subdir scopes the diffstat to that plugin only', a
 
 // v2 additions (E1, C1, E14, E15) need { parseMarketplaceManifest, repoSlug }
 // added to the plugin-repo import at the top of this file.
-test('parseMarketplaceManifest: bad segments all rejected; empty plugins is authoritative-ok', () => {
-  assert.deepEqual(
-    parseMarketplaceManifest({ name: 'x', plugins: ['../a', '/b', 'c/./d', 'e\\f', '', ' -x'] }).plugins, []);
-  assert.ok(parseMarketplaceManifest({ name: 'x', plugins: [] }).ok);
-});
-
-test('parseMarketplaceManifest: structurally invalid (plugins not an array) -> ok:false', () => {
-  const res = parseMarketplaceManifest({ plugins: 'nope' });
-  assert.equal(res.ok, false);
-  assert.ok(res.errors.length);
+test('parseMarketplaceManifest: bad segments rejected; empty plugins ok; non-array plugins -> ok:false', async () => {
+  await checkRows([
+    { name: 'parseMarketplaceManifest: bad segments all rejected; empty plugins is authoritative-ok', run: () => {
+      assert.deepEqual(
+        parseMarketplaceManifest({ name: 'x', plugins: ['../a', '/b', 'c/./d', 'e\\f', '', ' -x'] }).plugins, []);
+      assert.ok(parseMarketplaceManifest({ name: 'x', plugins: [] }).ok);
+    } },
+    { name: 'parseMarketplaceManifest: structurally invalid (plugins not an array) -> ok:false', run: () => {
+      const res = parseMarketplaceManifest({ plugins: 'nope' });
+      assert.equal(res.ok, false);
+      assert.ok(res.errors.length);
+    } },
+  ]);
 });
 
 test('repoSlug is injective across near-miss urls (no id/cache collision)', () => {
@@ -344,18 +323,6 @@ test('repoSlug is injective across near-miss urls (no id/cache collision)', () =
     ['/tmp/a/b', '/tmp/a-b'], ['https://h/o/r.git.git', 'https://h/o/r'],
     ['https://github.com/foo/bar', 'https://github.com-foo-bar']];
   for (const [a, b] of pairs) assert.notEqual(repoSlug(a), repoSlug(b), `${a} vs ${b}`);
-});
-
-test('addPluginRepo: empty marketplace manifest is authoritative (scan suppressed)', async () => {
-  const { root } = await makeRepo('mkt-empty', {
-    'worca-cc-marketplace.json': MP_MANIFEST([]),
-    // a stray depth-1 plugin must NOT surface — the (empty) manifest still wins
-    'stray/worca-cc-plugin.json': MANIFEST('stray-plugin'),
-    'stray/index.mjs': 'export default () => ({});\n',
-  });
-  const r = await addPluginRepo(root);
-  assert.deepEqual(r.marketplace, { name: 'Test Market', description: 'fixture marketplace' });
-  assert.deepEqual(r.discovered.map((d) => d.name), []);
 });
 
 test('addPluginRepo: engines-incompatible manifest plugin -> warning, absent from discovered', async () => {

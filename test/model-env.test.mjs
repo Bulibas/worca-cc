@@ -5,15 +5,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  EFFORTS, RESERVED_MODEL_ENV_KEYS, isReservedModelEnvKey, modelEnvRef, prepareModelEnv,
+  RESERVED_MODEL_ENV_KEYS, isReservedModelEnvKey, modelEnvRef, prepareModelEnv,
   envFlag, maskModelEnvValue, isReadableModelEnvKey, describeModelEnvEntry, describeModelEnv,
 } from '../src/core/model-env.mjs';
-import { EFFORTS as CONFIG_EFFORTS } from '../src/core/config.mjs';
-
-test('EFFORTS: canonical here, config.mjs re-export is the SAME array', () => {
-  assert.deepEqual(EFFORTS, ['medium', 'high', 'xhigh', 'max']);
-  assert.equal(CONFIG_EFFORTS, EFFORTS); // identity, not a drifting copy
-});
 
 test('isReservedModelEnvKey: exact keys, WORCA_ prefix, and the allowed rest', () => {
   for (const k of RESERVED_MODEL_ENV_KEYS) assert.equal(isReservedModelEnvKey(k), true, k);

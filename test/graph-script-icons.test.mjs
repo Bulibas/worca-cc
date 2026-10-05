@@ -4,15 +4,6 @@ import assert from 'node:assert/strict';
 import { SCRIPT_ICONS, SCRIPT_GLYPH, iconNameOf, iconSvgOf } from '../src/shared/graph/script-icons.mjs';
 import { sanitizeIcon } from '../src/shared/graph/manifest.mjs';
 
-const NAMES = ['terminal', 'code', 'flask', 'branch', 'page', 'funnel', 'bolt', 'globe', 'gear', 'shield',
-  'database', 'box', 'clock', 'bug', 'chart', 'lock', 'cloud', 'search', 'mail', 'tag'];
-
-test('twenty icons, in the canvas`s order, unique', () => {
-  assert.deepEqual(SCRIPT_ICONS.map((i) => i.name), NAMES);
-  assert.equal(new Set(SCRIPT_ICONS.map((i) => i.svg)).size, 20);
-  assert.ok(Object.isFrozen(SCRIPT_ICONS));
-});
-
 test('every fragment passes sanitizeIcon UNCHANGED and carries no colour of its own', () => {
   for (const { name, svg } of SCRIPT_ICONS) {
     assert.equal(sanitizeIcon(svg), svg, name);

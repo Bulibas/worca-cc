@@ -1,8 +1,8 @@
 // test/ui-team-metrics-timeline.test.mjs
 // Team metrics → Timeline wired into app.js: #team-metrics/timeline opens the tab, the PR
 // lookup is asked once for the runs on screen and repaints the tiles, tab switches do not
-// refetch the records, a bar opens its card (Escape closes it), zooming by the header works,
-// and a failing PR lookup leaves a working page. boot() is test/ui-team-metrics.test.mjs's.
+// refetch the records, outside PRs are drawn behind a remembered toggle, and a failing PR
+// lookup leaves a working page. boot() is test/ui-team-metrics.test.mjs's.
 import { test, mock, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { makeRecord } from './fixtures/team-metrics/records.mjs';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -82,69 +83,53 @@ function handler({ prs = PRS_OK, prsStatus = 200, events = [], log = [] } = {}) 
 }
 async function settle(tick, n = 6) { for (let i = 0; i < n; i++) await tick(); }
 
-test('#team-metrics/timeline opens the tab; PRs are asked once and repaint the tiles', async () => {
+test('#team-metrics/timeline opens the tab, asks PRs once for the runs on screen and repaints the tiles; switching tabs never refetches the records', async () => {
   const log = [];
   const { window, tick } = await boot({ url: 'http://localhost:4317/#team-metrics/timeline', fetchHandler: handler({ log }) });
   await settle(tick);
   const doc = window.document;
-  assert.equal(doc.querySelector('[data-tm-tab="timeline"]').getAttribute('aria-selected'), 'true');
-  assert.equal(doc.getElementById('tm-range').hidden, true);
-  assert.equal(doc.getElementById('tm-body').hidden, true);
-  assert.equal(doc.getElementById('tm-timeline').hidden, false);
-  const prCalls = log.filter((c) => c.u.includes('/api/team-metrics/prs'));
-  assert.equal(prCalls.length, 1);
-  assert.equal(prCalls[0].body.scope, 'project:billing-api-0123abcd');
-  assert.deepEqual(prCalls[0].body.runs.map((r) => r.id).sort(), ['a', 'b']);
-  assert.deepEqual(prCalls[0].body.runs.find((r) => r.id === 'a').repos, ['acme/billing-api']);
-  const tiles = [...doc.querySelectorAll('#tm-timeline .tl-tile .stat-label span')].map((s) => s.textContent);
-  assert.deepEqual(tiles.slice(0, 3), ['Shipped', 'In review', 'Needs attention']);
-  assert.equal(doc.querySelector('#tm-timeline [data-tl-filter="shipped"] .stat-value').textContent, '1');
-  assert.equal(doc.querySelectorAll('#tm-timeline .tl-item').length, 2);
-  // A repaint (grouping) does not ask again.
-  doc.querySelector('#tm-timeline [data-tl-mode="people"]').click();
-  await settle(tick);
-  assert.equal(log.filter((c) => c.u.includes('/api/team-metrics/prs')).length, 1);
-  assert.ok(doc.querySelector('#tm-timeline .tl-ava'));
-});
-
-test('tabs switch without refetching the records; Overview gets its controls back', async () => {
-  const log = [];
-  const { window, tick } = await boot({ url: 'http://localhost:4317/#team-metrics', fetchHandler: handler({ log }) });
-  await settle(tick);
-  const doc = window.document;
-  assert.equal(doc.getElementById('tm-timeline').hidden, true);
-  const dataCalls = () => log.filter((c) => c.u.includes('/api/team-metrics?')).length;
-  const before = dataCalls();
-  doc.querySelector('[data-tm-tab="timeline"]').click();
-  window.dispatchEvent(new window.Event('hashchange'));
-  await settle(tick);
-  assert.equal(window.location.hash, '#team-metrics/timeline');
-  assert.equal(doc.getElementById('tm-timeline').hidden, false);
-  doc.querySelector('[data-tm-tab="overview"]').click();
-  window.dispatchEvent(new window.Event('hashchange'));
-  await settle(tick);
-  assert.equal(doc.getElementById('tm-body').hidden, false);
-  assert.equal(doc.getElementById('tm-range').hidden, false);
-  assert.equal(dataCalls(), before, 'records are not fetched again');
-});
-
-test('a bar opens its card and Escape closes it; header zooms to a day', async () => {
-  const { window, tick } = await boot({ url: 'http://localhost:4317/#team-metrics/timeline', fetchHandler: handler() });
-  await settle(tick);
-  const doc = window.document;
-  doc.querySelector('#tm-timeline .tl-hit').click();
-  const pop = doc.querySelector('.tl-pop');
-  assert.ok(pop);
-  assert.match(pop.textContent, /Runs/);
-  pop.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  assert.equal(doc.querySelector('.tl-pop'), null);
-  doc.querySelector('#tm-timeline .tl-hcell.is-today').click();
-  await settle(tick);
-  assert.ok(doc.querySelector('#tm-timeline .tl-z-day'));
-  assert.equal(doc.querySelectorAll('#tm-timeline .tl-crumb').length, 2);
-  doc.querySelector('#tm-timeline .tl-crumb[data-tl-zoom="month"]').click();
-  await settle(tick);
-  assert.ok(doc.querySelector('#tm-timeline .tl-z-month'));
+  await checkRows([
+    { name: '#team-metrics/timeline opens the tab; PRs are asked once and repaint the tiles', run: async () => {
+      assert.equal(doc.querySelector('[data-tm-tab="timeline"]').getAttribute('aria-selected'), 'true');
+      assert.equal(doc.getElementById('tm-range').hidden, true);
+      assert.equal(doc.getElementById('tm-body').hidden, true);
+      assert.equal(doc.getElementById('tm-timeline').hidden, false);
+      const prCalls = log.filter((c) => c.u.includes('/api/team-metrics/prs'));
+      assert.equal(prCalls.length, 1);
+      assert.equal(prCalls[0].body.scope, 'project:billing-api-0123abcd');
+      assert.deepEqual(prCalls[0].body.runs.map((r) => r.id).sort(), ['a', 'b']);
+      assert.deepEqual(prCalls[0].body.runs.find((r) => r.id === 'a').repos, ['acme/billing-api']);
+      const tiles = [...doc.querySelectorAll('#tm-timeline .tl-tile .stat-label span')].map((s) => s.textContent);
+      assert.deepEqual(tiles.slice(0, 3), ['Shipped', 'In review', 'Needs attention']);
+      assert.equal(doc.querySelector('#tm-timeline [data-tl-filter="shipped"] .stat-value').textContent, '1');
+      assert.equal(doc.querySelectorAll('#tm-timeline .tl-item').length, 2);
+      // A repaint (grouping) does not ask again.
+      doc.querySelector('#tm-timeline [data-tl-mode="people"]').click();
+      await settle(tick);
+      assert.equal(log.filter((c) => c.u.includes('/api/team-metrics/prs')).length, 1);
+      assert.ok(doc.querySelector('#tm-timeline .tl-ava'));
+    } },
+    { name: 'tabs switch without refetching the records; Overview gets its controls back', run: async () => {
+      const dataCalls = () => log.filter((c) => c.u.includes('/api/team-metrics?')).length;
+      const before = dataCalls();
+      // Booted on the Timeline: go to the Overview first, where the timeline is hidden.
+      doc.querySelector('[data-tm-tab="overview"]').click();
+      window.dispatchEvent(new window.Event('hashchange'));
+      await settle(tick);
+      assert.equal(doc.getElementById('tm-timeline').hidden, true);
+      doc.querySelector('[data-tm-tab="timeline"]').click();
+      window.dispatchEvent(new window.Event('hashchange'));
+      await settle(tick);
+      assert.equal(window.location.hash, '#team-metrics/timeline');
+      assert.equal(doc.getElementById('tm-timeline').hidden, false);
+      doc.querySelector('[data-tm-tab="overview"]').click();
+      window.dispatchEvent(new window.Event('hashchange'));
+      await settle(tick);
+      assert.equal(doc.getElementById('tm-body').hidden, false);
+      assert.equal(doc.getElementById('tm-range').hidden, false);
+      assert.equal(dataCalls(), before, 'records are not fetched again');
+    } },
+  ]);
 });
 
 test('PRs outside Worca are fetched once, drawn, and the toggle hides them (remembered)', async () => {

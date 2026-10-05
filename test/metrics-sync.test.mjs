@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { templateWorld } from './helpers/git-dir.mjs';
 import { git, makeOrigin, cloneAs, branchFiles, rejectAllPushes, installFailingClientHooks, pushRawMarker, useGitSandbox } from './helpers/metrics-git.mjs';
 import { addProject } from '../src/core/projects.mjs';
 import { createWorkspace } from '../src/core/workspaces.mjs';
@@ -21,11 +22,11 @@ import { readRunLedger } from '../src/core/metrics/ledger.mjs';
 
 const skip = process.platform === 'win32' ? 'pre-receive hooks / sh not portable to win32' : false;
 const CHILD = resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures/team-metrics/flush-child.mjs');
-const root = mkdtempSync(join(tmpdir(), 'worca-metrics-sync-'));
+let root; // the billing-api world (remotes/billing-api.git + machineA/billing-api), copied in before()
 const homeB = mkdtempSync(join(tmpdir(), 'worca-home-b-'));
 useGitSandbox(before, after);   // FIRST: pins HOME / USERPROFILE / GIT_CONFIG_GLOBAL (§5.12)
 useTempHome(after);
-after(() => { rmSync(root, { recursive: true, force: true }); rmSync(homeB, { recursive: true, force: true }); });
+after(() => { if (root) rmSync(root, { recursive: true, force: true }); rmSync(homeB, { recursive: true, force: true }); });
 afterEach(() => { _testing.reset(); metricsEvents.removeAllListeners('changed'); });
 
 const rec = (id, startedAt = '2026-09-15T14:30:12Z', project = 'billing-api') => ({
@@ -51,8 +52,9 @@ function child(args, env) {
 
 let billingBare, billingA, billingB; // tests below run sequentially in file order and share this state
 before(async () => {
-  billingBare = makeOrigin(root, 'billing-api');
-  billingA = cloneAs(root, 'machineA', billingBare, 'billing-api');
+  root = templateWorld('metrics-billing', (r) => { cloneAs(r, 'machineA', makeOrigin(r, 'billing-api'), 'billing-api'); }, 'metrics-sync');
+  billingBare = join(root, 'remotes', 'billing-api.git');
+  billingA = join(root, 'machineA', 'billing-api');
   await addProject({ name: 'billing-api', path: billingA });
 });
 

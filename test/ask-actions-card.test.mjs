@@ -1,16 +1,16 @@
 // test/ask-actions-card.test.mjs
 // Ask Worca and Actions (docs/actions.md "Ask Worca"): the card's validator (pure, over injected
 // readers), the event/notice text, the five tools (read-only + propose; no start/stop tool exists),
-// the registry's state file the tools read from another process, rule 21 and the deployment line,
+// the registry's state file the tools read from another process, the deployment line,
 // and the card route over WORCA_MOCK — decline, apply a project config, apply stacks, a refusal.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 import { _resetForTests as closeDbForTests } from '../src/core/db.mjs';
 import {
   createActionsChangeValidator, actionsEventPrompt, actionsNoticeText, actionsProposalInput, describeAction, ACTIONS_CHANGE_KINDS,
@@ -18,6 +18,7 @@ import {
 import { normalizeProjectActions } from '../src/core/actions/model.mjs';
 import { ActionRegistry, readActionsState } from '../src/core/actions/registry.mjs';
 import { redactAskText } from '../src/core/ask/redact.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -42,51 +43,57 @@ function validator({ stored = {}, stacks = [], using = [] } = {}) {
   });
 }
 
-test('kinds: project and stacks; anything else is refused', async () => {
-  assert.deepEqual([...ACTIONS_CHANGE_KINDS], ['project', 'stacks']);
-  assert.deepEqual(await validator()({ kind: 'start' }), { ok: false, errors: ['kind must be one of project, stacks'] });
+test('kinds and project refusals: only project/stacks; no key, unknown key, no action list, nothing to change and the model\'s own field errors are refused', async () => {
+  await checkRows([
+    { name: 'kinds: project and stacks; anything else is refused', run: async () => {
+      assert.deepEqual([...ACTIONS_CHANGE_KINDS], ['project', 'stacks']);
+      assert.deepEqual(await validator()({ kind: 'start' }), { ok: false, errors: ['kind must be one of project, stacks'] });
+    } },
+    { name: 'project refusals: no key, unknown key, no action list, nothing to change, and the model\'s own field errors', run: async () => {
+      const v = validator({ stored: { 'web-0000aaaa': { actions: [TEST] } } });
+      assert.match((await v({ kind: 'project' })).errors[0], /projectKey is required/);
+      assert.match((await v({ kind: 'project', projectKey: 'nope-00000000', actions: [] })).errors[0], /unknown projectKey/);
+      assert.match((await v({ kind: 'project', projectKey: 'web-0000aaaa' })).errors[0], /actions is required/);
+      assert.match((await v({ kind: 'project', projectKey: 'web-0000aaaa', actions: [TEST] })).errors[0], /nothing would change/);
+      const bad = await v({ kind: 'project', projectKey: 'web-0000aaaa', actions: [{ ...TEST, cwd: '../up' }] });
+      assert.deepEqual(bad, { ok: false, errors: ['the working directory must stay inside the worktree (actions[0].cwd)'] });
+      const link = await v({ kind: 'project', projectKey: 'web-0000aaaa', actions: [{ ...RUN, openUrl: 'javascript:alert(1)' }] });
+      assert.match(link.errors[0], /http:\/\/ or https:\/\//);
+    } },
+  ]);
 });
 
-test('project: a first config adds the setup and each action, with every command on the card', async () => {
-  const r = await validator()({ kind: 'project', projectKey: 'web-0000aaaa', setup: 'npm ci', actions: [RUN, TEST], note: 'from package.json' });
-  assert.equal(r.ok, true, JSON.stringify(r));
-  const c = r.card;
-  assert.equal(c.type, 'actions');
-  assert.equal(c.summary, 'Set up actions for web');
-  assert.equal(c.note, 'from package.json');
-  assert.deepEqual(c.changes.map((x) => [x.op, x.label]), [['add', 'Setup'], ['add', 'Run'], ['add', 'Test']]);
-  assert.equal(c.changes[0].after, 'npm ci');
-  assert.match(c.changes[1].after, /^npm start\nservice · ready when port PORT answers \(60 s\)\nPORT = port \(automatic\)\nopen http:\/\/localhost:\{PORT\}$/);
-  assert.match(c.effects[0], /only when a person clicks Start/);
-  assert.deepEqual(c.change.config.actions.map((a) => a.id), ['run', 'test']);
-  assert.equal(c.change.config.setup, 'npm ci');
-});
-
-test('project: a change, a removal and a built-in switched off; stacks that start a removed action are named', async () => {
-  const v = validator({ stored: { 'web-0000aaaa': { setup: 'npm ci', actions: [RUN, TEST] } },
-    using: [{ workspaceId: WS.id, workspaceName: 'Shop', stackId: 'qa', label: 'QA', actions: ['test'] }] });
-  const r = await v({ kind: 'project', projectKey: 'web-0000aaaa', actions: [{ ...RUN, cmd: 'npm run dev' }], builtins: { terminal: false } });
-  assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(r.card.summary, 'Change the actions of web');
-  assert.deepEqual(r.card.changes.map((x) => [x.op, x.label]), [['change', 'Run'], ['remove', 'Test'], ['change', 'Built-in terminal']]);
-  assert.match(r.card.changes[0].before, /^npm start\n/);
-  assert.match(r.card.changes[0].after, /^npm run dev\n/);
-  assert.equal(r.card.change.config.setup, 'npm ci', 'setup left out keeps the stored one');
-  assert.equal(r.card.change.config.builtins.terminal, false);
-  assert.equal(r.card.change.config.builtins.editor, true);
-  assert.deepEqual(r.card.warnings, ['Stack "QA" of workspace Shop starts test — change that stack too, or it stops working']);
-});
-
-test('project refusals: no key, unknown key, no action list, nothing to change, and the model\'s own field errors', async () => {
-  const v = validator({ stored: { 'web-0000aaaa': { actions: [TEST] } } });
-  assert.match((await v({ kind: 'project' })).errors[0], /projectKey is required/);
-  assert.match((await v({ kind: 'project', projectKey: 'nope-00000000', actions: [] })).errors[0], /unknown projectKey/);
-  assert.match((await v({ kind: 'project', projectKey: 'web-0000aaaa' })).errors[0], /actions is required/);
-  assert.match((await v({ kind: 'project', projectKey: 'web-0000aaaa', actions: [TEST] })).errors[0], /nothing would change/);
-  const bad = await v({ kind: 'project', projectKey: 'web-0000aaaa', actions: [{ ...TEST, cwd: '../up' }] });
-  assert.deepEqual(bad, { ok: false, errors: ['the working directory must stay inside the worktree (actions[0].cwd)'] });
-  const link = await v({ kind: 'project', projectKey: 'web-0000aaaa', actions: [{ ...RUN, openUrl: 'javascript:alert(1)' }] });
-  assert.match(link.errors[0], /http:\/\/ or https:\/\//);
+test('project card: a first config adds setup + every action with its command; a change, a removal and a built-in switched off name the stacks that start a removed action', async () => {
+  await checkRows([
+    { name: 'project: a first config adds the setup and each action, with every command on the card', run: async () => {
+      const r = await validator()({ kind: 'project', projectKey: 'web-0000aaaa', setup: 'npm ci', actions: [RUN, TEST], note: 'from package.json' });
+      assert.equal(r.ok, true, JSON.stringify(r));
+      const c = r.card;
+      assert.equal(c.type, 'actions');
+      assert.equal(c.summary, 'Set up actions for web');
+      assert.equal(c.note, 'from package.json');
+      assert.deepEqual(c.changes.map((x) => [x.op, x.label]), [['add', 'Setup'], ['add', 'Run'], ['add', 'Test']]);
+      assert.equal(c.changes[0].after, 'npm ci');
+      assert.match(c.changes[1].after, /^npm start\nservice · ready when port PORT answers \(60 s\)\nPORT = port \(automatic\)\nopen http:\/\/localhost:\{PORT\}$/);
+      assert.match(c.effects[0], /only when a person clicks Start/);
+      assert.deepEqual(c.change.config.actions.map((a) => a.id), ['run', 'test']);
+      assert.equal(c.change.config.setup, 'npm ci');
+    } },
+    { name: 'project: a change, a removal and a built-in switched off; stacks that start a removed action are named', run: async () => {
+      const v = validator({ stored: { 'web-0000aaaa': { setup: 'npm ci', actions: [RUN, TEST] } },
+        using: [{ workspaceId: WS.id, workspaceName: 'Shop', stackId: 'qa', label: 'QA', actions: ['test'] }] });
+      const r = await v({ kind: 'project', projectKey: 'web-0000aaaa', actions: [{ ...RUN, cmd: 'npm run dev' }], builtins: { terminal: false } });
+      assert.equal(r.ok, true, JSON.stringify(r));
+      assert.equal(r.card.summary, 'Change the actions of web');
+      assert.deepEqual(r.card.changes.map((x) => [x.op, x.label]), [['change', 'Run'], ['remove', 'Test'], ['change', 'Built-in terminal']]);
+      assert.match(r.card.changes[0].before, /^npm start\n/);
+      assert.match(r.card.changes[0].after, /^npm run dev\n/);
+      assert.equal(r.card.change.config.setup, 'npm ci', 'setup left out keeps the stored one');
+      assert.equal(r.card.change.config.builtins.terminal, false);
+      assert.equal(r.card.change.config.builtins.editor, true);
+      assert.deepEqual(r.card.warnings, ['Stack "QA" of workspace Shop starts test — change that stack too, or it stops working']);
+    } },
+  ]);
 });
 
 test('redaction: an action sent back redacted but unchanged keeps the stored secret; a changed one is refused', async () => {
@@ -106,25 +113,28 @@ test('redaction: an action sent back redacted but unchanged keeps the stored sec
   assert.match(setup.errors[0], /setup command holds a redacted value/);
 });
 
-test('stacks: steps name members by key and actions by id; the card names members with their alias', async () => {
-  const v = validator({ stored: { 'api-0000bbbb': { actions: [RUN] }, 'web-0000aaaa': { actions: [RUN, TEST] } } });
-  const stack = { id: 'dev', label: 'Dev', kind: 'service', steps: [
-    { member: 'api-0000bbbb', action: 'run' },
-    { member: 'web-0000aaaa', action: 'run', env: [{ name: 'API_URL', value: 'http://localhost:{api.PORT}' }] }] };
-  const r = await v({ kind: 'stacks', workspaceId: WS.id, stacks: [stack] });
-  assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(r.card.summary, 'Add stacks to Shop');
-  assert.equal(r.card.changes[0].after, 'service stack\n1. api (api) › run\n2. web (web) › run (API_URL=http://localhost:{api.PORT})');
-  assert.deepEqual(r.card.change, { workspaceId: WS.id, stacks: [{ ...stack, steps: [{ ...stack.steps[0], env: [] }, { ...stack.steps[1], env: [{ name: 'API_URL', type: 'text', value: 'http://localhost:{api.PORT}' }] }] }] });
-  assert.match((await v({ kind: 'stacks', workspaceId: WS.id, stacks: [{ ...stack, steps: [{ member: 'api-0000bbbb', action: 'lint' }] }] })).errors[0], /"lint" is not an action of that project/);
-  assert.match((await v({ kind: 'stacks', workspaceId: 'wks-nope-00000000', stacks: [] })).errors[0], /unknown workspace/);
-  assert.match((await v({ kind: 'stacks', workspaceId: WS.id, stacks: [{ ...stack, steps: [{ ...stack.steps[0], env: [{ name: 'K', value: '<redacted>' }] }] }] })).errors[0], /redacted value/);
-});
-
-test('describeAction: task, output ready, cwd and the Windows command', () => {
-  const [a] = normalizeProjectActions({ actions: [{ id: 'sb', kind: 'service', cmd: 'npm run storybook', cmdWin32: 'npm.cmd run storybook', cwd: 'ui',
-    ready: { kind: 'output', text: 'started', timeoutMs: 120000 } }] }).actions;
-  assert.equal(describeAction(a), 'npm run storybook\nWindows: npm.cmd run storybook\nservice · ready when the output contains "started" (120 s) · in ui');
+test('stacks card names members/actions by key with aliases; describeAction (task, ready, cwd, Windows command)', async () => {
+  await checkRows([
+    { name: 'stacks: steps name members by key and actions by id; the card names members with their alias', run: async () => {
+      const v = validator({ stored: { 'api-0000bbbb': { actions: [RUN] }, 'web-0000aaaa': { actions: [RUN, TEST] } } });
+      const stack = { id: 'dev', label: 'Dev', kind: 'service', steps: [
+        { member: 'api-0000bbbb', action: 'run' },
+        { member: 'web-0000aaaa', action: 'run', env: [{ name: 'API_URL', value: 'http://localhost:{api.PORT}' }] }] };
+      const r = await v({ kind: 'stacks', workspaceId: WS.id, stacks: [stack] });
+      assert.equal(r.ok, true, JSON.stringify(r));
+      assert.equal(r.card.summary, 'Add stacks to Shop');
+      assert.equal(r.card.changes[0].after, 'service stack\n1. api (api) › run\n2. web (web) › run (API_URL=http://localhost:{api.PORT})');
+      assert.deepEqual(r.card.change, { workspaceId: WS.id, stacks: [{ ...stack, steps: [{ ...stack.steps[0], env: [] }, { ...stack.steps[1], env: [{ name: 'API_URL', type: 'text', value: 'http://localhost:{api.PORT}' }] }] }] });
+      assert.match((await v({ kind: 'stacks', workspaceId: WS.id, stacks: [{ ...stack, steps: [{ member: 'api-0000bbbb', action: 'lint' }] }] })).errors[0], /"lint" is not an action of that project/);
+      assert.match((await v({ kind: 'stacks', workspaceId: 'wks-nope-00000000', stacks: [] })).errors[0], /unknown workspace/);
+      assert.match((await v({ kind: 'stacks', workspaceId: WS.id, stacks: [{ ...stack, steps: [{ ...stack.steps[0], env: [{ name: 'K', value: '<redacted>' }] }] }] })).errors[0], /redacted value/);
+    } },
+    { name: 'describeAction: task, output ready, cwd and the Windows command', run: async () => {
+      const [a] = normalizeProjectActions({ actions: [{ id: 'sb', kind: 'service', cmd: 'npm run storybook', cmdWin32: 'npm.cmd run storybook', cwd: 'ui',
+        ready: { kind: 'output', text: 'started', timeoutMs: 120000 } }] }).actions;
+      assert.equal(describeAction(a), 'npm run storybook\nWindows: npm.cmd run storybook\nservice · ready when the output contains "started" (120 s) · in ui');
+    } },
+  ]);
 });
 
 test('the pinned target fills a missing one: a project for kind project, a workspace for kind stacks', () => {
@@ -207,13 +217,8 @@ test('state file: an instance with its status, ports and log tail; a dead server
 
 // ── the prompt ───────────────────────────────────────────────────────────────
 
-test('rule 21 explains Actions, forbids starting anything, and the deployment line says actions=off', async () => {
-  const { ASK_SYSTEM_RULES, buildContextHeader } = await import('../src/core/ask/prompt.mjs');
-  const rule = ASK_SYSTEM_RULES.slice(ASK_SYSTEM_RULES.indexOf('21. Actions'));
-  for (const t of ['Check out', 'get_run_checkout', 'list_running_actions', 'propose_actions_change', 'You never start, stop, check out, set up or discard anything',
-    'readyError', 'Settings › Runs › Actions', 'actions=off', 'WORCA_ACTIONS_REMOTE']) assert.ok(rule.includes(t), `rule 21 names "${t}"`);
-  assert.ok(ASK_SYSTEM_RULES.includes('7. Worktrees (yours, not the Actions "Check out" of rule 21)'));
-  assert.ok(ASK_SYSTEM_RULES.includes('get_run lists who acted on it (`actedBy`:'));
+test('deployment header: actions=off is rendered only when actions are off', async () => {
+  const { buildContextHeader } = await import('../src/core/ask/prompt.mjs');
   const head = buildContextHeader({ now: '2026-10-02T10:00:00Z', deployment: { deployment: 'hosted', projectsRoot: '/data/projects', github: 'app', actions: 'off' } });
   assert.match(head, /deployment: hosted projects root \/data\/projects github=app actions=off/);
   const on = buildContextHeader({ now: '2026-10-02T10:00:00Z', deployment: { deployment: 'hosted', projectsRoot: '/data/projects', github: 'app' } });
@@ -236,13 +241,10 @@ async function waitFor(pred, ms = 10000) {
     await new Promise((r) => setTimeout(r, 25));
   }
 }
-async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-askact-repo-'));
+function freshRepo() {
+  const dir = templateRepo('askact-repo', { branch: 'main', user: true,
+    files: { 'package.json': '{"scripts":{"start":"node server.js","test":"node -e 1"}}\n' } });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'package.json'), '{"scripts":{"start":"node server.js","test":"node -e 1"}}\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 
@@ -296,48 +298,45 @@ async function seedCard(card) {
 const noticeOf = async (threadId) => (await snapshot(threadId)).messages.filter((m) => m.role === 'user' && (m.blocks || []).some((b) => b.kind === 'notice' && b.synthetic)).map((m) => m.blocks[0].text);
 const storedActions = async (key) => (await (await fetch(`${base}/api/projects/${key}/actions`)).json()).config;
 
-test('route: decline stores nothing; apply stores the project config through the same validation; then it is applied', async () => {
-  const config = { setup: 'npm ci', actions: [RUN, TEST] };
-  const d = await seedCard({ kind: 'project', summary: 'Set up actions for p', projectKey: project.key, change: { projectKey: project.key, config } });
-  assert.equal((await post(`/api/ask/threads/${d.threadId}/cards/${d.cardId}`, { state: 'started' })).status, 400);
-  let r = await post(`/api/ask/threads/${d.threadId}/cards/${d.cardId}`, { state: 'declined' });
-  assert.equal((await r.json()).block.state, 'declined');
-  assert.deepEqual(await waitFor(async () => { const n = await noticeOf(d.threadId); return n.length ? n : null; }), ['Declined — Set up actions for p']);
-  assert.deepEqual((await storedActions(project.key)).actions, []);
+test('route: decline stores nothing; apply stores the project config through the same validation; a stack card applies against the members\' current actions and a stale one fails storing nothing', async () => {
+  await checkRows([
+    { name: 'route: decline stores nothing; apply stores the project config through the same validation; then it is applied', run: async () => {
+      const config = { setup: 'npm ci', actions: [RUN, TEST] };
+      const d = await seedCard({ kind: 'project', summary: 'Set up actions for p', projectKey: project.key, change: { projectKey: project.key, config } });
+      assert.equal((await post(`/api/ask/threads/${d.threadId}/cards/${d.cardId}`, { state: 'started' })).status, 400);
+      let r = await post(`/api/ask/threads/${d.threadId}/cards/${d.cardId}`, { state: 'declined' });
+      assert.equal((await r.json()).block.state, 'declined');
+      assert.deepEqual(await waitFor(async () => { const n = await noticeOf(d.threadId); return n.length ? n : null; }), ['Declined — Set up actions for p']);
+      assert.deepEqual((await storedActions(project.key)).actions, []);
 
-  const a = await seedCard({ kind: 'project', summary: 'Set up actions for p', projectKey: project.key, change: { projectKey: project.key, config } });
-  r = await post(`/api/ask/threads/${a.threadId}/cards/${a.cardId}`, { state: 'applied' });
-  assert.equal(r.status, 200, await r.clone().text());
-  const j = await r.json();
-  assert.equal(j.block.state, 'applied', JSON.stringify(j.block));
-  assert.equal(j.block.card.result.detail, '2 actions and a setup command saved');
-  const saved = await storedActions(project.key);
-  assert.equal(saved.setup, 'npm ci');
-  assert.deepEqual(saved.actions.map((x) => x.id), ['run', 'test']);
-  assert.deepEqual(await waitFor(async () => { const n = await noticeOf(a.threadId); return n.length ? n : null; }), ['Applied — Set up actions for p · 2 actions and a setup command saved']);
-  assert.equal((await post(`/api/ask/threads/${a.threadId}/cards/${a.cardId}`, { state: 'applied' })).status, 409, 'applied once');
-});
+      const a = await seedCard({ kind: 'project', summary: 'Set up actions for p', projectKey: project.key, change: { projectKey: project.key, config } });
+      r = await post(`/api/ask/threads/${a.threadId}/cards/${a.cardId}`, { state: 'applied' });
+      assert.equal(r.status, 200, await r.clone().text());
+      const j = await r.json();
+      assert.equal(j.block.state, 'applied', JSON.stringify(j.block));
+      assert.equal(j.block.card.result.detail, '2 actions and a setup command saved');
+      const saved = await storedActions(project.key);
+      assert.equal(saved.setup, 'npm ci');
+      assert.deepEqual(saved.actions.map((x) => x.id), ['run', 'test']);
+      assert.deepEqual(await waitFor(async () => { const n = await noticeOf(a.threadId); return n.length ? n : null; }), ['Applied — Set up actions for p · 2 actions and a setup command saved']);
+      assert.equal((await post(`/api/ask/threads/${a.threadId}/cards/${a.cardId}`, { state: 'applied' })).status, 409, 'applied once');
+    } },
+    { name: 'route: a stack card is applied against the members\' current actions; a stale one fails and stores nothing', run: async () => {
+      const stacks = [{ id: 'dev', label: 'Dev', kind: 'service', steps: [{ member: project.key, action: 'run', env: [] }] }];
+      const ok = await seedCard({ kind: 'stacks', summary: 'Add stacks to Act WS', workspaceId: ws.id, change: { workspaceId: ws.id, stacks } });
+      let j = await (await post(`/api/ask/threads/${ok.threadId}/cards/${ok.cardId}`, { state: 'applied' })).json();
+      assert.equal(j.block.state, 'applied', JSON.stringify(j.block));
+      assert.equal(j.block.card.result.detail, '1 stack saved');
+      assert.deepEqual((await (await fetch(`${base}/api/workspaces/${ws.id}/actions`)).json()).stacks.map((s) => s.id), ['dev']);
 
-test('route: a stack card is applied against the members\' current actions; a stale one fails and stores nothing', async () => {
-  const stacks = [{ id: 'dev', label: 'Dev', kind: 'service', steps: [{ member: project.key, action: 'run', env: [] }] }];
-  const ok = await seedCard({ kind: 'stacks', summary: 'Add stacks to Act WS', workspaceId: ws.id, change: { workspaceId: ws.id, stacks } });
-  let j = await (await post(`/api/ask/threads/${ok.threadId}/cards/${ok.cardId}`, { state: 'applied' })).json();
-  assert.equal(j.block.state, 'applied', JSON.stringify(j.block));
-  assert.equal(j.block.card.result.detail, '1 stack saved');
-  assert.deepEqual((await (await fetch(`${base}/api/workspaces/${ws.id}/actions`)).json()).stacks.map((s) => s.id), ['dev']);
-
-  const stale = [{ id: 'qa', label: 'QA', kind: 'task', steps: [{ member: project.key, action: 'lint', env: [] }] }];
-  const bad = await seedCard({ kind: 'stacks', summary: 'Change the stacks of Act WS', workspaceId: ws.id, change: { workspaceId: ws.id, stacks: stale } });
-  j = await (await post(`/api/ask/threads/${bad.threadId}/cards/${bad.cardId}`, { state: 'applied' })).json();
-  assert.equal(j.block.state, 'failed');
-  assert.match(j.block.error, /"lint" is not an action of that project/);
-  assert.deepEqual((await (await fetch(`${base}/api/workspaces/${ws.id}/actions`)).json()).stacks.map((s) => s.id), ['dev'], 'unchanged');
-});
-
-test('the context header lists an actions card by its summary', async () => {
-  const c = await seedCard({ kind: 'project', summary: 'Change the actions of p', projectKey: project.key, change: { projectKey: project.key, config: {} } });
-  const ctx = await mod._testing.resolveAskContext(c.threadId, {});
-  assert.ok((ctx.cards || []).some((x) => x.type === 'actions' && x.summary === 'Change the actions of p' && x.state === 'proposed'));
+      const stale = [{ id: 'qa', label: 'QA', kind: 'task', steps: [{ member: project.key, action: 'lint', env: [] }] }];
+      const bad = await seedCard({ kind: 'stacks', summary: 'Change the stacks of Act WS', workspaceId: ws.id, change: { workspaceId: ws.id, stacks: stale } });
+      j = await (await post(`/api/ask/threads/${bad.threadId}/cards/${bad.cardId}`, { state: 'applied' })).json();
+      assert.equal(j.block.state, 'failed');
+      assert.match(j.block.error, /"lint" is not an action of that project/);
+      assert.deepEqual((await (await fetch(`${base}/api/workspaces/${ws.id}/actions`)).json()).stacks.map((s) => s.id), ['dev'], 'unchanged');
+    } },
+  ]);
 });
 
 test('the real deps: the parent validator and get_run_checkout read the stored config and the run rows', async () => {

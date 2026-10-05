@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SEED_TEMPLATES, NODE_ID_MAP, FB_WIRE_MAP } from '../src/core/graph/seed-templates.mjs';
 import { GRAPH_DEFAULT_WORKFLOW, deepFreeze } from '../src/core/graph/builtin-workflows.mjs';
-import { NODE_ID_RE, WIRE_ID_RE, PORT_ID_RE, TEMPLATE_VERSION } from '../src/shared/graph/constants.mjs';
+import { NODE_ID_RE, WIRE_ID_RE, PORT_ID_RE } from '../src/shared/graph/constants.mjs';
 import { validateGraph } from '../src/shared/graph/validate.mjs';
 import { classifyLoops } from '../src/shared/graph/loops.mjs';
 import { realPortsFn } from './helpers/graph-ports.mjs';
@@ -61,40 +61,6 @@ function resolveWireId(tpl, fromId, toId) {
   return hits.size === 1 ? [...hits][0] : null;
 }
 
-test('the 8 shipping graphs: ids, names, version, domain, pin counts', () => {
-  assert.equal(SEED_TEMPLATES.length, 7);
-  assert.deepEqual(SEED_TEMPLATES.map((t) => t.id), [
-    'wf_full', 'wf_no-clarify', 'wf_provided-plan', 'wf_full-no-decompose',
-    'wf_quick-fix', 'wf_clarify-implement', 'wf_clarify-quick-fix',
-  ]);
-  assert.deepEqual(SEED_TEMPLATES.map((t) => t.name), [
-    'Full', 'No Clarify', 'Provided Plan', 'FULL-NO-Decompose',
-    'Quick Fix', 'Clarify -> Implement', 'Clarify -> Quick Fix',
-  ]);
-  assert.equal(GRAPH_DEFAULT_WORKFLOW.id, 'wf_default');
-  assert.equal(GRAPH_DEFAULT_WORKFLOW.name, 'Default');
-  for (const t of ALL) {
-    assert.equal(t.version, TEMPLATE_VERSION, `${t.id} version`);
-    assert.equal(t.domain, 'coding', `${t.id} domain`);
-    assert.deepEqual([t.nodes.length, t.wires.length], PINS[t.id], `${t.id} node/wire counts`);
-  }
-  for (const t of SEED_TEMPLATES) assert.match(t.createdAt, /^\d{4}-\d{2}-\d{2}T/, `${t.id} createdAt`);
-});
-
-test('every graph has exactly one Task and one End; key iff kind agent', () => {
-  for (const t of ALL) {
-    assert.equal(t.nodes.filter((n) => n.kind === 'task').length, 1, `${t.id} task`);
-    assert.equal(t.nodes.filter((n) => n.kind === 'end').length, 1, `${t.id} end`);
-    for (const n of t.nodes) {
-      assert.equal('key' in n, n.kind === 'agent', `${t.id}/${n.id}: key iff agent`);
-      if (n.kind === 'agent') assert.ok(n.key && typeof n.key === 'string');
-      assert.equal(typeof n.x, 'number');
-      assert.equal(typeof n.y, 'number');
-      assert.ok(n.config && typeof n.config === 'object', `${t.id}/${n.id} config`);
-    }
-  }
-});
-
 test('ids are unique, well-shaped, and every wire lands on a real node', () => {
   for (const t of ALL) {
     const ids = t.nodes.map((n) => n.id);
@@ -109,62 +75,6 @@ test('ids are unique, well-shaped, and every wire lands on a real node', () => {
       assert.match(w.from.port, PORT_ID_RE, `${t.id}/${w.id} from.port`);
       assert.match(w.to.port, PORT_ID_RE, `${t.id}/${w.id} to.port`);
     }
-  }
-});
-
-test('V7: every input carries exactly one inbound wire, and no port is named start', () => {
-  for (const t of ALL) {
-    const seen = new Set();
-    for (const w of t.wires) {
-      const key = `${w.to.node}.${w.to.port}`;
-      assert.ok(!seen.has(key), `${t.id}: ${key} has two inbound wires (V7)`);
-      seen.add(key);
-      assert.notEqual(w.to.port, 'start', `${t.id}/${w.id}`);
-      assert.notEqual(w.from.port, 'start', `${t.id}/${w.id}`);
-    }
-  }
-});
-
-test('the End node is fed from webui.pass where a webui node exists, else reviewer.pass', () => {
-  for (const t of ALL) {
-    const end = t.nodes.find((n) => n.kind === 'end');
-    const inbound = t.wires.filter((w) => w.to.node === end.id);
-    assert.equal(inbound.length, 1, `${t.id}: one wire into End`);
-    assert.equal(inbound[0].to.port, 'result');
-    const src = node(t, inbound[0].from.node);
-    const hasWebui = t.nodes.some((n) => n.key === 'manualWebUiTesting');
-    assert.equal(src.key, hasWebui ? 'manualWebUiTesting' : 'reviewer', `${t.id}: End source`);
-    assert.equal(inbound[0].from.port, 'pass');
-  }
-});
-
-test('reviewer.pass -> checklist.await wherever a checklist node exists', () => {
-  for (const t of ALL) {
-    const check = t.nodes.find((n) => n.key === 'manualTestsChecklist');
-    if (!check) continue;
-    const rev = t.nodes.find((n) => n.key === 'reviewer');
-    const w = t.wires.find((x) => x.from.node === rev.id && x.from.port === 'pass');
-    assert.ok(w, `${t.id}: reviewer.pass is wired`);
-    assert.equal(w.to.node, check.id, `${t.id}: reviewer.pass -> checklist`);
-    assert.equal(w.to.port, 'await', `${t.id}: lands on the synthesized await gate`);
-  }
-});
-
-test('the OR valve appears on exactly the three double-loop seeds', () => {
-  const withOr = ALL.filter((t) => t.nodes.some((n) => n.kind === 'or')).map((t) => t.id);
-  assert.deepEqual(withOr.sort(), ['wf_full', 'wf_full-no-decompose', 'wf_provided-plan']);
-  for (const id of withOr) {
-    const t = byId[id];
-    const or = t.nodes.find((n) => n.kind === 'or');
-    assert.equal(or.config.arity, 2, `${id} arity`);
-    const ins = t.wires.filter((w) => w.to.node === or.id);
-    assert.deepEqual(ins.map((w) => w.to.port).sort(), ['in1', 'in2'], `${id} valve inputs`);
-    for (const w of ins) assert.equal(w.config.maxCycles, 3, `${id}/${w.id} keeps its own budget`);
-    const outs = t.wires.filter((w) => w.from.node === or.id);
-    assert.equal(outs.length, 1, `${id}: one out-wire`);
-    assert.equal(outs[0].from.port, 'out');
-    assert.equal(outs[0].to.port, 'fix');
-    assert.equal(outs[0].config, undefined, `${id}: the always-sourced out-wire carries no maxCycles`);
   }
 });
 

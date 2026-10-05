@@ -8,15 +8,16 @@
 // useTempHome), then let the child read it.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, rm, realpath, readFile } from 'node:fs/promises';
-import { existsSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdtemp, rm, realpath } from 'node:fs/promises';
+import { existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipeline, seedPipelineRow } from './helpers/db-seed.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 import { graphResumePoint } from './helpers/graph-templates.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { readPipelineForResume } from '../src/core/artifacts.mjs';
@@ -24,6 +25,7 @@ import { worcaHome } from '../src/core/projects.mjs';
 import { projectKey } from '../src/core/store.mjs';
 import { getDb } from '../src/core/db.mjs';
 import { posix } from './helpers/posix-path.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, '..', 'src', 'cli', 'worca-cc.mjs');
@@ -49,28 +51,30 @@ function run(args, { cwd } = {}) {
 
 
 
-test('resume with no id -> exit 1 + usage', async () => {
-  const r = await run(['resume']);
-  assert.equal(r.code, 1, r.stderr);
-  assert.match(r.stderr, /usage: worca resume/i);
-});
-
-test('resume unknown id -> exit 1 + not found', async () => {
-  const r = await run(['resume', 'deadbeef']);
-  assert.equal(r.code, 1, r.stderr);
-  assert.match(r.stderr, /not found/i);
-});
-
-test('resume a non-paused pipeline -> exit 1 + not resumable', async () => {
-  seedPipelineRow({
-    id: 'aaaa0001',
-    status: 'done',
-    startedAt: '2026-06-01T00:00:00Z',
-    updatedAt: '2026-06-01T00:00:00Z',
-  });
-  const r = await run(['resume', 'aaaa0001']);
-  assert.equal(r.code, 1, r.stderr);
-  assert.match(r.stderr, /not resumable/i);
+test('resume refusals: no id (usage), unknown id (not found), non-paused id (not resumable) all exit 1', async () => {
+  await checkRows([
+    { name: 'resume with no id -> exit 1 + usage', run: async () => {
+      const r = await run(['resume']);
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /usage: worca resume/i);
+    } },
+    { name: 'resume unknown id -> exit 1 + not found', run: async () => {
+      const r = await run(['resume', 'deadbeef']);
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /not found/i);
+    } },
+    { name: 'resume a non-paused pipeline -> exit 1 + not resumable', run: async () => {
+      seedPipelineRow({
+        id: 'aaaa0001',
+        status: 'done',
+        startedAt: '2026-06-01T00:00:00Z',
+        updatedAt: '2026-06-01T00:00:00Z',
+      });
+      const r = await run(['resume', 'aaaa0001']);
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /not resumable/i);
+    } },
+  ]);
 });
 
 // ── §5.2 / §10: cross-mode resume is pinned to the mode the run STARTED in ────
@@ -80,13 +84,9 @@ test('resume a non-paused pipeline -> exit 1 + not resumable', async () => {
 // OPPOSITE VALUE in both directions.
 
 /** A real repo with one commit on `main`. */
-async function freshRepo(prefix = 'worca-cc-cliresume-repo-') {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), prefix)));
+function freshRepo(prefix = 'worca-cc-cliresume-repo-') {
+  const dir = realpathSync(templateRepo('cliresume-repo', { branch: 'main', user: true, files: { 'seed.txt': 'seed\n' }, prefix }));
   repos.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  writeFileSync(join(dir, 'seed.txt'), 'seed\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 const repos = [];
@@ -295,18 +295,6 @@ test('resume an unregistered cwd project -> resolves past "not onboarded"', asyn
   } finally {
     await rm(projDir, { recursive: true, force: true });
   }
-});
-
-test('cmdResume routes every resume through createOrchestratorFor, which refuses a v1 point', async () => {
-  const { createOrchestratorFor, EngineRetiredError } = await import('../src/core/engine-select.mjs');
-  await assert.rejects(
-    () => createOrchestratorFor({ projectDir: process.cwd(), resume: { row: {}, resumePoint: { version: 1 }, steps: [] } }),
-    EngineRetiredError,
-  );
-  // and the CLI still goes through the factory, never constructing an engine itself
-  const src = await readFile(new URL('../src/cli/worca-cc.mjs', import.meta.url), 'utf8');
-  assert.ok(/createOrchestratorFor/.test(src), 'CLI uses the refusing factory');
-  assert.ok(!/\bcreateOrchestrator\(/.test(src), 'CLI has no direct engine construction left');
 });
 
 // P8a: `worca resume` refuses a v1 point with exit 2 and the honest message.

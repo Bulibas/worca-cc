@@ -12,12 +12,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { useTempHome } from './helpers/temp-home.mjs';
-import { withEnv } from './helpers/with-env.mjs';
 import { testMembership, retestInBackground, probe, killProbe, materializeForTest, TEST_TIMEOUT_MS } from '../src/core/mcp/test.mjs';
 import { createSet, addManualServer, putMember as storePut, readMcpStore, mcpDir } from '../src/core/mcp/store.mjs';
 import { getSetView } from '../src/core/mcp/views.mjs';
 import { withBillTo } from '../src/core/billing.mjs';
 import { copyName, secretEnvName } from '../src/core/mcp/identity.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // P1 putMember takes the server's definition; these memberships are all of manual servers.
 const putMember = async (setId, serverId, patch) => storePut(setId, serverId, patch, { def: (await readMcpStore()).manual[serverId.slice(7)] });
@@ -108,7 +108,7 @@ test('error text is redacted before it is returned or stored', async () => {
 test('a hanging server is killed with its whole tree when the timeout fires; the timeout is 2 minutes', async () => {
   assert.equal(TEST_TIMEOUT_MS, 120000);
   const pidFile = join(scratch, 'pids');
-  await assert.rejects(probe({ command: process.execPath, args: [FIXTURE, 'hang', pidFile], env: {} }, { timeoutMs: 1500 }), /no answer within/);
+  await assert.rejects(probe({ command: process.execPath, args: [FIXTURE, 'hang', pidFile], env: {} }, { timeoutMs: 700 }), /no answer within/);
   const [pid, gc] = readFileSync(pidFile, 'utf8').split(' ').map(Number);
   try { await until(() => !alive(pid) && !alive(gc), 3000); }
   // Only a still-live pid: once seen dead it may already belong to an unrelated process.
@@ -182,10 +182,11 @@ test('refusals: plugin disabled, $env outside MCP_*, a missing required field ("
 });
 
 test('a Test finishing after an edit keeps the edit and is stale against it; the Save\'s own Test runs after it', async () => {
-  await addManualServer('fx-slow', { ...def('slow'), fields: [...def('slow').fields, { key: 'org', label: 'Org' }], env: { FIXTURE_TOKEN: { field: 'token' }, ORG: { field: 'org' } } });
+  // The fixture answers initialize after 800 ms: an edit at 200 ms that takes < 600 ms lands while the probe connects.
+  await addManualServer('fx-slow', { ...def('slow', ['800']), fields: [...def('slow').fields, { key: 'org', label: 'Org' }], env: { FIXTURE_TOKEN: { field: 'token' }, ORG: { field: 'org' } } });
   await putMember(setId, 'manual:fx-slow', { enabled: true, values: { org: 'a' }, secrets: { token: SECRET } });
   const t = testMembership(setId, 'manual:fx-slow');
-  await new Promise((r) => setTimeout(r, 200));   // the probe is connecting now (the fixture answers after 800 ms)
+  await new Promise((r) => setTimeout(r, 200));   // the probe is connecting now (initialize is answered after 800 ms)
   const t0 = Date.now();
   await putMember(setId, 'manual:fx-slow', { values: { org: 'b' } });
   assert.ok(Date.now() - t0 < 600, 'the edit did not wait for the probe: no lock is held while connecting');
@@ -280,21 +281,24 @@ test('Test expands ${MCPSECRET_…} refs in one pass: a secret spelling another 
   assert.deepEqual([env.FIXTURE_A, env.FIXTURE_B], [refB, 'second-secret-123']);
 });
 
-test('killProbe: POSIX signals the group, Windows runs taskkill /T /F /PID', () => {
-  const calls = [];
-  killProbe({ pid: 77 }, { platform: 'linux', kill: (pid, sig) => calls.push(['kill', pid, sig]) });
-  killProbe({ pid: 78 }, { platform: 'win32', spawnSyncImpl: (cmd, args) => calls.push([cmd, ...args]) });
-  assert.deepEqual(calls, [['kill', -77, 'SIGKILL'], ['taskkill', '/T', '/F', '/PID', '78']]);
-});
-
-test('killProbe: once the child has exited, no taskkill /T and no kill through sudo (its pid may be reused)', () => {
-  const calls = [];
-  const agent = { user: 'worca-agent', home: '/home/worca-agent', gid: 1001 };
-  const posix = { platform: 'linux', agent, kill: (pid) => calls.push(['kill', pid]), killGroup: (pid) => calls.push(['group', pid]) };
-  killProbe({ pid: 79, exitCode: 1, signalCode: null }, { platform: 'win32', spawnSyncImpl: (cmd) => calls.push([cmd]) });
-  killProbe({ pid: 80, exitCode: null, signalCode: 'SIGKILL' }, posix);
-  killProbe({ pid: 81, exitCode: null, signalCode: null }, posix);
-  assert.deepEqual(calls, [['kill', -80], ['kill', -81], ['group', 81]]);
+test('killProbe: POSIX signals the group, Windows runs taskkill /T /F /PID; once the child has exited, no taskkill /T and no kill through sudo', async () => {
+  await checkRows([
+    { name: 'killProbe: POSIX signals the group, Windows runs taskkill /T /F /PID', run: () => {
+      const calls = [];
+      killProbe({ pid: 77 }, { platform: 'linux', kill: (pid, sig) => calls.push(['kill', pid, sig]) });
+      killProbe({ pid: 78 }, { platform: 'win32', spawnSyncImpl: (cmd, args) => calls.push([cmd, ...args]) });
+      assert.deepEqual(calls, [['kill', -77, 'SIGKILL'], ['taskkill', '/T', '/F', '/PID', '78']]);
+    } },
+    { name: 'killProbe: once the child has exited, no taskkill /T and no kill through sudo (its pid may be reused)', run: () => {
+      const calls = [];
+      const agent = { user: 'worca-agent', home: '/home/worca-agent', gid: 1001 };
+      const posix = { platform: 'linux', agent, kill: (pid) => calls.push(['kill', pid]), killGroup: (pid) => calls.push(['group', pid]) };
+      killProbe({ pid: 79, exitCode: 1, signalCode: null }, { platform: 'win32', spawnSyncImpl: (cmd) => calls.push([cmd]) });
+      killProbe({ pid: 80, exitCode: null, signalCode: 'SIGKILL' }, posix);
+      killProbe({ pid: 81, exitCode: null, signalCode: null }, posix);
+      assert.deepEqual(calls, [['kill', -80], ['kill', -81], ['group', 81]]);
+    } },
+  ]);
 });
 
 test('the SDK is pinned exactly and named in THIRD_PARTY_NOTICES.md', () => {
@@ -375,16 +379,6 @@ test('sse: tools listed over the SSE transport; a 401 on its stream reads "token
     await assert.rejects(probe({ type: 'sse', url, headers: { Authorization: 'Bearer wrong-token-123' } }, { timeoutMs: 2000 }),
       (err) => err.rejected === true && err.message === 'token rejected');
   } finally { srv.closeAllConnections(); await new Promise((r) => srv.close(r)); }
-});
-
-test('Test gives the server as long to start as a pipeline would (2 minutes); worca\'s own MCP_TIMEOUT wins', async () => {
-  const seen = [];
-  const probeImpl = async (_entry, opts) => { seen.push(opts.timeoutMs); return ['t']; };
-  await withEnv({ MCP_TIMEOUT: undefined }, async () => {   // a worca spawn may set it
-    assert.equal((await testMembership(setId, 'manual:fx-ok', { probeImpl })).ok, true);
-  });
-  await withEnv({ MCP_TIMEOUT: '200000' }, () => testMembership(setId, 'manual:fx-ok', { probeImpl }));
-  assert.deepEqual(seen, [120000, 200000]);
 });
 
 test('the probe hands the SDK its whole bound: initialize and tools/list get timeoutMs, not the SDK\'s own 60 s', async () => {

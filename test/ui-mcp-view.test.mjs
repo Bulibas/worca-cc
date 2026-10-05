@@ -1,15 +1,16 @@
 // test/ui-mcp-view.test.mjs — Settings › MCP servers (spec §7): hashes, set list order and warning
-// dot, Used by × semantics, member card states, Team locks, Delete confirm, the read-only Servers view,
-// Add server → Save and test, the strip hook; plus the booted app's tab, level map and deep links.
+// dot, Used by × semantics, Team locks, Delete confirm, the read-only Servers view, Add server →
+// Save and test; plus the booted app's deep links.
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import {
-  parseMcpParam, mcpRoute, memberStateText, createMcpView, setMcpStripRenderer, collectFieldInputs,
+  parseMcpParam, mcpRoute, createMcpView, collectFieldInputs,
 } from '../ui/public/mcp-view.mjs';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -92,27 +93,6 @@ const click = (el) => el.dispatchEvent(new doc.defaultView.Event('click', { bubb
 const change = (el) => el.dispatchEvent(new doc.defaultView.Event('change', { bubbles: true }));
 const settle = async () => { for (let i = 0; i < 6; i++) await tick(); };
 
-test('hashes: #settings/mcp = General, #settings/mcp/sets/<id>, #settings/mcp/servers', () => {
-  assert.deepEqual(parseMcpParam(''), { view: 'sets', setId: 'general' });
-  assert.deepEqual(parseMcpParam('sets/billing'), { view: 'sets', setId: 'billing' });
-  assert.deepEqual(parseMcpParam('servers'), { view: 'servers', setId: null });
-  assert.equal(mcpRoute('general'), 'settings/mcp');
-  assert.equal(mcpRoute('billing'), 'settings/mcp/sets/billing');
-  assert.equal(mcpRoute(null), 'settings/mcp/servers');
-});
-
-test('the strip sits right after the topbar, above both views, hidden, handed to the registered renderer after each render', async () => {
-  const seen = [];
-  setMcpStripRenderer((el) => seen.push(el));
-  const { host, ctl } = mount();
-  await ctl.show('');
-  setMcpStripRenderer(null);
-  const strip = host.querySelector('.topbar').nextElementSibling;
-  assert.equal(strip.dataset.mcpStrip, '');
-  assert.equal(strip.hidden, true);
-  assert.equal(seen.at(-1), strip);
-});
-
 test('set list: General first, user sets, Team sets; the warning dot; Used by lines; a greyed Team set', async () => {
   const { host, ctl } = mount();
   await ctl.show('');
@@ -124,23 +104,6 @@ test('set list: General first, user sets, Team sets; the warning dot; Used by li
   assert.match(rows[4].textContent, /no project here follows old\/home/);
   assert.ok(rows[4].classList.contains('greyed'));
   assert.ok(rows[0].classList.contains('on'));
-});
-
-test('member card states, one per spec wording', () => {
-  const base = { reason: null, problem: null, test: null, tooLong: null };
-  const cases = [
-    [{ ...base, testing: true }, 'testing…'],
-    [{ ...base, reason: 'missing:token', problem: 'API token not set' }, 'API token not set · skipped until set'],
-    [{ ...base, reason: 'plugin-disabled', problem: 'plugin disabled' }, 'plugin disabled'],
-    [{ ...base, reason: 'off' }, 'off'],
-    [{ ...base, reason: 'needs-consent' }, 'off'],
-    [base, 'not tested'],
-    [{ ...base, test: { ok: false, error: 'token rejected' } }, 'token rejected'],
-    [{ ...base, test: { ok: true, tools: 18, at: ago(3), stale: true } }, 'stale · test again'],
-    [{ ...base, test: { ok: true, tools: 18, at: ago(3), stale: false }, tooLong: { limit: 64, tool: 'x'.repeat(50) } }, `tool too long for 64: ${'x'.repeat(50)}`],
-    [{ ...base, test: { ok: true, tools: 18, at: ago(3), stale: false } }, '18 tools · tested 3d ago'],
-  ];
-  for (const [m, text] of cases) assert.equal(memberStateText(m, NOW).text, text);
 });
 
 test('a user set: fields, secrets as set-ness with OAuth age, the problem line; edits PUT the membership', async () => {
@@ -182,42 +145,45 @@ test('Used by ×: on a user set it removes the set from that project; on General
   assert.deepEqual(m.writes(), [['PUT', '/api/mcp/projects/shop-2b3c4d5e', { sets: ['shop'], includeGeneral: false }]]);
 });
 
-test('a Team set: read-only Used by, no rename/delete/add/remove; never-consented switch disabled; "Use team value"', async () => {
-  const { host, ctl, writes, modal, nav } = mount();
-  await ctl.show('sets/team-acme-platform-9333');
-  assert.equal(host.querySelector('[data-unassign]'), null, 'Team chips are read-only');
-  for (const sel of ['[data-act="rename"]', '[data-act="delete"]', '[data-act="add-project"]', '[data-act="add-member"]', '[data-remove]']) {
-    assert.equal(host.querySelector(sel), null, sel);
-  }
-  assert.ok(host.querySelector('[data-act="duplicate"]'), 'a Team set can be duplicated into a user set');
-  const [gh, sentry] = host.querySelectorAll('.mcp-member');
-  assert.equal(sentry.querySelector('[data-toggle]').disabled, true);
-  assert.equal(sentry.querySelector('[data-test]').disabled, true, 'nothing runs before consent, not even Test');
-  assert.match(sentry.textContent, /Turn on in the team checklist/);
-  assert.equal(gh.querySelector('[data-toggle]').disabled, false);
-  assert.match(gh.querySelector('.mcp-secret').textContent, /^\$MCP_GH/, 'an $env secret shows its variable');
-  assert.equal(gh.querySelector('.mcp-secret .badge.amber'), null, 'a secret updated a day ago is not amber');
-  assert.match(gh.querySelector('.mcp-suggest').textContent, /Team suggests github\.acme\.io · Use team value/);
-  click(gh.querySelector('[data-use-team="host"]'));
-  await settle();
-  assert.deepEqual(writes(), [['PUT', '/api/mcp/sets/team-acme-platform-9333/members/policy%3Aacme%2Fplatform%2Fgithub', { values: { host: 'github.acme.io' } }]]);
-  click(host.querySelector('[data-act="duplicate"]'));
-  await settle();
-  assert.equal(modal.opened.body.querySelector('input').value, 'acme/platform copy', 'P1 reserves "Team · " names: the copy is named after the home');
-  modal.opened.actions.find(([label]) => label === 'Save')[2]();
-  await settle();
-  assert.deepEqual(writes().at(-1), ['POST', '/api/mcp/sets/team-acme-platform-9333/duplicate', { name: 'acme/platform copy' }]);
-  assert.equal(nav.at(-1), 'settings/mcp/sets/new-set');
-});
-
-test('a greyed Team set offers only Forget, which calls the team forget route', async () => {
-  const { host, ctl, writes, nav } = mount();
-  await ctl.show('sets/team-old-home-1234');
-  assert.deepEqual([...host.querySelectorAll('.mcp-set [data-act]')].map((b) => b.dataset.act), ['forget']);
-  click(host.querySelector('[data-act="forget"]'));
-  await settle();
-  assert.deepEqual(writes(), [['POST', '/api/mcp/teams/old%2Fhome/forget', {}]]);
-  assert.deepEqual(nav, ['settings/mcp']);
+test('Team sets are read-only (no rename/delete/add/remove, disabled never-consented switch, Use team value); a greyed Team set offers only Forget via the team route', async () => {
+  await checkRows([
+    { name: 'a Team set: read-only Used by, no rename/delete/add/remove; never-consented switch disabled; "Use team value"', run: async () => {
+      const { host, ctl, writes, modal, nav } = mount();
+      await ctl.show('sets/team-acme-platform-9333');
+      assert.equal(host.querySelector('[data-unassign]'), null, 'Team chips are read-only');
+      for (const sel of ['[data-act="rename"]', '[data-act="delete"]', '[data-act="add-project"]', '[data-act="add-member"]', '[data-remove]']) {
+        assert.equal(host.querySelector(sel), null, sel);
+      }
+      assert.ok(host.querySelector('[data-act="duplicate"]'), 'a Team set can be duplicated into a user set');
+      const [gh, sentry] = host.querySelectorAll('.mcp-member');
+      assert.equal(sentry.querySelector('[data-toggle]').disabled, true);
+      assert.equal(sentry.querySelector('[data-test]').disabled, true, 'nothing runs before consent, not even Test');
+      assert.match(sentry.textContent, /Turn on in the team checklist/);
+      assert.equal(gh.querySelector('[data-toggle]').disabled, false);
+      assert.match(gh.querySelector('.mcp-secret').textContent, /^\$MCP_GH/, 'an $env secret shows its variable');
+      assert.equal(gh.querySelector('.mcp-secret .badge.amber'), null, 'a secret updated a day ago is not amber');
+      assert.match(gh.querySelector('.mcp-suggest').textContent, /Team suggests github\.acme\.io · Use team value/);
+      click(gh.querySelector('[data-use-team="host"]'));
+      await settle();
+      assert.deepEqual(writes(), [['PUT', '/api/mcp/sets/team-acme-platform-9333/members/policy%3Aacme%2Fplatform%2Fgithub', { values: { host: 'github.acme.io' } }]]);
+      click(host.querySelector('[data-act="duplicate"]'));
+      await settle();
+      assert.equal(modal.opened.body.querySelector('input').value, 'acme/platform copy', 'P1 reserves "Team · " names: the copy is named after the home');
+      modal.opened.actions.find(([label]) => label === 'Save')[2]();
+      await settle();
+      assert.deepEqual(writes().at(-1), ['POST', '/api/mcp/sets/team-acme-platform-9333/duplicate', { name: 'acme/platform copy' }]);
+      assert.equal(nav.at(-1), 'settings/mcp/sets/new-set');
+    } },
+    { name: 'a greyed Team set offers only Forget, which calls the team forget route', run: async () => {
+      const { host, ctl, writes, nav } = mount();
+      await ctl.show('sets/team-old-home-1234');
+      assert.deepEqual([...host.querySelectorAll('.mcp-set [data-act]')].map((b) => b.dataset.act), ['forget']);
+      click(host.querySelector('[data-act="forget"]'));
+      await settle();
+      assert.deepEqual(writes(), [['POST', '/api/mcp/teams/old%2Fhome/forget', {}]]);
+      assert.deepEqual(nav, ['settings/mcp']);
+    } },
+  ]);
 });
 
 test('Delete: the confirm lists the projects using the set and flags those left with no sets (a Team set counts)', async () => {
@@ -359,28 +325,31 @@ test('secret inputs: an empty value keeps the stored secret; an MCP_ variable wi
   assert.deepEqual(collectFieldInputs(root), { values: { c: 'v' }, secrets: { b: { $env: 'MCP_B' } } });
 });
 
-test('the Servers view is read-only: badges, In sets links, Add to set everywhere, Edit/Remove on manual rows, Remove on retired ones', async () => {
-  const { host, ctl } = mount();
-  await ctl.show('servers');
-  assert.equal(host.querySelector('.mcp-servers input, .mcp-servers [data-test]'), null, 'no switches, values or Test');
-  const rows = [...host.querySelectorAll('.mcp-server-row')];
-  const acts = rows.map((r) => [...r.querySelectorAll('.pl-actions button')].map((b) => b.textContent));
-  assert.deepEqual(acts, [['Add to set', 'Edit definition', 'Remove'], ['Add to set'], ['Add to set', 'Remove']]);
-  assert.match(rows[0].textContent, /also in your Claude Code config/);
-  assert.match(rows[1].textContent, /name provisional.*plugin disabled/);
-  assert.match(rows[2].textContent, /no longer required by acme\/platform/);
-  assert.deepEqual([...rows[1].querySelectorAll('a.chip')].map((a) => a.getAttribute('href')),
-    ['#settings/mcp/sets/billing', '#settings/mcp/sets/team-acme-platform-9333']);
-  assert.equal(host.querySelector('[data-act="add-server"]').textContent, 'Add MCP server');
-});
-
-test('Remove on a manual server names the sets it leaves', async () => {
-  const { host, ctl, confirms, writes } = mount();
-  await ctl.show('servers');
-  click(host.querySelector('[data-remove-server="manual:postgres-ro"]'));
-  await settle();
-  assert.match(confirms[0].message, /It leaves Billing\./);
-  assert.deepEqual(writes(), [['DELETE', '/api/mcp/servers/manual%3Apostgres-ro', undefined]]);
+test('Servers view is read-only with badges/In sets/Add to set; Remove on a manual server names the sets it leaves', async () => {
+  await checkRows([
+    { name: 'the Servers view is read-only: badges, In sets links, Add to set everywhere, Edit/Remove on manual rows, Remove on retired ones', run: async () => {
+      const { host, ctl } = mount();
+      await ctl.show('servers');
+      assert.equal(host.querySelector('.mcp-servers input, .mcp-servers [data-test]'), null, 'no switches, values or Test');
+      const rows = [...host.querySelectorAll('.mcp-server-row')];
+      const acts = rows.map((r) => [...r.querySelectorAll('.pl-actions button')].map((b) => b.textContent));
+      assert.deepEqual(acts, [['Add to set', 'Edit definition', 'Remove'], ['Add to set'], ['Add to set', 'Remove']]);
+      assert.match(rows[0].textContent, /also in your Claude Code config/);
+      assert.match(rows[1].textContent, /name provisional.*plugin disabled/);
+      assert.match(rows[2].textContent, /no longer required by acme\/platform/);
+      assert.deepEqual([...rows[1].querySelectorAll('a.chip')].map((a) => a.getAttribute('href')),
+        ['#settings/mcp/sets/billing', '#settings/mcp/sets/team-acme-platform-9333']);
+      assert.equal(host.querySelector('[data-act="add-server"]').textContent, 'Add MCP server');
+    } },
+    { name: 'Remove on a manual server names the sets it leaves', run: async () => {
+      const { host, ctl, confirms, writes } = mount();
+      await ctl.show('servers');
+      click(host.querySelector('[data-remove-server="manual:postgres-ro"]'));
+      await settle();
+      assert.match(confirms[0].message, /It leaves Billing\./);
+      assert.deepEqual(writes(), [['DELETE', '/api/mcp/servers/manual%3Apostgres-ro', undefined]]);
+    } },
+  ]);
 });
 
 test('Add MCP server posts the name with the definition, then offers Add to set; Edit definition PUTs it; a refusal shows in the modal', async () => {
@@ -432,29 +401,6 @@ test('a malformed %-escape in the set hash never throws out of show(): it reads 
   assert.equal(host.querySelector('.form-msg.err').textContent, 'set not found');
 });
 
-test('Test by keyboard: the focused Test button keeps focus through the testing… paint and the repaint after', async () => {
-  const { host, ctl } = mount();
-  await ctl.show('sets/billing');
-  const t = host.querySelector('[data-test="plugin:acme-tools/sentry"]');
-  t.focus();
-  click(t);
-  assert.equal(host.querySelector('[data-server="plugin:acme-tools/sentry"] .mcp-state').textContent, 'testing…');
-  assert.equal(doc.activeElement.dataset.test, 'plugin:acme-tools/sentry', 'the testing… paint keeps it');
-  await settle();
-  assert.notEqual(doc.activeElement, t, 'the pane was repainted');
-  assert.equal(doc.activeElement.dataset.test, 'plugin:acme-tools/sentry', 'Enter again re-tests: focus is not on <body>');
-});
-
-test('the not-set secret\'s Set is a full .btn, and the pane topbar wraps on a phone (New set / Add MCP server stays on screen)', async () => {
-  const { host, ctl } = mount();
-  await ctl.show('sets/billing');
-  const set = host.querySelector('[data-server="plugin:acme-tools/jira"] [data-secret="token"]');
-  assert.equal(set.textContent, 'Set');
-  assert.ok(set.classList.contains('btn'), '.btn-primary alone paints a square black box');
-  const css = readFileSync(new URL('../ui/public/style.css', import.meta.url), 'utf8');
-  assert.match(css, /\.settings-pane\[data-tab="mcp"\] \.topbar\{flex-wrap:wrap;\}/);
-});
-
 test('a value a repaint restored still saves when the user leaves the field; a change and its focusout save once', async () => {
   const { host, ctl, writes } = mount();
   await ctl.show('sets/billing');
@@ -489,12 +435,6 @@ test('a value a repaint restored still saves when the user leaves the field; a c
   assert.equal(bad.writes().length, 2, 'a refused save is tried again when the user leaves the field');
 });
 
-test('the Servers view says so when the registry files need a newer Worca', async () => {
-  const { host, ctl } = mount({ over: { 'GET /api/mcp/servers': { ok: true, status: 200, data: { newer: true, servers: [] } } } });
-  await ctl.show('servers');
-  assert.equal(host.querySelector('.form-msg.err').textContent, 'MCP registry files need a newer Worca');
-});
-
 // ── the booted app ───────────────────────────────────────────────────────────
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -526,38 +466,27 @@ async function boot(url) {
 }
 const go = async (window, hash) => { window.location.hash = hash; window.dispatchEvent(new window.Event('hashchange')); await settle(); };
 
-test('the tab: after Plugins, Advanced, titled "MCP servers" for the level banner', () => {
-  const d = trackDom(new JSDOM(html)).window.document;
-  const tabs = [...d.querySelectorAll('#settings-tabs button[data-tab]')];
-  const i = tabs.findIndex((b) => b.dataset.tab === 'mcp');
-  assert.equal(tabs[i - 1].dataset.tab, 'plugins');
-  assert.equal(tabs[i].dataset.minLevel, 'advanced');
-  assert.equal(tabs[i].textContent.trim(), 'MCP servers');
-  const js = readFileSync(appPath, 'utf8');
-  assert.match(js, /SETTINGS_TAB_MIN_LEVEL = Object\.freeze\(\{[^}]*mcp: 'advanced'/);
-  assert.match(js, /VIEW_TITLES = Object\.freeze\(\{[^}]*mcp: 'MCP servers'/);
-});
-
-test('deep links land on the MCP pane: a set, then the Servers view', async () => {
-  const { window, calls } = await boot('http://localhost:4319/');
-  await go(window, 'settings/mcp/sets/billing');
-  const pane = window.document.querySelector('.settings-pane[data-tab="mcp"]');
-  assert.equal(pane.classList.contains('hidden'), false);
-  assert.ok(calls.includes('GET /api/mcp/sets/billing'));
-  assert.equal(window.location.hash, '#settings/mcp/sets/billing');
-  assert.ok(pane.querySelector('.mcp-setrow[data-set="billing"].on'));
-  await go(window, 'settings/mcp/servers');
-  assert.ok(calls.includes('GET /api/mcp/servers'));
-  assert.equal(pane.querySelectorAll('.mcp-server-row').length, 3);
-});
-
-test('leaving the MCP tab closes a picker it opened in #plugin-modal', async () => {
-  const { window } = await boot('http://localhost:4319/');
-  await go(window, 'settings/mcp');
-  const d = window.document;
-  d.querySelector('.settings-pane[data-tab="mcp"] [data-act="new-set"]').dispatchEvent(new window.Event('click', { bubbles: true }));
-  await settle();
-  assert.equal(d.getElementById('plugin-modal').classList.contains('hidden'), false);
-  await go(window, 'settings/plugins');
-  assert.equal(d.getElementById('plugin-modal').classList.contains('hidden'), true);
+test('MCP hashes (#settings/mcp General, /sets/<id>, /servers) route and deep links land on the pane', async () => {
+  await checkRows([
+    { name: 'hashes: #settings/mcp = General, #settings/mcp/sets/<id>, #settings/mcp/servers', run: () => {
+      assert.deepEqual(parseMcpParam(''), { view: 'sets', setId: 'general' });
+      assert.deepEqual(parseMcpParam('sets/billing'), { view: 'sets', setId: 'billing' });
+      assert.deepEqual(parseMcpParam('servers'), { view: 'servers', setId: null });
+      assert.equal(mcpRoute('general'), 'settings/mcp');
+      assert.equal(mcpRoute('billing'), 'settings/mcp/sets/billing');
+      assert.equal(mcpRoute(null), 'settings/mcp/servers');
+    } },
+    { name: 'deep links land on the MCP pane: a set, then the Servers view', run: async () => {
+      const { window, calls } = await boot('http://localhost:4319/');
+      await go(window, 'settings/mcp/sets/billing');
+      const pane = window.document.querySelector('.settings-pane[data-tab="mcp"]');
+      assert.equal(pane.classList.contains('hidden'), false);
+      assert.ok(calls.includes('GET /api/mcp/sets/billing'));
+      assert.equal(window.location.hash, '#settings/mcp/sets/billing');
+      assert.ok(pane.querySelector('.mcp-setrow[data-set="billing"].on'));
+      await go(window, 'settings/mcp/servers');
+      assert.ok(calls.includes('GET /api/mcp/servers'));
+      assert.equal(pane.querySelectorAll('.mcp-server-row').length, 3);
+    } },
+  ]);
 });

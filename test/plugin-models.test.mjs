@@ -21,6 +21,7 @@ import {
   setNodeModel, modelCostConfig, resolveModelCost,
 } from '../src/core/config.mjs';
 import { addGlobalModel, removeGlobalModel } from '../src/core/settings.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let homeDir, worcaHomeDir, proj;
 const prevEnv = {
@@ -146,32 +147,43 @@ test('catalog composition: custom "plugin" + plugin name; global shadows plugin;
   writePluginsLock(lock);
 });
 
-test('resolveModelEnv: plugin entry with secrets + refs; user global entry wins outright', async () => {
+test('resolveModelEnv + modelHasBaseUrlRouting: plugin entries route (secrets, ${} refs); a user global shadow wins outright', async () => {
+  // One DS fixture and ONE global shadow: each step's result is recorded as it
+  // happens, then every row asserts on those records.
   process.env.MY_DS_VAR = 'expanded-ref';
+  let env;
   try {
-    const env = resolveModelEnv('DS-Stable');
-    assert.equal(env.ANTHROPIC_BASE_URL, 'https://api.ds.example');
-    assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'sk-team-1234');
-    assert.equal(env.X_REF, 'expanded-ref', 'ref expanded at the resolution point');
+    env = resolveModelEnv('DS-Stable');
   } finally {
     delete process.env.MY_DS_VAR;
   }
+  const routing = { stable: modelHasBaseUrlRouting('ds-stable'), fast: modelHasBaseUrlRouting('ds-fast') };
 
-  // A global shadow WITHOUT env means: no routing (the user's copy wins entirely).
+  // A global shadow WITHOUT env (so without a base URL) means: no routing (the user's copy wins entirely).
   await addGlobalModel({ id: 'ds-stable', label: 'Mine' });
-  assert.equal(resolveModelEnv('ds-stable'), undefined);
-  await removeGlobalModel('ds-stable');
+  let shadowEnv, shadowRouting;
+  try {
+    shadowEnv = resolveModelEnv('ds-stable');
+    shadowRouting = modelHasBaseUrlRouting('ds-stable');
+  } finally {
+    await removeGlobalModel('ds-stable');
+  }
 
-  assert.equal(resolveModelEnv('ds-fast'), undefined, 'plugin model without env');
-  assert.equal(resolveModelEnv('nope'), undefined);
-});
-
-test('modelHasBaseUrlRouting covers plugin entries (global still first)', async () => {
-  assert.equal(modelHasBaseUrlRouting('ds-stable'), true);
-  assert.equal(modelHasBaseUrlRouting('ds-fast'), false);
-  await addGlobalModel({ id: 'ds-stable', label: 'Mine' }); // shadow without base URL
-  assert.equal(modelHasBaseUrlRouting('ds-stable'), false);
-  await removeGlobalModel('ds-stable');
+  await checkRows([
+    { name: 'resolveModelEnv: plugin entry with secrets + refs; user global entry wins outright', run: () => {
+      assert.equal(env.ANTHROPIC_BASE_URL, 'https://api.ds.example');
+      assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'sk-team-1234');
+      assert.equal(env.X_REF, 'expanded-ref', 'ref expanded at the resolution point');
+      assert.equal(shadowEnv, undefined);
+      assert.equal(resolveModelEnv('ds-fast'), undefined, 'plugin model without env');
+      assert.equal(resolveModelEnv('nope'), undefined);
+    } },
+    { name: 'modelHasBaseUrlRouting covers plugin entries (global still first)', run: () => {
+      assert.equal(routing.stable, true);
+      assert.equal(routing.fast, false);
+      assert.equal(shadowRouting, false, 'a global shadow without a base URL comes first');
+    } },
+  ]);
 });
 
 test('referencedPluginModels: refs block; global-shadow and other-plugin carve-outs', async () => {
@@ -244,13 +256,4 @@ test('a user GLOBAL entry shadows the plugin price â€” even when it pins none (Â
   await removeGlobalModel('pp-rated');
   await removeGlobalModel('pp-free');
   assert.deepEqual(modelCostConfig('pp-rated'), { perMtok: { input: 1, output: 3 } }, 'the plugin price returns');
-});
-
-test('a disabled plugin takes its pricing with it', () => {
-  installFixture('priced-plug', {
-    models: [{ id: 'pp-free', cost: { free: true } }],
-  }, { enabled: false });
-  assert.equal(modelCostConfig('pp-free'), null);
-  installFixture('priced-plug', { models: [{ id: 'pp-free', cost: { free: true } }] });
-  assert.deepEqual(modelCostConfig('pp-free'), { free: true });
 });

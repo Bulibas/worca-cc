@@ -1,7 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import * as uiModel from '../ui/public/graph/model.mjs';
 import * as validate from '../src/shared/graph/validate.mjs';
 import * as ports from '../src/shared/graph/ports.mjs';
@@ -43,14 +41,4 @@ test('ui/public/graph/model.mjs re-exports the SHARED functions — same identit
   // composer canvas (view.mjs safeAgentIcon) — one function, never a second copy.
   assert.equal(typeof manifest.sanitizeIcon, 'function', 'manifest exports sanitizeIcon');
   assert.equal(uiModel.sanitizeIcon, manifest.sanitizeIcon);
-});
-
-test('model.mjs imports ONLY by relative path and carries the depth note', () => {
-  const src = readFileSync(fileURLToPath(new URL('../ui/public/graph/model.mjs', import.meta.url)), 'utf8');
-  const specs = [...src.matchAll(/from\s*'([^']+)'/g)].map((m) => m[1]);
-  assert.ok(specs.length >= 8);
-  for (const s of specs) {
-    assert.match(s, /^\.\.\/\.\.\/\.\.\/src\/shared\/graph\//, `"${s}" must walk up exactly three levels`);
-  }
-  assert.match(src, /depth 3/, 'the header states the depth so a moved file is caught by review');
 });

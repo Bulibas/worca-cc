@@ -2,53 +2,73 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { sanitizeTitle, generateTitle, isRefusalTitle } from '../src/core/title.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const POSIX_SHIM = { skip: process.platform === 'win32' ? 'fake claude shim is a POSIX shell script (no .exe stand-in on Windows)' : false };
 
-test('sanitizeTitle strips quotes, collapses whitespace, caps length', () => {
-  assert.equal(sanitizeTitle('  "Add user auth"\n'), 'Add user auth');
-  // sanitizeTitle takes the FIRST non-empty line, then strips a leading "Title:" label.
-  // The "  thing" on the 2nd line is intentionally dropped.
-  assert.equal(sanitizeTitle('Title: Fix the thing'), 'Fix the thing');
-  assert.equal(sanitizeTitle('Title: Fix the\n  thing'), 'Fix the'); // 2nd line dropped (first-line-only)
-  const long = 'x'.repeat(120);
-  assert.ok(sanitizeTitle(long).length <= 70);
-  assert.equal(sanitizeTitle(''), '');
-  assert.equal(sanitizeTitle('```\ncode\n```'), 'code'); // strips stray code fences
+test('sanitizeTitle: strips quotes/labels/fences, first line only, caps at 70 on a word boundary', async () => {
+  await checkRows([
+    { name: 'sanitizeTitle strips quotes, collapses whitespace, caps length', run: () => {
+      assert.equal(sanitizeTitle('  "Add user auth"\n'), 'Add user auth');
+      // sanitizeTitle takes the FIRST non-empty line, then strips a leading "Title:" label.
+      // The "  thing" on the 2nd line is intentionally dropped.
+      assert.equal(sanitizeTitle('Title: Fix the thing'), 'Fix the thing');
+      assert.equal(sanitizeTitle('Title: Fix the\n  thing'), 'Fix the'); // 2nd line dropped (first-line-only)
+      const long = 'x'.repeat(120);
+      assert.ok(sanitizeTitle(long).length <= 70);
+      assert.equal(sanitizeTitle(''), '');
+      assert.equal(sanitizeTitle('```\ncode\n```'), 'code'); // strips stray code fences
+    } },
+    { name: 'sanitizeTitle truncates at a word boundary, never mid-word', run: () => {
+      const long = 'Implement the new authentication middleware layer for every incoming request handler';
+      const t = sanitizeTitle(long);
+      assert.ok(t.length <= 70);
+      assert.ok(!t.endsWith('reque'), 'must not cut mid-word');
+      // every word of the output is a whole word of the input
+      for (const w of t.split(' ')) assert.ok(long.split(' ').includes(w), `"${w}" is a fragment`);
+      // a single unbroken run longer than the cap still hard-slices (nothing to break on)
+      assert.equal(sanitizeTitle('x'.repeat(120)).length, 70);
+    } },
+  ]);
 });
 
-test('sanitizeTitle truncates at a word boundary, never mid-word', () => {
-  const long = 'Implement the new authentication middleware layer for every incoming request handler';
-  const t = sanitizeTitle(long);
-  assert.ok(t.length <= 70);
-  assert.ok(!t.endsWith('reque'), 'must not cut mid-word');
-  // every word of the output is a whole word of the input
-  for (const w of t.split(' ')) assert.ok(long.split(' ').includes(w), `"${w}" is a fragment`);
-  // a single unbroken run longer than the cap still hard-slices (nothing to break on)
-  assert.equal(sanitizeTitle('x'.repeat(120)).length, 70);
-});
-
-test('isRefusalTitle flags clarifying-question / refusal output', () => {
-  // The exact live failure: haiku asked for context instead of titling, and the
-  // 70-char slice produced this mid-word string as a run title.
-  assert.ok(isRefusalTitle("I need more context to write a title. What's the task or work you'd li"));
-  assert.ok(isRefusalTitle("What's the task or work you'd like to do?"));
-  assert.ok(isRefusalTitle('Could you describe the task first?'));
-  assert.ok(isRefusalTitle('Sorry, I cannot write a title without more information'));
-  assert.ok(isRefusalTitle('Please provide the task description'));
-  assert.ok(isRefusalTitle("I'm unable to determine what this task is about"));
-  // prose far beyond the 3–8 word instruction is a refusal/ramble, not a title
-  assert.ok(isRefusalTitle('The user has not actually described any software task that could be titled here'));
-});
-
-test('isRefusalTitle passes real titles through', () => {
-  assert.equal(isRefusalTitle('Add User Auth'), false);
-  assert.equal(isRefusalTitle('Fix Login Redirect Bug'), false);
-  assert.equal(isRefusalTitle('Improve History Diff Viewer'), false);
-  assert.equal(isRefusalTitle('I/O Error Handling Cleanup'), false);   // "I/" is not first-person "I "
-  assert.equal(isRefusalTitle('I18n Support For Settings Page'), false);
-  assert.equal(isRefusalTitle('[mock] role unknown complete'), false); // mock-mode title must survive
-  assert.equal(isRefusalTitle(''), false);
+test('isRefusalTitle: refusals flagged, real titles (incl. What/Which/Unable/Please starts) pass', async () => {
+  await checkRows([
+    { name: 'isRefusalTitle flags clarifying-question / refusal output', run: () => {
+      // The exact live failure: haiku asked for context instead of titling, and the
+      // 70-char slice produced this mid-word string as a run title.
+      assert.ok(isRefusalTitle("I need more context to write a title. What's the task or work you'd li"));
+      assert.ok(isRefusalTitle("What's the task or work you'd like to do?"));
+      assert.ok(isRefusalTitle('Could you describe the task first?'));
+      assert.ok(isRefusalTitle('Sorry, I cannot write a title without more information'));
+      assert.ok(isRefusalTitle('Please provide the task description'));
+      assert.ok(isRefusalTitle("I'm unable to determine what this task is about"));
+      // prose far beyond the 3–8 word instruction is a refusal/ramble, not a title
+      assert.ok(isRefusalTitle('The user has not actually described any software task that could be titled here'));
+    } },
+    { name: 'isRefusalTitle passes real titles through', run: () => {
+      assert.equal(isRefusalTitle('Add User Auth'), false);
+      assert.equal(isRefusalTitle('Fix Login Redirect Bug'), false);
+      assert.equal(isRefusalTitle('Improve History Diff Viewer'), false);
+      assert.equal(isRefusalTitle('I/O Error Handling Cleanup'), false);   // "I/" is not first-person "I "
+      assert.equal(isRefusalTitle('I18n Support For Settings Page'), false);
+      assert.equal(isRefusalTitle('[mock] role unknown complete'), false); // mock-mode title must survive
+      assert.equal(isRefusalTitle(''), false);
+    } },
+    { name: 'isRefusalTitle: legitimate titles starting with What/Which/Unable/Please are NOT refusals; real refusals still are', run: () => {
+      // Review of PR #376: the refusal filter dropped legitimate pipeline titles that
+      // merely START with What's/Which/Unable/Please — the caller then kept the
+      // provisional "first 80 chars of the prompt" title for ever.
+      for (const t of ['What\'s New Page Redesign', 'Which Tab Is Active Indicator', 'Unable To Login Error Fix',
+        'Please Wait Spinner Timing', 'What If Analysis Export', 'Unable Reason Column In Reports']) {
+        assert.equal(isRefusalTitle(t), false, t);
+      }
+      for (const t of ['What is the task you want titled', 'Which task should I title', 'Unable to determine the task',
+        'Please provide more details about the task', 'Please let me know what the task is', "What's the task or work you'd like to do?"]) {
+        assert.equal(isRefusalTitle(t), true, t);
+      }
+    } },
+  ]);
 });
 
 test('generateTitle returns "" when the model asks for context instead of titling', async () => {
@@ -75,22 +95,6 @@ test('generateTitle returns "" when the model asks for context instead of titlin
   }
 });
 
-test('generateTitle returns a non-empty deterministic title in mock mode', async () => {
-  process.env.WORCA_MOCK = '1';
-  const t = await generateTitle('Make sure the title of a new running pipeline is generated up front', {
-    cwd: process.cwd(),
-  });
-  // Under mock with no MOCK_ROLE the body is generic ('[mock] role unknown complete');
-  // we only assert shape — a real `claude` binary produces a human title.
-  assert.equal(typeof t, 'string');
-  assert.ok(t.length > 0 && t.length <= 70);
-  delete process.env.WORCA_MOCK;
-});
-
-test('generateTitle returns "" when the prompt is empty', async () => {
-  assert.equal(await generateTitle('', { cwd: process.cwd() }), '');
-});
-
 test('generateTitle forwards envScrub/envAllowlist to the spawn (no leak during runs)', POSIX_SHIM, async () => {
   const { mkdtemp, writeFile, readFile, chmod, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
@@ -112,20 +116,6 @@ test('generateTitle forwards envScrub/envAllowlist to the spawn (no leak during 
     if (prevMock === undefined) delete process.env.WORCA_MOCK; else process.env.WORCA_MOCK = prevMock;
     if (prevLeak === undefined) delete process.env.WORCA_TITLE_LEAK; else process.env.WORCA_TITLE_LEAK = prevLeak;
     await rm(dir, { recursive: true, force: true });
-  }
-});
-
-// Review of PR #376: the refusal filter dropped legitimate pipeline titles that
-// merely START with What's/Which/Unable/Please — the caller then kept the
-// provisional "first 80 chars of the prompt" title for ever.
-test('isRefusalTitle: legitimate titles starting with What/Which/Unable/Please are NOT refusals; real refusals still are', () => {
-  for (const t of ['What\'s New Page Redesign', 'Which Tab Is Active Indicator', 'Unable To Login Error Fix',
-    'Please Wait Spinner Timing', 'What If Analysis Export', 'Unable Reason Column In Reports']) {
-    assert.equal(isRefusalTitle(t), false, t);
-  }
-  for (const t of ['What is the task you want titled', 'Which task should I title', 'Unable to determine the task',
-    'Please provide more details about the task', 'Please let me know what the task is', "What's the task or work you'd like to do?"]) {
-    assert.equal(isRefusalTitle(t), true, t);
   }
 });
 

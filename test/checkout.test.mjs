@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipeline, seedPipelineRow } from './helpers/db-seed.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 import { getDb } from '../src/core/db.mjs';
 import { worcaHome } from '../src/core/projects.mjs';
 import { projectKey } from '../src/core/store.mjs';
@@ -23,15 +24,9 @@ useTempHome(after, 'worca-cc-checkout-');
 
 const git = (cwd, args) => spawnSync('git', args, { cwd, encoding: 'utf8' });
 const created = [];
-async function freshRepo({ initialBranch = 'main' } = {}) {          // copy of test/worktree.test.mjs:30-42
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-co-'));
+function freshRepo({ initialBranch = 'main' } = {}) {
+  const dir = templateRepo('co', { branch: initialBranch, user: true, files: { 'README.md': '# hi\n' } });
   created.push(dir);
-  git(dir, ['init', '-q', '-b', initialBranch]);
-  git(dir, ['config', 'user.email', 't@t']);
-  git(dir, ['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  git(dir, ['add', '-A']);
-  git(dir, ['commit', '-qm', 'init']);
   return dir;
 }
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true }))));

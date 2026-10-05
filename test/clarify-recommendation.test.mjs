@@ -8,6 +8,7 @@ import { normalizeClarify, scaleConfidence } from '../src/core/protocol.mjs';
 import { writeStepQuestions, readStepQuestions } from '../src/core/artifacts.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -21,25 +22,27 @@ test('confidence stays aligned when blank options are dropped', () => {
   assert.equal(q.recommended, 'B');
 });
 
-test('confidence is dropped when its length differs from the RAW options', () => {
-  const q = one({ options: ['A', 'B'], confidence: [70] });
-  assert.equal(q.confidence, undefined);
-  assert.equal(q.recommended, undefined);
-});
-
-test('non-finite entries drop confidence', () => {
-  assert.equal(one({ options: ['A', 'B'], confidence: [1, NaN] }).confidence, undefined);
-  assert.equal(one({ options: ['A', 'B'], confidence: [1, '2'] }).confidence, undefined);
+test('confidence is dropped when its length differs from the raw options, has a non-finite entry, or is all zero', async () => {
+  await checkRows([
+    { name: 'confidence is dropped when its length differs from the RAW options', run: () => {
+      const q = one({ options: ['A', 'B'], confidence: [70] });
+      assert.equal(q.confidence, undefined);
+      assert.equal(q.recommended, undefined);
+    } },
+    { name: 'non-finite entries drop confidence', run: () => {
+      assert.equal(one({ options: ['A', 'B'], confidence: [1, NaN] }).confidence, undefined);
+      assert.equal(one({ options: ['A', 'B'], confidence: [1, '2'] }).confidence, undefined);
+    } },
+    { name: 'all-zero confidence is dropped', run: () => {
+      assert.equal(one({ options: ['A', 'B'], confidence: [0, -1] }).confidence, undefined);
+    } },
+  ]);
 });
 
 test('negatives clamp to 0, integers sum to exactly 100, remainder on the largest (first on ties)', () => {
   const q = one({ options: ['A', 'B', 'C'], confidence: [1, 1, 1] });
   assert.deepEqual(q.confidence, [34, 33, 33]);
   assert.deepEqual(one({ options: ['A', 'B'], confidence: [-5, 3] }).confidence, [0, 100]);
-});
-
-test('all-zero confidence is dropped', () => {
-  assert.equal(one({ options: ['A', 'B'], confidence: [0, -1] }).confidence, undefined);
 });
 
 test('recommended: agent pick when it is an option, else highest (first on ties)', () => {

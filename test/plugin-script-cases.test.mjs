@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { runPluginScriptCases } from '../src/core/plugin-script-cases.mjs';
 
 useTempHome(after);
@@ -47,31 +48,28 @@ test('every shipped case runs; the expectation decides pass, and the tally adds 
   assert.deepEqual([r.passed, r.failed, r.unchecked], [1, 1, 1]);
 });
 
-test('a case with NO expectation still fails when the script could not run', async () => {
+test('a script that throws fails every case: an unchecked case (status error, diff names boom) and a checked one (expected clean, got error)', async () => {
   const dir = pluginWithScript('broken', { body: THROW_BODY, cases: [
     { id: 'bare', name: 'bare', cwd: { kind: 'scratch' }, inputs: {} },
-  ] });
-  const r = await runPluginScriptCases(dir);
-  const kase = r.scripts[0].cases[0];
-  assert.equal(kase.status, 'error');
-  assert.equal(kase.pass, false);
-  assert.match(kase.diffs.join(' '), /boom/);
-  assert.deepEqual([r.passed, r.failed, r.unchecked], [0, 1, 0]);
-});
-
-test('a CHECKED case that broke names the reason beside the expectation diff', async () => {
-  const dir = pluginWithScript('brokenToo', { body: THROW_BODY, cases: [
     { id: 'checked', name: 'checked', cwd: { kind: 'scratch' }, inputs: {}, expect: { verdict: 'clean' } },
   ] });
-  const kase = (await runPluginScriptCases(dir)).scripts[0].cases[0];
-  assert.equal(kase.pass, false);
-  assert.match(kase.diffs[0], /expected clean, got error/);
-  assert.match(kase.diffs.join(' '), /boom/);
-});
-
-test('a dir with no scripts/ is an empty, green result', async () => {
-  assert.deepEqual(await runPluginScriptCases(tmp('worca-cc-pcases-empty-')),
-    { scripts: [], passed: 0, failed: 0, unchecked: 0, stopped: false, problems: [] });
+  const r = await runPluginScriptCases(dir);
+  const [bare, checked] = r.scripts[0].cases;
+  await checkRows([
+    { name: 'a case with NO expectation still fails when the script could not run', run: () => {
+      assert.equal(bare.caseId, 'bare');
+      assert.equal(bare.status, 'error');
+      assert.equal(bare.pass, false);
+      assert.match(bare.diffs.join(' '), /boom/);
+      assert.deepEqual([r.passed, r.failed, r.unchecked], [0, 2, 0], 'both cases fail; neither counts as unchecked');
+    } },
+    { name: 'a CHECKED case that broke names the reason beside the expectation diff', run: () => {
+      assert.equal(checked.caseId, 'checked');
+      assert.equal(checked.pass, false);
+      assert.match(checked.diffs[0], /expected clean, got error/);
+      assert.match(checked.diffs.join(' '), /boom/);
+    } },
+  ]);
 });
 
 // The CLI holds each case's live bench so Ctrl+C / a CI cancel can stop the child
@@ -116,10 +114,18 @@ test('a stopped case FAILS even when its expectation is one a cut-short run sati
   assert.deepEqual([r.passed, r.failed, r.unchecked], [0, 1, 0]);
 });
 
-test('a stop requested before the first case runs nothing', async () => {
-  const dir = pluginWithScript('napperTwo', { body: NAP_BODY, cases: [
-    { id: 'one', name: 'one', cwd: { kind: 'scratch' }, inputs: {} },
-  ] });
-  const r = await runPluginScriptCases(dir, { stopRequested: () => true });
-  assert.deepEqual(r, { scripts: [], passed: 0, failed: 0, unchecked: 0, stopped: true, problems: [] });
+test('empty results: no scripts/ dir is green; a stop requested before the first case runs nothing', async () => {
+  await checkRows([
+    { name: 'a dir with no scripts/ is an empty, green result', run: async () => {
+      assert.deepEqual(await runPluginScriptCases(tmp('worca-cc-pcases-empty-')),
+        { scripts: [], passed: 0, failed: 0, unchecked: 0, stopped: false, problems: [] });
+    } },
+    { name: 'a stop requested before the first case runs nothing', run: async () => {
+      const dir = pluginWithScript('napperTwo', { body: NAP_BODY, cases: [
+        { id: 'one', name: 'one', cwd: { kind: 'scratch' }, inputs: {} },
+      ] });
+      const r = await runPluginScriptCases(dir, { stopRequested: () => true });
+      assert.deepEqual(r, { scripts: [], passed: 0, failed: 0, unchecked: 0, stopped: true, problems: [] });
+    } },
+  ]);
 });

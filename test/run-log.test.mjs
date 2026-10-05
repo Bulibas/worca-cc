@@ -5,6 +5,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRunLogWriter, RUN_LOG_FILE } from '../src/core/run-log.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 function readLines(text) {
   return text.split('\n').filter(Boolean).map((l) => JSON.parse(l));
@@ -29,24 +30,27 @@ test('buffers before bind, then flushes the full ordered stream on close', async
   }
 });
 
-test('push after close is a no-op; second close is safe', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-rlw-'));
-  try {
-    const w = createRunLogWriter({ flushMs: 5 });
-    w.bind(dir);
-    w.push({ source: 'a', level: 'info', text: 'kept', ts: 't' });
-    await w.close();
-    w.push({ source: 'a', level: 'info', text: 'dropped', ts: 't' });
-    await w.close(); // idempotent
-    const lines = readLines(await readFile(join(dir, RUN_LOG_FILE), 'utf8'));
-    assert.deepEqual(lines.map((l) => l.text), ['kept']);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('close() with no bind never throws and writes nothing', async () => {
-  const w = createRunLogWriter();
-  w.push({ source: 'x', level: 'info', text: 'no dir', ts: 't' });
-  await assert.doesNotReject(w.close());
+test('close() is idempotent, a push after close is a no-op, and close() without bind writes nothing', async () => {
+  await checkRows([
+    { name: 'push after close is a no-op; second close is safe', run: async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'worca-cc-rlw-'));
+      try {
+        const w = createRunLogWriter({ flushMs: 5 });
+        w.bind(dir);
+        w.push({ source: 'a', level: 'info', text: 'kept', ts: 't' });
+        await w.close();
+        w.push({ source: 'a', level: 'info', text: 'dropped', ts: 't' });
+        await w.close(); // idempotent
+        const lines = readLines(await readFile(join(dir, RUN_LOG_FILE), 'utf8'));
+        assert.deepEqual(lines.map((l) => l.text), ['kept']);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    } },
+    { name: 'close() with no bind never throws and writes nothing', run: async () => {
+      const w = createRunLogWriter();
+      w.push({ source: 'x', level: 'info', text: 'no dir', ts: 't' });
+      await assert.doesNotReject(w.close());
+    } },
+  ]);
 });

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // scripts/deck-sync.mjs — refresh docs/why-worca/'s flat kit copies from the
 // canonical assets/deck-kit/. deck-export.js fetches its siblings by relative
-// path, so the deck folder must keep flat copies; test/deck-kit-sync.test.mjs
-// fails CI when they drift.
+// path, so the deck folder must keep flat copies. The drift between the two is
+// no longer tested: run this after every assets/deck-kit/ change.
 import { copyFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';

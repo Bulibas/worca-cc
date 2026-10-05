@@ -19,10 +19,11 @@
 // while an element holds pointerId N, a pointer event for N is dispatched to
 // THAT element, and a `click` is dispatched on the nearest common ancestor of
 // the effective pointerdown/pointerup targets (what a browser does). So the
-// last two tests pin the set/release PAIRING and its consequence under a
+// last test's two rows pin the set/release PAIRING and its consequence under a
 // faithful model — the real retargeting stays proven by the CDP script.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { open } from './helpers/composer-shell.mjs';
 
 const palettePath = new URL('../ui/public/graph/palette.mjs', import.meta.url).href;
@@ -133,96 +134,102 @@ test('a foreign pointerup never releases the live gesture\'s capture', async () 
 
 // ---- (b) the palette pill ---------------------------------------------------
 
-test('drag-to-spawn captures on the PILL itself (never the palette or the stage) and leaks no stage capture', async () => {
-  const s = await open();
-  s.c.view.setTransform({ x: 0, y: 0, z: 1 });
-  const L = ledger();
-  stub(L, s.c.view.stage, 'stage');
-  stub(L, s.el.palette, 'palette');
-  const { renderPalette } = await import(palettePath);
-  renderPalette(s.el.palette, { agents: [{ key: 'planner', displayName: 'Plan', domain: 'coding', order: 1, inputs: [], outputs: [] }],
-    placedKinds: [], collapsed: new Set(), doc: s.doc });
-  const pill = stub(L, s.el.palette.querySelector('.ap[data-key="planner"]'), 'pill');
-  const n0 = s.c.template().nodes.length;
+test('palette drag-to-spawn captures on the pill only, releases the same id, and destroy() mid-drag tears it down without spawning', async () => {
+  await checkRows([
+    { name: 'drag-to-spawn captures on the PILL itself (never the palette or the stage) and leaks no stage capture', run: async () => {
+      const s = await open();
+      s.c.view.setTransform({ x: 0, y: 0, z: 1 });
+      const L = ledger();
+      stub(L, s.c.view.stage, 'stage');
+      stub(L, s.el.palette, 'palette');
+      const { renderPalette } = await import(palettePath);
+      renderPalette(s.el.palette, { agents: [{ key: 'planner', displayName: 'Plan', domain: 'coding', order: 1, inputs: [], outputs: [] }],
+        placedKinds: [], collapsed: new Set(), doc: s.doc });
+      const pill = stub(L, s.el.palette.querySelector('.ap[data-key="planner"]'), 'pill');
+      const n0 = s.c.template().nodes.length;
 
-  pill.dispatchEvent(pev(s, 'pointerdown', { pointerId: 3, button: 0, clientX: 100, clientY: 700 }));
-  assert.deepEqual(ops(L), ['set:pill#3'], 'the capture is taken on the pill, with the event id');
-  assert.equal(L.held.get(3), pill);
-  // The move/up listeners live on the DOCUMENT, so the retarget cannot starve
-  // them — route() to the pill and let them bubble, exactly as a browser does.
-  route(L, 3, s.doc).dispatchEvent(pev(s, 'pointermove', { pointerId: 3, clientX: 400, clientY: 300 }));
-  assert.ok(s.doc.querySelector('.gv-drag-ghost'), 'past the 4px threshold the ghost exists');
-  route(L, 3, s.doc).dispatchEvent(pev(s, 'pointerup', { pointerId: 3, clientX: 400, clientY: 300 }));
-  assert.equal(s.c.template().nodes.length, n0 + 1, 'the drop inside the stage spawned a card');
-  assert.equal(s.doc.querySelector('.gv-drag-ghost'), null, 'endPalDrag removed the ghost');
-  assert.equal(L.held.get(3) === s.c.view.stage, false, 'a palette gesture never captures the stage');
-  assert.equal(ops(L).filter((o) => o.startsWith('set:')).length, 1, 'exactly one capture for the whole drag');
-  // endPalDrag() releases the pill's capture explicitly (browsers also release
-  // implicitly after pointerup — the explicit release is what covers destroy()).
-  assert.deepEqual(ops(L), ['set:pill#3', 'release:pill#3'], 'the pill releases the same id it captured');
-  assert.equal(L.calls[1].held, true, 'and the release was legal (the pill really held it)');
-  assert.equal(L.held.size, 0, 'no capture outlives the drag');
-});
-
-test('destroy() mid-palette-drag tears the drag down and still holds no stage capture', async () => {
-  const s = await open();
-  s.c.view.setTransform({ x: 0, y: 0, z: 1 });
-  const L = ledger();
-  stub(L, s.c.view.stage, 'stage');
-  const { renderPalette } = await import(palettePath);
-  renderPalette(s.el.palette, { agents: [{ key: 'planner', displayName: 'Plan', domain: 'coding', order: 1, inputs: [], outputs: [] }],
-    placedKinds: [], collapsed: new Set(), doc: s.doc });
-  const pill = stub(L, s.el.palette.querySelector('.ap[data-key="planner"]'), 'pill');
-  pill.dispatchEvent(pev(s, 'pointerdown', { pointerId: 9, button: 0, clientX: 100, clientY: 700 }));
-  s.doc.dispatchEvent(pev(s, 'pointermove', { pointerId: 9, clientX: 400, clientY: 300 }));
-  assert.ok(s.doc.querySelector('.gv-drag-ghost'));
-  const n0 = s.c.template().nodes.length;
-  s.c.destroy();
-  assert.equal(s.doc.querySelector('.gv-drag-ghost'), null, 'destroy() runs endPalDrag');
-  assert.deepEqual(ops(L), ['set:pill#9', 'release:pill#9'], 'destroy() mid-drag releases the pill capture');
-  s.doc.dispatchEvent(pev(s, 'pointerup', { pointerId: 9, clientX: 400, clientY: 300 }));
-  assert.equal(s.c.template().nodes.length, n0, 'the orphaned pointerup spawns nothing');
-  assert.equal(L.held.get(9) === s.c.view.stage, false);
+      pill.dispatchEvent(pev(s, 'pointerdown', { pointerId: 3, button: 0, clientX: 100, clientY: 700 }));
+      assert.deepEqual(ops(L), ['set:pill#3'], 'the capture is taken on the pill, with the event id');
+      assert.equal(L.held.get(3), pill);
+      // The move/up listeners live on the DOCUMENT, so the retarget cannot starve
+      // them — route() to the pill and let them bubble, exactly as a browser does.
+      route(L, 3, s.doc).dispatchEvent(pev(s, 'pointermove', { pointerId: 3, clientX: 400, clientY: 300 }));
+      assert.ok(s.doc.querySelector('.gv-drag-ghost'), 'past the 4px threshold the ghost exists');
+      route(L, 3, s.doc).dispatchEvent(pev(s, 'pointerup', { pointerId: 3, clientX: 400, clientY: 300 }));
+      assert.equal(s.c.template().nodes.length, n0 + 1, 'the drop inside the stage spawned a card');
+      assert.equal(s.doc.querySelector('.gv-drag-ghost'), null, 'endPalDrag removed the ghost');
+      assert.equal(L.held.get(3) === s.c.view.stage, false, 'a palette gesture never captures the stage');
+      assert.equal(ops(L).filter((o) => o.startsWith('set:')).length, 1, 'exactly one capture for the whole drag');
+      // endPalDrag() releases the pill's capture explicitly (browsers also release
+      // implicitly after pointerup — the explicit release is what covers destroy()).
+      assert.deepEqual(ops(L), ['set:pill#3', 'release:pill#3'], 'the pill releases the same id it captured');
+      assert.equal(L.calls[1].held, true, 'and the release was legal (the pill really held it)');
+      assert.equal(L.held.size, 0, 'no capture outlives the drag');
+    } },
+    { name: 'destroy() mid-palette-drag tears the drag down and still holds no stage capture', run: async () => {
+      const s = await open();
+      s.c.view.setTransform({ x: 0, y: 0, z: 1 });
+      const L = ledger();
+      stub(L, s.c.view.stage, 'stage');
+      const { renderPalette } = await import(palettePath);
+      renderPalette(s.el.palette, { agents: [{ key: 'planner', displayName: 'Plan', domain: 'coding', order: 1, inputs: [], outputs: [] }],
+        placedKinds: [], collapsed: new Set(), doc: s.doc });
+      const pill = stub(L, s.el.palette.querySelector('.ap[data-key="planner"]'), 'pill');
+      pill.dispatchEvent(pev(s, 'pointerdown', { pointerId: 9, button: 0, clientX: 100, clientY: 700 }));
+      s.doc.dispatchEvent(pev(s, 'pointermove', { pointerId: 9, clientX: 400, clientY: 300 }));
+      assert.ok(s.doc.querySelector('.gv-drag-ghost'));
+      const n0 = s.c.template().nodes.length;
+      s.c.destroy();
+      assert.equal(s.doc.querySelector('.gv-drag-ghost'), null, 'destroy() runs endPalDrag');
+      assert.deepEqual(ops(L), ['set:pill#9', 'release:pill#9'], 'destroy() mid-drag releases the pill capture');
+      s.doc.dispatchEvent(pev(s, 'pointerup', { pointerId: 9, clientX: 400, clientY: 300 }));
+      assert.equal(s.c.template().nodes.length, n0, 'the orphaned pointerup spawns nothing');
+      assert.equal(L.held.get(9) === s.c.view.stage, false);
+    } },
+  ]);
 });
 
 // ---- (c)/(d) the consequence: header buttons ---------------------------------
 
-test('after a canvas drag the stage holds NO capture and a header click reaches its handler', async () => {
-  const s = await open();
-  s.c.view.setTransform({ x: 0, y: 0, z: 1 });
-  const L = ledger();
-  stub(L, s.c.view.stage, 'stage');
-  let clicks = 0;
-  s.el.autolayout.addEventListener('click', () => { clicks += 1; });
-  const before = s.c.template().nodes.map((n) => `${n.x},${n.y}`).join('|');
+test('after a canvas drag no capture remains: a header click reaches its handler, a press released over a header never fires it', async () => {
+  await checkRows([
+    { name: 'after a canvas drag the stage holds NO capture and a header click reaches its handler', run: async () => {
+      const s = await open();
+      s.c.view.setTransform({ x: 0, y: 0, z: 1 });
+      const L = ledger();
+      stub(L, s.c.view.stage, 'stage');
+      let clicks = 0;
+      s.el.autolayout.addEventListener('click', () => { clicks += 1; });
+      const before = s.c.template().nodes.map((n) => `${n.x},${n.y}`).join('|');
 
-  down(s, L, 120, 500); move(s, L, 180, 470); s.flush(); up(s, L, 180, 470); s.flush();
-  assert.equal(s.c.gesture(), null);
-  assert.equal(L.held.size, 0, 'the drag released its capture — the retarget window is closed');
+      down(s, L, 120, 500); move(s, L, 180, 470); s.flush(); up(s, L, 180, 470); s.flush();
+      assert.equal(s.c.gesture(), null);
+      assert.equal(L.held.size, 0, 'the drag released its capture — the retarget window is closed');
 
-  clickEl(s, L, s.el.autolayout, { pointerId: 1, clientX: 900, clientY: 12 });
-  assert.equal(clicks, 1, 'the header button received a real click after the drag');
-  assert.notEqual(s.c.template().nodes.map((n) => `${n.x},${n.y}`).join('|'), before,
-    'and its handler ran: auto-layout moved the cards');
-});
+      clickEl(s, L, s.el.autolayout, { pointerId: 1, clientX: 900, clientY: 12 });
+      assert.equal(clicks, 1, 'the header button received a real click after the drag');
+      assert.notEqual(s.c.template().nodes.map((n) => `${n.x},${n.y}`).join('|'), before,
+        'and its handler ran: auto-layout moved the cards');
+    } },
+    { name: 'a press on the canvas released over a header button never fires that button', run: async () => {
+      const s = await open();
+      s.c.view.setTransform({ x: 0, y: 0, z: 1 });
+      const L = ledger();
+      stub(L, s.c.view.stage, 'stage');
+      let clicks = 0;
+      s.el.autolayout.addEventListener('click', () => { clicks += 1; });
 
-test('a press on the canvas released over a header button never fires that button', async () => {
-  const s = await open();
-  s.c.view.setTransform({ x: 0, y: 0, z: 1 });
-  const L = ledger();
-  stub(L, s.c.view.stage, 'stage');
-  let clicks = 0;
-  s.el.autolayout.addEventListener('click', () => { clicks += 1; });
-
-  down(s, L, 120, 500);                                  // press on empty canvas
-  assert.equal(s.c.gesture().type, 'pan');
-  // release OVER the button: the capture retargets the pointerup to the stage,
-  // so the gesture closes and the button sees no down/up pair at all.
-  const t = route(L, 1, s.el.autolayout);
-  assert.equal(t, s.c.view.stage, 'the captured pointer is retargeted to the stage');
-  t.dispatchEvent(pev(s, 'pointerup', { pointerId: 1, button: 0, clientX: 900, clientY: 12 }));
-  s.flush();
-  assert.equal(clicks, 0, 'the cross-release fired no button action');
-  assert.equal(s.c.gesture(), null, 'and the gesture still ended');
-  assert.equal(L.held.size, 0, 'the capture was released on the way out');
+      down(s, L, 120, 500);                                  // press on empty canvas
+      assert.equal(s.c.gesture().type, 'pan');
+      // release OVER the button: the capture retargets the pointerup to the stage,
+      // so the gesture closes and the button sees no down/up pair at all.
+      const t = route(L, 1, s.el.autolayout);
+      assert.equal(t, s.c.view.stage, 'the captured pointer is retargeted to the stage');
+      t.dispatchEvent(pev(s, 'pointerup', { pointerId: 1, button: 0, clientX: 900, clientY: 12 }));
+      s.flush();
+      assert.equal(clicks, 0, 'the cross-release fired no button action');
+      assert.equal(s.c.gesture(), null, 'and the gesture still ended');
+      assert.equal(L.held.size, 0, 'the capture was released on the way out');
+    } },
+  ]);
 });

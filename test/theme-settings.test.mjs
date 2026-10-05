@@ -7,8 +7,9 @@ import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  settingsFile, theme, setTheme, assertThemeInput, THEME_MODES, DEFAULT_THEME, SETTINGS_POST_KEYS,
+  settingsFile, theme, setTheme, assertThemeInput, SETTINGS_POST_KEYS,
 } from '../src/core/settings.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let home, prevHome, prevProfile;
 before(async () => {
@@ -26,13 +27,8 @@ after(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-test('THEME_MODES and the default', () => {
-  assert.deepEqual([...THEME_MODES], ['system', 'light', 'dark']);
-  assert.equal(DEFAULT_THEME, 'system');
-  assert.equal(theme(), 'system', 'absent ⇒ default');
-});
-
 test('a stored valid mode is returned; an invalid one warns and yields the default', async () => {
+  assert.equal(theme(), 'system', 'absent ⇒ default');
   await writeFile(settingsFile(), JSON.stringify({ theme: 'dark' }), 'utf8');
   assert.equal(theme(), 'dark');
   await writeFile(settingsFile(), JSON.stringify({ theme: 'blue' }), 'utf8');
@@ -48,21 +44,24 @@ test('assertThemeInput: the three modes and a clear pass; anything else throws',
   for (const v of ['blue', 'Dark', 1, true, {}, ['dark']]) assert.throws(() => assertThemeInput(v), /theme must be system, light or dark/, String(v));
 });
 
-test('setTheme persists a non-default mode and deletes the key for the default or a clear', async () => {
-  assert.deepEqual(await setTheme('dark'), { theme: 'dark' });
-  assert.equal(JSON.parse(await readFile(settingsFile(), 'utf8')).theme, 'dark');
-  assert.deepEqual(await setTheme('system'), { theme: 'system' });
-  assert.equal('theme' in JSON.parse(await readFile(settingsFile(), 'utf8')), false, 'default ⇒ key deleted');
-  await setTheme('light');
-  await setTheme('');
-  assert.equal('theme' in JSON.parse(await readFile(settingsFile(), 'utf8')), false, 'clear ⇒ key deleted');
-  await assert.rejects(() => setTheme('blue'), /theme must be system, light or dark/);
-});
-
-test('setTheme leaves every other key alone', async () => {
-  await writeFile(settingsFile(), JSON.stringify({ hideBuiltinModels: true, askMaxTurns: 7 }), 'utf8');
-  await setTheme('dark');
-  assert.deepEqual(JSON.parse(await readFile(settingsFile(), 'utf8')), { hideBuiltinModels: true, askMaxTurns: 7, theme: 'dark' });
+test('setTheme persists a non-default mode, deletes the key for the default or a clear, and leaves every other key alone', async () => {
+  await checkRows([
+    { name: 'setTheme persists a non-default mode and deletes the key for the default or a clear', run: async () => {
+      assert.deepEqual(await setTheme('dark'), { theme: 'dark' });
+      assert.equal(JSON.parse(await readFile(settingsFile(), 'utf8')).theme, 'dark');
+      assert.deepEqual(await setTheme('system'), { theme: 'system' });
+      assert.equal('theme' in JSON.parse(await readFile(settingsFile(), 'utf8')), false, 'default ⇒ key deleted');
+      await setTheme('light');
+      await setTheme('');
+      assert.equal('theme' in JSON.parse(await readFile(settingsFile(), 'utf8')), false, 'clear ⇒ key deleted');
+      await assert.rejects(() => setTheme('blue'), /theme must be system, light or dark/);
+    } },
+    { name: 'setTheme leaves every other key alone', run: async () => {
+      await writeFile(settingsFile(), JSON.stringify({ hideBuiltinModels: true, askMaxTurns: 7 }), 'utf8');
+      await setTheme('dark');
+      assert.deepEqual(JSON.parse(await readFile(settingsFile(), 'utf8')), { hideBuiltinModels: true, askMaxTurns: 7, theme: 'dark' });
+    } },
+  ]);
 });
 
 test('the POST key list names theme (a theme-only POST must not clear root)', () => {

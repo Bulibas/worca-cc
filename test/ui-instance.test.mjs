@@ -10,6 +10,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import {
   DEFAULT_UI_PORT, UI_HEALTH_NAME, uiInstanceFile, writeUiInstance, readUiInstance, removeUiInstance,
   probeUi, stopUi, uiUrl, urlHost, waitForUiState, newUiToken,
@@ -67,58 +68,60 @@ test('instance file: write is 0600 + atomic, read normalises, remove honours ifP
   removeUiInstance();
 });
 
-test('probeUi: free port -> free', async () => {
-  const port = await freePort();
-  assert.deepEqual(await probeUi({ port }), { state: 'free' });
-});
-
-test('probeUi: a Worca /api/health -> worca with its info', async () => {
-  const { port, close } = await serve((req, res) => {
-    if (req.url === '/api/health') return json(res, 200, { name: UI_HEALTH_NAME, version: '9.9.9', pid: 77 });
-    json(res, 404, { error: 'nope' });
-  });
-  try {
-    const r = await probeUi({ port });
-    assert.equal(r.state, 'worca');
-    assert.equal(r.info.pid, 77);
-    assert.equal(r.info.version, '9.9.9');
-  } finally { await close(); }
-});
-
-test('probeUi: a different program (HTML, other JSON name, 500) -> busy', async () => {
-  const cases = [
-    (_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html>hi</html>'); },
-    (_req, res) => json(res, 200, { name: 'something-else' }),
-    (_req, res) => json(res, 500, { error: 'boom' }),
-  ];
-  for (const handler of cases) {
-    const { port, close } = await serve(handler);
-    try { assert.deepEqual(await probeUi({ port }), { state: 'busy' }); } finally { await close(); }
-  }
-});
-
-test('probeUi: a hang is busy, not free (timeout)', async () => {
-  const { port, close, srv } = await serve(() => { /* never answers */ });
-  srv.on('connection', (s) => s.setTimeout(0));
-  try {
-    const r = await probeUi({ port, timeoutMs: 200 });
-    assert.equal(r.state, 'busy');
-  } finally { srv.closeAllConnections?.(); await close(); }
-});
-
-test('probeUi: an older Worca UI (no /api/health, but /api/settings) -> worca + legacy', async () => {
-  const { port, close } = await serve((req, res) => {
-    if (req.url === '/api/settings') return json(res, 200, { projectsRootDefault: '/home/x', askMaxTurns: 40, chat: {} });
-    json(res, 404, { error: 'not found' });
-  });
-  try {
-    const r = await probeUi({ port });
-    assert.equal(r.state, 'worca');
-    assert.equal(r.info.legacy, true);
-    const s = await stopUi({ port });
-    assert.equal(s.status, 'failed');
-    assert.match(s.reason, /older Worca UI/);
-  } finally { await close(); }
+// Each row owns its own tiny server and closes it in its own finally; checkRows runs
+// the rows one after another, so a failing row never leaves a server for the next.
+test('probeUi classifies a port: free, worca (with info), busy (other program / 500 / hang), legacy worca via /api/settings', async () => {
+  await checkRows([
+    { name: 'probeUi: free port -> free', run: async () => {
+      const port = await freePort();
+      assert.deepEqual(await probeUi({ port }), { state: 'free' });
+    } },
+    { name: 'probeUi: a Worca /api/health -> worca with its info', run: async () => {
+      const { port, close } = await serve((req, res) => {
+        if (req.url === '/api/health') return json(res, 200, { name: UI_HEALTH_NAME, version: '9.9.9', pid: 77 });
+        json(res, 404, { error: 'nope' });
+      });
+      try {
+        const r = await probeUi({ port });
+        assert.equal(r.state, 'worca');
+        assert.equal(r.info.pid, 77);
+        assert.equal(r.info.version, '9.9.9');
+      } finally { await close(); }
+    } },
+    { name: 'probeUi: a different program (HTML, other JSON name, 500) -> busy', run: async () => {
+      const cases = [
+        (_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html>hi</html>'); },
+        (_req, res) => json(res, 200, { name: 'something-else' }),
+        (_req, res) => json(res, 500, { error: 'boom' }),
+      ];
+      for (const handler of cases) {
+        const { port, close } = await serve(handler);
+        try { assert.deepEqual(await probeUi({ port }), { state: 'busy' }); } finally { await close(); }
+      }
+    } },
+    { name: 'probeUi: a hang is busy, not free (timeout)', run: async () => {
+      const { port, close, srv } = await serve(() => { /* never answers */ });
+      srv.on('connection', (s) => s.setTimeout(0));
+      try {
+        const r = await probeUi({ port, timeoutMs: 200 });
+        assert.equal(r.state, 'busy');
+      } finally { srv.closeAllConnections?.(); await close(); }
+    } },
+    { name: 'probeUi: an older Worca UI (no /api/health, but /api/settings) -> worca + legacy', run: async () => {
+      const { port, close } = await serve((req, res) => {
+        if (req.url === '/api/settings') return json(res, 200, { projectsRootDefault: '/home/x', askMaxTurns: 40, chat: {} });
+        json(res, 404, { error: 'not found' });
+      });
+      try {
+        const r = await probeUi({ port });
+        assert.equal(r.state, 'worca');
+        assert.equal(r.info.legacy, true);
+        const s = await stopUi({ port });
+        assert.equal(s.status, 'failed');
+        assert.match(s.reason, /older Worca UI/);
+      } finally { await close(); }
+    } },
+  ]);
 });
 
 test('stopUi: free port -> not-running (idempotent) and clears a stale instance file', async () => {

@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeWorkspace, runDetector, keysOf, assertEvidence } from './helpers/wsmap-fixtures.mjs';
 import detector from '../src/core/workspace-map/detectors/pkg-cargo.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const ROOT = `[workspace]
 members = ["crates/*"]
@@ -47,34 +48,34 @@ before(async () => {
 after(() => ws.cleanup());
 const member = (k) => ws.members.find((m) => m.key === k);
 
-test('pkg-cargo: a crate provides its package name (cargo lower-cased by normKey); the virtual root provides nothing', async () => {
+test('pkg-cargo (member billing): provides, consumes every table, path deps target the owning member', async () => {
   const r = await runDetector(detector, member('billing'), ws.members);
-  assert.deepEqual(keysOf(r, 'pkg', 'provides'), ['cargo:Billing-Api']);
-  const p = r.facts.find((f) => f.dir === 'provides');
-  assert.deepEqual([p.file, p.line, p.norm], ['crates/api/Cargo.toml', 2, 'pkg:cargo:billing-api']);
-  assert.deepEqual(r.aliases.map((a) => a.value), ['Billing-Api']);
-  assert.equal(r.role.text, 'Billing HTTP API');
-  assert.deepEqual(r.stack, ['rust']);
-  assertEvidence(member('billing'), r);
-});
-
-test('pkg-cargo: consumes all dependency tables, renamed packages, workspace deps', async () => {
-  const r = await runDetector(detector, member('billing'), ws.members);
-  assert.deepEqual(keysOf(r, 'pkg', 'consumes'), [
-    'cargo:acme-money', 'cargo:insta', 'cargo:ledger', 'cargo:nix', 'cargo:serde', 'cargo:shared', 'cargo:tokio',
+  await checkRows([
+    { name: 'pkg-cargo: a crate provides its package name (cargo lower-cased by normKey); the virtual root provides nothing', run: () => {
+      assert.deepEqual(keysOf(r, 'pkg', 'provides'), ['cargo:Billing-Api']);
+      const p = r.facts.find((f) => f.dir === 'provides');
+      assert.deepEqual([p.file, p.line, p.norm], ['crates/api/Cargo.toml', 2, 'pkg:cargo:billing-api']);
+      assert.deepEqual(r.aliases.map((a) => a.value), ['Billing-Api']);
+      assert.equal(r.role.text, 'Billing HTTP API');
+      assert.deepEqual(r.stack, ['rust']);
+      assertEvidence(member('billing'), r);
+    } },
+    { name: 'pkg-cargo: consumes all dependency tables, renamed packages, workspace deps', run: () => {
+      assert.deepEqual(keysOf(r, 'pkg', 'consumes'), [
+        'cargo:acme-money', 'cargo:insta', 'cargo:ledger', 'cargo:nix', 'cargo:serde', 'cargo:shared', 'cargo:tokio',
+      ]);
+      assert.equal(r.facts.find((f) => f.key === 'cargo:nix').detail, 'target cfg(unix)');
+      assert.equal(r.facts.find((f) => f.key === 'cargo:acme-money').line, 8);
+    } },
+    { name: 'pkg-cargo: path dependencies (inline and [dependencies.x] table) target the owning member; a path inside the member is not a consume', run: () => {
+      const ledger = r.facts.find((f) => f.key === 'cargo:ledger');
+      const shared = r.facts.find((f) => f.key === 'cargo:shared');
+      assert.deepEqual([ledger.target, ledger.line], ['ledger', 9]);
+      assert.deepEqual([shared.target, shared.line], ['shared', 11]);
+      assert.equal(r.facts.find((f) => f.key === 'cargo:tokio').target, undefined);
+      assert.ok(!r.facts.some((f) => f.key === 'cargo:util'), 'a path inside the member (a sibling crate) is not a consume');
+    } },
   ]);
-  assert.equal(r.facts.find((f) => f.key === 'cargo:nix').detail, 'target cfg(unix)');
-  assert.equal(r.facts.find((f) => f.key === 'cargo:acme-money').line, 8);
-});
-
-test('pkg-cargo: path dependencies (inline and [dependencies.x] table) target the owning member; a path inside the member is not a consume', async () => {
-  const r = await runDetector(detector, member('billing'), ws.members);
-  const ledger = r.facts.find((f) => f.key === 'cargo:ledger');
-  const shared = r.facts.find((f) => f.key === 'cargo:shared');
-  assert.deepEqual([ledger.target, ledger.line], ['ledger', 9]);
-  assert.deepEqual([shared.target, shared.line], ['shared', 11]);
-  assert.equal(r.facts.find((f) => f.key === 'cargo:tokio').target, undefined);
-  assert.ok(!r.facts.some((f) => f.key === 'cargo:util'), 'a path inside the member (a sibling crate) is not a consume');
 });
 
 test('pkg-cargo: a string where a dependency table belongs is ignored; a fixture crate sets no role and no alias', async () => {

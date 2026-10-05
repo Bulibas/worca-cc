@@ -7,6 +7,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import {
   setWireCycles, setFeedbackCycles, setNodeModel, readRunConfig, resolveRunConfig, resetWorkflowConfig,
 } from '../src/core/config.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 const projectDir = mkdtempSync(join(tmpdir(), 'worca-cc-cfg-'));
@@ -21,19 +22,26 @@ test('setWireCycles round-trips and coerces to >= 1', async () => {
   assert.equal((await resolveRunConfig(projectDir, 'wf_g')).wires.w5.maxCycles, 6, 'upsert, not duplicate');
 });
 
-test('GET /api/config shape: nodes + feedbacks (v1) + wires (v2) coexist', async () => {
-  // `setNodeModel` VALIDATES against listModels() (`config.mjs:617-629`; its
-  // per-role twin `setStep` is `:400-414`) and
-  // EFFORTS = ['medium','high','xhigh','max'] — an invented short id throws
-  // `unknown model "…"`. Use catalog ids everywhere a SETTER runs.
-  await setNodeModel(projectDir, 'wf_g', 'n_plan', { model: 'claude-sonnet-5' });
-  await setFeedbackCycles(projectDir, 'wf_v1', 'fb_0', 2);
-  const cfg = await readRunConfig(projectDir);
-  assert.deepEqual(cfg.workflows.wf_g.nodes.n_plan, { model: 'claude-sonnet-5' });
-  assert.deepEqual(cfg.workflows.wf_g.wires.w5, { maxCycles: 6 });
-  assert.deepEqual(cfg.workflows.wf_g.feedbacks, {});
-  assert.deepEqual(cfg.workflows.wf_v1.feedbacks.fb_0, { maxCycles: 2 });
-  assert.deepEqual(cfg.workflows.wf_v1.wires, {});
+test('nodes + feedbacks (v1) + wires (v2) coexist in readRunConfig; an unconfigured workflow resolves to empty maps', async () => {
+  await checkRows([
+    { name: 'GET /api/config shape: nodes + feedbacks (v1) + wires (v2) coexist', run: async () => {
+      // `setNodeModel` VALIDATES against listModels() (`config.mjs:617-629`; its
+      // per-role twin `setStep` is `:400-414`) and
+      // EFFORTS = ['medium','high','xhigh','max'] — an invented short id throws
+      // `unknown model "…"`. Use catalog ids everywhere a SETTER runs.
+      await setNodeModel(projectDir, 'wf_g', 'n_plan', { model: 'claude-sonnet-5' });
+      await setFeedbackCycles(projectDir, 'wf_v1', 'fb_0', 2);
+      const cfg = await readRunConfig(projectDir);
+      assert.deepEqual(cfg.workflows.wf_g.nodes.n_plan, { model: 'claude-sonnet-5' });
+      assert.deepEqual(cfg.workflows.wf_g.wires.w5, { maxCycles: 6 });
+      assert.deepEqual(cfg.workflows.wf_g.feedbacks, {});
+      assert.deepEqual(cfg.workflows.wf_v1.feedbacks.fb_0, { maxCycles: 2 });
+      assert.deepEqual(cfg.workflows.wf_v1.wires, {});
+    } },
+    { name: 'an unconfigured workflow resolves to empty maps', run: async () => {
+      assert.deepEqual(await resolveRunConfig(projectDir, 'wf_nothing'), { nodes: {}, wires: {}, feedbacks: {} });
+    } },
+  ]);
 });
 
 test('resetWorkflowConfig clears nodes AND wires for that workflow only', async () => {
@@ -42,10 +50,6 @@ test('resetWorkflowConfig clears nodes AND wires for that workflow only', async 
   const cfg = await readRunConfig(projectDir);
   assert.equal(cfg.workflows.wf_g, undefined);
   assert.deepEqual(cfg.workflows.wf_other.wires.w1, { maxCycles: 5 });
-});
-
-test('an unconfigured workflow resolves to empty maps', async () => {
-  assert.deepEqual(await resolveRunConfig(projectDir, 'wf_nothing'), { nodes: {}, wires: {}, feedbacks: {} });
 });
 
 // MAJ-1: readWorkflowsMap's `ensure` allocated on a PLAIN object, so a stored

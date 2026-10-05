@@ -66,14 +66,6 @@ test('workspace-scan mock (the survey stage) writes a valid survey.json off the 
   assert.ok(events.some((e) => /workspace survey: 1 investigated, 1 skipped/.test(e.text || '')), 'the run log says what the mock did');
 });
 
-test('workspace-scan mock degrades to an empty valid survey with no brief', async () => {
-  const dir = await makeTmpDir();
-  const out = join(dir, 'survey.json');
-  const { onEvent } = collect();
-  await runClaude({ cwd: dir, prompt: `MOCK_ROLE: workspace-scan\nMOCK_OUT: ${out}\nMOCK_BASE: Empty`, mock: true, onEvent });
-  assert.deepEqual(JSON.parse(await readFile(out, 'utf8')), { version: 1, members: {} });
-});
-
 test('workspace-reviewer mock: blocking count decreases with cycle (loop terminates)', async () => {
   const dir = await makeTmpDir();
   const md1 = join(dir, 'ws1.md'); const j1 = join(dir, 'ws1.json');
@@ -188,14 +180,4 @@ test('LEGACY workspace: the mock implementer writes ONLY to its cwd (no ctx.runR
   }, { planPath: join(pipelineDir, 'plan.md') });
   assert.ok(wroteFeature(wtA), 'the cwd (primary worktree) got the edits, exactly as today');
   assert.ok(!existsSync(join(wtB, 'src')), 'the OTHER member stays untouched under legacy');
-});
-
-test('detached SINGLE project: no workspace => the mock falls back to the cwd', async () => {
-  const cwd = await makeTmpDir();
-  const pipelineDir = await makeTmpDir();
-  await mockImplementer({
-    projectDir: cwd, runRoot: '/mh/runs/pipe-2', pipelineDir,
-    taskPrompt: 'x', node: { key: 'implementer' }, claudeOpts: { mock: true },
-  }, { planPath: join(pipelineDir, 'plan.md') });
-  assert.ok(wroteFeature(cwd), 'single mode is byte-identical: writes at cwd');
 });

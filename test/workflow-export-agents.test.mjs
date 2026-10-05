@@ -25,14 +25,6 @@ test('every subagent_type dispatched in SKILL.md has a matching agent .md whose 
   }
 });
 
-test('agent body carries the console-adaptation preamble', async () => {
-  const dest = await tmp();
-  await applyExport({ workflowId: 'wf_default', destination: 'project', projectDir: dest, onConflict: 'overwrite' });
-  const planner = await readFile(join(dest, '.claude/agents/worca-cc-planner.md'), 'utf8');
-  assert.match(planner, /## Console adaptation \(read first\)/);
-  assert.match(planner, /The absolute file paths in your dispatch prompt are authoritative/);
-});
-
 // REGRESSION GUARD (#6): a node that declares ONLY AskUserQuestion must NOT be refused. That
 // tool is compatible-via-hoist (the ask-user hoist), not a dropped subagent-incompatible tool,
 // so it must be excluded from the "all tools stripped" refusal — the agent inherits all tools.

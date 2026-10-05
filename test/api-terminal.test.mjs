@@ -5,7 +5,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { mkdtemp, rm, realpath } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -16,6 +16,7 @@ import { insertSession, startBlock, listBranchWorktrees } from '../src/core/term
 import { branchCheckoutName } from '../src/core/terminal/worktrees.mjs';
 import { branchWorktreeRoot } from '../src/core/terminal/paths.mjs';
 import { worcaHome } from '../src/core/projects.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 const ENV_KEYS = ['WORCA_HOME', 'HOME', 'USERPROFILE', 'WORCA_TERMINAL_PTY', 'SHELL'];
 const prev = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -23,12 +24,9 @@ const created = [];
 const BASH = spawnSync('/bin/sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).status === 0;
 let homeDir, repo, key, srv, port, base, wsBase, wt;
 
-async function freshRepo(prefix) {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), prefix)));
+function freshRepo(prefix) {
+  const dir = realpathSync(templateRepo('apiterm', { branch: 'main', user: true, prefix }));
   created.push(dir);
-  const git = (...a) => spawnSync('git', a, { cwd: dir, encoding: 'utf8' });
-  git('init', '-q', '-b', 'main'); git('config', 'user.email', 't@t'); git('config', 'user.name', 't');
-  git('commit', '-q', '--allow-empty', '-m', 'init');
   return dir;
 }
 const getJson = async (p) => (await fetch(`${base}${p}`)).json();

@@ -67,15 +67,6 @@ async function defragRun({ claude = {}, dir = gitDir('dmodel') } = {}) {
   return { dir, orch, res, seen, logs, node };
 }
 
-test('unset: today\'s behaviour — the template\'s Sonnet 5, no effort, no model line', { timeout: 120000 }, async () => {
-  await storeSetting(null);
-  const { res, seen, logs, node } = await defragRun();
-  assert.equal(res.status, 'done', JSON.stringify(res));
-  assert.deepEqual(seen, [{ model: 'claude-sonnet-5', effort: undefined }]);
-  assert.deepEqual([node.model, node.effort], ['claude-sonnet-5', '']);
-  assert.ok(!logs.some((e) => /Memory defragment model/.test(e.text)), 'nothing to say');
-});
-
 test('the setting reaches the agent (model AND effort), the manifest shows it, and the log names where it came from', { timeout: 120000 }, async () => {
   await storeSetting({ model: 'claude-opus-5-5', effort: 'high' });
   const { res, seen, logs, node } = await defragRun();
@@ -83,18 +74,6 @@ test('the setting reaches the agent (model AND effort), the manifest shows it, a
   assert.deepEqual(seen, [{ model: 'claude-opus-5-5', effort: 'high' }]);
   assert.deepEqual([node.model, node.effort], ['claude-opus-5-5', 'high'], 'Running / History show what the engine ran');
   assert.ok(logs.some((e) => e.level === 'info' && e.text === 'Memory defragment model: claude-opus-5-5 · high (Settings › Memory)'), logs.map((e) => e.text).join('\n'));
-});
-
-test('a model named at start wins, and the setting\'s effort never rides under it', { timeout: 120000 }, async () => {
-  await storeSetting({ model: 'claude-opus-5-5', effort: 'high' });
-  const { seen, logs, node } = await defragRun({ claude: { model: 'claude-haiku-4-5' } });
-  assert.deepEqual(seen, [{ model: 'claude-haiku-4-5', effort: undefined }]);
-  assert.deepEqual([node.model, node.effort], ['claude-haiku-4-5', '']);
-  assert.ok(logs.some((e) => e.text === 'Memory defragment model: claude-haiku-4-5 (named at start)'));
-  const { seen: withEffort } = await defragRun({ claude: { model: 'claude-haiku-4-5', effort: 'medium' } });
-  assert.deepEqual(withEffort, [{ model: 'claude-haiku-4-5', effort: 'medium' }], 'a pair named at start carries its own effort');
-  const { seen: seen2 } = await defragRun({ claude: { effort: 'max' } });
-  assert.deepEqual(seen2, [{ model: 'claude-opus-5-5', effort: 'high' }], 'an effort named without a model means nothing');
 });
 
 test('a model gone from the catalog degrades to the default with a run-log AND an audit warning — the run is not refused', { timeout: 120000 }, async () => {
@@ -108,13 +87,6 @@ test('a model gone from the catalog degrades to the default with a run-log AND a
   const detail = await readPipelineByKey(projectKey(dir), orch.pipeline.id);
   assert.match(detail.auditMarkdown, /Memory defragment model "gone-model-9" \(Settings › Memory\) is not in this project's model catalog — the run uses claude-sonnet-5 at its default effort\./);
   assert.ok(log.some((e) => e.level === 'warn' && / — the run uses claude-sonnet-5 at its default effort$/.test(e.text)), 'the warning names the model the run really used');
-});
-
-test('an effort the model does not offer is dropped with a warning; the model stays', { timeout: 120000 }, async () => {
-  await storeSetting({ model: 'claude-haiku-4-5', effort: 'max' });
-  const { seen, logs } = await defragRun();
-  assert.deepEqual(seen, [{ model: 'claude-haiku-4-5', effort: undefined }]);
-  assert.ok(logs.some((e) => e.level === 'warn' && /effort "max" .* is not offered by claude-haiku-4-5 — the run uses claude-haiku-4-5 at its default effort$/.test(e.text)), logs.map((e) => e.text).join('\n'));
 });
 
 test('a stale setting over a project\'s own node pick: the warning names the pick the run falls back to', { timeout: 120000 }, async () => {

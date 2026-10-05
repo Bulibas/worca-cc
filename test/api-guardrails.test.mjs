@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Outer isolation that outlives the per-suite before/after (async orchestrator
 // writes after /api/run must land in temp, not ~) — the api-workflows pattern.
@@ -138,59 +139,58 @@ test('PUT /api/guardrails/:id with {settings: null} keeps the stored settings (n
   assert.deepEqual(set.settings.deny, ['Bash(curl:*)', 'Bash(nc:*)'], 'deny list kept');
 });
 
-test('DELETE /api/guardrails/:id: pinned by a paused run -> 409 {error, references}; unpinned -> 200 {ok}', async () => {
-  // Seed the pin directly: the server and this test share the process-wide DB
-  // singleton (same WORCA_HOME), so a raw pipelines row is visible to the route.
-  const { getDb } = await import('../src/core/db.mjs');
-  getDb().prepare(
-    "INSERT INTO pipelines (id, project_key, status, resume_point) VALUES ('gr-pin-1', 'k1', 'paused', ?)"
-  ).run(JSON.stringify({ version: 1, guardrailsId: 'gr_org-policy' }));
-  const blocked = await fetch(`${base}/api/guardrails/gr_org-policy`, { method: 'DELETE' });
-  assert.equal(blocked.status, 409);
-  const body = await blocked.json();
-  assert.match(body.error, /still referenced/);
-  assert.deepEqual(body.references, [{ id: 'gr_org-policy', referencedBy: ['pipeline gr-pin-1'] }]);
-  // The pinned run finishes (resume point nulled): the delete goes through.
-  getDb().prepare("UPDATE pipelines SET resume_point = NULL, status = 'done' WHERE id = 'gr-pin-1'").run();
-  const ok = await fetch(`${base}/api/guardrails/gr_org-policy`, { method: 'DELETE' });
-  assert.equal(ok.status, 200);
-  assert.deepEqual(await ok.json(), { ok: true });
+test('DELETE /api/guardrails/:id: built-in 400, unknown 404, pinned by a paused run 409 {error, references}, unpinned 200 {ok}', async () => {
+  await checkRows([
+    { name: 'DELETE /api/guardrails/:id: built-in -> 400, unknown -> 404', run: async () => {
+      assert.equal((await fetch(`${base}/api/guardrails/secure`, { method: 'DELETE' })).status, 400);
+      assert.equal((await fetch(`${base}/api/guardrails/gr_missing`, { method: 'DELETE' })).status, 404);
+    } },
+    { name: 'DELETE /api/guardrails/:id: pinned by a paused run -> 409 {error, references}; unpinned -> 200 {ok}', run: async () => {
+      // Seed the pin directly: the server and this test share the process-wide DB
+      // singleton (same WORCA_HOME), so a raw pipelines row is visible to the route.
+      const { getDb } = await import('../src/core/db.mjs');
+      getDb().prepare(
+        "INSERT INTO pipelines (id, project_key, status, resume_point) VALUES ('gr-pin-1', 'k1', 'paused', ?)"
+      ).run(JSON.stringify({ version: 1, guardrailsId: 'gr_org-policy' }));
+      const blocked = await fetch(`${base}/api/guardrails/gr_org-policy`, { method: 'DELETE' });
+      assert.equal(blocked.status, 409);
+      const body = await blocked.json();
+      assert.match(body.error, /still referenced/);
+      assert.deepEqual(body.references, [{ id: 'gr_org-policy', referencedBy: ['pipeline gr-pin-1'] }]);
+      // The pinned run finishes (resume point nulled): the delete goes through.
+      getDb().prepare("UPDATE pipelines SET resume_point = NULL, status = 'done' WHERE id = 'gr-pin-1'").run();
+      const ok = await fetch(`${base}/api/guardrails/gr_org-policy`, { method: 'DELETE' });
+      assert.equal(ok.status, 200);
+      assert.deepEqual(await ok.json(), { ok: true });
+    } },
+  ]);
 });
 
-test('DELETE /api/guardrails/:id: built-in -> 400, unknown -> 404', async () => {
-  assert.equal((await fetch(`${base}/api/guardrails/secure`, { method: 'DELETE' })).status, 400);
-  assert.equal((await fetch(`${base}/api/guardrails/gr_missing`, { method: 'DELETE' })).status, 404);
-});
-
-test('POST /api/run rejects an unknown guardrailsId -> 400 (before the run starts)', async () => {
+test('POST /api/run validates guardrailsId: unknown 400, non-string 400, a built-in id 200 {runId}', async () => {
   const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-grrun-'));
-  const r = await fetch(`${base}/api/run`, {
+  const postRun = (guardrailsId) => fetch(`${base}/api/run`, {
     method: 'POST', headers: JSONH,
-    body: JSON.stringify({ projectDir, prompt: 'demo task', mock: true, guardrailsId: 'gr_nope' }),
+    body: JSON.stringify({ projectDir, prompt: 'demo task', mock: true, guardrailsId }),
   });
-  assert.equal(r.status, 400);
-  assert.match((await r.json()).error, /unknown guardrailsId "gr_nope"/);
-  await rm(projectDir, { recursive: true, force: true });
-});
-
-test('POST /api/run accepts a known guardrailsId (built-in id) -> 200 {runId}', async () => {
-  const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-grrun2-'));
-  const r = await fetch(`${base}/api/run`, {
-    method: 'POST', headers: JSONH,
-    body: JSON.stringify({ projectDir, prompt: 'demo task', mock: true, guardrailsId: 'secure' }),
-  });
-  assert.equal(r.status, 200);
-  assert.ok((await r.json()).runId, 'runId returned');
-  await rm(projectDir, { recursive: true, force: true });
-});
-
-test('POST /api/run rejects a NON-STRING guardrailsId -> 400 (never a silent policy drop)', async () => {
-  const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-grrun3-'));
-  const r = await fetch(`${base}/api/run`, {
-    method: 'POST', headers: JSONH,
-    body: JSON.stringify({ projectDir, prompt: 'demo task', mock: true, guardrailsId: 123 }),
-  });
-  assert.equal(r.status, 400);
-  assert.match((await r.json()).error, /guardrailsId must be a string/);
-  await rm(projectDir, { recursive: true, force: true });
+  try {
+    await checkRows([
+      { name: 'POST /api/run rejects an unknown guardrailsId -> 400 (before the run starts)', run: async () => {
+        const r = await postRun('gr_nope');
+        assert.equal(r.status, 400);
+        assert.match((await r.json()).error, /unknown guardrailsId "gr_nope"/);
+      } },
+      { name: 'POST /api/run rejects a NON-STRING guardrailsId -> 400 (never a silent policy drop)', run: async () => {
+        const r = await postRun(123);
+        assert.equal(r.status, 400);
+        assert.match((await r.json()).error, /guardrailsId must be a string/);
+      } },
+      { name: 'POST /api/run accepts a known guardrailsId (built-in id) -> 200 {runId}', run: async () => {
+        const r = await postRun('secure');
+        assert.equal(r.status, 200);
+        assert.ok((await r.json()).runId, 'runId returned');
+      } },
+    ]);
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
 });

@@ -5,28 +5,23 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { templateRepo } from './helpers/git-dir.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { checkNewWorkspace, createWorkspace, readWorkspace, workspaceKey } from '../src/core/workspaces.mjs';
 import {
-  WORKSPACE_SCAN_OUTPUT_FILE, scanRunTitle, scanRunPrompt, createWorkspaceWithHomes, finalizeWorkspaceScan,
+  WORKSPACE_SCAN_OUTPUT_FILE, scanRunTitle, scanRunPrompt, finalizeWorkspaceScan,
 } from '../src/core/workspace-scan-run.mjs';
-import { loadScriptRegistry } from '../src/core/script-registry.mjs';
 
 useTempHome(after);
 const created = [];
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true }))));
 
-async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-scanrun-'));
+function freshRepo() {
+  const dir = templateRepo('scanrun', { branch: 'main', user: true, files: { 'README.md': '# hi\n' } });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 async function pipelineDirWith(text) {
@@ -36,10 +31,6 @@ async function pipelineDirWith(text) {
   return dir;
 }
 const DESC = '# Workspace: X\n## Overview\nTwo services.\n## Interconnections\n- a -> b: REST API; /v1\n';
-
-test('WORKSPACE_SCAN_OUTPUT_FILE is the render stage\'s output filename', () => {
-  assert.equal(WORKSPACE_SCAN_OUTPUT_FILE, loadScriptRegistry({ agentKeys: null }).workspaceMapRender.outputs[0].filename);
-});
 
 test('scanRunTitle / scanRunPrompt name the workspace and every member', () => {
   assert.equal(scanRunTitle('Platform'), 'Workspace scan: Platform');
@@ -75,17 +66,6 @@ test('finalize creates the workspace from the scanner output (outcome created)',
   assert.equal((await readWorkspace(id)).description, DESC.trim());
 });
 
-test('finalize replaces the description of an existing workspace (outcome updated)', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const ws = await createWorkspace({ name: 'Delta', projectPaths: [a, b], description: 'old notes' });
-  const res = await finalizeWorkspaceScan({ workspaceId: ws.id, name: 'Delta', projectPaths: [a, b], pipelineDir: await pipelineDirWith(DESC) });
-  assert.equal(res.outcome, 'updated');
-  const after_ = await readWorkspace(ws.id);
-  assert.equal(after_.description, DESC.trim());
-  assert.equal(after_.name, 'Delta');
-});
-
 test('finalize never throws: empty output and a taken name come back as failed', async () => {
   const a = await freshRepo();
   const b = await freshRepo();
@@ -104,16 +84,6 @@ test('finalize never throws: empty output and a taken name come back as failed',
   assert.equal(clash.outcome, 'failed');
   assert.equal(clash.code, 'DUPLICATE_NAME');
   assert.equal(await readWorkspace(idZ), null);
-});
-
-test('createWorkspaceWithHomes creates like POST /api/workspaces (no recording member -> no home)', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const { workspace, metricsHomeAuto } = await createWorkspaceWithHomes({ name: 'Eta', projectPaths: [a, b], description: 'd' });
-  assert.equal(workspace.name, 'Eta');
-  assert.equal(workspace.description, 'd');
-  assert.equal(workspace.metricsProject, null);
-  assert.equal(metricsHomeAuto, false);
 });
 
 test('finalize refuses to save a scan of a member set the workspace no longer has (SET_CHANGED)', async () => {

@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { createThread, linkRun, updateRunLink, listRunLinks } from '../src/core/ask/store.mjs';
 import {
   addDiffComment, getDiffComment, deleteDiffComment,
@@ -63,35 +64,38 @@ test('ask_run_links carries commentIds as JSON and round-trips through the row m
   assert.equal(listRunLinks(thread.id)[0].status, 'running', 'the other scalar patches still work');
 });
 
-test('stampSentRunId writes the pipeline id of a real run and never resolves', async () => {
-  const { c, projectDir } = await seedComment();
-  const target = await seedPipeline(projectDir, { title: 'Fix run', status: 'running' });
-  stampSentRunId([c.id], target.id);
-  const stamped = getDiffComment(c.id);
-  assert.equal(stamped.sentRunId, target.id);
-  assert.equal(stamped.resolved, false);
-});
+test('stampSentRunId writes the real run\'s pipeline id, scoped to the launched run\'s store, and pokes the comment\'s own run', async () => {
+  await checkRows([
+    { name: 'stampSentRunId writes the pipeline id of a real run and never resolves', run: async () => {
+      const { c, projectDir } = await seedComment();
+      const target = await seedPipeline(projectDir, { title: 'Fix run', status: 'running' });
+      stampSentRunId([c.id], target.id);
+      const stamped = getDiffComment(c.id);
+      assert.equal(stamped.sentRunId, target.id);
+      assert.equal(stamped.resolved, false);
+    } },
+    { name: 'stampSentRunId is scoped to the launched run\'s store and pokes the comment\'s own run', run: async () => {
+      const { run, c, projectDir } = await seedComment();
+      const otherDir = mkdtempSync(join(tmpdir(), 'worca-dcl-other-'));
+      const other = await seedPipeline(otherDir, { title: 'Elsewhere', status: 'done' });
+      const seen = [];
+      const off = onDiffCommentsChanged((e) => seen.push(e));
+      // m4: nothing ever un-stamps sent_run_id, so a wrong marker is permanent.
+      assert.equal(stampSentRunId([c.id], other.id), 0, 'cross-project stamp writes nothing');
+      assert.equal(getDiffComment(c.id).sentRunId, null);
+      assert.deepEqual(seen, [], 'nothing to repaint either');
 
-test('stampSentRunId is scoped to the launched run\'s store and pokes the comment\'s own run', async () => {
-  const { run, c, projectDir } = await seedComment();
-  const otherDir = mkdtempSync(join(tmpdir(), 'worca-dcl-other-'));
-  const other = await seedPipeline(otherDir, { title: 'Elsewhere', status: 'done' });
-  const seen = [];
-  const off = onDiffCommentsChanged((e) => seen.push(e));
-  // m4: nothing ever un-stamps sent_run_id, so a wrong marker is permanent.
-  assert.equal(stampSentRunId([c.id], other.id), 0, 'cross-project stamp writes nothing');
-  assert.equal(getDiffComment(c.id).sentRunId, null);
-  assert.deepEqual(seen, [], 'nothing to repaint either');
-
-  const fix = await seedPipeline(projectDir, { title: 'Fix run', status: 'running' }); // same project => same store key
-  assert.equal(stampSentRunId([c.id], fix.id), 1);
-  assert.equal(getDiffComment(c.id).sentRunId, fix.id);
-  // m5: the Diff tab's cards repaint only from diff-comments-changed, and no run
-  // event touches them — so the marker needed a reopen to appear.
-  assert.deepEqual(seen, [{ storeKey: run.key, pipelineId: run.id }],
-    'the poke names the run whose Diff tab shows the pill, not the run it was sent to');
-  off();
-  assert.equal(stampSentRunId([c.id], 'nosuchid'), 0, 'an unknown run stamps nothing');
+      const fix = await seedPipeline(projectDir, { title: 'Fix run', status: 'running' }); // same project => same store key
+      assert.equal(stampSentRunId([c.id], fix.id), 1);
+      assert.equal(getDiffComment(c.id).sentRunId, fix.id);
+      // m5: the Diff tab's cards repaint only from diff-comments-changed, and no run
+      // event touches them — so the marker needed a reopen to appear.
+      assert.deepEqual(seen, [{ storeKey: run.key, pipelineId: run.id }],
+        'the poke names the run whose Diff tab shows the pill, not the run it was sent to');
+      off();
+      assert.equal(stampSentRunId([c.id], 'nosuchid'), 0, 'an unknown run stamps nothing');
+    } },
+  ]);
 });
 
 test('no state event -> sent_run_id stays NULL and the pending link remains', async () => {

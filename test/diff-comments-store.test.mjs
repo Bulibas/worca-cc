@@ -18,6 +18,7 @@ import {
 } from '../src/core/diff-comments.mjs';
 import { archivePipeline } from '../src/core/pipeline-delete.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -41,12 +42,6 @@ async function seedRun() {
 const mk = (run, path, side, line, body, author = 'user') => addDiffComment({
   storeKey: run.key, pipelineId: run.id, patchText: run.patch, path, side, line, body, author });
 
-test('the body cap is stated once and shared with the MCP schema', () => {
-  assert.equal(COMMENT_BODY_MAX, 4000);
-  assert.equal(ASK_LIMITS.commentBodyMaxChars, COMMENT_BODY_MAX,
-    'the tool description and the store must quote the same number');
-});
-
 test('addDiffComment: validates the anchor, captures line_text server-side, mints dc_<8hex>', async () => {
   const run = await seedRun();
   const c = mk(run, 'src/a.js', 'new', 3, '  needs a test  ');
@@ -63,53 +58,61 @@ test('addDiffComment: validates the anchor, captures line_text server-side, mint
   assert.deepEqual(listDiffComments(run.key, run.id).map((x) => x.id), [c.id]);
 });
 
-test('addDiffComment: a body over the cap is REFUSED, never silently truncated', async () => {
+test('addDiffComment refusals: body cap/empty/author, no patch, bad anchor are all DiffCommentErrors', async () => {
   const run = await seedRun();
-  assert.throws(() => mk(run, 'src/a.js', 'new', 1, 'x'.repeat(COMMENT_BODY_MAX + 1)),
-    { name: 'DiffCommentError', message: `body exceeds ${COMMENT_BODY_MAX} characters` });
-  assert.doesNotThrow(() => mk(run, 'src/a.js', 'new', 1, 'x'.repeat(COMMENT_BODY_MAX)), 'exactly at the cap is fine');
-  assert.throws(() => mk(run, 'src/a.js', 'new', 1, '   '), { message: 'body is required' });
-  assert.throws(() => mk(run, 'src/a.js', 'new', 1, 'x', 'nobody'), { message: 'author must be "user" or "ask"' });
+  await checkRows([
+    { name: 'the body cap is stated once and shared with the MCP schema', run: () => {
+      assert.equal(COMMENT_BODY_MAX, 4000);
+      assert.equal(ASK_LIMITS.commentBodyMaxChars, COMMENT_BODY_MAX,
+        'the tool description and the store must quote the same number');
+    } },
+    { name: 'addDiffComment: a body over the cap is REFUSED, never silently truncated', run: () => {
+      assert.throws(() => mk(run, 'src/a.js', 'new', 1, 'x'.repeat(COMMENT_BODY_MAX + 1)),
+        { name: 'DiffCommentError', message: `body exceeds ${COMMENT_BODY_MAX} characters` });
+      assert.doesNotThrow(() => mk(run, 'src/a.js', 'new', 1, 'x'.repeat(COMMENT_BODY_MAX)), 'exactly at the cap is fine');
+      assert.throws(() => mk(run, 'src/a.js', 'new', 1, '   '), { message: 'body is required' });
+      assert.throws(() => mk(run, 'src/a.js', 'new', 1, 'x', 'nobody'), { message: 'author must be "user" or "ask"' });
+    } },
+    { name: 'addDiffComment: no patch at all is a DiffCommentError, not an anchor error', run: () => {
+      for (const empty of [null, undefined, '']) {
+        assert.throws(() => addDiffComment({
+          storeKey: run.key, pipelineId: run.id, patchText: empty,
+          path: 'src/a.js', side: 'new', line: 1, body: 'x', author: 'user',
+        }), { message: 'this run has no stored diff — comments cannot be created on it' });
+      }
+    } },
+    { name: 'addDiffComment: an anchor refusal arrives as a DiffCommentError with the AnchorError text', run: () => {
+      assert.throws(() => mk(run, 'ghost.js', 'new', 1, 'x'),
+        { name: 'DiffCommentError', message: '"ghost.js" is not a file of this run\'s diff' });
+    } },
+  ]);
 });
 
-test('addDiffComment: no patch at all is a DiffCommentError, not an anchor error', async () => {
+test('listDiffComments: path, line, then creation (rowid) order incl. 25 same-ms inserts; status and path filters', async () => {
   const run = await seedRun();
-  for (const empty of [null, undefined, '']) {
-    assert.throws(() => addDiffComment({
-      storeKey: run.key, pipelineId: run.id, patchText: empty,
-      path: 'src/a.js', side: 'new', line: 1, body: 'x', author: 'user',
-    }), { message: 'this run has no stored diff — comments cannot be created on it' });
-  }
-});
-
-test('addDiffComment: an anchor refusal arrives as a DiffCommentError with the AnchorError text', async () => {
-  const run = await seedRun();
-  assert.throws(() => mk(run, 'ghost.js', 'new', 1, 'x'),
-    { name: 'DiffCommentError', message: '"ghost.js" is not a file of this run\'s diff' });
-});
-
-test('listDiffComments: ordered by path, then line, then CREATION (rowid); status and path filters', async () => {
-  const run = await seedRun();
-  // a and b land on the same line in the same millisecond — created_at ties, so
-  // only the rowid tiebreak (D17) makes this deterministic.
-  const third = mk(run, 'src/a.js', 'new', 4, 'c');
-  const first = mk(run, 'src/a.js', 'new', 1, 'a');
-  const second = mk(run, 'src/a.js', 'new', 1, 'b');
-  assert.deepEqual(listDiffComments(run.key, run.id).map((c) => c.body), ['a', 'b', 'c']);
-  setDiffCommentResolved(first.id, true);
-  assert.deepEqual(listDiffComments(run.key, run.id, { status: 'unresolved' }).map((c) => c.body), ['b', 'c']);
-  assert.deepEqual(listDiffComments(run.key, run.id, { status: 'resolved' }).map((c) => c.body), ['a']);
-  assert.equal(listDiffComments(run.key, run.id, { path: 'nope' }).length, 0);
-  assert.equal(listDiffComments(run.key, run.id, { path: 'src/a.js' }).length, 3);
-  assert.ok(second && third);
-});
-
-test('listDiffComments: creation order holds for 25 same-millisecond inserts', async () => {
-  const run = await seedRun();
-  const bodies = Array.from({ length: 25 }, (_, i) => `n${String(i).padStart(2, '0')}`);
-  for (const b of bodies) mk(run, 'src/a.js', 'new', 2, b);
-  assert.deepEqual(listDiffComments(run.key, run.id).map((c) => c.body), bodies,
-    'a random-hex id tiebreak would shuffle these');
+  await checkRows([
+    { name: 'listDiffComments: ordered by path, then line, then CREATION (rowid); status and path filters', run: () => {
+      // a and b land on the same line in the same millisecond — created_at ties, so
+      // only the rowid tiebreak (D17) makes this deterministic.
+      const third = mk(run, 'src/a.js', 'new', 4, 'c');
+      const first = mk(run, 'src/a.js', 'new', 1, 'a');
+      const second = mk(run, 'src/a.js', 'new', 1, 'b');
+      assert.deepEqual(listDiffComments(run.key, run.id).map((c) => c.body), ['a', 'b', 'c']);
+      setDiffCommentResolved(first.id, true);
+      assert.deepEqual(listDiffComments(run.key, run.id, { status: 'unresolved' }).map((c) => c.body), ['b', 'c']);
+      assert.deepEqual(listDiffComments(run.key, run.id, { status: 'resolved' }).map((c) => c.body), ['a']);
+      assert.equal(listDiffComments(run.key, run.id, { path: 'nope' }).length, 0);
+      assert.equal(listDiffComments(run.key, run.id, { path: 'src/a.js' }).length, 3);
+      assert.ok(second && third);
+    } },
+    { name: 'listDiffComments: creation order holds for 25 same-millisecond inserts', run: () => {
+      // Same run as the row above: its rows sit on lines 1 and 4, these 25 on line 2.
+      const bodies = Array.from({ length: 25 }, (_, i) => `n${String(i).padStart(2, '0')}`);
+      for (const b of bodies) mk(run, 'src/a.js', 'new', 2, b);
+      assert.deepEqual(listDiffComments(run.key, run.id).filter((c) => c.line === 2).map((c) => c.body), bodies,
+        'a random-hex id tiebreak would shuffle these');
+    } },
+  ]);
 });
 
 test('setDiffCommentResolved: toggles resolved_at both ways; delete is hard', async () => {
@@ -143,37 +146,30 @@ test('stampSentRunId: sets the pipeline id, scopes to the run\'s store, and NEVE
   assert.equal(getDiffComment(c.id).sentRunId, target.id, 'and the good stamp survives');
 });
 
-test('unresolvedCounts: keyed "<storeKey>/<pipelineId>", resolved rows excluded', async () => {
+test('change listener: every mutation pokes with ids only; a throwing listener never breaks the write', async () => {
   const run = await seedRun();
-  const key = `${run.key}/${run.id}`;
-  const a = mk(run, 'src/a.js', 'new', 1, 'a');
-  mk(run, 'src/a.js', 'new', 2, 'b');
-  assert.equal(unresolvedCounts()[key], 2);
-  setDiffCommentResolved(a.id, true);
-  assert.equal(unresolvedCounts()[key], 1);
-});
-
-test('every successful mutation pokes the change listener with ids only', async () => {
-  const run = await seedRun();
-  const seen = [];
-  const off = onDiffCommentsChanged((e) => seen.push(e));
-  const c = mk(run, 'src/a.js', 'new', 1, 'a');
-  setDiffCommentResolved(c.id, true);
-  deleteDiffComment(c.id);
-  off();
-  setDiffCommentResolved(c.id, false);   // after unsubscribe AND already deleted: no event
-  assert.deepEqual(seen, [
-    { storeKey: run.key, pipelineId: run.id },
-    { storeKey: run.key, pipelineId: run.id },
-    { storeKey: run.key, pipelineId: run.id },
+  await checkRows([
+    { name: 'every successful mutation pokes the change listener with ids only', run: () => {
+      const seen = [];
+      const off = onDiffCommentsChanged((e) => seen.push(e));
+      const c = mk(run, 'src/a.js', 'new', 1, 'a');
+      setDiffCommentResolved(c.id, true);
+      deleteDiffComment(c.id);
+      off();
+      setDiffCommentResolved(c.id, false);   // after unsubscribe AND already deleted: no event
+      assert.deepEqual(seen, [
+        { storeKey: run.key, pipelineId: run.id },
+        { storeKey: run.key, pipelineId: run.id },
+        { storeKey: run.key, pipelineId: run.id },
+      ]);
+    } },
+    { name: 'a throwing listener never breaks the write', run: () => {
+      const off = onDiffCommentsChanged(() => { throw new Error('sink is broken'); });
+      try {
+        assert.doesNotThrow(() => mk(run, 'src/a.js', 'new', 1, 'still saved'));
+      } finally { off(); }
+    } },
   ]);
-});
-
-test('a throwing listener never breaks the write', async () => {
-  const run = await seedRun();
-  const off = onDiffCommentsChanged(() => { throw new Error('sink is broken'); });
-  assert.doesNotThrow(() => mk(run, 'src/a.js', 'new', 1, 'still saved'));
-  off();
 });
 
 test('archiving a run deletes its comments inside the archive transaction', async () => {

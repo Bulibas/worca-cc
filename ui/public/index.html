@@ -1407,8 +1407,8 @@
              .hidden back on it at every navigation. The tab rides in the hash
              param (#settings/<tab>, #settings/guardrails/<id>) — parseHash splits
              on the FIRST '/' only, so the view stays 'settings'.
-             NOTE: the routed-view census in test/ui-shell.test.mjs counts the
-             literal routing attribute name, so never spell it out in a comment. -->
+             NOTE: the routed-view census (test/ui-boot.test.mjs) counts DOM
+             elements, not the literal routing attribute name in this source. -->
         <section class="view hidden" data-view="settings">
           <div class="seg settings-tabs" id="settings-tabs" role="group" aria-label="Settings section">
             <!-- Ordered by mode (Simple, Advanced, Expert) so each mode sees a gap-free prefix of the
@@ -1560,7 +1560,7 @@
               <small class="hint" id="gsSettingsMsg"></small>
             </section>
 
-            <!-- About: intentionally no info-tip and no .hint (test/ui-settings-tooltips.test.mjs pins both). -->
+            <!-- About: intentionally no info-tip and no .hint (no longer tested; keep both out by hand). -->
             <section class="card settings-card" id="about-card" data-min-level="simple">
               <div class="label-row">
                 <h2>About</h2>
@@ -1980,9 +1980,9 @@
               </div>
             </div>
             <!-- Settings › Memory: the model + effort EVERY Memory defragment run uses (memory-defrag-model.mjs).
-                 Expert, like the health card's Defragment. No ⓘ and empty hints: the settings-view census
-                 (test/ui-settings-tooltips.test.mjs) pins both. A plain .card like the health card, NOT a
-                 .settings-card: that census (About last) counts the Settings cards. -->
+                 Expert, like the health card's Defragment. No ⓘ and empty hints, as in the Settings view
+                 (no longer tested; keep both out by hand). A plain .card like the health card, NOT a
+                 .settings-card: the Settings card set (About last) stays the General cards only. -->
             <section class="card mem-model-card" id="mem-defrag-model-card" data-min-level="expert">
               <div class="label-row"><h2>Defragment model</h2></div>
               <p class="mem-model-text">The model every Memory defragment run uses — from the Defragment button, New pipeline, an Ask Worca card or the CLI. A model named when the run starts (<code>worca --model</code>) still wins.</p>

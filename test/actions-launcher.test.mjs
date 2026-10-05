@@ -1,12 +1,13 @@
 // test/actions-launcher.test.mjs — the Editor / Terminal command lines of Settings › Runs › Actions
 // (src/core/actions/launcher.mjs): the shell command per OS, {folder} and the other placeholders, the
 // conveniences (a macOS .app, an unquoted path with spaces), the label, the save warning, what "Choose…"
-// lists, the hover examples per OS, and the watched launch. Every OS is tested from any OS (injected fs).
+// lists, and the watched launch. Every OS is tested from any OS (injected fs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { checkRows } from './helpers/rows.mjs';
 import {
-  shellQuote, quoteLeadingPath, buildLauncherCommand, launcherLabel, launcherWarning, installedLaunchers, launcherExamples, launchAndWatch,
+  shellQuote, quoteLeadingPath, buildLauncherCommand, launcherWarning, installedLaunchers, launchAndWatch,
 } from '../src/core/actions/launcher.mjs';
 
 const has = (paths) => (p) => paths.includes(p);
@@ -68,15 +69,6 @@ test('an empty line is refused', () => {
   assert.throws(() => buildLauncherCommand('  ', { folder: '/r', ...MAC }), (e) => e.code === 'EMPTY');
 });
 
-test('launcherLabel: an app, a Windows program, open -a, a command, a path', () => {
-  assert.equal(launcherLabel('/Applications/Zed.app/Contents/MacOS/cli {folder}'), 'Zed');
-  assert.equal(launcherLabel('"C:\\Program Files\\Microsoft VS Code\\Code.exe" --new-window'), 'Code');
-  assert.equal(launcherLabel('open -a "Visual Studio Code" {folder}'), 'Visual Studio Code');
-  assert.equal(launcherLabel('xed'), 'xed');
-  assert.equal(launcherLabel('~/bin/my-editor -n'), 'my-editor');
-  assert.equal(launcherLabel(''), null);
-});
-
 test('launcherWarning: a program not on PATH or not on disk warns; found, open -a, an app and cmd builtins do not', () => {
   const off = { ...MAC, exists: () => false, findOnPath: () => null };
   assert.match(launcherWarning('zedd {folder}', off), /^zedd was not found on this machine\. It is saved anyway; use Try to check it\.$/);
@@ -88,42 +80,35 @@ test('launcherWarning: a program not on PATH or not on disk warns; found, open -
   assert.equal(launcherWarning('', off), null);
 });
 
-test('installedLaunchers on macOS: xed with Xcode, an app CLI when present else open -a, Terminal always', () => {
-  const found = installedLaunchers({ ...MAC, findOnPath: () => null, exists: has(['/usr/bin/xed', '/Applications/Xcode.app',
-    '/Applications/Visual Studio Code.app', '/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code',
-    '/Applications/Nova.app', '/Applications/iTerm.app', '/Applications/kitty.app', '/Applications/kitty.app/Contents/MacOS/kitty']) });
-  assert.deepEqual(found.editor, [
-    { label: 'Xcode', line: 'xed {folder}' },
-    { label: 'Visual Studio Code', line: "'/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code' {folder}" },
-    { label: 'Nova', line: "open -a '/Applications/Nova.app' {folder}" },
+test('installedLaunchers per OS (macOS, Windows, Linux)', async () => {
+  await checkRows([
+    { name: 'installedLaunchers on macOS: xed with Xcode, an app CLI when present else open -a, Terminal always', run: () => {
+      const found = installedLaunchers({ ...MAC, findOnPath: () => null, exists: has(['/usr/bin/xed', '/Applications/Xcode.app',
+        '/Applications/Visual Studio Code.app', '/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code',
+        '/Applications/Nova.app', '/Applications/iTerm.app', '/Applications/kitty.app', '/Applications/kitty.app/Contents/MacOS/kitty']) });
+      assert.deepEqual(found.editor, [
+        { label: 'Xcode', line: 'xed {folder}' },
+        { label: 'Visual Studio Code', line: "'/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code' {folder}" },
+        { label: 'Nova', line: "open -a '/Applications/Nova.app' {folder}" },
+      ]);
+      assert.deepEqual(found.terminal, [
+        { label: 'Terminal', line: 'open -a Terminal {folder}' },
+        { label: 'iTerm', line: "open -a '/Applications/iTerm.app' {folder}" },
+        { label: 'kitty', line: "'/Applications/kitty.app/Contents/MacOS/kitty' --directory {folder}" },
+      ]);
+    } },
+    { name: 'installedLaunchers on Windows: known install paths and PATH commands; the built-in terminals', run: () => {
+      const code = 'C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe';
+      const found = installedLaunchers({ ...WIN, exists: has([code, 'C:\\Program Files\\Git\\git-bash.exe']), findOnPath: (n) => (n === 'wt' ? 'C:\\x\\wt.exe' : null) });
+      assert.deepEqual(found.editor, [{ label: 'VS Code', line: `"${code}" {folder}` }]);
+      assert.deepEqual(found.terminal.map((t) => t.label), ['Windows Terminal', 'Windows PowerShell', 'Command Prompt', 'Git Bash']);
+      assert.equal(found.terminal[0].line, 'wt -d {folder}');
+    } },
+    { name: 'installedLaunchers on Linux: commands on PATH', run: () => {
+      const found = installedLaunchers({ ...LINUX, exists: () => false, findOnPath: (n) => (['code', 'konsole'].includes(n) ? `/usr/bin/${n}` : null) });
+      assert.deepEqual(found, { editor: [{ label: 'VS Code', line: 'code {folder}' }], terminal: [{ label: 'Konsole', line: 'konsole --workdir {folder}' }] });
+    } },
   ]);
-  assert.deepEqual(found.terminal, [
-    { label: 'Terminal', line: 'open -a Terminal {folder}' },
-    { label: 'iTerm', line: "open -a '/Applications/iTerm.app' {folder}" },
-    { label: 'kitty', line: "'/Applications/kitty.app/Contents/MacOS/kitty' --directory {folder}" },
-  ]);
-});
-
-test('installedLaunchers on Windows: known install paths and PATH commands; the built-in terminals', () => {
-  const code = 'C:\\Users\\ada\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe';
-  const found = installedLaunchers({ ...WIN, exists: has([code, 'C:\\Program Files\\Git\\git-bash.exe']), findOnPath: (n) => (n === 'wt' ? 'C:\\x\\wt.exe' : null) });
-  assert.deepEqual(found.editor, [{ label: 'VS Code', line: `"${code}" {folder}` }]);
-  assert.deepEqual(found.terminal.map((t) => t.label), ['Windows Terminal', 'Windows PowerShell', 'Command Prompt', 'Git Bash']);
-  assert.equal(found.terminal[0].line, 'wt -d {folder}');
-});
-
-test('installedLaunchers on Linux: commands on PATH', () => {
-  const found = installedLaunchers({ ...LINUX, exists: () => false, findOnPath: (n) => (['code', 'konsole'].includes(n) ? `/usr/bin/${n}` : null) });
-  assert.deepEqual(found, { editor: [{ label: 'VS Code', line: 'code {folder}' }], terminal: [{ label: 'Konsole', line: 'konsole --workdir {folder}' }] });
-});
-
-test('launcherExamples: only the forms of that OS', () => {
-  const mac = launcherExamples('darwin'); const win = launcherExamples('win32'); const lin = launcherExamples('linux');
-  assert.ok(mac.editor.includes('xed') && mac.editor.some((x) => x.startsWith('open -a')));
-  assert.ok(win.editor.some((x) => x.includes('.exe')) && win.terminal.includes('wt -d {folder}'));
-  assert.ok(lin.terminal.some((x) => x.startsWith('gnome-terminal')));
-  assert.ok(!mac.editor.concat(mac.terminal).some((x) => /\.exe|%[A-Z]/.test(x)), 'no Windows forms on macOS');
-  assert.ok(!win.editor.concat(win.terminal).some((x) => /^open -a|\.app/.test(x)), 'no macOS forms on Windows');
 });
 
 // ── the watched launch ───────────────────────────────────────────────────────

@@ -1,7 +1,8 @@
 // test/ui-ask-policy-card.test.mjs
 // The team-policy card in the Ask panel (docs/team-policy.md "Ask Worca"): the metrics card's
-// component with the policy words — title, kind chip, the per-kind verb — plus an edit's
-// before → after list; Publish posts {state:'applied'}; applied / failed / declined states.
+// component with the policy words — title, kind chip — plus an edit's before → after list;
+// Publish posts {state:'applied'}. The terminal states are the metrics card's
+// (test/ui-ask-metrics-card.test.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -21,10 +22,6 @@ const EDIT_CARD = {
     { key: 'guardrails.minimum', block: 'fields', label: 'Minimum tier', before: null, after: 'soft Normal' },
   ],
   effects: ["One commit to acme/gateway's worca-policy branch, pushed to origin under your git user", 'Governs acme/gateway and the projects that follow it: acme/billing'],
-};
-const FOLLOW_CARD = {
-  type: 'policy', kind: 'enable', mode: 'follow', projectKey: 'ed-00000001', projectName: 'edge', workspaceId: null, workspaceName: null,
-  delegateTo: 'acme/gateway', change: false, note: '', summary: "Make edge follow acme/gateway's team policy", effects: ['Pushes a marker branch'],
 };
 
 function apiHandler(recorder = {}) {
@@ -84,30 +81,4 @@ test('proposed edit: policy title and chip, the before → after list, effects, 
   apply.click();
   await ctx.tick(); await ctx.tick();
   assert.deepEqual(rec.cardBodies, [{ state: 'applied' }]);
-});
-
-test('the verb follows the kind: Follow / Set up / Set home / Route members', async () => {
-  const verb = async (card) => (await openWith({ kind: 'card', id: CARD_ID, state: 'proposed', card })).doc.querySelector('[data-ask-mc-apply]').textContent;
-  assert.equal(await verb(FOLLOW_CARD), 'Follow');
-  assert.equal(await verb({ ...FOLLOW_CARD, mode: 'here', delegateTo: null }), 'Set up');
-  assert.equal(await verb({ ...FOLLOW_CARD, kind: 'workspace_home' }), 'Set home');
-  assert.equal(await verb({ ...FOLLOW_CARD, kind: 'route_members' }), 'Route members');
-  const chip = (await openWith({ kind: 'card', id: CARD_ID, state: 'proposed', card: FOLLOW_CARD })).doc.querySelector('.ask-mcard-kind').textContent;
-  assert.equal(chip, 'Set up team policy');
-});
-
-test('applied, failed and declined states', async () => {
-  const applied = await openWith({ kind: 'card', id: CARD_ID, state: 'applied', card: { ...EDIT_CARD, result: { ok: true, detail: 'published abc1234 to acme/gateway' } } });
-  const a = applied.doc.querySelector('.ask-pcard');
-  assert.equal(a.querySelector('.ask-mcard-title').textContent, 'Applied policy change');
-  assert.equal(a.querySelector('.ask-mcard-detail').textContent, 'published abc1234 to acme/gateway');
-  assert.equal(a.querySelectorAll('.ask-mcard-changes li').length, 2, 'the receipt keeps what changed');
-  assert.ok(!a.querySelector('.ask-mcard-effects') && !a.querySelector('[data-ask-mc-apply]'));
-  const failed = await openWith({ kind: 'card', id: CARD_ID, state: 'failed', error: 'push rejected', card: { ...EDIT_CARD, result: { ok: false, error: 'push rejected', hint: 'you may not have push rights to `worca-policy`' } } });
-  const f = failed.doc.querySelector('.ask-pcard');
-  assert.equal(f.querySelector('.ask-mcard-title').textContent, 'Policy change failed');
-  assert.equal(f.querySelector('.ask-mcard-failed').textContent, 'Could not apply: push rejected');
-  assert.match(f.querySelector('.ask-mcard-hint').textContent, /push rights/);
-  const declined = await openWith({ kind: 'card', id: CARD_ID, state: 'declined', card: EDIT_CARD });
-  assert.equal(declined.doc.querySelector('.ask-card-stub').textContent, `Declined — ${EDIT_CARD.summary}`);
 });

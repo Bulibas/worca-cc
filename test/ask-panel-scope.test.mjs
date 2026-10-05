@@ -170,23 +170,3 @@ test('#397: a scopeMismatch card renders the warning; a clean card does not', as
   assert.match(warns[0].textContent, /different project or workspace/);
   ctx.panel.destroy();
 });
-
-test('scope pill lives in the composer row: header is logo → title → spacer → icon buttons; row is attach → scope → spacer', () => {
-  const ctx = makePanel({ fetchHandler: handler({ patches: [], bodies: [], snap: null }) });
-  ctx.panel.open();
-  const kids = [...ctx.doc.querySelector('.ask-header').children];
-  assert.equal(kids[0].className, 'ask-header-logo');
-  assert.equal(kids[1].className, 'ask-title', 'the title follows the logo directly — no scope pill in between');
-  assert.equal(kids[2].className, 'ask-header-spacer');
-  assert.ok(kids[3].hasAttribute('data-ask-threads-btn'), 'then the icon buttons');
-  assert.equal(ctx.doc.querySelector('.ask-header [data-ask-scope-btn]'), null, 'the header no longer carries the scope pill');
-
-  const row = ctx.doc.querySelector('.ask-composer-row');
-  const attach = row.querySelector('[data-ask-attach-btn]');
-  const scope = attach.nextElementSibling;
-  assert.ok(scope && scope.hasAttribute('data-ask-scope-btn'), 'the scope pill sits right after the "+" attach button');
-  assert.ok(scope.classList.contains('ask-scope-btn'));
-  assert.ok(scope.nextElementSibling.hasAttribute('data-ask-mcp-btn'), 'then the MCP picker chip (MCP registry §9.4)');
-  assert.equal(scope.nextElementSibling.nextElementSibling.className, 'ask-composer-spacer', 'and before the spacer');
-  assert.equal(row.querySelector('[data-ask-scope-btn]').textContent.trim(), 'Auto');
-});

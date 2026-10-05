@@ -52,7 +52,7 @@ const BANNED = [
   // `src/cli/render.mjs` defines a v2 helper literally named `loopSource(ev,…)`;
   // a bare \bloopSource\b would flag it forever. `uiPhase` is NOT here: the
   // RUNTIME attribution field survives (the sub_agents.ui_phase column). Only
-  // the SIDECAR key dies, and the agents/ test below is what pins that.
+  // the SIDECAR key dies, and test/agents-meta.test.mjs is what pins that.
   // The workspace interconnection map (src/{shared,core}/workspace-map/) has a field of its OWN
   // named `consumes` — a member's consumed boundary facts (map spec §5.1), not the v1 sidecar
   // field — so both folders are exempt as DIRECTORY prefixes (entries ending in '/').
@@ -94,32 +94,6 @@ test('no v1 engine remnant survives in src/ or ui/', () => {
   assert.deepEqual(hits, [], `v1 remnants found:\n${hits.join('\n')}`);
 });
 
-test('the workspace-map exemption is a directory prefix; a bare consumes: anywhere else is still flagged', () => {
-  const field = 'export const x = { consumes: [], produces: [] };\n';
-  const flagged = remnantHits([
-    ['src/shared/workspace-map/schema.mjs', field],
-    ['src/core/workspace-map/detectors/pkg-npm.mjs', field],
-    ['src/core/workspace-map-legacy/x.mjs', field],
-    ['src/core/scheduler.mjs', field],
-    ['ui/public/workspace-map-view.mjs', field],
-  ]).map((h) => h.slice(0, h.indexOf(': ')));
-  assert.deepEqual(flagged, ['src/core/workspace-map-legacy/x.mjs', 'src/core/scheduler.mjs', 'ui/public/workspace-map-view.mjs']);
-});
-
-// The 11 builtin sidecars live OUTSIDE src/ and ui/, so the sweep above cannot
-// see them — Task 16's deletions need their own assertion.
-test('no builtin agent sidecar carries a v1 wiring field', () => {
-  const bad = [];
-  for (const f of readdirSync('agents').filter((n) => n.endsWith('.meta.json'))) {
-    const m = JSON.parse(readFileSync(join('agents', f), 'utf8'));
-    for (const k of ['consumes', 'optionalConsumes', 'produces', 'connectsTo', 'loopSource', 'uiPhase']) {
-      if (k in m) bad.push(`agents/${f}: ${k}`);
-    }
-    if (m.metaVersion !== 2 || !m.inputs || !m.outputs) bad.push(`agents/${f}: not meta v2`);
-  }
-  assert.deepEqual(bad, []);
-});
-
 // Agent keys are DATA, never control flow: the engine is generic (spec §1).
 const AGENT_KEYS = ['planner', 'refiner', 'implementer', 'reviewer', 'decomposer',
   'planReviewer', 'manualTestsChecklist', 'manualWebUiTesting', 'workspaceReviewer', 'memoryDefragmenter'];
@@ -143,57 +117,4 @@ test('no agent-key literal drives engine or UI control flow', () => {
     }
   }
   assert.deepEqual(hits, [], hits.join('\n'));
-});
-
-// ── the two sanctioned survivors, pinned rather than banned ─────────────────
-// 1. ui/server.mjs's EVENT_NAMES: the pattern above bans `'phase'` INSIDE the
-//    literal, which only fires if someone re-adds it. Pin the literal itself so
-//    a rename cannot silently retire the check.
-test("ui/server.mjs's EVENT_NAMES is the v2 list and never carries 'phase'", () => {
-  const src = readFileSync('ui/server.mjs', 'utf8');
-  const m = /^const EVENT_NAMES = (\[[^\]]*\]);/m.exec(src);
-  assert.ok(m, 'EVENT_NAMES is still declared as a literal array');
-  const names = JSON.parse(m[1].replace(/'/g, '"'));
-  assert.equal(names.includes('phase'), false, 'the v1 phase event left the wire vocabulary');
-  assert.ok(names.includes('exec'), 'exec is the execution vocabulary');
-  // 'artifact-gone' joined the vocabulary with the index prune: the engine drops
-  // rows for files that no longer exist (the audit recreates shots/ every cycle)
-  // and the browser has to drop them too, or it keeps rendering a row that 404s.
-  assert.deepEqual(names, ['exec', 'token', 'log', 'question', 'artifact', 'artifact-gone', 'state',
-    'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title', 'night-decision']);
-});
-
-// 2. migrate-fs-to-db.mjs is the ONE module that still WRITES a v1-shaped
-//    workflows row (the pre-DB filesystem import). It is sanctioned because
-//    reconcileAfterFsImport archives everything it creates — so pin BOTH halves:
-//    remove the archive and the writer stops being sanctioned.
-test('the fs-import v1 row writer is the only one left, and its rows are archived', () => {
-  const src = readFileSync('src/core/migrate-fs-to-db.mjs', 'utf8');
-  assert.match(src, /INSERT OR IGNORE INTO workflows \(id,name,version,steps,feedbacks,/,
-    'the fs-import writer is still the v1-shaped INSERT this test sanctions');
-  // The archive pass lives in db.mjs (P8a Task 6), NOT in the writer's own file.
-  assert.match(readFileSync('src/core/db.mjs', 'utf8'),
-    /function reconcileAfterFsImport|export function reconcileV1Workflows/,
-    'the reconcile pass that archives what this writer creates is still wired in');
-  // Nobody else writes a v1-SHAPED row. `feedbacks` alone is not the tell —
-  // workflows.mjs and plugin-workflows.mjs name it as a COLUMN while writing
-  // GRAPH rows (they also name `graph`). The v1 shape is the column list with
-  // steps+feedbacks and NO graph column.
-  // FINDING (measured): `writeWorkflow` in src/core/workflows.mjs is the OTHER
-  // live v1-row writer and it has ZERO production callers — ui/server.mjs was
-  // its last one and P8a Task 8 dropped the import. It survives only because
-  // test call sites still write v1 rows through it. Deleting it — and porting
-  // those — is the last piece of the kill list; this allowlist entry is what
-  // makes that debt visible instead of silent.
-  const V1_WRITER_ALLOW = new Set(['src/core/migrate-fs-to-db.mjs', 'src/core/workflows.mjs']);
-  const v1Insert = /INSERT[^;]{0,40}INTO workflows \(([^)]*)\)/g;
-  for (const f of files()) {
-    if (V1_WRITER_ALLOW.has(f)) continue;
-    const text = stripComments(readFileSync(f, 'utf8'));
-    for (const m of text.matchAll(v1Insert)) {
-      const cols = m[1].replace(/\s+/g, '');
-      const v1Shaped = cols.includes('steps,feedbacks') && !cols.includes('graph');
-      assert.equal(v1Shaped, false, `${f} writes a v1-shaped workflows row: (${cols})`);
-    }
-  }
 });

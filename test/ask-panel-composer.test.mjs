@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 
 import { makePanel, key } from './helpers/ask-panel-harness.mjs';
 import { stampFrames } from './helpers/ask-frames.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const TID = 'ask_00000001';
 const MID = 'askm_00000001';
@@ -74,84 +75,89 @@ test('ask-panel-composer: attach → chip; send posts base64 attachments and the
   assert.deepEqual(ctx.wsSends.at(-1), { type: 'subscribe', threadId: TID });
 });
 
-test('ask-panel-composer: dedupe by name — newest wins, one chip', async () => {
-  const ctx = makePanel({ fetchHandler: apiHandler() });
-  ctx.panel.open();
-  injectFiles(ctx, [mkFile(ctx, 'a.md', 'first')]);
-  await ctx.tick(); await ctx.tick();
-  injectFiles(ctx, [mkFile(ctx, 'a.md', 'second')]);
-  await ctx.tick(); await ctx.tick();
-  assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 1);
+test('ask-panel-composer: attachment chips — dedupe by name (newest wins), bad extension/oversize rejected inline, × removes, at most 8', async () => {
+  await checkRows([
+    { name: 'ask-panel-composer: dedupe by name — newest wins, one chip', run: async () => {
+      const ctx = makePanel({ fetchHandler: apiHandler() });
+      ctx.panel.open();
+      injectFiles(ctx, [mkFile(ctx, 'a.md', 'first')]);
+      await ctx.tick(); await ctx.tick();
+      injectFiles(ctx, [mkFile(ctx, 'a.md', 'second')]);
+      await ctx.tick(); await ctx.tick();
+      assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 1);
+    } },
+    { name: 'ask-panel-composer: bad extension and oversize rejected inline; the × removes a chip', run: async () => {
+      const ctx = makePanel({ fetchHandler: apiHandler() });
+      ctx.panel.open();
+      injectFiles(ctx, [mkFile(ctx, 'evil.exe', 'x')]);
+      await ctx.tick(); await ctx.tick();
+      assert.equal(ctx.doc.querySelector('.ask-chip'), null);
+      assert.match(ctx.doc.querySelector('.ask-composer-msg').textContent, /attachment type not allowed: evil\.exe/);
+      injectFiles(ctx, [mkFile(ctx, 'big.md', 'x'.repeat(524_289))]);
+      await ctx.tick(); await ctx.tick();
+      assert.match(ctx.doc.querySelector('.ask-composer-msg').textContent, /attachment over 524288 bytes: big\.md/);
+      injectFiles(ctx, [mkFile(ctx, 'ok.md', 'fine')]);
+      await ctx.tick(); await ctx.tick();
+      assert.ok(ctx.doc.querySelector('.ask-chip'));
+      ctx.doc.querySelector('.ask-chip .ask-chip-x').click();
+      assert.equal(ctx.doc.querySelector('.ask-chip'), null);
+    } },
+    { name: 'ask-panel-composer: at most 8 attachments', run: async () => {
+      const ctx = makePanel({ fetchHandler: apiHandler() });
+      ctx.panel.open();
+      injectFiles(ctx, Array.from({ length: 9 }, (_, i) => mkFile(ctx, `f${i}.md`, 'x')));
+      await ctx.tick(); await ctx.tick(); await ctx.tick();
+      assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 8);
+      assert.match(ctx.doc.querySelector('.ask-composer-msg').textContent, /at most 8 attachments per message/);
+    } },
+  ]);
 });
 
-test('ask-panel-composer: bad extension and oversize rejected inline; the × removes a chip', async () => {
-  const ctx = makePanel({ fetchHandler: apiHandler() });
-  ctx.panel.open();
-  injectFiles(ctx, [mkFile(ctx, 'evil.exe', 'x')]);
-  await ctx.tick(); await ctx.tick();
-  assert.equal(ctx.doc.querySelector('.ask-chip'), null);
-  assert.match(ctx.doc.querySelector('.ask-composer-msg').textContent, /attachment type not allowed: evil\.exe/);
-  injectFiles(ctx, [mkFile(ctx, 'big.md', 'x'.repeat(524_289))]);
-  await ctx.tick(); await ctx.tick();
-  assert.match(ctx.doc.querySelector('.ask-composer-msg').textContent, /attachment over 524288 bytes: big\.md/);
-  injectFiles(ctx, [mkFile(ctx, 'ok.md', 'fine')]);
-  await ctx.tick(); await ctx.tick();
-  assert.ok(ctx.doc.querySelector('.ask-chip'));
-  ctx.doc.querySelector('.ask-chip .ask-chip-x').click();
-  assert.equal(ctx.doc.querySelector('.ask-chip'), null);
-});
-
-test('ask-panel-composer (#398): png accepted with a thumbnail chip, pdf accepted, binary cap is 5 MB', async () => {
-  const ctx = makePanel({ fetchHandler: apiHandler() });
-  ctx.panel.open();
-  const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
-  injectFiles(ctx, [new ctx.window.File([pngBytes], 'shot.png', { type: 'image/png' })]);
-  await ctx.tick(); await ctx.tick();
-  const chip = ctx.doc.querySelector('.ask-chip');
-  assert.ok(chip, 'a png is accepted by the composer');
-  assert.match(chip.textContent, /shot\.png/);
-  const thumb = chip.querySelector('img.ask-chip-thumb');
-  assert.ok(thumb, 'image chips carry a thumbnail');
-  assert.ok(thumb.src.startsWith('data:image/png;base64,'), 'thumbnail is a data URI of the bytes just read');
-  injectFiles(ctx, [new ctx.window.File(['%PDF-1.7 fake'], 'spec.pdf', { type: 'application/pdf' })]);
-  await ctx.tick(); await ctx.tick();
-  assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 2, 'pdf accepted too');
-  assert.equal(ctx.doc.querySelectorAll('.ask-chip img.ask-chip-thumb').length, 1, 'no thumbnail on a pdf chip');
-  injectFiles(ctx, [new ctx.window.File([new Uint8Array(32 * 1024 * 1024 + 1)], 'big.png', { type: 'image/png' })]);
-  await ctx.tick(); await ctx.tick();
-  assert.match(ctx.doc.querySelector('.ask-composer-msg').textContent, /attachment over 33554432 bytes: big\.png/);
-  // the file input advertises the binary types
-  const accept = ctx.doc.querySelector('.ask-composer input[type="file"]').accept;
-  for (const e of ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf']) assert.ok(accept.includes(e), `accept carries ${e}`);
-});
-
-test('ask-panel-composer: .html and .htm are accepted as text attachments; the file input advertises them', async () => {
-  const bodies = [];
-  const calls = {
-    messages: (url, opts) => { bodies.push(JSON.parse(opts.body)); return { ok: true, status: 202, json: async () => ({ userMessageId: 'askm_u0000001', assistantMessageId: MID }) }; },
-  };
-  const ctx = makePanel({ fetchHandler: apiHandler(calls) });
-  ctx.panel.open();
-  injectFiles(ctx, [new ctx.window.File(['<p>hi</p>'], 'page.html', { type: 'text/html' }), new ctx.window.File(['<p>old</p>'], 'OLD.HTM', { type: 'text/html' })]);
-  await ctx.tick(); await ctx.tick();
-  assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 2, 'both HTML files become chips');
-  assert.equal(ctx.doc.querySelectorAll('.ask-chip img.ask-chip-thumb').length, 0, 'no thumbnail: HTML is a text kind');
-  const accept = ctx.doc.querySelector('.ask-composer input[type="file"]').accept.split(',');
-  for (const e of ['.html', '.htm']) assert.ok(accept.includes(e), `accept carries ${e}`);
-  ctx.doc.querySelector('textarea.ask-input').value = 'read it';
-  ctx.doc.querySelector('[data-ask-send]').click();
-  await ctx.tick(); await ctx.tick(); await ctx.tick();
-  assert.deepEqual(bodies[0].attachments.map((a) => [a.name, a.dataBase64]),
-    [['page.html', Buffer.from('<p>hi</p>').toString('base64')], ['OLD.HTM', Buffer.from('<p>old</p>').toString('base64')]]);
-});
-
-test('ask-panel-composer: at most 8 attachments', async () => {
-  const ctx = makePanel({ fetchHandler: apiHandler() });
-  ctx.panel.open();
-  injectFiles(ctx, Array.from({ length: 9 }, (_, i) => mkFile(ctx, `f${i}.md`, 'x')));
-  await ctx.tick(); await ctx.tick(); await ctx.tick();
-  assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 8);
-  assert.match(ctx.doc.querySelector('.ask-composer-msg').textContent, /at most 8 attachments per message/);
+test('ask-panel-composer: accepted kinds — png (thumbnail chip), pdf, .html/.htm as text; the binary cap is 5 MB; the file input advertises them', async () => {
+  await checkRows([
+    { name: 'ask-panel-composer (#398): png accepted with a thumbnail chip, pdf accepted, binary cap is 5 MB', run: async () => {
+      const ctx = makePanel({ fetchHandler: apiHandler() });
+      ctx.panel.open();
+      const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+      injectFiles(ctx, [new ctx.window.File([pngBytes], 'shot.png', { type: 'image/png' })]);
+      await ctx.tick(); await ctx.tick();
+      const chip = ctx.doc.querySelector('.ask-chip');
+      assert.ok(chip, 'a png is accepted by the composer');
+      assert.match(chip.textContent, /shot\.png/);
+      const thumb = chip.querySelector('img.ask-chip-thumb');
+      assert.ok(thumb, 'image chips carry a thumbnail');
+      assert.ok(thumb.src.startsWith('data:image/png;base64,'), 'thumbnail is a data URI of the bytes just read');
+      injectFiles(ctx, [new ctx.window.File(['%PDF-1.7 fake'], 'spec.pdf', { type: 'application/pdf' })]);
+      await ctx.tick(); await ctx.tick();
+      assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 2, 'pdf accepted too');
+      assert.equal(ctx.doc.querySelectorAll('.ask-chip img.ask-chip-thumb').length, 1, 'no thumbnail on a pdf chip');
+      injectFiles(ctx, [new ctx.window.File([new Uint8Array(32 * 1024 * 1024 + 1)], 'big.png', { type: 'image/png' })]);
+      await ctx.tick(); await ctx.tick();
+      assert.match(ctx.doc.querySelector('.ask-composer-msg').textContent, /attachment over 33554432 bytes: big\.png/);
+      // the file input advertises the binary types
+      const accept = ctx.doc.querySelector('.ask-composer input[type="file"]').accept;
+      for (const e of ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf']) assert.ok(accept.includes(e), `accept carries ${e}`);
+    } },
+    { name: 'ask-panel-composer: .html and .htm are accepted as text attachments; the file input advertises them', run: async () => {
+      const bodies = [];
+      const calls = {
+        messages: (url, opts) => { bodies.push(JSON.parse(opts.body)); return { ok: true, status: 202, json: async () => ({ userMessageId: 'askm_u0000001', assistantMessageId: MID }) }; },
+      };
+      const ctx = makePanel({ fetchHandler: apiHandler(calls) });
+      ctx.panel.open();
+      injectFiles(ctx, [new ctx.window.File(['<p>hi</p>'], 'page.html', { type: 'text/html' }), new ctx.window.File(['<p>old</p>'], 'OLD.HTM', { type: 'text/html' })]);
+      await ctx.tick(); await ctx.tick();
+      assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 2, 'both HTML files become chips');
+      assert.equal(ctx.doc.querySelectorAll('.ask-chip img.ask-chip-thumb').length, 0, 'no thumbnail: HTML is a text kind');
+      const accept = ctx.doc.querySelector('.ask-composer input[type="file"]').accept.split(',');
+      for (const e of ['.html', '.htm']) assert.ok(accept.includes(e), `accept carries ${e}`);
+      ctx.doc.querySelector('textarea.ask-input').value = 'read it';
+      ctx.doc.querySelector('[data-ask-send]').click();
+      await ctx.tick(); await ctx.tick(); await ctx.tick();
+      assert.deepEqual(bodies[0].attachments.map((a) => [a.name, a.dataBase64]),
+        [['page.html', Buffer.from('<p>hi</p>').toString('base64')], ['OLD.HTM', Buffer.from('<p>old</p>').toString('base64')]]);
+    } },
+  ]);
 });
 
 test('ask-panel-composer: Enter sends, Shift+Enter does not', async () => {
@@ -170,25 +176,28 @@ test('ask-panel-composer: Enter sends, Shift+Enter does not', async () => {
   assert.equal(bodies.length, 1);
 });
 
-test('ask-panel-composer: a 409 body renders verbatim and the composer keeps the text', async () => {
-  const calls = { messages: () => ({ ok: false, status: 409, json: async () => ({ error: 'turn in flight' }) }) };
-  const ctx = makePanel({ fetchHandler: apiHandler(calls) });
-  ctx.panel.open();
-  ctx.doc.querySelector('textarea.ask-input').value = 'try again later';
-  ctx.doc.querySelector('[data-ask-send]').click();
-  await ctx.tick(); await ctx.tick(); await ctx.tick();
-  assert.equal(ctx.doc.querySelector('.ask-composer-msg').textContent, 'turn in flight');
-  assert.equal(ctx.doc.querySelector('textarea.ask-input').value, 'try again later', 'text preserved on failure');
-});
-
-test('ask-panel-composer: a 413 body renders verbatim', async () => {
-  const calls = { messages: () => ({ ok: false, status: 413, json: async () => ({ error: 'attachments over 50331648 bytes per message' }) }) };
-  const ctx = makePanel({ fetchHandler: apiHandler(calls) });
-  ctx.panel.open();
-  ctx.doc.querySelector('textarea.ask-input').value = 'big send';
-  ctx.doc.querySelector('[data-ask-send]').click();
-  await ctx.tick(); await ctx.tick(); await ctx.tick();
-  assert.equal(ctx.doc.querySelector('.ask-composer-msg').textContent, 'attachments over 50331648 bytes per message');
+test('ask-panel-composer: a 409 or 413 body renders verbatim and the composer keeps the text', async () => {
+  await checkRows([
+    { name: 'ask-panel-composer: a 409 body renders verbatim and the composer keeps the text', run: async () => {
+      const calls = { messages: () => ({ ok: false, status: 409, json: async () => ({ error: 'turn in flight' }) }) };
+      const ctx = makePanel({ fetchHandler: apiHandler(calls) });
+      ctx.panel.open();
+      ctx.doc.querySelector('textarea.ask-input').value = 'try again later';
+      ctx.doc.querySelector('[data-ask-send]').click();
+      await ctx.tick(); await ctx.tick(); await ctx.tick();
+      assert.equal(ctx.doc.querySelector('.ask-composer-msg').textContent, 'turn in flight');
+      assert.equal(ctx.doc.querySelector('textarea.ask-input').value, 'try again later', 'text preserved on failure');
+    } },
+    { name: 'ask-panel-composer: a 413 body renders verbatim', run: async () => {
+      const calls = { messages: () => ({ ok: false, status: 413, json: async () => ({ error: 'attachments over 50331648 bytes per message' }) }) };
+      const ctx = makePanel({ fetchHandler: apiHandler(calls) });
+      ctx.panel.open();
+      ctx.doc.querySelector('textarea.ask-input').value = 'big send';
+      ctx.doc.querySelector('[data-ask-send]').click();
+      await ctx.tick(); await ctx.tick(); await ctx.tick();
+      assert.equal(ctx.doc.querySelector('.ask-composer-msg').textContent, 'attachments over 50331648 bytes per message');
+    } },
+  ]);
 });
 
 test('ask-panel-composer: streaming swaps send→stop; stop POSTs; done swaps back', async () => {
@@ -213,102 +222,43 @@ test('ask-panel-composer: streaming swaps send→stop; stop POSTs; done swaps ba
   assert.equal(ctx.doc.querySelector('[data-ask-stop]').hidden, true);
 });
 
-test('ask-panel-composer: the user echo replaces the optimistic row (no duplicate)', async () => {
-  const ctx = makePanel({ fetchHandler: apiHandler() });
-  ctx.panel.open();
-  ctx.doc.querySelector('textarea.ask-input').value = 'echo me';
-  ctx.doc.querySelector('[data-ask-send]').click();
-  await ctx.tick(); await ctx.tick(); await ctx.tick();
-  ctx.flush();
-  assert.equal(ctx.doc.querySelectorAll('.ask-msg-user').length, 1);
-  ctx.panel.pushServerFrame({ type: 'ask-message', threadId: TID, message: { id: 'askm_u0000001', threadId: TID, seq: 1, role: 'user', text: 'echo me', blocks: [], status: null, reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't' } });
-  ctx.flush();
-  assert.equal(ctx.doc.querySelectorAll('.ask-msg-user').length, 1, 'upsert by id, not append');
-});
-
-// #398: the sender's own tab must show the thumbnail right away — the 202 body
-// carries the store-minted id, and no later frame re-sends the row.
-test('ask-panel-composer (#398): the 202 attachment rows give the echo its ids — thumbnail now, and earlier uploads never block a new one', async () => {
-  const calls = {
-    messages: () => ({ ok: true, status: 202, json: async () => ({ userMessageId: 'askm_u0000001', assistantMessageId: MID,
-      attachments: [{ id: 'att_00000001', name: 'shot.png', bytes: 24 * 1024 * 1024, kind: 'image', mime: 'image/png' }] }) }),
-  };
-  const ctx = makePanel({ fetchHandler: apiHandler(calls) });
-  ctx.panel.open();
-  injectFiles(ctx, [new ctx.window.File(['not really a png'], 'shot.png', { type: 'image/png' })]);
-  await ctx.tick(); await ctx.tick();
-  ctx.doc.querySelector('textarea.ask-input').value = 'look at this';
-  ctx.doc.querySelector('[data-ask-send]').click();
-  await ctx.tick(); await ctx.tick(); await ctx.tick();
-  ctx.flush();
-  const img = ctx.doc.querySelector('.ask-msg-user img.ask-attachment-thumb');
-  assert.ok(img, 'the echo renders the thumbnail without waiting for a broadcast or reload');
-  assert.ok(img.src.endsWith(`/api/ask/threads/${TID}/attachments/att_00000001`));
-  // the cap is per message, not per thread: the 24 MB already sent does not
-  // count against the next message's files
-  injectFiles(ctx, [new ctx.window.File(['still not a png'], 'more.png', { type: 'image/png' })]);
-  await ctx.tick(); await ctx.tick();
-  assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 1, 'the new file is accepted');
-});
-
-test('ask-panel-composer: the ring shows context fill — empty on a fresh panel, the live ctx while streaming, the thread ctx after done', async () => {
-  const ctx = makePanel({ fetchHandler: apiHandler() });
-  ctx.panel.open();
-  const ring = () => ctx.doc.querySelector('[data-ask-ctx-btn]');
-  assert.equal(ring().hasAttribute('title'), false, 'fresh panel: no session, no fill');
-  assert.equal(ring().querySelector('.ask-ctx-ring-arc').getAttribute('stroke-dasharray'), '0 100');
-  ctx.doc.querySelector('textarea.ask-input').value = 'meter me';
-  ctx.doc.querySelector('[data-ask-send]').click();
-  await ctx.tick(); await ctx.tick(); await ctx.tick();
-  assert.equal(ctx.doc.querySelector('.ask-meter-cost').textContent, '', 'no cost rendered before a result');
-  const frames = stampFrames([
-    { type: 'ask-start', userMessageId: 'askm_u0000001', model: 'm', effort: 'high', startedAt: 't' },
-    { type: 'ask-usage', usage: { input: 12, output: 300, cacheRead: 60900, cacheCreation: 0, ctx: 61212 }, costUsd: null },
-    { type: 'ask-done', text: 'ok', blocks: [], usage: { input: 900, output: 1100, cacheRead: 0, cacheCreation: 0, ctx: 68400 }, costUsd: 0.14, durationMs: 5, model: 'm', status: 'done', threadTotals: { costUsd: 0.25, input: 9000, output: 10600, cacheRead: 0, cacheCreation: 0, ctx: 68400, turns: 2, agents: 6 } },
-  ], { threadId: TID, messageId: MID });
-  ctx.panel.pushServerFrame(frames[0]);
-  ctx.panel.pushServerFrame(frames[1]);
-  ctx.flush();
-  assert.equal(ring().title, '61.2k ctx', 'live: the streaming call\'s fill');
-  ctx.panel.pushServerFrame(frames[2]);
-  ctx.flush();
-  assert.equal(ring().title, '68.4k ctx');
-  const meter = ctx.doc.querySelector('[data-ask-meter]');
-  assert.ok(!/tok/.test(meter.textContent), 'cumulative token count is gone');
-  assert.equal(meter.textContent, '$0.25', 'the cost is the meter\'s only text');
-});
-
-test('ask-panel-composer: a legacy thread (totals without ctx) hides the fill but keeps the cost', async () => {
-  const ctx = makePanel({ fetchHandler: apiHandler() });
-  ctx.panel.open();
-  ctx.doc.querySelector('textarea.ask-input').value = 'meter me';
-  ctx.doc.querySelector('[data-ask-send]').click();
-  await ctx.tick(); await ctx.tick(); await ctx.tick();
-  const frames = stampFrames([
-    { type: 'ask-start', userMessageId: 'askm_u0000001', model: 'm', effort: 'high', startedAt: 't' },
-    { type: 'ask-done', text: 'ok', blocks: [], usage: { input: 900, output: 1100, cacheRead: 0, cacheCreation: 0 }, costUsd: 0.14, durationMs: 5, model: 'm', status: 'done', threadTotals: { costUsd: 0.25, input: 9000, output: 10600, cacheRead: 0, cacheCreation: 0, turns: 2, agents: 6 } },
-  ], { threadId: TID, messageId: MID });
-  for (const f of frames) ctx.panel.pushServerFrame(f);
-  ctx.flush();
-  assert.equal(ctx.doc.querySelector('[data-ask-ctx-btn]').hasAttribute('title'), false, 'no fabricated 0 ctx on a thread that has turns');
-  assert.match(ctx.doc.querySelector('[data-ask-meter]').textContent, /\$0\.25/);
-});
-
-test('ask-panel-composer: the textarea grows with the draft and shrinks back once the send clears it', async () => {
-  const ctx = makePanel({ fetchHandler: apiHandler() });
-  ctx.panel.open();
-  const input = ctx.doc.querySelector('textarea.ask-input');
-  // jsdom lays nothing out: scrollHeight is whatever the draft would need.
-  let need = 96;
-  Object.defineProperty(input, 'scrollHeight', { get: () => need, configurable: true });
-  input.value = 'line 1\nline 2\nline 3\nline 4';
-  input.dispatchEvent(new ctx.window.Event('input'));
-  assert.equal(input.style.height, '96px', 'a multi-line draft grows the box');
-  need = 24;                                          // an empty textarea needs one line again
-  ctx.doc.querySelector('[data-ask-send]').click();
-  await ctx.tick();
-  await ctx.tick();
-  await ctx.tick();
-  assert.equal(input.value, '', 'the send cleared the draft');
-  assert.equal(input.style.height, '24px', 'the box shrank back with it — a programmatic clear fires no input event');
+test('ask-panel-composer: the user echo replaces the optimistic row (no duplicate) and its 202 attachment ids give the thumbnail without blocking a new upload', async () => {
+  await checkRows([
+    { name: 'ask-panel-composer: the user echo replaces the optimistic row (no duplicate)', run: async () => {
+      const ctx = makePanel({ fetchHandler: apiHandler() });
+      ctx.panel.open();
+      ctx.doc.querySelector('textarea.ask-input').value = 'echo me';
+      ctx.doc.querySelector('[data-ask-send]').click();
+      await ctx.tick(); await ctx.tick(); await ctx.tick();
+      ctx.flush();
+      assert.equal(ctx.doc.querySelectorAll('.ask-msg-user').length, 1);
+      ctx.panel.pushServerFrame({ type: 'ask-message', threadId: TID, message: { id: 'askm_u0000001', threadId: TID, seq: 1, role: 'user', text: 'echo me', blocks: [], status: null, reason: null, model: null, effort: null, usage: null, costUsd: null, durationMs: null, createdAt: 't' } });
+      ctx.flush();
+      assert.equal(ctx.doc.querySelectorAll('.ask-msg-user').length, 1, 'upsert by id, not append');
+    } },
+    { name: 'ask-panel-composer (#398): the 202 attachment rows give the echo its ids — thumbnail now, and earlier uploads never block a new one', run: async () => {
+    // #398: the sender's own tab must show the thumbnail right away — the 202 body
+    // carries the store-minted id, and no later frame re-sends the row.
+      const calls = {
+        messages: () => ({ ok: true, status: 202, json: async () => ({ userMessageId: 'askm_u0000001', assistantMessageId: MID,
+          attachments: [{ id: 'att_00000001', name: 'shot.png', bytes: 24 * 1024 * 1024, kind: 'image', mime: 'image/png' }] }) }),
+      };
+      const ctx = makePanel({ fetchHandler: apiHandler(calls) });
+      ctx.panel.open();
+      injectFiles(ctx, [new ctx.window.File(['not really a png'], 'shot.png', { type: 'image/png' })]);
+      await ctx.tick(); await ctx.tick();
+      ctx.doc.querySelector('textarea.ask-input').value = 'look at this';
+      ctx.doc.querySelector('[data-ask-send]').click();
+      await ctx.tick(); await ctx.tick(); await ctx.tick();
+      ctx.flush();
+      const img = ctx.doc.querySelector('.ask-msg-user img.ask-attachment-thumb');
+      assert.ok(img, 'the echo renders the thumbnail without waiting for a broadcast or reload');
+      assert.ok(img.src.endsWith(`/api/ask/threads/${TID}/attachments/att_00000001`));
+      // the cap is per message, not per thread: the 24 MB already sent does not
+      // count against the next message's files
+      injectFiles(ctx, [new ctx.window.File(['still not a png'], 'more.png', { type: 'image/png' })]);
+      await ctx.tick(); await ctx.tick();
+      assert.equal(ctx.doc.querySelectorAll('.ask-chip').length, 1, 'the new file is accepted');
+    } },
+  ]);
 });

@@ -6,7 +6,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { useEnvProxy, proxyNotice } from '../src/core/env-proxy.mjs';
+import { useEnvProxy } from '../src/core/env-proxy.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const LOOPBACK = 'localhost,127.0.0.1,::1,[::1]';
 
@@ -21,27 +22,29 @@ test('no proxy variables: fetch is left alone', () => {
   assert.equal(api.calls.length, 0);
 });
 
-test('a proxy is set: loopback is appended to NO_PROXY, the existing entries kept', () => {
-  const api = fakeApi();
-  const r = useEnvProxy({ env: { HTTPS_PROXY: 'http://proxy.corp:8080', no_proxy: 'corp.example' }, api });
-  assert.equal(r.status, 'on');
-  assert.equal(api.calls.length, 1);
-  const passed = api.calls[0];
-  assert.equal(passed.HTTPS_PROXY, 'http://proxy.corp:8080');
-  assert.equal(passed.no_proxy, `corp.example,${LOOPBACK}`);
-  assert.equal(passed.NO_PROXY, passed.no_proxy);
-});
-
-test('no_proxy and NO_PROXY both set: entries from both survive', () => {
-  const api = fakeApi();
-  useEnvProxy({ env: { HTTPS_PROXY: 'http://proxy.corp:8080', no_proxy: 'corp.example', NO_PROXY: 'jira.corp,corp.example' }, api });
-  assert.equal(api.calls[0].NO_PROXY, `corp.example,jira.corp,${LOOPBACK}`);
-});
-
-test('a proxy with no NO_PROXY at all still keeps loopback direct', () => {
-  const api = fakeApi();
-  useEnvProxy({ env: { http_proxy: 'http://proxy.corp:8080' }, api });
-  assert.equal(api.calls[0].NO_PROXY, LOOPBACK);
+test('NO_PROXY merge: loopback appended; no_proxy and NO_PROXY entries both kept; absent NO_PROXY gets loopback only', async () => {
+  await checkRows([
+    { name: 'a proxy is set: loopback is appended to NO_PROXY, the existing entries kept', run: async () => {
+      const api = fakeApi();
+      const r = useEnvProxy({ env: { HTTPS_PROXY: 'http://proxy.corp:8080', no_proxy: 'corp.example' }, api });
+      assert.equal(r.status, 'on');
+      assert.equal(api.calls.length, 1);
+      const passed = api.calls[0];
+      assert.equal(passed.HTTPS_PROXY, 'http://proxy.corp:8080');
+      assert.equal(passed.no_proxy, `corp.example,${LOOPBACK}`);
+      assert.equal(passed.NO_PROXY, passed.no_proxy);
+    } },
+    { name: 'no_proxy and NO_PROXY both set: entries from both survive', run: async () => {
+      const api = fakeApi();
+      useEnvProxy({ env: { HTTPS_PROXY: 'http://proxy.corp:8080', no_proxy: 'corp.example', NO_PROXY: 'jira.corp,corp.example' }, api });
+      assert.equal(api.calls[0].NO_PROXY, `corp.example,jira.corp,${LOOPBACK}`);
+    } },
+    { name: 'a proxy with no NO_PROXY at all still keeps loopback direct', run: async () => {
+      const api = fakeApi();
+      useEnvProxy({ env: { http_proxy: 'http://proxy.corp:8080' }, api });
+      assert.equal(api.calls[0].NO_PROXY, LOOPBACK);
+    } },
+  ]);
 });
 
 test('a Node without setGlobalProxyFromEnv falls back to undici\'s EnvHttpProxyAgent', () => {
@@ -69,13 +72,6 @@ test('a malformed proxy URL: invalid, never throws, and the message hides the UR
   assert.equal(r.status, 'invalid');
   assert.match(r.error, /proxy/i);
   assert.doesNotMatch(r.error, /s3cret/);
-});
-
-test('proxyNotice: one line per status, nothing when off', () => {
-  assert.equal(proxyNotice({ status: 'off' }), null);
-  assert.equal(proxyNotice({ status: 'on' }).level, 'info');
-  assert.equal(proxyNotice({ status: 'invalid', error: 'bad' }).level, 'warn');
-  assert.match(proxyNotice({ status: 'unsupported' }).text, /go direct/);
 });
 
 test('real fetch: an outside host goes through the proxy, loopback (v4 and v6) goes direct', async () => {

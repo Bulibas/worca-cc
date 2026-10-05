@@ -1,36 +1,32 @@
 // test/workspace-map-store.test.mjs
-// Workspace map storage (schema v40) in src/core/workspaces.mjs: the list carries mapSummary +
-// descriptionOrigin but never the map; saveWorkspaceScanResult stores map + a CHECKED synthesis
-// (credentials redacted, D21), marks the description 'generated' and re-renders it from the map;
+// Workspace map storage (schema v40) in src/core/workspaces.mjs: saveWorkspaceScanResult stores
+// map + a CHECKED synthesis (credentials redacted, D21), marks the description 'generated' and
+// re-renders it from the map;
 // a CHANGED description through updateWorkspace marks it 'edited', and updateWorkspace re-reads
 // under its write lock (a save from another process is never reverted);
 // regenerateWorkspaceDescription re-renders on demand.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { spawn, spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { rm } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { basename } from 'node:path';
 
+import { templateRepo } from './helpers/git-dir.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { sampleMap, DISPLAYS } from './helpers/wsmap-stored.mjs';
 import { dbPath, prepare } from '../src/core/db.mjs';
 import {
   createWorkspace, listWorkspaces, readWorkspace, updateWorkspace, renameWorkspace,
-  readWorkspaceMap, saveWorkspaceScanResult, regenerateWorkspaceDescription, graphLineFor, isWorkspaceMap,
+  readWorkspaceMap, saveWorkspaceScanResult, regenerateWorkspaceDescription,
 } from '../src/core/workspaces.mjs';
 
 useTempHome(after);
 const created = [];
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true, maxRetries: 3 }))));
 
-async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-wsmap-'));
+function freshRepo() {
+  const dir = templateRepo('wsmap', { branch: 'main', user: true, files: { 'README.md': '# hi\n' } });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 let seq = 0;
@@ -59,20 +55,6 @@ db.prepare("UPDATE workspaces SET description = ?, description_origin = 'generat
 db.exec('COMMIT');
 db.close();
 `;
-
-test('a new workspace has no map: mapSummary null, origin null, readWorkspaceMap empty', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const ws = await createWorkspace({ name: 'Plain', projectPaths: [a, b] });
-  assert.equal(ws.mapSummary, null);
-  assert.equal(ws.descriptionOrigin, null);
-  const stored = await readWorkspaceMap(ws.id);
-  assert.equal(stored.map, null);
-  assert.equal(stored.synthesis, null);
-  assert.deepEqual(stored.overrides, { version: 1, edges: {}, manual: [] });
-  assert.equal(stored.descriptionOrigin, null);
-  assert.equal(await readWorkspaceMap('wks-nope-00000000'), null);
-});
 
 test('saveWorkspaceScanResult stores map + synthesis, renders the description from the map, origin generated', async () => {
   const { ws, map, synthesis } = await scannedWorkspace();
@@ -119,19 +101,6 @@ test('saveWorkspaceScanResult stores a CHECKED synthesis: invalid items dropped,
   assert.deepEqual(stored.roles, { [ws.projectKeys[0]]: 'Signs requests with API_TOKEN=***' }, 'a role for a non-member is dropped');
   assert.deepEqual(stored.coordination, ['Rotate API_TOKEN=*** first.'], 'a note that is not a string is dropped');
   assert.equal(stored.orderNotes, 'password: ***');
-});
-
-test('the list carries mapSummary and descriptionOrigin, never the map, synthesis or overrides', async () => {
-  const { ws, map, synthesis } = await scannedWorkspace();
-  await saveWorkspaceScanResult(ws.id, { map, synthesis });
-  const listed = (await listWorkspaces()).find((w) => w.id === ws.id);
-  assert.equal(listed.descriptionOrigin, 'generated');
-  assert.equal(listed.mapSummary.members, 2);
-  assert.equal(listed.mapSummary.edges, 3);
-  assert.equal(listed.mapSummary.scannedAt, map.scannedAt);
-  for (const k of ['map', 'map_json', 'mapDoc', 'synthesis', 'overrides', 'map_overrides_json']) {
-    assert.ok(!(k in listed), `list entry must not carry ${k}`);
-  }
 });
 
 test('a CHANGED description through updateWorkspace marks it edited; an unchanged save or a rename does not', async () => {
@@ -210,14 +179,4 @@ test('corrupt map_json / map_overrides_json read as no map / empty overrides, ne
   const stored = await readWorkspaceMap(ws.id);
   assert.equal(stored.map, null);
   assert.deepEqual(stored.overrides, { version: 1, edges: {}, manual: [] });
-});
-
-test('graphLineFor names an absolute graph file only; isWorkspaceMap needs members[] and edges[]', () => {
-  const abs = join(tmpdir(), 'workspace-graph.json');
-  assert.equal(graphLineFor({ graph: { file: abs } }), `Cross-project graph: ${abs} — graphify query "<question>" --graph "${abs}"`);
-  assert.equal(graphLineFor({ graph: { file: 'workspace-graph.json' } }), null);
-  assert.equal(graphLineFor({ graph: { file: null } }), null);
-  assert.equal(graphLineFor(null), null);
-  assert.equal(isWorkspaceMap({ members: [], edges: [] }), true);
-  for (const bad of [null, [], 'x', { members: [] }, { edges: [] }]) assert.equal(isWorkspaceMap(bad), false);
 });

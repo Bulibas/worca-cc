@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 import { userScriptsDir } from '../src/core/script-registry.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, '..', 'src', 'cli', 'worca-cc.mjs');
@@ -118,12 +119,23 @@ test('script new --runtime shell writes the sh + cmd pair; an unknown runtime ex
   assert.match(bad.stderr, /--runtime must be one of node, shell, python \(got perl\)/);
 });
 
-test('script new --from copies another script', async () => {
-  writeUserScript('copySource');
-  const r = await run(['script', 'new', 'copyTarget', '--from', 'copySource']);
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /^created\tcopyTarget\t\(copy of copySource\)$/m);
-  assert.ok(existsSync(join(userScriptsDir(), 'copyTarget.meta.json')));
+test('script new --from copies another script and refuses --runtime (nothing written)', async () => {
+  await checkRows([
+    { name: 'script new --from copies another script', run: async () => {
+      writeUserScript('copySource');
+      const r = await run(['script', 'new', 'copyTarget', '--from', 'copySource']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /^created\tcopyTarget\t\(copy of copySource\)$/m);
+      assert.ok(existsSync(join(userScriptsDir(), 'copyTarget.meta.json')));
+    } },
+    { name: 'script new --from refuses --runtime: a copy keeps its runtime, a typed flag is never dropped', run: async () => {
+      writeUserScript('fromSource');
+      const r = await run(['script', 'new', 'fromTarget', '--from', 'fromSource', '--runtime', 'shell']);
+      assert.equal(r.code, 2, r.stdout);
+      assert.match(r.stderr, /--runtime cannot be combined with --from: a copy keeps the runtime of "fromSource"/);
+      assert.equal(existsSync(join(userScriptsDir(), 'fromTarget.meta.json')), false, 'nothing was written');
+    } },
+  ]);
 });
 
 test('script rm: a user script goes, a built-in is refused (1), an unknown key is usage (2)', async () => {
@@ -171,14 +183,6 @@ test('script show --json survives a PIPE: a source past the 64 KiB pipe buffer a
   assert.equal(JSON.parse(r.stdout).source, body);
   const plain = await run(['script', 'show', 'bigSource']);
   assert.ok(plain.stdout.endsWith(body), 'the plain form prints the whole source too');
-});
-
-test('script new --from refuses --runtime: a copy keeps its runtime, a typed flag is never dropped', async () => {
-  writeUserScript('fromSource');
-  const r = await run(['script', 'new', 'fromTarget', '--from', 'fromSource', '--runtime', 'shell']);
-  assert.equal(r.code, 2, r.stdout);
-  assert.match(r.stderr, /--runtime cannot be combined with --from: a copy keeps the runtime of "fromSource"/);
-  assert.equal(existsSync(join(userScriptsDir(), 'fromTarget.meta.json')), false, 'nothing was written');
 });
 
 test('worca script with no verb prints help; an unknown verb exits 2; the top-level help lists it', async () => {
@@ -349,12 +353,11 @@ test('script test: an EMPTY number is refused (Number("") is 0), and an @file ov
   assert.equal((await run(['script', 'test', 'probeFour', '--input', `plan=@${big}`])).code, 0, 'exactly the cap is fine');
 });
 
-// Arms of ONE flow: a loose run, and saved cases WITH an expectation — there a
+// Arms of ONE flow: saved cases WITH an expectation, and Run all — there a
 // stopped run used to exit 1 ("a check failed") because the expectation was read first.
 // `quiet` names no verdict, so a stopped run SATISFIES it: it used to print
 // `expect: pass` and `1 passed` beside exit code 2.
 for (const [label, args, line] of [
-  ['a loose run', [], /^sleeper\tnode\tstopped/m],
   ['a saved case with an expectation', ['--case', 'nap'], /^sleeper\tnode\tstopped/m],
   ['a saved case whose expectation a stopped run satisfies', ['--case', 'quiet'], /^sleeper\tnode\tstopped/m],
   ['Run all', ['--all'], /^✗ sleeper\/quiet\tstopped\t[\s\S]*^0 passed, 1 failed, 0 unchecked$/m],

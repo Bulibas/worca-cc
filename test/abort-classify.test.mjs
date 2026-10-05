@@ -6,19 +6,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { isAbort } from '../src/core/run-harness.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
-test('an AbortError-named error is an abort', () => {
-  const e = new Error('aborted');
-  e.name = 'AbortError';
-  assert.equal(isAbort(e), true);
-});
-
-test('a real failure that merely mentions "aborted"/"stopped" is NOT an abort', () => {
-  assert.equal(isAbort(new Error('claude exited with code 1: FetchError: the operation was aborted')), false);
-  assert.equal(isAbort(new Error('MCP server stopped unexpectedly')), false);
-});
-
-test('null/undefined are not aborts', () => {
-  assert.equal(isAbort(null), false);
-  assert.equal(isAbort(undefined), false);
+test('isAbort classifies by AbortError name, never by message; null/undefined are not aborts', async () => {
+  await checkRows([
+    { name: 'an AbortError-named error is an abort', run: () => {
+      const e = new Error('aborted');
+      e.name = 'AbortError';
+      assert.equal(isAbort(e), true);
+    } },
+    { name: 'a real failure that merely mentions "aborted"/"stopped" is NOT an abort', run: () => {
+      assert.equal(isAbort(new Error('claude exited with code 1: FetchError: the operation was aborted')), false);
+      assert.equal(isAbort(new Error('MCP server stopped unexpectedly')), false);
+    } },
+    { name: 'null/undefined are not aborts', run: () => {
+      assert.equal(isAbort(null), false);
+      assert.equal(isAbort(undefined), false);
+    } },
+  ]);
 });

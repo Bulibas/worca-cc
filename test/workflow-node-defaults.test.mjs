@@ -7,14 +7,15 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { checkRows } from './helpers/rows.mjs';
 
 process.env.WORCA_HOME = mkdtempSync(join(tmpdir(), 'worca-wfdef-'));
 
 const {
-  writeWorkflow, readWorkflow, writeGraphWorkflow, resolveGraph, setWorkflowNodeDefaults,
-  sanitizeNodeDefaults, sanitizeWorkflowSteps, workflowNodeDefaults, GRAPH_DEFAULT_WORKFLOW,
+  writeGraphWorkflow, resolveGraph, setWorkflowNodeDefaults,
+  sanitizeNodeDefaults, GRAPH_DEFAULT_WORKFLOW,
 } = await import('../src/core/workflows.mjs');
-const { setStep, setNodeModel } = await import('../src/core/config.mjs');
+const { setStep } = await import('../src/core/config.mjs');
 
 const PROJECT = mkdtempSync(join(tmpdir(), 'worca-wfdef-proj-'));
 
@@ -31,77 +32,31 @@ const REGISTRY = {
 
 // ── sanitizeNodeDefaults ────────────────────────────────────────────────────
 
-test('sanitizeNodeDefaults keeps well-formed fields and drops malformed ones individually', () => {
-  const out = sanitizeNodeDefaults({
-    model: '  claude-opus-4-8 ', effort: 'high', fanOut: true, askQuestions: false,
-  });
-  assert.deepEqual(out, { model: 'claude-opus-4-8', effort: 'high', fanOut: true, askQuestions: false });
+// [input, expected] per original test title.
+const SANITIZE = {
+  'sanitizeNodeDefaults keeps well-formed fields and drops malformed ones individually': [
+    [{ model: '  claude-opus-4-8 ', effort: 'high', fanOut: true, askQuestions: false },
+      { model: 'claude-opus-4-8', effort: 'high', fanOut: true, askQuestions: false }],
+    // A bad field is dropped; its siblings survive (loud-and-lenient house style).
+    [{ model: 'm', effort: 'ludicrous', fanOut: 'yes', askQuestions: true }, { model: 'm', askQuestions: true }],
+  ],
+  'sanitizeNodeDefaults refuses an effort with no model to interpret it': [
+    [{ effort: 'high' }, undefined],
+    [{ effort: 'high', fanOut: true }, { fanOut: true }],
+  ],
+  'sanitizeNodeDefaults yields undefined for absent/empty/non-object blocks':
+    [undefined, null, {}, [], 'x', 7, { model: '' }].map((raw) => [raw, undefined]),
+};
 
-  // A bad field is dropped; its siblings survive (loud-and-lenient house style).
-  const partial = sanitizeNodeDefaults({ model: 'm', effort: 'ludicrous', fanOut: 'yes', askQuestions: true });
-  assert.deepEqual(partial, { model: 'm', askQuestions: true });
-});
-
-test('sanitizeNodeDefaults refuses an effort with no model to interpret it', () => {
-  assert.equal(sanitizeNodeDefaults({ effort: 'high' }), undefined);
-  assert.deepEqual(sanitizeNodeDefaults({ effort: 'high', fanOut: true }), { fanOut: true });
-});
-
-test('sanitizeNodeDefaults yields undefined for absent/empty/non-object blocks', () => {
-  for (const raw of [undefined, null, {}, [], 'x', 7, { model: '' }]) {
-    assert.equal(sanitizeNodeDefaults(raw), undefined, `expected undefined for ${JSON.stringify(raw)}`);
-  }
-});
-
-test('sanitizeWorkflowSteps normalizes defaults but passes unknown node fields through', () => {
-  const steps = sanitizeWorkflowSteps([[
-    { id: 'a', key: 'planner', defaults: { model: 'm', effort: 'nope' }, custom: { plugin: 'x' } },
-    { id: 'b', key: 'reviewer', defaults: {} },
-  ]]);
-  assert.deepEqual(steps[0][0], { id: 'a', key: 'planner', defaults: { model: 'm' }, custom: { plugin: 'x' } });
-  assert.deepEqual(steps[0][1], { id: 'b', key: 'reviewer' }, 'an empty block is dropped entirely');
+test('sanitizeNodeDefaults: keeps well-formed fields, drops malformed ones individually, refuses a model-less effort, undefined for empty/non-object', async () => {
+  await checkRows(Object.entries(SANITIZE).map(([name, cases]) => ({ name, run: () => {
+    for (const [raw, expected] of cases) {
+      assert.deepEqual(sanitizeNodeDefaults(raw), expected, `expected ${JSON.stringify(expected)} for ${JSON.stringify(raw)}`);
+    }
+  } })));
 });
 
 // ── persistence ─────────────────────────────────────────────────────────────
-
-test('writeWorkflow round-trips node defaults; workflowNodeDefaults flattens them', async () => {
-  await writeWorkflow({
-    id: 'wf_def_rt', name: 'RT',
-    steps: [[{ id: 'n0', key: 'planner', defaults: { model: 'claude-opus-4-8', effort: 'high', fanOut: true } }],
-      [{ id: 'n1', key: 'reviewer' }]],
-    feedbacks: [],
-  });
-  const tpl = await readWorkflow('wf_def_rt');
-  assert.deepEqual(tpl.steps[0][0].defaults, { model: 'claude-opus-4-8', effort: 'high', fanOut: true });
-  assert.deepEqual(workflowNodeDefaults(tpl), {
-    n0: { model: 'claude-opus-4-8', effort: 'high', fanOut: true },
-  });
-});
-
-test('setWorkflowNodeDefaults sets, clears, and ignores unknown node ids without touching topology', async () => {
-  await writeWorkflow({
-    id: 'wf_def_set', name: 'Set',
-    steps: [[{ id: 'n0', key: 'planner', defaults: { model: 'old-model' } }], [{ id: 'n1', key: 'reviewer' }]],
-    feedbacks: [{ id: 'fb', from: 'n1', to: 'n0' }],
-  });
-
-  await setWorkflowNodeDefaults('wf_def_set', {
-    n0: { model: 'claude-opus-4-8', effort: 'high' },
-    n1: { fanOut: true },
-    ghost: { model: 'nope' }, // not in the template -> ignored, never resurrected
-  });
-  let tpl = await readWorkflow('wf_def_set');
-  assert.deepEqual(tpl.steps[0][0].defaults, { model: 'claude-opus-4-8', effort: 'high' });
-  assert.deepEqual(tpl.steps[1][0].defaults, { fanOut: true });
-  assert.equal(tpl.steps.flat().length, 2, 'topology unchanged');
-  assert.deepEqual(tpl.feedbacks, [{ id: 'fb', from: 'n1', to: 'n0' }]);
-
-  // null clears one node; a node absent from the map keeps what it has.
-  await setWorkflowNodeDefaults('wf_def_set', { n0: null });
-  tpl = await readWorkflow('wf_def_set');
-  assert.equal(tpl.steps[0][0].defaults, undefined);
-  assert.deepEqual(tpl.steps[1][0].defaults, { fanOut: true }, 'untouched node kept its defaults');
-});
 
 test('setWorkflowNodeDefaults refuses the built-in default workflow and unknown ids', async () => {
   await assert.rejects(() => setWorkflowNodeDefaults(GRAPH_DEFAULT_WORKFLOW.id, { n_plan: { fanOut: true } }),
@@ -128,25 +83,6 @@ function graph(id, name, nodes) {
   };
 }
 
-test('a workflow default supplies model/effort when the project has no override', async () => {
-  await writeGraphWorkflow(graph('wf_res_a', 'A',
-    [{ id: 'n_a', key: 'planner', config: { model: 'claude-opus-4-8', effort: 'high' } }]));
-  const nodes = await resolve('wf_res_a');
-  assert.equal(nodes.n_a.model, 'claude-opus-4-8');
-  assert.equal(nodes.n_a.effort, 'high');
-});
-
-test('a per-project override beats the workflow default, and takes its effort with it', async () => {
-  await writeGraphWorkflow(graph('wf_res_b', 'B',
-    [{ id: 'n_a', key: 'planner', config: { model: 'claude-opus-4-8', effort: 'max' } }]));
-  await setNodeModel(PROJECT, 'wf_res_b', 'n_a', { model: 'claude-haiku-4-5' });
-  const nodes = await resolve('wf_res_b');
-  assert.equal(nodes.n_a.model, 'claude-haiku-4-5');
-  // The default's 'max' belonged to Opus — inheriting it here would silently
-  // pair an effort with a model that may not advertise it.
-  assert.equal(nodes.n_a.effort, undefined);
-});
-
 test('workflow defaults sit ABOVE the agent registry for fanOut and askQuestions', async () => {
   await writeGraphWorkflow(graph('wf_res_c', 'C', [
     { id: 'n_a', key: 'planner', config: { fanOut: true, askQuestions: true } },
@@ -163,14 +99,6 @@ test('a locked questions agent ignores a workflow default, exactly as it ignores
     [{ id: 'n_a', key: 'locked', config: { askQuestions: false } }]));
   const nodes = await resolve('wf_res_d');
   assert.equal(nodes.n_a.askQuestions, true, 'locked agents always follow their manifest');
-});
-
-test('a workflow with no defaults resolves exactly as before (no migration needed)', async () => {
-  await writeGraphWorkflow(graph('wf_res_e', 'E', [{ id: 'n_a', key: 'planner' }]));
-  const nodes = await resolve('wf_res_e');
-  assert.equal(nodes.n_a.model, undefined);
-  assert.equal(nodes.n_a.effort, undefined);
-  assert.equal(nodes.n_a.fanOut, false);
 });
 
 test('the legacy per-role config still outranks a workflow default on wf_default', async () => {

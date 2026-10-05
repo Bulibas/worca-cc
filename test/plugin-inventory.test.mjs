@@ -8,6 +8,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { addPluginRepo } from '../src/core/plugin-repo.mjs';
 import { inventoryFromCache } from '../src/core/plugin-inventory.mjs';
 
@@ -23,11 +24,14 @@ async function git(cwd, ...args) {
   return stdout.trim();
 }
 
-test('inventoryFromCache: depth-2 subdir inventory matches the plugin manifest', async () => {
+test('inventoryFromCache: depth-2 subdir inventory matches the manifest; throwaway tmp path in setup commands is rewritten to <plugin-dir> (C6)', async () => {
+  // One marketplace repo listing both depth-2 plugins, one addPluginRepo (one bare
+  // cache); each row exports and inventories its own subdir.
   const root = join(scratch, 'repo');
   mkdirSync(join(root, 'plugins', 'demo', 'connector'), { recursive: true });
+  mkdirSync(join(root, 'plugins', 'withdep'), { recursive: true });
   writeFileSync(join(root, 'worca-cc-marketplace.json'),
-    JSON.stringify({ name: 'M', plugins: ['plugins/demo'] }));
+    JSON.stringify({ name: 'M', plugins: ['plugins/demo', 'plugins/withdep'] }));
   writeFileSync(join(root, 'plugins', 'demo', 'worca-cc-plugin.json'), JSON.stringify({
     name: 'demo', version: '1.0.0',
     taskSources: [{ id: 'main', displayName: 'Demo', module: './connector/index.mjs',
@@ -35,21 +39,6 @@ test('inventoryFromCache: depth-2 subdir inventory matches the plugin manifest',
       inputs: [{ key: 'task', type: 'task-browser', label: 'Task' }] }],
   }));
   writeFileSync(join(root, 'plugins', 'demo', 'connector', 'index.mjs'), 'export default () => ({});\n');
-  await git(root, 'init', '-q', '-b', 'main');
-  await git(root, 'add', '-A');
-  await git(root, 'commit', '-qm', 'c1');
-  const found = await addPluginRepo(root);
-  const inv = await inventoryFromCache(found.repoUrl, found.sha, 'plugins/demo');
-  assert.deepEqual(inv.taskSources, [{ id: 'main', displayName: 'Demo', secrets: ['token'] }]);
-  assert.deepEqual(inv.setupCommands, []);
-  assert.equal(inv.depCount, null);
-});
-
-test('inventoryFromCache: throwaway tmp path in setup commands is rewritten to <plugin-dir> (C6)', async () => {
-  const root = join(scratch, 'repo-setup');
-  mkdirSync(join(root, 'plugins', 'withdep'), { recursive: true });
-  writeFileSync(join(root, 'worca-cc-marketplace.json'),
-    JSON.stringify({ name: 'M', plugins: ['plugins/withdep'] }));
   writeFileSync(join(root, 'plugins', 'withdep', 'worca-cc-plugin.json'), JSON.stringify({
     name: 'withdep', version: '1.0.0', setup: { node: true },
     taskSources: [{ id: 'main', displayName: 'W', module: './index.mjs',
@@ -62,9 +51,19 @@ test('inventoryFromCache: throwaway tmp path in setup commands is rewritten to <
   await git(root, 'add', '-A');
   await git(root, 'commit', '-qm', 'c1');
   const found = await addPluginRepo(root);
-  const inv = await inventoryFromCache(found.repoUrl, found.sha, 'plugins/withdep');
-  const joined = (inv.setupCommands || []).join('\n');
-  assert.ok(inv.setupCommands.length > 0, 'setup commands present');
-  assert.doesNotMatch(joined, /\/var\/folders|\/tmp/); // no leaked throwaway path
-  assert.match(joined, /<plugin-dir>/);
+  await checkRows([
+    { name: 'inventoryFromCache: depth-2 subdir inventory matches the plugin manifest', run: async () => {
+      const inv = await inventoryFromCache(found.repoUrl, found.sha, 'plugins/demo');
+      assert.deepEqual(inv.taskSources, [{ id: 'main', displayName: 'Demo', secrets: ['token'] }]);
+      assert.deepEqual(inv.setupCommands, []);
+      assert.equal(inv.depCount, null);
+    } },
+    { name: 'inventoryFromCache: throwaway tmp path in setup commands is rewritten to <plugin-dir> (C6)', run: async () => {
+      const inv = await inventoryFromCache(found.repoUrl, found.sha, 'plugins/withdep');
+      const joined = (inv.setupCommands || []).join('\n');
+      assert.ok(inv.setupCommands.length > 0, 'setup commands present');
+      assert.doesNotMatch(joined, /\/var\/folders|\/tmp/); // no leaked throwaway path
+      assert.match(joined, /<plugin-dir>/);
+    } },
+  ]);
 });

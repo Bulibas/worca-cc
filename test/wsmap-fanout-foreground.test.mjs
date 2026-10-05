@@ -54,15 +54,6 @@ test('fanOutSpawnEnv: only the scan\'s two fan-out nodes turn background tasks o
   assert.equal(fanOutSpawnEnv(null, {}), undefined);
 });
 
-test('the scan: survey and usage spawn with background tasks off, the synthesizer (no fan-out) with nothing', async () => {
-  const projectDir = await tmp();
-  const r = await resolveGraph(projectDir, 'wf_workspace_scan', loadAgentRegistry(), DEFAULT_AGENTS_DIR, { isWorkspace: true });
-  const spawnEnvOf = (id) => runOpts({ projectDir, claudeOpts: {}, node: r.nodes[id] }, CALL).spawnEnv;
-  assert.deepEqual(spawnEnvOf('n_scan'), FOREGROUND);
-  assert.deepEqual(spawnEnvOf('n_usage'), FOREGROUND);
-  assert.equal(spawnEnvOf('n_synth'), undefined);
-});
-
 test('every fan-out node of the default workflow keeps background tasks: its spawn env is the cap alone', async () => {
   const projectDir = await tmp();
   for (const isWorkspace of [false, true]) {

@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { lastToast, edit } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -71,18 +72,33 @@ async function boot({ configOk = true } = {}) {
   return { window, posts, calls, tick, openSettings, setSettings };
 }
 
-test('the card sits after the Auto workflow model on the Models tab; options come from the catalog; the note names the effective model', async () => {
-  const { window, openSettings } = await boot(); await openSettings();
-  const ids = [...window.document.querySelectorAll('.view[data-view="settings"] section.card.settings-card')].map((c) => c.id);
-  assert.equal(ids[ids.indexOf('auto-model-settings-card') + 1], 'pr-description-model-settings-card');
-  const card = window.document.getElementById('pr-description-model-settings-card');
-  assert.equal(card.closest('.settings-pane').dataset.tab, 'models');
-  assert.equal(card.dataset.minLevel, 'expert', 'an expert card, like its siblings');
-  const sel = window.document.getElementById('prDescModel');
-  assert.deepEqual([...sel.options].map((o) => o.value), ['', 'claude-opus-5-5', 'claude-sonnet-5']);
-  assert.equal(sel.options[0].textContent, 'Default (Sonnet-class)');
-  assert.equal(sel.value, '');
-  assert.match(window.document.getElementById('prDescModelNote').textContent, /PR descriptions are written with claude-sonnet-5 \(the default\)/);
+test('the PR description model card (Models tab, after Auto, expert) lists the catalog with Default first; Use default posts an empty prDescriptionModel; Test sends one tiny prompt to the picked model', async () => {
+  const { window, openSettings, posts, calls, setSettings } = await boot(); await openSettings();
+  await checkRows([
+    { name: 'the card sits after the Auto workflow model on the Models tab; options come from the catalog; the note names the effective model', run: async () => {
+      const ids = [...window.document.querySelectorAll('.view[data-view="settings"] section.card.settings-card')].map((c) => c.id);
+      assert.equal(ids[ids.indexOf('auto-model-settings-card') + 1], 'pr-description-model-settings-card');
+      const card = window.document.getElementById('pr-description-model-settings-card');
+      assert.equal(card.closest('.settings-pane').dataset.tab, 'models');
+      assert.equal(card.dataset.minLevel, 'expert', 'an expert card, like its siblings');
+      const sel = window.document.getElementById('prDescModel');
+      assert.deepEqual([...sel.options].map((o) => o.value), ['', 'claude-opus-5-5', 'claude-sonnet-5']);
+      assert.equal(sel.options[0].textContent, 'Default (Sonnet-class)');
+      assert.equal(sel.value, '');
+      assert.match(window.document.getElementById('prDescModelNote').textContent, /PR descriptions are written with claude-sonnet-5 \(the default\)/);
+    } },
+    { name: 'Use default posts an empty prDescriptionModel; Test sends one tiny prompt to the picked model', run: async () => {
+      setSettings({ prDescriptionModel: 'claude-opus-5-5', prDescriptionModelEffective: { model: 'claude-opus-5-5', source: 'settings' } });
+      await openSettings();
+      window.document.getElementById('prDescModelTest').click(); await settle(window);
+      assert.ok(calls.some((c) => c.method === 'POST' && c.url.endsWith('/api/models/claude-opus-5-5/test')));
+      assert.equal(window.document.getElementById('prDescModelMsg').textContent, 'claude-opus-5-5 replied: pong');
+      assert.equal(window.document.getElementById('prDescModelMsg').className, 'hint ok');
+      assert.equal(window.document.getElementById('prDescModelTest').textContent, 'Works');
+      window.document.getElementById('prDescModelReset').click(); await settle(window);
+      assert.deepEqual(posts.at(-1), { prDescriptionModel: '' });
+    } },
+  ]);
 });
 
 test('Save posts prDescriptionModel; a stored id paints its own line; one that left the catalog paints "not installed"', async () => {
@@ -114,17 +130,4 @@ test('a failed catalog GET never becomes a "no longer in the catalog" verdict', 
   assert.ok(opt && !opt.disabled, 'the stored id stays selectable');
   assert.doesNotMatch(window.document.getElementById('prDescModelNote').textContent, /no longer in the catalog/);
   assert.equal(window.document.getElementById('prDescModelTest').disabled, false, 'Test stays available');
-});
-
-test('Use default posts an empty prDescriptionModel; Test sends one tiny prompt to the picked model', async () => {
-  const { window, openSettings, posts, calls, setSettings } = await boot();
-  setSettings({ prDescriptionModel: 'claude-opus-5-5', prDescriptionModelEffective: { model: 'claude-opus-5-5', source: 'settings' } });
-  await openSettings();
-  window.document.getElementById('prDescModelTest').click(); await settle(window);
-  assert.ok(calls.some((c) => c.method === 'POST' && c.url.endsWith('/api/models/claude-opus-5-5/test')));
-  assert.equal(window.document.getElementById('prDescModelMsg').textContent, 'claude-opus-5-5 replied: pong');
-  assert.equal(window.document.getElementById('prDescModelMsg').className, 'hint ok');
-  assert.equal(window.document.getElementById('prDescModelTest').textContent, 'Works');
-  window.document.getElementById('prDescModelReset').click(); await settle(window);
-  assert.deepEqual(posts.at(-1), { prDescriptionModel: '' });
 });

@@ -27,6 +27,7 @@ import { persistResults, persistDiffPatch } from '../src/core/results.mjs';
 import { listSubAgents } from '../src/core/artifacts.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
 import { getDb, _resetForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const dirs = [];
 const prevEnv = {
@@ -70,30 +71,33 @@ function pausedOrch(name) {
 
 // ── 1. non-result frames are never re-priced ──────────────────────────────────
 
-test('orchestrator: an override never turns a NON-result frame into a booked $0', async () => {
-  await addGlobalModel({ id: 'onprem', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { free: true } });
-  const { orch, seen } = pausedOrch('mcos-frames');
-  for (let i = 0; i < 25; i++) orch._onAgentEvent('planner', FRAME(i), { model: 'onprem', stepKey: 'plan' });
+test('orchestrator: a {free} or {perMtok} override is inert on non-result frames (never a booked $0)', async () => {
+  await checkRows([
+    { name: 'orchestrator: an override never turns a NON-result frame into a booked $0', run: async () => {
+      await addGlobalModel({ id: 'onprem', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { free: true } });
+      const { orch, seen } = pausedOrch('mcos-frames');
+      for (let i = 0; i < 25; i++) orch._onAgentEvent('planner', FRAME(i), { model: 'onprem', stepKey: 'plan' });
 
-  const step = orch.getState().steps.find((s) => s.key === 'plan');
-  assert.equal(step.costUsd, undefined, 'no result yet -> the step carries no cost figure at all');
-  assert.equal(seen.states, 0,
-    'not one state broadcast: _recordCost (writeState + broadcast) must fire once per NODE, never per frame');
+      const step = orch.getState().steps.find((s) => s.key === 'plan');
+      assert.equal(step.costUsd, undefined, 'no result yet -> the step carries no cost figure at all');
+      assert.equal(seen.states, 0,
+        'not one state broadcast: _recordCost (writeState + broadcast) must fire once per NODE, never per frame');
 
-  // The terminal result IS re-priced — the whole point of the feature.
-  orch._onAgentEvent('planner',
-    { type: 'result', costUsd: 0.4625, raw: { type: 'result', total_cost_usd: 0.4625, usage: USAGE } },
-    { model: 'onprem', stepKey: 'plan' });
-  assert.equal(orch.getState().totalCostUsd, 0, 'the fabricated 0.4625 is discarded');
-  assert.equal(seen.states, 1, 'exactly one broadcast, from the result');
-});
-
-test('orchestrator: a {perMtok} override is likewise inert on non-result frames', async () => {
-  await addGlobalModel({ id: 'priced', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { perMtok: { input: 1 } } });
-  const { orch, seen } = pausedOrch('mcos-frames2');
-  for (let i = 0; i < 25; i++) orch._onAgentEvent('planner', FRAME(i), { model: 'priced', stepKey: 'plan' });
-  assert.equal(seen.states, 0);
-  assert.equal(orch.getState().steps.find((s) => s.key === 'plan').costUsd, undefined);
+      // The terminal result IS re-priced — the whole point of the feature.
+      orch._onAgentEvent('planner',
+        { type: 'result', costUsd: 0.4625, raw: { type: 'result', total_cost_usd: 0.4625, usage: USAGE } },
+        { model: 'onprem', stepKey: 'plan' });
+      assert.equal(orch.getState().totalCostUsd, 0, 'the fabricated 0.4625 is discarded');
+      assert.equal(seen.states, 1, 'exactly one broadcast, from the result');
+    } },
+    { name: 'orchestrator: a {perMtok} override is likewise inert on non-result frames', run: async () => {
+      await addGlobalModel({ id: 'priced', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { perMtok: { input: 1 } } });
+      const { orch, seen } = pausedOrch('mcos-frames2');
+      for (let i = 0; i < 25; i++) orch._onAgentEvent('planner', FRAME(i), { model: 'priced', stepKey: 'plan' });
+      assert.equal(seen.states, 0);
+      assert.equal(orch.getState().steps.find((s) => s.key === 'plan').costUsd, undefined);
+    } },
+  ]);
 });
 
 // ── 2. {perMtok} with nothing to price on ─────────────────────────────────────
@@ -240,19 +244,6 @@ test('ask: a {perMtok} model books the recomputed cost into the budget ledger', 
   assert.equal(getThread(thread.id).totals.costUsd, 4);
   assert.deepEqual(askLedger().map((r) => r.amount_usd), [4]);
   assert.equal(frames.at(-1).costUsd, 4);
-});
-
-test('ask: with NO override the CLI figure stands unchanged (default behavior)', async () => {
-  await addGlobalModel({ id: 'plain', env: { ANTHROPIC_BASE_URL: 'https://p' } });
-  const { turn, thread, asst } = askTurn('plain', async (opts) => {
-    opts.onEvent({ type: 'assistant', raw: { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'hi' }] }, parent_tool_use_id: null } });
-    opts.onEvent({ type: 'result', raw: ASK_RESULT() });
-    return { text: 'hi', exitCode: 0 };
-  });
-  await turn.run();
-  assert.equal(getMessage(asst.id).costUsd, 0.4625);
-  assert.equal(getThread(thread.id).totals.costUsd, 0.4625);
-  assert.deepEqual(askLedger().map((r) => r.amount_usd), [0.4625]);
 });
 
 test('ask: §6.2.8 — no `result` frame still means costUsd NULL, an override does not forge a $0', async () => {

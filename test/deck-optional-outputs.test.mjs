@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { runScriptExecution } from '../src/core/graph/script-runner.mjs';
 import { loadScriptRegistry } from '../src/core/script-registry.mjs';
 import { probePython } from '../src/core/graph/python-probe.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const REG = loadScriptRegistry({ userScriptsDir: null });
 const GEN = 'Generate narration audio (ElevenLabs)';
@@ -98,29 +99,32 @@ async function everyFileUnder(dir) {
 
 // ── deckAudio ────────────────────────────────────────────────────────────────
 
-test('deckAudio: the default is no audio, and it says so without touching the deck', async (t) => {
+test('deckAudio: default and keyless requests skip without touching the deck', async (t) => {
   if (!(await withPython(t))) return;
-  const pdir = await fixture({ answers: values({}) });
-  const res = await runScriptExecution(ctxFor('deckAudio', pdir));
-  assert.deepEqual(res.verdict.issues, []);
-  assert.match(res.verdict.summary, /skipped \(not requested\)/);
-  assert.equal(await readFile(join(pdir, 'deck', 'deck.html'), 'utf8'), DECK);
-  assert.ok(!(await readdir(join(pdir, 'deck'))).includes('narration-audio.js'));
-});
 
-test('deckAudio: requested but no key -> skipped, never a failure', async (t) => {
-  if (!(await withPython(t))) return;
-  const pdir = await fixture({ answers: values({ audio: GEN, voiceId: 'voice-1' }) });
-  const saved = { a: process.env.ELEVENLABS_API_KEY, b: process.env.WORCA_DECK_ELEVENLABS_API_KEY };
-  delete process.env.ELEVENLABS_API_KEY; delete process.env.WORCA_DECK_ELEVENLABS_API_KEY;
-  try {
-    const res = await runScriptExecution(ctxFor('deckAudio', pdir));
-    assert.deepEqual(res.verdict.issues, []);
-    assert.match(res.verdict.summary, /no key or voice/);
-  } finally {
-    if (saved.a !== undefined) process.env.ELEVENLABS_API_KEY = saved.a;
-    if (saved.b !== undefined) process.env.WORCA_DECK_ELEVENLABS_API_KEY = saved.b;
-  }
+  await checkRows([
+    { name: 'deckAudio: the default is no audio, and it says so without touching the deck', run: async () => {
+      const pdir = await fixture({ answers: values({}) });
+      const res = await runScriptExecution(ctxFor('deckAudio', pdir));
+      assert.deepEqual(res.verdict.issues, []);
+      assert.match(res.verdict.summary, /skipped \(not requested\)/);
+      assert.equal(await readFile(join(pdir, 'deck', 'deck.html'), 'utf8'), DECK);
+      assert.ok(!(await readdir(join(pdir, 'deck'))).includes('narration-audio.js'));
+    } },
+    { name: 'deckAudio: requested but no key -> skipped, never a failure', run: async () => {
+      const pdir = await fixture({ answers: values({ audio: GEN, voiceId: 'voice-1' }) });
+      const saved = { a: process.env.ELEVENLABS_API_KEY, b: process.env.WORCA_DECK_ELEVENLABS_API_KEY };
+      delete process.env.ELEVENLABS_API_KEY; delete process.env.WORCA_DECK_ELEVENLABS_API_KEY;
+      try {
+        const res = await runScriptExecution(ctxFor('deckAudio', pdir));
+        assert.deepEqual(res.verdict.issues, []);
+        assert.match(res.verdict.summary, /no key or voice/);
+      } finally {
+        if (saved.a !== undefined) process.env.ELEVENLABS_API_KEY = saved.a;
+        if (saved.b !== undefined) process.env.WORCA_DECK_ELEVENLABS_API_KEY = saved.b;
+      }
+    } },
+  ]);
 });
 
 test('deckAudio: requested with a key -> clips generated, files written, deck wired, key never on disk', async (t) => {
@@ -224,31 +228,36 @@ async function withChrome(bin, fn) {
   }
 }
 
-test('deckPdf: the PDF is the default — an absent answers file still prints one', async (t) => {
+test('deckPdf: default prints, deselected skips, a page-count mismatch blocks', async (t) => {
   if (!(await withPython(t))) return;
-  const pdir = await fixture();
-  const bin = await fakeChrome(pdir, 2);
-  const res = await withChrome(bin, () => runScriptExecution(ctxFor('deckPdf', pdir)));
-  assert.deepEqual(res.verdict.issues, [], JSON.stringify(res.verdict));
-  assert.match(res.verdict.summary, /2 slide\(s\), 2 PDF page\(s\)/, 'the data-deck-skip slide is not counted');
-  assert.ok((await readdir(join(pdir, 'deck'))).includes('deck.pdf'));
-});
 
-test('deckPdf: deselected -> skipped, and Chrome is never invoked', async (t) => {
-  if (!(await withPython(t))) return;
-  const pdir = await fixture({ answers: values({ deliverables: 'Standalone HTML only' }) });
-  const res = await withChrome('/nonexistent/chrome', () => runScriptExecution(ctxFor('deckPdf', pdir)));
-  assert.deepEqual(res.verdict.issues, []);
-  assert.match(res.verdict.summary, /skipped \(not requested\)/);
-  assert.ok(!(await readdir(join(pdir, 'deck'))).includes('deck.pdf'));
-});
-
-test('deckPdf: a page-count mismatch is a blocking finding against the print CSS', async (t) => {
-  if (!(await withPython(t))) return;
-  const pdir = await fixture({ answers: values({}) });
-  const bin = await fakeChrome(pdir, 5);
-  const res = await withChrome(bin, () => runScriptExecution(ctxFor('deckPdf', pdir)));
-  assert.equal(res.verdict.issues.length, 1);
-  assert.equal(res.verdict.issues[0].severity, 'major');
-  assert.match(res.verdict.issues[0].title, /5 page\(s\) for 2 slide\(s\)/);
+  await checkRows([
+    { name: 'deckPdf: prints by default; deselected skips without invoking Chrome', run: async () => {
+      await checkRows([
+        { name: 'deckPdf: the PDF is the default — an absent answers file still prints one', run: async () => {
+          const pdir = await fixture();
+          const bin = await fakeChrome(pdir, 2);
+          const res = await withChrome(bin, () => runScriptExecution(ctxFor('deckPdf', pdir)));
+          assert.deepEqual(res.verdict.issues, [], JSON.stringify(res.verdict));
+          assert.match(res.verdict.summary, /2 slide\(s\), 2 PDF page\(s\)/, 'the data-deck-skip slide is not counted');
+          assert.ok((await readdir(join(pdir, 'deck'))).includes('deck.pdf'));
+        } },
+        { name: 'deckPdf: deselected -> skipped, and Chrome is never invoked', run: async () => {
+          const pdir = await fixture({ answers: values({ deliverables: 'Standalone HTML only' }) });
+          const res = await withChrome('/nonexistent/chrome', () => runScriptExecution(ctxFor('deckPdf', pdir)));
+          assert.deepEqual(res.verdict.issues, []);
+          assert.match(res.verdict.summary, /skipped \(not requested\)/);
+          assert.ok(!(await readdir(join(pdir, 'deck'))).includes('deck.pdf'));
+        } },
+      ]);
+    } },
+    { name: 'deckPdf: a page-count mismatch is a blocking finding against the print CSS', run: async () => {
+      const pdir = await fixture({ answers: values({}) });
+      const bin = await fakeChrome(pdir, 5);
+      const res = await withChrome(bin, () => runScriptExecution(ctxFor('deckPdf', pdir)));
+      assert.equal(res.verdict.issues.length, 1);
+      assert.equal(res.verdict.issues[0].severity, 'major');
+      assert.match(res.verdict.issues[0].title, /5 page\(s\) for 2 slide\(s\)/);
+    } },
+  ]);
 });

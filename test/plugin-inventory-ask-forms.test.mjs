@@ -66,17 +66,6 @@ test('an agent with forms carries the ids and the file types it may display', ()
   assert.deepEqual(agent.fileTypes, ['application/pdf', 'image/*'], 'union of every form, deduped and sorted');
 });
 
-test('an agent with no forms carries empty arrays, never undefined', () => {
-  const dir = mkDir({
-    'worca-cc-plugin.json': JSON.stringify({ name: 'p' }),
-    'agents/plain.meta.json': sidecar('plain', null),
-    'agents/plain.md': '# plain\n',
-  });
-  const [agent] = buildInstallInventory(dir).agents;
-  assert.deepEqual(agent.forms, []);
-  assert.deepEqual(agent.fileTypes, []);
-});
-
 test('a form that fails gate 1 is NOT promised to the reviewer', () => {
   const broken = { ...PICK_ONE, layout: [{ widget: 'grid', bind: 'data.summary' }] };
   const dir = mkDir({

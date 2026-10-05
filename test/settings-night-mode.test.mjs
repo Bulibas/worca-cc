@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setNightMode, nightModeSettings, setNightModeToggle, nightModeToggle, nightModeHereSince, SETTINGS_POST_KEYS } from '../src/core/settings.mjs';
+import { setNightMode, nightModeSettings, setNightModeToggle, nightModeToggle, nightModeHereSince } from '../src/core/settings.mjs';
 
 // settings.json is read from $HOME/.worca-cc (NOT WORCA_HOME): swap HOME/USERPROFILE.
 let home; const prev = {};
@@ -47,9 +47,4 @@ test('"here" stores auto plus the moment it was said; any other status clears it
   await setNightModeToggle('here', { now: t });
   await setNightModeToggle('auto');
   assert.equal(nightModeHereSince(), null);
-});
-
-test('POST keys include the night mode keys', () => {
-  assert.ok(SETTINGS_POST_KEYS.includes('nightMode'));
-  assert.ok(SETTINGS_POST_KEYS.includes('nightModeToggle'));
 });

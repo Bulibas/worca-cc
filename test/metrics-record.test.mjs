@@ -7,6 +7,7 @@ import {
   NOW, projectDone, workspaceTouched, workspaceUntouched, failedBudget, stoppedRun, stoppedAfterBudget, resumedRun, preflightFailed,
 } from './fixtures/team-metrics/snapshots.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);   // Step 3 hoists sync/ledger imports into record.mjs; ledger resolves worcaHome()
 
@@ -39,9 +40,26 @@ test('single-project done → exact RunRecord v1', () => {
   });
 });
 
-test('a resumed run records its parked time; absent or non-finite → 0', () => {
-  assert.equal(buildRunRecord({ ...resumedRun, pausedMs: 30_093_429 }, { now: new Date(NOW) }).pausedMs, 30_093_429);
-  assert.equal(buildRunRecord({ ...projectDone, pausedMs: Number.NaN }, { now: new Date(NOW) }).pausedMs, 0);
+test('RunRecord field normalisation: pausedMs, actor under attribution none, agent model ids only, 8-hex rev, interventions', async () => {
+  await checkRows([
+    { name: 'a resumed run records its parked time; absent or non-finite → 0', run: () => {
+      assert.equal(buildRunRecord({ ...resumedRun, pausedMs: 30_093_429 }, { now: new Date(NOW) }).pausedMs, 30_093_429);
+      assert.equal(buildRunRecord({ ...projectDone, pausedMs: Number.NaN }, { now: new Date(NOW) }).pausedMs, 0);
+    } },
+    { name: 'attribution none → actor null', run: () => {
+      assert.equal(buildRunRecord(projectDone, { attribution: 'none', now: new Date(NOW) }).actor, null);
+    } },
+    { name: 'agents.models holds full model ids from agent steps only (sub-agent aliases ignored)', run: () => {
+      const rec = buildRunRecord({ ...projectDone, subAgents: [{ runModel: 'haiku' }] }, { now: new Date(NOW) });
+      assert.deepEqual(rec.agents.models, ['claude-opus-5-5', 'claude-sonnet-5']);
+    } },
+    { name: 'workflow.rev keeps only an 8-hex revision', run: () => {
+      assert.equal(buildRunRecord({ ...projectDone, workflow: { ...projectDone.workflow, rev: 'nope' } }, { now: new Date(NOW) }).workflow.rev, null);
+    } },
+    { name: 'resumed run carries pause/resume interventions', run: () => {
+      assert.deepEqual(buildRunRecord(resumedRun, { now: new Date(NOW) }).interventions, { questions: 2, pauses: 1, resumes: 1 });
+    } },
+  ]);
 });
 
 test('field order is fixed (serialised key order == RECORD_FIELDS)', () => {
@@ -71,48 +89,33 @@ test('failure.message never carries a local path (§4.12, decision 34); URLs sur
   assert.equal(redactPaths(null), null);
 });
 
-test('attribution none → actor null', () => {
-  assert.equal(buildRunRecord(projectDone, { attribution: 'none', now: new Date(NOW) }).actor, null);
-});
-
-test('failed after a cost-cap pause → failure.kind budget; plain error → error; preflight-only row → preflight', () => {
-  const b = buildRunRecord(failedBudget, { now: new Date(NOW) });
-  assert.equal(b.result, 'failed');
-  assert.deepEqual(b.failure, { kind: 'budget', message: 'resume failed: worktree gone' });
-  const e = buildRunRecord({ ...failedBudget, lastPause: null, error: 'scheduler exploded' }, { now: new Date(NOW) });
-  assert.deepEqual(e.failure, { kind: 'error', message: 'scheduler exploded' });
-  const p = buildRunRecord(preflightFailed, { now: new Date(NOW) });
-  assert.equal(p.failure.kind, 'preflight');
-  assert.equal(p.steps, 0);
-  // A cost cap can trip on the classifier's preflight cost before any agent step: budget wins.
-  const pb = buildRunRecord({ ...preflightFailed, lastPause: { reason: 'cost_total', detail: 'total cost cap reached' } }, { now: new Date(NOW) });
-  assert.equal(pb.failure.kind, 'budget');
-});
-
-test('agents.models holds full model ids from agent steps only (sub-agent aliases ignored)', () => {
-  const rec = buildRunRecord({ ...projectDone, subAgents: [{ runModel: 'haiku' }] }, { now: new Date(NOW) });
-  assert.deepEqual(rec.agents.models, ['claude-opus-5-5', 'claude-sonnet-5']);
-});
-
-test('stopped → result stopped, failure null, git counts null when no results.json', () => {
-  const rec = buildRunRecord(stoppedRun, { now: new Date(NOW) });
-  assert.equal(rec.result, 'stopped');
-  assert.equal(rec.failure, null);
-  assert.deepEqual(rec.git, { branch: 'worca/x', head: null, base: 'main', filesChanged: null, insertions: null, deletions: null });
-});
-
-test('stopped while parked by a cost cap → failure.kind budget with the pause detail', () => {
-  const rec = buildRunRecord(stoppedAfterBudget, { now: new Date(NOW) });
-  assert.equal(rec.result, 'stopped');
-  assert.deepEqual(rec.failure, { kind: 'budget', message: 'pipeline cost cap $5.00 reached' });
-});
-
-test('workflow.rev keeps only an 8-hex revision', () => {
-  assert.equal(buildRunRecord({ ...projectDone, workflow: { ...projectDone.workflow, rev: 'nope' } }, { now: new Date(NOW) }).workflow.rev, null);
-});
-
-test('resumed run carries pause/resume interventions', () => {
-  assert.deepEqual(buildRunRecord(resumedRun, { now: new Date(NOW) }).interventions, { questions: 2, pauses: 1, resumes: 1 });
+test('result + failure.kind: budget / error / preflight / stopped (null) / stopped while cost-parked (budget)', async () => {
+  await checkRows([
+    { name: 'failed after a cost-cap pause → failure.kind budget; plain error → error; preflight-only row → preflight', run: () => {
+      const b = buildRunRecord(failedBudget, { now: new Date(NOW) });
+      assert.equal(b.result, 'failed');
+      assert.deepEqual(b.failure, { kind: 'budget', message: 'resume failed: worktree gone' });
+      const e = buildRunRecord({ ...failedBudget, lastPause: null, error: 'scheduler exploded' }, { now: new Date(NOW) });
+      assert.deepEqual(e.failure, { kind: 'error', message: 'scheduler exploded' });
+      const p = buildRunRecord(preflightFailed, { now: new Date(NOW) });
+      assert.equal(p.failure.kind, 'preflight');
+      assert.equal(p.steps, 0);
+      // A cost cap can trip on the classifier's preflight cost before any agent step: budget wins.
+      const pb = buildRunRecord({ ...preflightFailed, lastPause: { reason: 'cost_total', detail: 'total cost cap reached' } }, { now: new Date(NOW) });
+      assert.equal(pb.failure.kind, 'budget');
+    } },
+    { name: 'stopped → result stopped, failure null, git counts null when no results.json', run: () => {
+      const rec = buildRunRecord(stoppedRun, { now: new Date(NOW) });
+      assert.equal(rec.result, 'stopped');
+      assert.equal(rec.failure, null);
+      assert.deepEqual(rec.git, { branch: 'worca/x', head: null, base: 'main', filesChanged: null, insertions: null, deletions: null });
+    } },
+    { name: 'stopped while parked by a cost cap → failure.kind budget with the pause detail', run: () => {
+      const rec = buildRunRecord(stoppedAfterBudget, { now: new Date(NOW) });
+      assert.equal(rec.result, 'stopped');
+      assert.deepEqual(rec.failure, { kind: 'budget', message: 'pipeline cost cap $5.00 reached' });
+    } },
+  ]);
 });
 
 test('workspace target: projects = member set, touched = changed subset (touched / untouched)', () => {

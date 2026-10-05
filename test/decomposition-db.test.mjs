@@ -8,6 +8,7 @@ import { getDb, _resetForTests } from '../src/core/db.mjs';
 import {
   writeDecomposition, listPhases, listTasks, updateTaskStatus, updatePhaseStatus,
 } from '../src/core/artifacts.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let home;
 beforeEach(async () => {
@@ -35,23 +36,26 @@ const PHASES = [
   ] },
 ];
 
-test('writeDecomposition persists phases + tasks; list* reads them back ordered', () => {
-  writeDecomposition('p1', PHASES);
-  assert.deepEqual(listPhases('p1').map((p) => p.ordinal), [1, 2]);
-  const tasks = listTasks('p1');
-  assert.equal(tasks.length, 3);
-  assert.deepEqual(tasks[0], {
-    id: 'p1t1', phaseOrdinal: 1, taskIndex: 0, title: 'Slice A',
-    fileRelPath: 'tasks/p1-t1-slice-a.md', nodeId: 's_impl_p1_t1',
-    status: 'pending', startedAt: null, finishedAt: null,
-  });
-});
-
-test('writeDecomposition is idempotent (re-write does not duplicate)', () => {
-  writeDecomposition('p1', PHASES);
-  writeDecomposition('p1', PHASES);
-  assert.equal(listPhases('p1').length, 2);
-  assert.equal(listTasks('p1').length, 3);
+test('writeDecomposition persists ordered phases + tasks, idempotently', async () => {
+  await checkRows([
+    { name: 'writeDecomposition persists phases + tasks; list* reads them back ordered', run: () => {
+      writeDecomposition('p1', PHASES);
+      assert.deepEqual(listPhases('p1').map((p) => p.ordinal), [1, 2]);
+      const tasks = listTasks('p1');
+      assert.equal(tasks.length, 3);
+      assert.deepEqual(tasks[0], {
+        id: 'p1t1', phaseOrdinal: 1, taskIndex: 0, title: 'Slice A',
+        fileRelPath: 'tasks/p1-t1-slice-a.md', nodeId: 's_impl_p1_t1',
+        status: 'pending', startedAt: null, finishedAt: null,
+      });
+    } },
+    { name: 'writeDecomposition is idempotent (re-write does not duplicate)', run: () => {
+      writeDecomposition('p1', PHASES);
+      writeDecomposition('p1', PHASES);
+      assert.equal(listPhases('p1').length, 2);
+      assert.equal(listTasks('p1').length, 3);
+    } },
+  ]);
 });
 
 test('updateTaskStatus / updatePhaseStatus set status + timestamps', () => {

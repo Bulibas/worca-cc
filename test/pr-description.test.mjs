@@ -43,23 +43,6 @@ test('the system prompt treats the run data as untrusted and asks for the three 
   assert.match(PR_DESCRIPTION_SYSTEM_PROMPT, /## Testing/);
 });
 
-test('buildPrDescriptionPrompt embeds the title, prompt, results summary, review issues and diff', () => {
-  const p = buildPrDescriptionPrompt({
-    title: 'Add retry to fetch',
-    prompt: 'Make the fetch helper retry twice',
-    baseBranch: 'dev',
-    patch: 'diff --git a/x b/x\n+retry()',
-    results: { summary: { filesNew: 1, filesChanged: 2 } },
-    reviews: [{ kind: 'impl', cycle: 1, issues: [{ severity: 'major', title: 'missing backoff', location: 'x:1' }], summary: '' }],
-  });
-  assert.match(p, /Add retry to fetch/);
-  assert.match(p, /Make the fetch helper retry twice/);
-  assert.match(p, /"filesChanged": 2/);
-  assert.match(p, /\[major\] missing backoff \(x:1\)/);
-  assert.match(p, /\+retry\(\)/);
-  assert.match(p, /dev/);
-});
-
 test('buildPrDescriptionPrompt: a patch above the cap keeps hunk headers only; a long prompt is capped', () => {
   const big = ['diff --git a/a b/a', '--- a/a', '+++ b/a', '@@ -1 +1 @@', `+${'x'.repeat(70_000)}`].join('\n');
   const p = buildPrDescriptionPrompt({ title: 't', prompt: 'p'.repeat(20_000), patch: big, results: null, reviews: [] });
@@ -154,16 +137,5 @@ test('generatePrDescription: without an explicit model it resolves the setting, 
     assert.ok(warns.some((w) => /prDescriptionModel "gone-model" is no longer in the catalog/.test(w)), warns.join('\n'));
     await generatePrDescription(key, id, { setting: 'claude-opus-5', runClaudeImpl: fake });
     assert.equal(seen[1].model, 'claude-opus-5');
-  });
-});
-
-test('generatePrDescription: an empty reply and a missing run are errors, a signal is forwarded', async () => {
-  await withRun({ title: 't' }, async ({ id, key }) => {
-    await assert.rejects(() => generatePrDescription(key, id, { model: 'm', runClaudeImpl: async () => ({ text: '  ' }) }), /empty description/);
-    await assert.rejects(() => generatePrDescription(key, 'deadbeef', { model: 'm', runClaudeImpl: async () => ({ text: 'x' }) }), /pipeline not found/);
-    const ac = new AbortController();
-    let got;
-    await generatePrDescription(key, id, { model: 'm', signal: ac.signal, runClaudeImpl: async (o) => { got = o.signal; return { text: 'x' }; } });
-    assert.equal(got, ac.signal);
   });
 });

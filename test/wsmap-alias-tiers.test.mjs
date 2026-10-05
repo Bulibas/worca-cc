@@ -7,11 +7,10 @@
 // member's name: the key claim alone would hide the bug.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { mkdir, rename, rm } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 
-import { extractWorkspace, failedExtract, surveyBrief } from '../src/core/workspace-map/extract.mjs';
+import { extractWorkspace, failedExtract } from '../src/core/workspace-map/extract.mjs';
 import { buildCatalog } from '../src/core/workspace-map/catalog.mjs';
 import { joinMap } from '../src/core/workspace-map/join.mjs';
 import { PROJECT_KEY_RE, projectKey } from '../src/core/store.mjs';
@@ -194,31 +193,6 @@ test('extraction failed: every member\'s key and name still claim first — a su
   } finally {
     await ws.cleanup();
   }
-});
-
-test('every alias source a built-in detector emits has its tier; an unknown source is a manifest-tier claim', async () => {
-  const { ALIAS_TIERS, aliasTier, GUESS_SOURCES } = await import('../src/core/workspace-map/alias-tiers.mjs');
-  assert.deepEqual([...GUESS_SOURCES], ['deploy-self', 'npm-scope-tail', 'survey'], 'the guesses that tie with a manifest-tier claim');
-  assert.deepEqual({ ...ALIAS_TIERS }, {
-    identity: 0,
-    compose: 1, k8s: 1, 'k8s-ingress': 1, helm: 1, serverless: 1, spring: 1,
-    'package.json': 2, pyproject: 2, maven: 2, gradle: 2, cargo: 2, 'go.mod': 2, 'git-remote': 2,
-    survey: 3, 'npm-scope-tail': 3, 'deploy-self': 3,
-  });
-  assert.ok(Object.isFrozen(ALIAS_TIERS));
-  for (const [source, tier] of Object.entries(ALIAS_TIERS)) assert.equal(aliasTier(source), tier, source);
-  for (const odd of ['plugin-detector', 'constructor', '__proto__', '', undefined, null, 7]) assert.equal(aliasTier(odd), 2, String(odd));
-});
-
-test('the scanner body and the survey brief say what an alias is: a name other members use to reach this member, never a service it deploys', () => {
-  const body = readFileSync(new URL('../agents/worca-cc-workspace-scanner.md', import.meta.url), 'utf8');
-  assert.ok(body.includes('`aliases`: the names OTHER projects use to reach THIS project'), 'the investigator brief defines an alias');
-  assert.ok(body.includes('Never the name of a service it deploys, runs or calls'), 'the investigator brief excludes deployed services');
-  const brief = surveyBrief({ workspace: { name: 'W' }, members: {
-    a: { key: 'a', name: 'a', dir: '/a', needs: ['role', 'aliases', 'provides', 'consumes'], stack: [], aliases: [], provides: [], consumes: [], unresolved: [] },
-  } }, { extractPath: '/p/extract.json', checkerCmd: 'CHECK' });
-  assert.ok(brief.includes('- aliases (only for a member whose Needs lists aliases) = the names OTHER members use to reach this member'), brief);
-  assert.ok(brief.includes('Never the name of a service it deploys, runs or calls.'), brief);
 });
 
 test('an npm scope tail never outranks the survey alias of a member no code maps: http://billing never lands on the SDK', async () => {

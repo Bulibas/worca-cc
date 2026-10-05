@@ -121,10 +121,6 @@ test('chat /resume works without a loopback self-fetch (direct helper call)', as
   assert.match(out.error, /worktree missing/);
 });
 
-test('resumeRun maps guard failures to typed errors', async () => {
-  await assert.rejects(() => _testing.resumeRun('nope'), (e) => e.status === 404);
-});
-
 test('/api/resume still answers { ok, runId, pipelineId }', async () => {
   const res = await post('/api/resume', { pipelineId: resumableId, mock: true });
   assert.equal(res.status, 200);

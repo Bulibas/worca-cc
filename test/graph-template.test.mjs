@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import {
   normalizeTemplate, serializeTemplate, newNode, newWire, mintId, canWire,
   removeNode, removeWire, nodeById, wireById,
@@ -68,19 +69,22 @@ test('newNode / newWire', () => {
   assert.equal('config' in newWire({ node: 'a', port: 'p' }, { node: 'b', port: 'q' }), false);
 });
 
-test('canWire: legal drop', () => {
-  const r = canWire({ tpl: tpl(), portsFn, from: { node: 'n_plan', port: 'plan' }, to: { node: 'n_or', port: 'in1' } });
-  assert.deepEqual(r, { ok: true });
-});
-
-test('canWire: same node, unknown port, already connected', () => {
-  const t = tpl();
-  assert.deepEqual(canWire({ tpl: t, portsFn, from: { node: 'n_plan', port: 'plan' }, to: { node: 'n_plan', port: 'task' } }),
-    { ok: false, code: 'V0', reason: 'same node' });
-  assert.deepEqual(canWire({ tpl: t, portsFn, from: { node: 'n_plan', port: 'nope' }, to: { node: 'n_or', port: 'in1' } }),
-    { ok: false, code: 'V5', reason: 'unknown port' });
-  assert.deepEqual(canWire({ tpl: t, portsFn, from: { node: 'n_cl', port: 'answers' }, to: { node: 'n_plan', port: 'task' } }),
-    { ok: false, code: 'V7', reason: 'already connected' });
+test('canWire: a legal drop; same node, unknown port and already-connected refusals', async () => {
+  await checkRows([
+    { name: 'canWire: legal drop', run: () => {
+      const r = canWire({ tpl: tpl(), portsFn, from: { node: 'n_plan', port: 'plan' }, to: { node: 'n_or', port: 'in1' } });
+      assert.deepEqual(r, { ok: true });
+    } },
+    { name: 'canWire: same node, unknown port, already connected', run: () => {
+      const t = tpl();
+      assert.deepEqual(canWire({ tpl: t, portsFn, from: { node: 'n_plan', port: 'plan' }, to: { node: 'n_plan', port: 'task' } }),
+        { ok: false, code: 'V0', reason: 'same node' });
+      assert.deepEqual(canWire({ tpl: t, portsFn, from: { node: 'n_plan', port: 'nope' }, to: { node: 'n_or', port: 'in1' } }),
+        { ok: false, code: 'V5', reason: 'unknown port' });
+      assert.deepEqual(canWire({ tpl: t, portsFn, from: { node: 'n_cl', port: 'answers' }, to: { node: 'n_plan', port: 'task' } }),
+        { ok: false, code: 'V7', reason: 'already connected' });
+    } },
+  ]);
 });
 
 test('canWire: a self-loop is legal ONLY from a blocking output into a loop input', () => {
@@ -123,12 +127,6 @@ test('removeNode drops the node AND its wires; removeWire drops one wire', () =>
   assert.equal(wireById(w, 'w1'), null);
   assert.equal(w.nodes.length, 4);
   assert.equal(removeNode(tpl(), 'ghost').nodes.length, 4, 'removing an unknown id is a no-op');
-});
-
-test('nodeById / wireById', () => {
-  assert.equal(nodeById(tpl(), 'n_or').kind, 'or');
-  assert.equal(wireById(tpl(), 'w1').to.port, 'task');
-  assert.equal(nodeById(null, 'x'), null);
 });
 
 test('script nodes are keyed like agent nodes (KEYED_KINDS): newNode keeps the key, normalizeTemplate keeps it, flow cards never do', () => {

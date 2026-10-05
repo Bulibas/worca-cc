@@ -1,5 +1,6 @@
 // v41: seed AND refresh the shipped Presentation workflow (wf_presentation) as a
-// v2 row — a fresh DB gains it, a DB stamped lower gains it on the ladder, an
+// v2 row — a fresh DB gains it (a DB stamped lower gains it on the ladder:
+// test/presentation-seed-refresh.test.mjs "but a DB that never reached the seed"), an
 // archived row with the id is not resurrected, and a user's own live row with the
 // id is left untouched.
 //
@@ -13,68 +14,48 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { migrate, SCHEMA_VERSION } from '../src/core/db.mjs';
+import { migrate } from '../src/core/db.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { assertRunnableWorkflow } from '../src/core/workflows.mjs';
 import * as presentationModule from '../src/core/graph/presentation-workflow.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const rowFor = (db, id) => db.prepare('SELECT * FROM workflows WHERE id = ?').get(id);
 const freshMigrated = () => { const db = new DatabaseSync(':memory:'); migrate(db); return db; };
 
-test('a fresh DB carries wf_presentation as a v2 presentation graph with 14 nodes', () => {
-  const db = freshMigrated();
-  const row = rowFor(db, 'wf_presentation');
-  assert.ok(row, 'seeded');
-  assert.equal(row.version, 2);
-  assert.equal(row.domain, 'presentation');
-  const graph = JSON.parse(row.graph);
-  assert.equal(graph.nodes.length, 14);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
-  db.close();
-});
-
-test('ladder: a DB stamped 29 gains wf_presentation', () => {
-  assert.ok(SCHEMA_VERSION >= 41);
-  const db = freshMigrated();
-  db.prepare('DELETE FROM workflows WHERE id = ?').run('wf_presentation');
-  db.exec('PRAGMA user_version = 29');
-  migrate(db);
-  assert.ok(rowFor(db, 'wf_presentation'), 'seeded on the ladder');
-  db.close();
-});
-
-test('INSERT OR IGNORE: an archived row keeps the id and is not resurrected', () => {
-  const db = freshMigrated();
-  db.prepare('DELETE FROM workflows WHERE id = ?').run('wf_presentation');
-  db.prepare(`INSERT INTO workflows (id, name, version, domain, origin, steps, feedbacks, graph, created_at, updated_at, archived_at)
-    VALUES ('wf_presentation', 'Mine', 2, 'coding', NULL, '[]', '[]', '{"nodes":[],"wires":[]}', 't', 't', 't')`).run();
-  db.exec('PRAGMA user_version = 29');
-  migrate(db);
-  const row = rowFor(db, 'wf_presentation');
-  assert.equal(row.archived_at, 't', 'archived row not resurrected');
-  assert.equal(row.name, 'Mine');
-  db.close();
-});
-
-test('INSERT OR IGNORE: a user\'s own live row with the id is left byte-identical', () => {
-  const db = freshMigrated();
-  db.prepare('DELETE FROM workflows WHERE id = ?').run('wf_presentation');
-  db.prepare(`INSERT INTO workflows (id, name, version, domain, origin, steps, feedbacks, graph, created_at, updated_at, archived_at)
-    VALUES ('wf_presentation', 'My Deck', 2, 'presentation', NULL, '[]', '[]', '{"nodes":[],"wires":[]}', 't', 't', NULL)`).run();
-  db.exec('PRAGMA user_version = 29');
-  migrate(db);
-  const row = rowFor(db, 'wf_presentation');
-  assert.equal(row.name, 'My Deck');
-  assert.equal(row.graph, '{"nodes":[],"wires":[]}');
-  db.close();
-});
-
 useTempHome(after);
 
-test('assertRunnableWorkflow resolves wf_presentation from the seeded store', async () => {
-  const live = await assertRunnableWorkflow('wf_presentation');
-  assert.equal(live.id, 'wf_presentation');
-  assert.equal(live.version, 2);
+// Table-driven over the two rows a user can hold under the shipped id: the seed is
+// INSERT OR IGNORE, so neither is resurrected nor rewritten.
+test('INSERT OR IGNORE: an archived row or a user\'s own live row holding the id is never resurrected or rewritten', async () => {
+  await checkRows([
+    { name: 'INSERT OR IGNORE: an archived row keeps the id and is not resurrected', run: () => {
+      const db = freshMigrated();
+      try {
+        db.prepare('DELETE FROM workflows WHERE id = ?').run('wf_presentation');
+        db.prepare(`INSERT INTO workflows (id, name, version, domain, origin, steps, feedbacks, graph, created_at, updated_at, archived_at)
+          VALUES ('wf_presentation', 'Mine', 2, 'coding', NULL, '[]', '[]', '{"nodes":[],"wires":[]}', 't', 't', 't')`).run();
+        db.exec('PRAGMA user_version = 29');
+        migrate(db);
+        const row = rowFor(db, 'wf_presentation');
+        assert.equal(row.archived_at, 't', 'archived row not resurrected');
+        assert.equal(row.name, 'Mine');
+      } finally { db.close(); }
+    } },
+    { name: 'INSERT OR IGNORE: a user\'s own live row with the id is left byte-identical', run: () => {
+      const db = freshMigrated();
+      try {
+        db.prepare('DELETE FROM workflows WHERE id = ?').run('wf_presentation');
+        db.prepare(`INSERT INTO workflows (id, name, version, domain, origin, steps, feedbacks, graph, created_at, updated_at, archived_at)
+          VALUES ('wf_presentation', 'My Deck', 2, 'presentation', NULL, '[]', '[]', '{"nodes":[],"wires":[]}', 't', 't', NULL)`).run();
+        db.exec('PRAGMA user_version = 29');
+        migrate(db);
+        const row = rowFor(db, 'wf_presentation');
+        assert.equal(row.name, 'My Deck');
+        assert.equal(row.graph, '{"nodes":[],"wires":[]}');
+      } finally { db.close(); }
+    } },
+  ]);
 });
 
 // The refresh replaced the stored graph WHOLESALE. Its guard — "the stored shape

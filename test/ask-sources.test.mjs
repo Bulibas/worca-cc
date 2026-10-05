@@ -10,6 +10,7 @@ import { validateRunSource, checkTask, runSourceOf, shapeTask, shapeSources } fr
 import { createProposalValidator } from '../src/core/ask/proposal.mjs';
 import { createAskTools } from '../src/core/ask/tools.mjs';
 import { shapeSources as realShapeSources, shapeTask as realShapeTask } from '../src/core/ask/source-spec.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const JIRA = {
   type: 'plugin', plugin: 'jira-source', sourceId: 'jira', displayName: 'Jira',
@@ -26,36 +27,39 @@ const PROJECT = { target: 'project', projectKey: 'shop-00000001', workspaceId: n
 const bound = (map) => (ref) => (map[ref.scopeKey] ? { profile: map[ref.scopeKey], via: 'binding' } : { profile: null, via: 'none', candidates: ref.available });
 const v = (raw, o = {}) => validateRunSource(raw, { target: PROJECT, listTaskSources: () => SOURCES, resolveProfile: bound({ 'shop-00000001': 'acme' }), ...o });
 
-test('source: the reference, the project\'s bound profile, declared inputs with their defaults — never the task browser', () => {
-  const r = v({ plugin: 'jira-source', sourceId: 'jira', taskId: 'PROJ-123' });
-  assert.deepEqual(r, { ok: true, source: { type: 'plugin', plugin: 'jira-source', sourceId: 'jira', taskId: 'PROJ-123', displayName: 'Jira', profile: 'acme', profileVia: 'binding', inputs: { writeBack: 'yes' } } });
-  assert.equal(v({ plugin: 'jira-source', sourceId: 'jira', taskId: 'PROJ-1', profile: 'globex', inputs: { writeBack: 'no' } }).source.profile, 'globex');
-  assert.deepEqual(runSourceOf(r.source), { type: 'plugin', plugin: 'jira-source', sourceId: 'jira', taskId: 'PROJ-123', profile: 'acme', inputs: { writeBack: 'yes' } }, 'what POST /api/run gets');
-  assert.deepEqual(v(undefined), { ok: true, source: null });
-  const gh = v({ plugin: 'github-source', sourceId: 'github', taskId: 'acme/shop#12', inputs: { repo: 'acme/shop' } });
-  assert.deepEqual(gh.source.inputs, { repo: 'acme/shop' });
-  assert.equal('profile' in gh.source, false, 'a single-profile source carries none');
-});
-
-test('source: unknown sources, stray inputs, bad options, profiles the scope has not chosen — each refused with the way forward', () => {
-  const err = (raw, o) => v(raw, o).errors.join(' | ');
-  assert.match(err({ plugin: 'linear', sourceId: 'x', taskId: '1' }), /no task source linear\/x is installed and enabled \(installed: jira-source\/jira, github-source\/github\)/);
-  assert.match(err({ plugin: 'linear', sourceId: 'x', taskId: '1' }, { listTaskSources: () => [] }), /none is installed/);
-  assert.match(err({ plugin: 'jira-source', sourceId: 'jira' }), /source\.taskId is required/);
-  assert.match(err({ plugin: 'jira-source', sourceId: 'jira', taskId: 'P-1', inputs: { task: 'P-1', color: 'x' } }), /source\.inputs\.task is not an input of Jira .*source\.inputs\.color/);
-  assert.match(err({ plugin: 'jira-source', sourceId: 'jira', taskId: 'P-1', inputs: { writeBack: 'maybe' } }), /writeBack must be one of yes \| no/);
-  assert.match(err({ plugin: 'jira-source', sourceId: 'jira', taskId: 'P-1', profile: 'initech' }), /Jira has no profile "initech" \(profiles: acme, globex\)/);
-  assert.match(err({ plugin: 'jira-source', sourceId: 'jira', taskId: 'P-1' }, { resolveProfile: bound({}) }), /several profiles and this project is not bound to one — ask the user which: acme, globex/);
-  assert.match(err({ plugin: 'jira-source', sourceId: 'jira', taskId: 'P-1' }, { listTaskSources: () => [{ ...JIRA, profiles: [] }], resolveProfile: bound({}) }), /no profile yet/);
-  assert.match(err({ plugin: 'github-source', sourceId: 'github', taskId: 'a/b#1', profile: 'acme' }), /does not use profiles/);
-  // A workspace resolves through its members' bindings.
-  let seen = null;
-  validateRunSource({ plugin: 'jira-source', sourceId: 'jira', taskId: 'P-1' }, {
-    target: { target: 'workspace', workspaceId: 'wks-team-00000001', members: [{ projectKey: 'a-00000001' }, { projectKey: 'b-00000002' }] },
-    listTaskSources: () => SOURCES, resolveProfile: (ref) => { seen = ref; return { profile: 'acme', via: 'members' }; },
-  });
-  assert.deepEqual(seen.memberKeys, ['a-00000001', 'b-00000002']);
-  assert.equal(seen.scopeType, 'workspace');
+test('source spec: reference, bound profile, input defaults; every refusal with the way forward', async () => {
+  await checkRows([
+    { name: 'source: the reference, the project\'s bound profile, declared inputs with their defaults — never the task browser', run: async () => {
+      const r = v({ plugin: 'jira-source', sourceId: 'jira', taskId: 'PROJ-123' });
+      assert.deepEqual(r, { ok: true, source: { type: 'plugin', plugin: 'jira-source', sourceId: 'jira', taskId: 'PROJ-123', displayName: 'Jira', profile: 'acme', profileVia: 'binding', inputs: { writeBack: 'yes' } } });
+      assert.equal(v({ plugin: 'jira-source', sourceId: 'jira', taskId: 'PROJ-1', profile: 'globex', inputs: { writeBack: 'no' } }).source.profile, 'globex');
+      assert.deepEqual(runSourceOf(r.source), { type: 'plugin', plugin: 'jira-source', sourceId: 'jira', taskId: 'PROJ-123', profile: 'acme', inputs: { writeBack: 'yes' } }, 'what POST /api/run gets');
+      assert.deepEqual(v(undefined), { ok: true, source: null });
+      const gh = v({ plugin: 'github-source', sourceId: 'github', taskId: 'acme/shop#12', inputs: { repo: 'acme/shop' } });
+      assert.deepEqual(gh.source.inputs, { repo: 'acme/shop' });
+      assert.equal('profile' in gh.source, false, 'a single-profile source carries none');
+    } },
+    { name: 'source: unknown sources, stray inputs, bad options, profiles the scope has not chosen — each refused with the way forward', run: async () => {
+      const err = (raw, o) => v(raw, o).errors.join(' | ');
+      assert.match(err({ plugin: 'linear', sourceId: 'x', taskId: '1' }), /no task source linear\/x is installed and enabled \(installed: jira-source\/jira, github-source\/github\)/);
+      assert.match(err({ plugin: 'linear', sourceId: 'x', taskId: '1' }, { listTaskSources: () => [] }), /none is installed/);
+      assert.match(err({ plugin: 'jira-source', sourceId: 'jira' }), /source\.taskId is required/);
+      assert.match(err({ plugin: 'jira-source', sourceId: 'jira', taskId: 'P-1', inputs: { task: 'P-1', color: 'x' } }), /source\.inputs\.task is not an input of Jira .*source\.inputs\.color/);
+      assert.match(err({ plugin: 'jira-source', sourceId: 'jira', taskId: 'P-1', inputs: { writeBack: 'maybe' } }), /writeBack must be one of yes \| no/);
+      assert.match(err({ plugin: 'jira-source', sourceId: 'jira', taskId: 'P-1', profile: 'initech' }), /Jira has no profile "initech" \(profiles: acme, globex\)/);
+      assert.match(err({ plugin: 'jira-source', sourceId: 'jira', taskId: 'P-1' }, { resolveProfile: bound({}) }), /several profiles and this project is not bound to one — ask the user which: acme, globex/);
+      assert.match(err({ plugin: 'jira-source', sourceId: 'jira', taskId: 'P-1' }, { listTaskSources: () => [{ ...JIRA, profiles: [] }], resolveProfile: bound({}) }), /no profile yet/);
+      assert.match(err({ plugin: 'github-source', sourceId: 'github', taskId: 'a/b#1', profile: 'acme' }), /does not use profiles/);
+      // A workspace resolves through its members' bindings.
+      let seen = null;
+      validateRunSource({ plugin: 'jira-source', sourceId: 'jira', taskId: 'P-1' }, {
+        target: { target: 'workspace', workspaceId: 'wks-team-00000001', members: [{ projectKey: 'a-00000001' }, { projectKey: 'b-00000002' }] },
+        listTaskSources: () => SOURCES, resolveProfile: (ref) => { seen = ref; return { profile: 'acme', via: 'members' }; },
+      });
+      assert.deepEqual(seen.memberKeys, ['a-00000001', 'b-00000002']);
+      assert.equal(seen.scopeType, 'workspace');
+    } },
+  ]);
 });
 
 test('checkTask: found → title and an http(s) link; missing refuses; a transient failure keeps the card with a warning; auth refuses', async () => {

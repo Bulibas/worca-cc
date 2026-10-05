@@ -9,7 +9,7 @@
 // Mock-driven (WORCA_MOCK=1), chdir-sandboxed, temp WORCA_HOME.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,6 +18,8 @@ import { WebSocket } from 'ws';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 import { workspaceKey, addWorkspaceMembers } from '../src/core/workspaces.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 useTempHome(after);
 
@@ -67,12 +69,8 @@ after(async () => {
 });
 
 async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-scanapi-repo-'));
+  const dir = templateRepo('scanapi-repo', { branch: 'main', user: true, files: { 'README.md': '# hi\n' } });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 async function freshDir() {
@@ -141,31 +139,63 @@ test('POST /api/workspaces/scan: 409 while a live scan targets the same project 
   } finally { runs.delete('fake-live-scan'); }
 });
 
-test('a first scan is a recorded pipeline run that creates the workspace on done', async () => {
+test('a first scan (with a models pick) is a recorded run that creates the workspace, pins its models, stores its map and leaves no branches', async () => {
   const a = await freshRepo();
   const b = await freshRepo();
+  // The 400-on-bad-models half stays a cheap check before any run starts.
+  const bad = await post('/api/workspaces/scan', { name: 'Bad Models', projectPaths: [a, b], models: { scanModel: 'claude-sonnet-5', scanEffort: 'medium', agentModel: 'haiku', agentEffort: 'medium' } });
   const sock = openWs();
   await sock.opened;
-  const res = await post('/api/workspaces/scan', { name: 'Platform', projectPaths: [a, b] });
-  assert.equal(res.status, 200);
-  const data = await res.json();
-  const id = workspaceKey({ name: 'Platform', projectPaths: [a, b] });
-  assert.equal(data.workspaceId, id);
-  assert.equal(data.title, 'Workspace scan: Platform');
-  assert.equal(data.projectNames.length, 2);
-  const entry = runs.get(data.runId);
-  assert.equal(entry.kind, 'workspace-run');
-  assert.equal(entry.workspaceId, id);
-  assert.equal(entry.orch.workflowId, 'wf_workspace_scan');
-  const done = await settled(data.runId);
-  assert.equal(done.status, 'done');
-  const ws = await (await fetch(`${base}/api/workspaces/${id}`)).json();
-  assert.match(ws.workspace.description, /## Interconnections/);
-  await waitFor(() => sock.msgs.some((m) => m.type === 'workspaces-changed' && m.action === 'scan-created'));
-  await branchesGone(a, b);
-  assert.deepEqual(branches(a), ['main'], 'branches gone');
-  assert.deepEqual(branches(b), ['main'], 'branches gone');
-  sock.ws.close();
+  try {
+    // ONE full mock scan (a models pick, name "Platform") carries the three former happy-scan tests.
+    const res = await post('/api/workspaces/scan', { name: 'Platform', projectPaths: [a, b], models: { scanModel: 'claude-opus-5-5', scanEffort: 'high', agentModel: 'opus', agentEffort: 'xhigh' } });
+    const data = await res.json();
+    assert.equal(res.status, 200, JSON.stringify(data));
+    const entry = runs.get(data.runId);
+    await settled(data.runId);
+    await checkRows([
+      { name: 'a first scan is a recorded pipeline run that creates the workspace on done', run: async () => {
+        assert.equal(res.status, 200);
+        const id = workspaceKey({ name: 'Platform', projectPaths: [a, b] });
+        assert.equal(data.workspaceId, id);
+        assert.equal(data.title, 'Workspace scan: Platform');
+        assert.equal(data.projectNames.length, 2);
+        assert.equal(entry.kind, 'workspace-run');
+        assert.equal(entry.workspaceId, id);
+        assert.equal(entry.orch.workflowId, 'wf_workspace_scan');
+        const done = await settled(data.runId);
+        assert.equal(done.status, 'done');
+        const ws = await (await fetch(`${base}/api/workspaces/${id}`)).json();
+        assert.match(ws.workspace.description, /## Interconnections/);
+        await waitFor(() => sock.msgs.some((m) => m.type === 'workspaces-changed' && m.action === 'scan-created'));
+        await branchesGone(a, b);
+        assert.deepEqual(branches(a), ['main'], 'branches gone');
+        assert.deepEqual(branches(b), ['main'], 'branches gone');
+      } },
+      { name: 'the scan request\'s models pin the run; a bad pick is a 400 before any run', run: async () => {
+        assert.equal(bad.status, 400);
+        assert.equal(res.status, 200);
+        const { runId } = data;
+        const done = await settled(runId);
+        const n = done.orch.state.stepper.graph.nodes.find((x) => x.id === 'n_scan');
+        assert.deepEqual([n.model, n.effort, n.subagentModel, n.subagentEffort], ['claude-opus-5-5', 'high', 'opus', 'xhigh']);
+      } },
+      { name: 'a scan stores its map: GET /map answers the members, the list carries mapSummary, origin generated', run: async () => {
+        assert.equal(res.status, 200);
+        const { runId, workspaceId } = data;
+        assert.equal((await settled(runId)).status, 'done');
+        const m = await (await fetch(`${base}/api/workspaces/${workspaceId}/map`)).json();
+        const ws = (await (await fetch(`${base}/api/workspaces/${workspaceId}`)).json()).workspace;
+        assert.ok(m.map, 'the scan stored its map');
+        assert.deepEqual(m.map.members.map((x) => x.key).sort(), [...ws.projectKeys].sort(),
+          'map member keys are the workspace projectKeys (manual edges validate against them)');
+        assert.equal(m.descriptionOrigin, 'generated');
+        assert.equal(ws.mapSummary.members, 2);
+        assert.match(ws.description, /^# Workspace: Platform/);
+        await branchesGone(a, b);
+      } },
+    ]);
+  } finally { sock.ws.close(); }
 });
 
 test('two first scans of the same set in the same tick: the launch reservation refuses the second', async () => {
@@ -297,19 +327,6 @@ test('the scan workflow is never listed; the off-pipeline scan surface is gone',
   } finally { runs.delete('r-sum'); }
 });
 
-test('the scan request\'s models pin the run; a bad pick is a 400 before any run', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const bad = await post('/api/workspaces/scan', { name: 'Bad Models', projectPaths: [a, b], models: { scanModel: 'claude-sonnet-5', scanEffort: 'medium', agentModel: 'haiku', agentEffort: 'medium' } });
-  assert.equal(bad.status, 400);
-  const res = await post('/api/workspaces/scan', { name: 'Picked Models', projectPaths: [a, b], models: { scanModel: 'claude-opus-5-5', scanEffort: 'high', agentModel: 'opus', agentEffort: 'xhigh' } });
-  assert.equal(res.status, 200);
-  const { runId } = await res.json();
-  const done = await settled(runId);
-  const n = done.orch.state.stepper.graph.nodes.find((x) => x.id === 'n_scan');
-  assert.deepEqual([n.model, n.effort, n.subagentModel, n.subagentEffort], ['claude-opus-5-5', 'high', 'opus', 'xhigh']);
-});
-
 test('41 member projects: 400 from both create routes, before any run or row exists', async () => {
   const root = await freshDir();
   const dirs = Array.from({ length: 41 }, (_, i) => join(root, `m${i}`));
@@ -322,22 +339,4 @@ test('41 member projects: 400 from both create routes, before any run or row exi
   assert.ok(![...runs.values()].some((r) => r.title === 'Workspace scan: Too big'), 'no run registered');
   const { workspaces } = await (await fetch(`${base}/api/workspaces`)).json();
   assert.ok(!workspaces.some((w) => w.name === 'Too big'), 'no workspace row');
-});
-
-test('a scan stores its map: GET /map answers the members, the list carries mapSummary, origin generated', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const res = await post('/api/workspaces/scan', { name: 'Mapped Scan', projectPaths: [a, b] });
-  assert.equal(res.status, 200);
-  const { runId, workspaceId } = await res.json();
-  assert.equal((await settled(runId)).status, 'done');
-  const m = await (await fetch(`${base}/api/workspaces/${workspaceId}/map`)).json();
-  const ws = (await (await fetch(`${base}/api/workspaces/${workspaceId}`)).json()).workspace;
-  assert.ok(m.map, 'the scan stored its map');
-  assert.deepEqual(m.map.members.map((x) => x.key).sort(), [...ws.projectKeys].sort(),
-    'map member keys are the workspace projectKeys (manual edges validate against them)');
-  assert.equal(m.descriptionOrigin, 'generated');
-  assert.equal(ws.mapSummary.members, 2);
-  assert.match(ws.description, /^# Workspace: Mapped Scan/);
-  await branchesGone(a, b);
 });

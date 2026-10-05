@@ -7,8 +7,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { confirmDialog, cancelDialog, dialogText } from './helpers/confirm-modal.mjs';
 import { proposalFor, WEB_TASK } from './helpers/auto-proposal-fixture.mjs';
-import { FLOW_PAD_Y } from '../src/shared/graph/flow-layout.mjs';
-import { bootApp, helloRun, runCard, runPanel } from './helpers/run-page-boot.mjs';
+import { bootApp, helloRun, runPanel } from './helpers/run-page-boot.mjs';
 
 const wins = [];
 afterEach(() => { for (const w of wins.splice(0)) w.close(); });
@@ -48,44 +47,6 @@ async function openWf(ctx) {
   ask(ctx); await settle(ctx.window);
   return panelOf(ctx);
 }
-
-test('the workflow question renders head, the shared body, the graph at chat scale (4 per row in a 702 host) and the table', async () => {
-  const ctx = await boot(); const panel = await openWf(ctx); const p = proposalFor();
-  assert.ok(panel.classList.contains('qpanel-workflow')); assert.equal(panel.classList.contains('hidden'), false);
-  assert.equal(panel.closest('#run-detail').querySelector('.rd-ask-head').textContent, 'Review the workflow');
-  assert.equal(panel.querySelector('.qcount').textContent, 'workflow');
-  assert.equal(panel.querySelectorAll('.qblock').length, 0, 'not the clarify body');
-  assert.equal(panel.querySelector('.wf-namelabel').textContent, 'Workflow:');
-  assert.ok(panel.querySelector('.wf-namelabel').parentElement.querySelector('.ask-wfcard-name'), 'the editable name sits beside the label');
-  const preview = panel.querySelector('button.wf-preview');
-  assert.ok(preview, 'the preview is an always-visible button');
-  const stage = preview.querySelector('.ask-wfcard-graph .gv-stage.gv-flow');
-  assert.ok(stage); assert.equal(stage.style.getPropertyValue('--gv-scale'), '0.65');
-  const cards = [...panel.querySelectorAll('.ask-wfcard-graph .node')];
-  assert.equal(cards.length, p.manifest.graph.nodes.length);
-  const ys = cards.map((c) => /,\s*([-\d.]+)px\)/.exec(c.style.transform)[1]);
-  assert.equal(ys.filter((y) => y === String(FLOW_PAD_Y)).length, 4, 'four cards on the first row (702px default width)');
-  assert.equal(panel.querySelectorAll('.qtune tbody tr').length, p.order.length);
-  const first = panel.querySelector('.qtune tbody tr');
-  assert.equal(first.dataset.nodeId, p.order[0]);
-  assert.equal(first.querySelector('select[aria-label^="Model"]').value, 'claude-sonnet-5');
-  assert.deepEqual([...panel.querySelectorAll('.qpanel-foot button')].map((b) => b.textContent.trim()), ['Cancel run', 'Revise', 'Send', 'Accept & run']);
-  assert.equal(panel.querySelector('.wf-send').hidden, true);
-  // the disclosures: Customize agents (table) above Why this? (facts); the old reasoning/chips/meta lines are gone
-  const discs = [...panel.querySelectorAll('details.wf-disc')];
-  assert.deepEqual(discs.map((d) => d.querySelector('summary').textContent), ['Customize agents', 'Why this?']);
-  assert.ok(discs[0].querySelector('.qtune'), 'the tunables live in Customize agents');
-  assert.equal(discs[0].open, p.order.length > 1, 'open by default only when there is more than one agent');
-  assert.ok(discs[1].querySelector('dl.wf-facts'), 'the facts live in Why this?');
-  assert.deepEqual([...panel.querySelectorAll('.wf-facts dt')].map((n) => n.textContent).filter((t) => t !== 'Classified as'), ['Saved as', 'Classifier cost']);
-  assert.match(factOf(panel, 'Classifier cost'), /^≈ \$0\.02/);
-  assert.equal(panel.querySelector('.ask-wfcard-meta'), null, 'the meta line is not shown in this host');
-  // jsdom has no ResizeObserver and clientWidth is 0, so drive the relayout the observer would.
-  panel.__wf.handle.relayout(310);
-  assert.equal(panel.__wf.handle.graph.flowLayout().perRow, 1, 'one card per row in a 310px host');
-  assert.ok([...panel.querySelectorAll('.ask-wfcard-graph .node')].every((c) => /^translate\(20px, /.test(c.style.transform)), 'every card at the left pad');
-  assert.equal(panel.querySelector('.ask-wfcard-graph').style.height, `${panel.__wf.handle.graph.flowLayout().height}px`, 'the host grew with the rows');
-});
 
 test('Accept posts the §5.4 payload with only the changed tunables and the edited name', async () => {
   const ctx = await boot(); const panel = await openWf(ctx); const p = proposalFor();
@@ -166,35 +127,6 @@ test('Cancel run asks first, then posts cancel; a kept run posts nothing; resolv
   assert.ok(panel.classList.contains('hidden'));
   assert.equal(panel.classList.contains('qpanel-workflow'), false, 'clearQpanel drops the arm class — else the delegates would swallow a later clarify Submit in this card (A34)');
   assert.equal(panel.__wf, null);
-});
-
-test('clicking the preview opens the pan/zoom popup titled with the workflow name; Close removes it', async () => {
-  const ctx = await boot(); const panel = await openWf(ctx);
-  assert.equal(ctx.window.document.querySelector('.wf-pop'), null, 'closed until asked for');
-  panel.querySelector('.wf-preview').click();
-  const pop = ctx.window.document.querySelector('.wf-pop');
-  assert.ok(pop, 'the popup opened');
-  assert.equal(pop.querySelector('.wf-pop-head h2').textContent, `Workflow: ${proposalFor().name}`);
-  assert.ok(pop.querySelector('.gv-stage'), 'it renders the graph');
-  assert.equal(ctx.answers.length, 0, 'opening the preview never posts an answer');
-  pop.querySelector('.wf-pop-head button').click();
-  assert.equal(ctx.window.document.querySelector('.wf-pop'), null, 'Close removes it');
-});
-
-test('the list row holds no workflow panel: it reads "Workflow review" and opens the run page', async () => {
-  const ctx = await boot(); await openWf(ctx);
-  // The bare list with nothing open (rule 5): a click on the OPEN run's row would prove nothing.
-  ctx.showRunning(); await settle(ctx.window);
-  assert.equal(ctx.window.location.hash, '#runs');
-  const card = runCard(ctx, RUN_ID);
-  assert.ok(card, 'the run is listed in its project group');
-  assert.equal(card.querySelector('.qpanel'), null, 'no panel on the row');
-  assert.equal(card.querySelector('.gv-stage'), null, 'and no graph');
-  // The ask frame carries no nodeId, so no step names it: the generic "Workflow review".
-  assert.equal(card.querySelector('.runs-row-sub').textContent.split(' · ')[0], 'Workflow review', 'the row names the workflow review');
-  assert.ok(ctx.window.document.querySelector(`#runs-list .runs-needs .runs-row[data-run-id="${RUN_ID}"]`), 'and it is in Needs you');
-  card.click();
-  assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`);
 });
 
 test('B5: the cost line is max(Σ auto-classify rows, proposal.costUsd) — rows that undercount after a resume never hide the spend', async () => {

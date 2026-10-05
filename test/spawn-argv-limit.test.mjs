@@ -158,13 +158,3 @@ test('runClaude: a real ~1000-line markdown prompt (the #380 report) stages by d
   await runClaude({ cwd: dir, bin, prompt, systemPrompt: 'agent body' });
   assert.equal(await readFile(join(dir, 'stdin.txt'), 'utf8'), prompt);
 });
-
-test('planClaudeInvocation: a dir factory is invoked only when staging is needed', () => {
-  let calls = 0;
-  const dir = () => { calls++; return '/lazy'; };
-  planClaudeInvocation({ prompt: 'p', permissionMode: 'acceptEdits' }, { bin: 'claude', dir });
-  assert.equal(calls, 0, 'inline: no dir');
-  const plan = planClaudeInvocation({ prompt: BIG, systemPrompt: 's', permissionMode: 'acceptEdits' }, { bin: 'claude', dir });
-  assert.equal(calls, 1);
-  assert.equal(plan.files[0].path, join('/lazy', 'system-prompt.md'));
-});

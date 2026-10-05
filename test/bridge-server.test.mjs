@@ -17,6 +17,7 @@ import { bridgeCallsFor, _resetBridgeTelemetry } from '../src/core/bridge/teleme
 import { _resetBridgeWarnings } from '../src/core/bridge/upstream.mjs';
 import { testProviderConnection } from '../src/core/bridge/provider-ops.mjs';
 import { _resetForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let home, worcaHome, chatSrv, chatPort, antSrv, antPort;
 const prevEnv = {
@@ -201,15 +202,28 @@ test('the connection test takes the base URL and key the user typed, and a maske
   }
 });
 
-test('resolveModelEnv: a translated model turns the CLI\'s tool search on (MCP schemas stay deferred); passthrough and an explicit entry value are left alone', async () => {
-  assert.equal(resolveModelEnv('gw-gpt').ENABLE_TOOL_SEARCH, 'true');
-  assert.equal('ENABLE_TOOL_SEARCH' in resolveModelEnv('gw-claude'), false);
-  await addGlobalModel({ id: 'gw-nosearch', upstream: { provider: 'openai', api: 'openai-chat', model: 'q' }, env: { ENABLE_TOOL_SEARCH: 'false' } });
-  try {
-    assert.equal(resolveModelEnv('gw-nosearch').ENABLE_TOOL_SEARCH, 'false');
-  } finally {
-    await removeGlobalModel('gw-nosearch');
-  }
+test('resolveModelEnv: a translated (chat or responses) model turns tool search on and withholds web tools; passthrough and an explicit entry value are left alone', async () => {
+  await checkRows([
+    { name: 'resolveModelEnv: a translated model turns the CLI\'s tool search on (MCP schemas stay deferred); passthrough and an explicit entry value are left alone', run: async () => {
+      assert.equal(resolveModelEnv('gw-gpt').ENABLE_TOOL_SEARCH, 'true');
+      assert.equal('ENABLE_TOOL_SEARCH' in resolveModelEnv('gw-claude'), false);
+      await addGlobalModel({ id: 'gw-nosearch', upstream: { provider: 'openai', api: 'openai-chat', model: 'q' }, env: { ENABLE_TOOL_SEARCH: 'false' } });
+      try {
+        assert.equal(resolveModelEnv('gw-nosearch').ENABLE_TOOL_SEARCH, 'false');
+      } finally {
+        await removeGlobalModel('gw-nosearch');
+      }
+    } },
+    { name: 'resolveModelEnv: an openai-responses entry is translated too — tool search on, web tools withheld', run: async () => {
+      await addGlobalModel({ id: 'gw-resp-env', upstream: { provider: 'openai', api: 'openai-responses', model: 'r' } });
+      try {
+        assert.equal(resolveModelEnv('gw-resp-env').ENABLE_TOOL_SEARCH, 'true');
+        assert.deepEqual(bridgedModelInfo('gw-resp-env').excludeTools, ['WebSearch', 'WebFetch']);
+      } finally {
+        await removeGlobalModel('gw-resp-env');
+      }
+    } },
+  ]);
 });
 
 test('resolveModelEnv: pinned prompt/output limits become the CLI\'s context window and output cap (it cannot know a bridged id); unpinned or entry-set values are left alone', async () => {
@@ -226,16 +240,6 @@ test('resolveModelEnv: pinned prompt/output limits become the CLI\'s context win
   } finally {
     await removeGlobalModel('gw-local');
     await removeGlobalModel('gw-local2');
-  }
-});
-
-test('resolveModelEnv: an openai-responses entry is translated too — tool search on, web tools withheld', async () => {
-  await addGlobalModel({ id: 'gw-resp-env', upstream: { provider: 'openai', api: 'openai-responses', model: 'r' } });
-  try {
-    assert.equal(resolveModelEnv('gw-resp-env').ENABLE_TOOL_SEARCH, 'true');
-    assert.deepEqual(bridgedModelInfo('gw-resp-env').excludeTools, ['WebSearch', 'WebFetch']);
-  } finally {
-    await removeGlobalModel('gw-resp-env');
   }
 });
 

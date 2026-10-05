@@ -14,6 +14,7 @@ import {
 } from '../src/core/config.mjs';
 import { prepare } from '../src/core/db.mjs';
 import { projectKey } from '../src/core/store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after, 'worca-cc-cfg-actions-home-');
 const dirs = [];
@@ -24,28 +25,31 @@ async function freshProject() {
   return d;
 }
 
-test('actions round-trip in project_config.extra and stay out of run config', async () => {
-  const dir = await freshProject();
-  const key = projectKey(dir);
-  writeProjectActions(key, { setup: 'npm ci', actions: [{ id: 'test', label: 'Test', kind: 'task', cmd: 'npm test' }] });
-  writeActionsMeta(key, { lastSetupMs: 1234 });
-  assert.equal(readProjectActions(key).setup, 'npm ci');
-  assert.equal(readProjectActions(key).actions[0].ready.kind, 'immediate');
-  assert.equal(readActionsMeta(key).lastSetupMs, 1234);
-  const cfg = await readRunConfig(dir);
-  assert.equal(cfg.actions, undefined);
-  assert.equal(cfg.actionsMeta, undefined);
-  assert.throws(() => readProjectActions('/abs/path'), /projectKey/);
-  assert.throws(() => writeProjectActions(key, { actions: [{ id: 'x', kind: 'daemon', cmd: 'a' }] }), (e) => e.code === 'BAD_REQUEST');
-});
-
-test('an unknown project reads as empty actions and empty meta', async () => {
-  const key = projectKey(await freshProject());
-  const cfg = readProjectActions(key);
-  assert.equal(cfg.setup, null);
-  assert.deepEqual(cfg.actions, []);
-  assert.equal(cfg.builtins.editor, true);
-  assert.deepEqual(readActionsMeta(key), {});
+test('an unknown project reads empty actions/meta; actions round-trip in project_config.extra and stay out of run config', async () => {
+  await checkRows([
+    { name: 'an unknown project reads as empty actions and empty meta', run: async () => {
+      const key = projectKey(await freshProject());
+      const cfg = readProjectActions(key);
+      assert.equal(cfg.setup, null);
+      assert.deepEqual(cfg.actions, []);
+      assert.equal(cfg.builtins.editor, true);
+      assert.deepEqual(readActionsMeta(key), {});
+    } },
+    { name: 'actions round-trip in project_config.extra and stay out of run config', run: async () => {
+      const dir = await freshProject();
+      const key = projectKey(dir);
+      writeProjectActions(key, { setup: 'npm ci', actions: [{ id: 'test', label: 'Test', kind: 'task', cmd: 'npm test' }] });
+      writeActionsMeta(key, { lastSetupMs: 1234 });
+      assert.equal(readProjectActions(key).setup, 'npm ci');
+      assert.equal(readProjectActions(key).actions[0].ready.kind, 'immediate');
+      assert.equal(readActionsMeta(key).lastSetupMs, 1234);
+      const cfg = await readRunConfig(dir);
+      assert.equal(cfg.actions, undefined);
+      assert.equal(cfg.actionsMeta, undefined);
+      assert.throws(() => readProjectActions('/abs/path'), /projectKey/);
+      assert.throws(() => writeProjectActions(key, { actions: [{ id: 'x', kind: 'daemon', cmd: 'a' }] }), (e) => e.code === 'BAD_REQUEST');
+    } },
+  ]);
 });
 
 test('a rejected write leaves the stored config untouched', async () => {

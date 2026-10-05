@@ -5,6 +5,7 @@ import {
   createHljsLoader, HLJS_SUB_LANGUAGES, HLJS_GRAMMAR_IDS, MAX_RESOURCE_FAILURES, _testing,
 } from '../ui/public/hljs-loader.mjs';
 import { SUPPORTED_LANGUAGE_IDS, rowsFromHtml } from '../ui/public/syntax-highlight.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const ASSETS = '@highlightjs/cdn-assets/es';
 const realAssets = {
@@ -47,45 +48,6 @@ test('invalid and unmapped language IDs never call resource loaders', async () =
     assert.equal(await loader.forLanguage(id), null);
   }
   assert.equal(calls, 0);
-});
-
-test('concurrent languages share core and grammar loading but receive isolated instances', async () => {
-  const log = [];
-  let coreCalls = 0;
-  const grammarCalls = [];
-  const loader = createHljsLoader({
-    loadCore: async () => { coreCalls += 1; return { default: fakeFactory(log) }; },
-    loadGrammar: async (lang) => { grammarCalls.push(lang); return { default: grammar }; },
-  });
-  const [js, xml] = await Promise.all([
-    loader.forLanguage('javascript'), loader.forLanguage('xml'),
-  ]);
-  assert.equal(coreCalls, 1);
-  // css/graphql/javascript/xml are each fetched ONCE even though both closures need them.
-  assert.deepEqual(grammarCalls.sort(), ['css', 'graphql', 'javascript', 'xml']);
-  assert.notEqual(js, xml);
-  const instances = log.filter(([kind]) => kind === 'instance').map(([, instance]) => instance);
-  assert.equal(instances.length, 2);
-  const registeredOn = (instance) => log
-    .filter(([kind, , target]) => kind === 'register' && target === instance)
-    .map((entry) => entry[1]).sort();
-  assert.deepEqual(instances.map(registeredOn).sort((a, b) => a.length - b.length), [
-    ['css', 'graphql', 'javascript', 'xml'],
-    ['css', 'graphql', 'javascript', 'xml'],
-  ]);
-  assert.deepEqual([...instances[0].languages.keys()].length, 4);
-});
-
-test('a language without sub-languages registers exactly its own grammar', async () => {
-  const log = [];
-  const grammarCalls = [];
-  const loader = createHljsLoader({
-    loadCore: async () => ({ default: fakeFactory(log) }),
-    loadGrammar: async (lang) => { grammarCalls.push(lang); return { default: grammar }; },
-  });
-  assert.ok(await loader.forLanguage('python'));
-  assert.deepEqual(grammarCalls, ['python']);
-  assert.deepEqual(log.filter(([kind]) => kind === 'register').map((entry) => entry[1]), ['python']);
 });
 
 test('the sub-language map is the transitive closure declared by the pinned grammars', async () => {
@@ -134,306 +96,361 @@ test('the sub-language map is the transitive closure declared by the pinned gram
   assert.ok(!SUPPORTED_LANGUAGE_IDS.includes('mojolicious'), 'sub-languages are not primaries');
 });
 
-test('production-shaped bindings highlight embedded sub-languages', async () => {
-  const loader = createHljsLoader(realAssets);
-  const jsx = [
-    'export default function App({ items }) {',
-    '  return <ul className="list">{items.map((item) => <li key={item.id}>{item.label}</li>)}</ul>;',
-    '}',
-  ].join('\n');
-  const js = (await loader.forLanguage('javascript')).highlight(jsx);
-  assert.match(js, /<span class="language-xml"><span class="hljs-tag">/);
-  assert.match(js, /<span class="hljs-attr">className<\/span>/);
-  assert.equal(rowsFromHtml(js)?.length, 3, 'the strict row parser accepts sub-language wrappers');
+test('every loader failure mode retries narrowly, gives up after MAX_RESOURCE_FAILURES and never rejects unhandled', async () => {
+  await checkRows([
+    { name: 'binding failures retry only what failed, from cached resources, with a fresh instance', run: async () => {
+      await checkRows([
+        { name: 'a failed sub-language grammar yields no binding, then retries only that grammar', run: async () => {
+          const attempts = [];
+          const loader = createHljsLoader({
+            loadCore: async () => ({ default: fakeFactory() }),
+            loadGrammar: async (lang, attempt) => {
+              attempts.push([lang, attempt]);
+              if (lang === 'graphql' && attempt === 0) throw new Error('graphql 404');
+              return { default: grammar };
+            },
+          });
+          assert.equal(await loader.forLanguage('javascript'), null);
+          assert.ok(await loader.forLanguage('javascript'));
+          assert.deepEqual(attempts.sort(), [
+            ['css', 0], ['graphql', 0], ['graphql', 1], ['javascript', 0], ['xml', 0],
+          ]);
+        } },
+        { name: 'binding failures do not refetch successful resources and retry with a fresh instance', run: async () => {
+          let coreCalls = 0;
+          let grammarCalls = 0;
+          let instances = 0;
+          const factory = {
+            newInstance() {
+              instances += 1;
+              if (instances === 1) throw new Error('fail once');
+              return fakeFactory().newInstance();
+            },
+          };
+          const loader = createHljsLoader({
+            loadCore: async () => { coreCalls += 1; return { default: factory }; },
+            loadGrammar: async () => { grammarCalls += 1; return { default: grammar }; },
+          });
+          assert.equal(await loader.forLanguage('javascript'), null);
+          assert.ok(await loader.forLanguage('javascript'));
+          assert.equal(instances, 2);
+          assert.equal(coreCalls, 1);
+          assert.equal(grammarCalls, 4, 'javascript + its 3 sub-language grammars, none refetched');
+        } },
+        { name: 'throwing registration and lookup failures retry from cached resources with fresh instances', run: async () => {
+          for (const failure of ['register throws', 'lookup throws', 'lookup false']) {
+            let coreCalls = 0;
+            let grammarCalls = 0;
+            let instances = 0;
+            const factory = {
+              newInstance() {
+                instances += 1;
+                const fail = instances === 1;
+                let registered = false;
+                return {
+                  registerLanguage() {
+                    if (fail && failure === 'register throws') throw new Error(failure);
+                    registered = true;
+                  },
+                  getLanguage() {
+                    if (fail && failure === 'lookup throws') throw new Error(failure);
+                    if (fail && failure === 'lookup false') return false;
+                    return registered;
+                  },
+                  highlight(text) { return { value: String(text) }; },
+                };
+              },
+            };
+            const loader = createHljsLoader({
+              loadCore: async () => { coreCalls += 1; return { default: factory }; },
+              loadGrammar: async () => { grammarCalls += 1; return { default: grammar }; },
+            });
+            assert.equal(await loader.forLanguage('javascript'), null, failure);
+            assert.ok(await loader.forLanguage('javascript'), `${failure} retry succeeds`);
+            assert.equal(instances, 2, `${failure} builds a fresh instance`);
+            assert.equal(coreCalls, 1, `${failure} reuses the core factory`);
+            assert.equal(grammarCalls, 4, `${failure} reuses every cached grammar function`);
+          }
+        } },
+      ]);
+    } },
+    { name: 'failing resources retry with increasing, distinct attempts and are abandoned after MAX_RESOURCE_FAILURES', run: async () => {
+      await checkRows([
+        { name: 'failed core and grammar resources retry with monotonically increasing attempts', run: async () => {
+          const coreAttempts = [];
+          const grammarAttempts = [];
+          const loader = createHljsLoader({
+            loadCore: async (attempt) => {
+              coreAttempts.push(attempt);
+              if (attempt === 0) throw new Error('first core');
+              return { default: fakeFactory() };
+            },
+            loadGrammar: async (lang, attempt) => {
+              grammarAttempts.push([lang, attempt]);
+              return { default: grammar };
+            },
+          });
+          assert.equal(await loader.forLanguage('javascript'), null);
+          assert.ok(await loader.forLanguage('javascript'));
+          assert.deepEqual(coreAttempts, [0, 1]);
+          assert.deepEqual(grammarAttempts.sort(), [
+            ['css', 0], ['graphql', 0], ['javascript', 0], ['xml', 0],
+          ], 'successful grammars stay cached');
 
-  const xml = (await loader.forLanguage('xml'))
-    .highlight('<style>.a{color:red}</style><script>const x = 1;</script>');
-  assert.match(xml, /<span class="language-css">.*hljs-selector-class/);
-  assert.match(xml, /<span class="language-javascript">.*hljs-keyword/);
+          const grammarRetry = [];
+          const second = createHljsLoader({
+            loadCore: async () => ({ default: fakeFactory() }),
+            loadGrammar: async (lang, attempt) => {
+              grammarRetry.push([lang, attempt]);
+              if (attempt === 0) throw new Error('first grammar');
+              return { default: grammar };
+            },
+          });
+          assert.equal(await second.forLanguage('python'), null);
+          assert.ok(await second.forLanguage('python'));
+          assert.deepEqual(grammarRetry, [['python', 0], ['python', 1]]);
+        } },
+        { name: 'a resource that keeps failing is abandoned after MAX_RESOURCE_FAILURES loads', run: async () => {
+          let coreCalls = 0;
+          const grammarCalls = [];
+          const loader = createHljsLoader({
+            loadCore: async () => { coreCalls += 1; throw new Error('core 404'); },
+            loadGrammar: async (lang) => { grammarCalls.push(lang); return { default: grammar }; },
+          });
+          for (let i = 0; i < MAX_RESOURCE_FAILURES + 5; i += 1) {
+            assert.equal(await loader.forLanguage('python'), null);
+          }
+          assert.equal(coreCalls, MAX_RESOURCE_FAILURES, 'no further core imports after the ceiling');
+          assert.deepEqual(grammarCalls, ['python'], 'the successful grammar was fetched once and cached');
 
-  const dockerfile = (await loader.forLanguage('dockerfile')).highlight('RUN apt-get install -y curl');
-  assert.match(dockerfile, /<span class="language-bash">/);
+          const grammarAttempts = [];
+          const perGrammar = createHljsLoader({
+            loadCore: async () => ({ default: fakeFactory() }),
+            loadGrammar: async (lang, attempt) => {
+              grammarAttempts.push([lang, attempt]);
+              if (lang === 'graphql') throw new Error('graphql 404');
+              return { default: grammar };
+            },
+          });
+          for (let i = 0; i < MAX_RESOURCE_FAILURES + 5; i += 1) {
+            assert.equal(await perGrammar.forLanguage('javascript'), null);
+          }
+          assert.deepEqual(grammarAttempts.filter(([lang]) => lang === 'graphql').map(([, a]) => a),
+            [...Array(MAX_RESOURCE_FAILURES).keys()], 'only the failing grammar retried, then abandoned');
+          assert.ok(await perGrammar.forLanguage('python'), 'other languages are unaffected');
+        } },
+        { name: 'retry URLs use distinct query strings', run: async () => {
+          assert.equal(_testing.coreUrl(0), '/vendor/hljs/core.min.js?retry=0');
+          assert.equal(_testing.coreUrl(1), '/vendor/hljs/core.min.js?retry=1');
+          assert.equal(_testing.grammarUrl('javascript', 0),
+            '/vendor/hljs/languages/javascript.min.js?retry=0');
+          assert.equal(_testing.grammarUrl('javascript', 1),
+            '/vendor/hljs/languages/javascript.min.js?retry=1');
+        } },
+      ]);
+    } },
+    { name: 'bad shapes, throwing highlighters and async failures degrade without unhandled rejections', run: async () => {
+      await checkRows([
+        { name: 'bad module and instance shapes degrade to null', run: async () => {
+          const badCore = createHljsLoader({
+            loadCore: async () => ({ default: {} }), loadGrammar: async () => ({ default: grammar }),
+          });
+          assert.equal(await badCore.forLanguage('javascript'), null);
 
-  const typescript = (await loader.forLanguage('typescript')).highlight('const el = <div id="x" />;');
-  assert.match(typescript, /<span class="language-xml">/);
-});
+          const badGrammar = createHljsLoader({
+            loadCore: async () => ({ default: fakeFactory() }), loadGrammar: async () => ({ default: {} }),
+          });
+          assert.equal(await badGrammar.forLanguage('javascript'), null);
 
-test('a failed sub-language grammar yields no binding, then retries only that grammar', async () => {
-  const attempts = [];
-  const loader = createHljsLoader({
-    loadCore: async () => ({ default: fakeFactory() }),
-    loadGrammar: async (lang, attempt) => {
-      attempts.push([lang, attempt]);
-      if (lang === 'graphql' && attempt === 0) throw new Error('graphql 404');
-      return { default: grammar };
-    },
-  });
-  assert.equal(await loader.forLanguage('javascript'), null);
-  assert.ok(await loader.forLanguage('javascript'));
-  assert.deepEqual(attempts.sort(), [
-    ['css', 0], ['graphql', 0], ['graphql', 1], ['javascript', 0], ['xml', 0],
+          const badInstance = createHljsLoader({
+            loadCore: async () => ({ default: { newInstance: () => ({}) } }),
+            loadGrammar: async () => ({ default: grammar }),
+          });
+          assert.equal(await badInstance.forLanguage('javascript'), null);
+        } },
+        { name: 'throwing highlighters and invalid highlight results fail synchronously', run: async () => {
+          for (const result of [null, {}, { value: 1 }]) {
+            const loader = createHljsLoader({
+              loadCore: async () => ({
+                default: {
+                  newInstance: () => ({
+                    registerLanguage() {},
+                    getLanguage() { return true; },
+                    highlight() { return result; },
+                  }),
+                },
+              }),
+              loadGrammar: async () => ({ default: grammar }),
+            });
+            const bound = await loader.forLanguage('javascript');
+            assert.ok(bound);
+            assert.throws(() => bound.highlight('x'), /invalid highlight result/);
+          }
+
+          const throwing = createHljsLoader({
+            loadCore: async () => ({
+              default: {
+                newInstance: () => ({
+                  registerLanguage() {},
+                  getLanguage() { return true; },
+                  highlight() { throw new Error('highlight failed'); },
+                }),
+              },
+            }),
+            loadGrammar: async () => ({ default: grammar }),
+          });
+          const bound = await throwing.forLanguage('javascript');
+          assert.throws(() => bound.highlight('x'), /highlight failed/);
+        } },
+        { name: 'async loader and binding failures produce no unhandled rejection', run: async () => {
+          const unhandled = [];
+          const onUnhandled = (reason) => unhandled.push(reason);
+          process.on('unhandledRejection', onUnhandled);
+          try {
+            const importFailure = createHljsLoader({
+              loadCore: async () => { throw new Error('core failed'); },
+              loadGrammar: async () => { throw new Error('grammar failed'); },
+            });
+            assert.equal(await importFailure.forLanguage('javascript'), null);
+
+            const registrationFailure = createHljsLoader({
+              loadCore: async () => ({
+                default: {
+                  newInstance: () => ({
+                    registerLanguage() { throw new Error('register failed'); },
+                    getLanguage() { throw new Error('lookup should not run'); },
+                    highlight() { return { value: '' }; },
+                  }),
+                },
+              }),
+              loadGrammar: async () => ({ default: grammar }),
+            });
+            assert.equal(await registrationFailure.forLanguage('javascript'), null);
+            await new Promise((resolve) => setImmediate(resolve));
+          } finally {
+            process.off('unhandledRejection', onUnhandled);
+          }
+          assert.deepEqual(unhandled, []);
+        } },
+      ]);
+    } },
   ]);
 });
 
-test('same-language concurrency and successful caches reuse one complete binding', async () => {
-  let coreCalls = 0;
-  const grammarCalls = [];
-  const log = [];
-  const loader = createHljsLoader({
-    loadCore: async () => { coreCalls += 1; return { default: fakeFactory(log) }; },
-    loadGrammar: async (lang) => { grammarCalls.push(lang); return { default: grammar }; },
-  });
-  const [a, b] = await Promise.all([
-    loader.forLanguage('javascript'), loader.forLanguage('javascript'),
+test('loading is shared and cached; each language gets one isolated binding that pins its options', async () => {
+  await checkRows([
+    { name: 'loading is shared and cached; each language gets one isolated, complete binding', run: async () => {
+      await checkRows([
+        { name: 'concurrent languages share core and grammar loading but receive isolated instances', run: async () => {
+          const log = [];
+          let coreCalls = 0;
+          const grammarCalls = [];
+          const loader = createHljsLoader({
+            loadCore: async () => { coreCalls += 1; return { default: fakeFactory(log) }; },
+            loadGrammar: async (lang) => { grammarCalls.push(lang); return { default: grammar }; },
+          });
+          const [js, xml] = await Promise.all([
+            loader.forLanguage('javascript'), loader.forLanguage('xml'),
+          ]);
+          assert.equal(coreCalls, 1);
+          // css/graphql/javascript/xml are each fetched ONCE even though both closures need them.
+          assert.deepEqual(grammarCalls.sort(), ['css', 'graphql', 'javascript', 'xml']);
+          assert.notEqual(js, xml);
+          const instances = log.filter(([kind]) => kind === 'instance').map(([, instance]) => instance);
+          assert.equal(instances.length, 2);
+          const registeredOn = (instance) => log
+            .filter(([kind, , target]) => kind === 'register' && target === instance)
+            .map((entry) => entry[1]).sort();
+          assert.deepEqual(instances.map(registeredOn).sort((a, b) => a.length - b.length), [
+            ['css', 'graphql', 'javascript', 'xml'],
+            ['css', 'graphql', 'javascript', 'xml'],
+          ]);
+          assert.deepEqual([...instances[0].languages.keys()].length, 4);
+        } },
+        { name: 'a language without sub-languages registers exactly its own grammar', run: async () => {
+          const log = [];
+          const grammarCalls = [];
+          const loader = createHljsLoader({
+            loadCore: async () => ({ default: fakeFactory(log) }),
+            loadGrammar: async (lang) => { grammarCalls.push(lang); return { default: grammar }; },
+          });
+          assert.ok(await loader.forLanguage('python'));
+          assert.deepEqual(grammarCalls, ['python']);
+          assert.deepEqual(log.filter(([kind]) => kind === 'register').map((entry) => entry[1]), ['python']);
+        } },
+        { name: 'same-language concurrency and successful caches reuse one complete binding', run: async () => {
+          let coreCalls = 0;
+          const grammarCalls = [];
+          const log = [];
+          const loader = createHljsLoader({
+            loadCore: async () => { coreCalls += 1; return { default: fakeFactory(log) }; },
+            loadGrammar: async (lang) => { grammarCalls.push(lang); return { default: grammar }; },
+          });
+          const [a, b] = await Promise.all([
+            loader.forLanguage('javascript'), loader.forLanguage('javascript'),
+          ]);
+          const c = await loader.forLanguage('javascript');
+          assert.equal(a, b);
+          assert.equal(a, c);
+          assert.equal(coreCalls, 1);
+          assert.deepEqual(grammarCalls.sort(), ['css', 'graphql', 'javascript', 'xml']);
+          assert.equal(log.filter(([kind]) => kind === 'instance').length, 1);
+        } },
+      ]);
+    } },
+    { name: 'bound highlighter returns value and pins the primary language options', run: async () => {
+      const log = [];
+      const loader = createHljsLoader({
+        loadCore: async () => ({ default: fakeFactory(log) }),
+        loadGrammar: async () => ({ default: grammar }),
+      });
+      const bound = await loader.forLanguage('javascript');
+      assert.equal(bound.highlight('const x = 1;'), 'javascript:const x = 1;');
+      const call = log.find(([kind]) => kind === 'highlight');
+      assert.deepEqual(call[2], { language: 'javascript', ignoreIllegals: true });
+      assert.throws(() => bound.highlight('x', 'python'), /language mismatch/);
+    } },
   ]);
-  const c = await loader.forLanguage('javascript');
-  assert.equal(a, b);
-  assert.equal(a, c);
-  assert.equal(coreCalls, 1);
-  assert.deepEqual(grammarCalls.sort(), ['css', 'graphql', 'javascript', 'xml']);
-  assert.equal(log.filter(([kind]) => kind === 'instance').length, 1);
 });
 
-test('failed core and grammar resources retry with monotonically increasing attempts', async () => {
-  const coreAttempts = [];
-  const grammarAttempts = [];
-  const loader = createHljsLoader({
-    loadCore: async (attempt) => {
-      coreAttempts.push(attempt);
-      if (attempt === 0) throw new Error('first core');
-      return { default: fakeFactory() };
-    },
-    loadGrammar: async (lang, attempt) => {
-      grammarAttempts.push([lang, attempt]);
-      return { default: grammar };
-    },
-  });
-  assert.equal(await loader.forLanguage('javascript'), null);
-  assert.ok(await loader.forLanguage('javascript'));
-  assert.deepEqual(coreAttempts, [0, 1]);
-  assert.deepEqual(grammarAttempts.sort(), [
-    ['css', 0], ['graphql', 0], ['javascript', 0], ['xml', 0],
-  ], 'successful grammars stay cached');
+test('real hljs assets: embedded sub-languages highlight and instances stay isolated', async () => {
+  await checkRows([
+    { name: 'production-shaped bindings highlight embedded sub-languages', run: async () => {
+      const loader = createHljsLoader(realAssets);
+      const jsx = [
+        'export default function App({ items }) {',
+        '  return <ul className="list">{items.map((item) => <li key={item.id}>{item.label}</li>)}</ul>;',
+        '}',
+      ].join('\n');
+      const js = (await loader.forLanguage('javascript')).highlight(jsx);
+      assert.match(js, /<span class="language-xml"><span class="hljs-tag">/);
+      assert.match(js, /<span class="hljs-attr">className<\/span>/);
+      assert.equal(rowsFromHtml(js)?.length, 3, 'the strict row parser accepts sub-language wrappers');
 
-  const grammarRetry = [];
-  const second = createHljsLoader({
-    loadCore: async () => ({ default: fakeFactory() }),
-    loadGrammar: async (lang, attempt) => {
-      grammarRetry.push([lang, attempt]);
-      if (attempt === 0) throw new Error('first grammar');
-      return { default: grammar };
-    },
-  });
-  assert.equal(await second.forLanguage('python'), null);
-  assert.ok(await second.forLanguage('python'));
-  assert.deepEqual(grammarRetry, [['python', 0], ['python', 1]]);
-});
+      const xml = (await loader.forLanguage('xml'))
+        .highlight('<style>.a{color:red}</style><script>const x = 1;</script>');
+      assert.match(xml, /<span class="language-css">.*hljs-selector-class/);
+      assert.match(xml, /<span class="language-javascript">.*hljs-keyword/);
 
-test('a resource that keeps failing is abandoned after MAX_RESOURCE_FAILURES loads', async () => {
-  let coreCalls = 0;
-  const grammarCalls = [];
-  const loader = createHljsLoader({
-    loadCore: async () => { coreCalls += 1; throw new Error('core 404'); },
-    loadGrammar: async (lang) => { grammarCalls.push(lang); return { default: grammar }; },
-  });
-  for (let i = 0; i < MAX_RESOURCE_FAILURES + 5; i += 1) {
-    assert.equal(await loader.forLanguage('python'), null);
-  }
-  assert.equal(coreCalls, MAX_RESOURCE_FAILURES, 'no further core imports after the ceiling');
-  assert.deepEqual(grammarCalls, ['python'], 'the successful grammar was fetched once and cached');
+      const dockerfile = (await loader.forLanguage('dockerfile')).highlight('RUN apt-get install -y curl');
+      assert.match(dockerfile, /<span class="language-bash">/);
 
-  const grammarAttempts = [];
-  const perGrammar = createHljsLoader({
-    loadCore: async () => ({ default: fakeFactory() }),
-    loadGrammar: async (lang, attempt) => {
-      grammarAttempts.push([lang, attempt]);
-      if (lang === 'graphql') throw new Error('graphql 404');
-      return { default: grammar };
-    },
-  });
-  for (let i = 0; i < MAX_RESOURCE_FAILURES + 5; i += 1) {
-    assert.equal(await perGrammar.forLanguage('javascript'), null);
-  }
-  assert.deepEqual(grammarAttempts.filter(([lang]) => lang === 'graphql').map(([, a]) => a),
-    [...Array(MAX_RESOURCE_FAILURES).keys()], 'only the failing grammar retried, then abandoned');
-  assert.ok(await perGrammar.forLanguage('python'), 'other languages are unaffected');
-});
+      const typescript = (await loader.forLanguage('typescript')).highlight('const el = <div id="x" />;');
+      assert.match(typescript, /<span class="language-xml">/);
+    } },
+    { name: 'real isolated instances keep XML output independent of JavaScript load order', run: async () => {
+      const loader = createHljsLoader(realAssets);
+      const xml = await loader.forLanguage('xml');
+      const source = '<script>const x = 1;</script>';
+      const before = xml.highlight(source);
+      assert.match(before, /language-javascript/, 'the script body is highlighted, not plain');
+      await loader.forLanguage('javascript');
+      assert.equal(xml.highlight(source), before);
 
-test('retry URLs use distinct query strings', () => {
-  assert.equal(_testing.coreUrl(0), '/vendor/hljs/core.min.js?retry=0');
-  assert.equal(_testing.coreUrl(1), '/vendor/hljs/core.min.js?retry=1');
-  assert.equal(_testing.grammarUrl('javascript', 0),
-    '/vendor/hljs/languages/javascript.min.js?retry=0');
-  assert.equal(_testing.grammarUrl('javascript', 1),
-    '/vendor/hljs/languages/javascript.min.js?retry=1');
-});
-
-test('binding failures do not refetch successful resources and retry with a fresh instance', async () => {
-  let coreCalls = 0;
-  let grammarCalls = 0;
-  let instances = 0;
-  const factory = {
-    newInstance() {
-      instances += 1;
-      if (instances === 1) throw new Error('fail once');
-      return fakeFactory().newInstance();
-    },
-  };
-  const loader = createHljsLoader({
-    loadCore: async () => { coreCalls += 1; return { default: factory }; },
-    loadGrammar: async () => { grammarCalls += 1; return { default: grammar }; },
-  });
-  assert.equal(await loader.forLanguage('javascript'), null);
-  assert.ok(await loader.forLanguage('javascript'));
-  assert.equal(instances, 2);
-  assert.equal(coreCalls, 1);
-  assert.equal(grammarCalls, 4, 'javascript + its 3 sub-language grammars, none refetched');
-});
-
-test('throwing registration and lookup failures retry from cached resources with fresh instances', async () => {
-  for (const failure of ['register throws', 'lookup throws', 'lookup false']) {
-    let coreCalls = 0;
-    let grammarCalls = 0;
-    let instances = 0;
-    const factory = {
-      newInstance() {
-        instances += 1;
-        const fail = instances === 1;
-        let registered = false;
-        return {
-          registerLanguage() {
-            if (fail && failure === 'register throws') throw new Error(failure);
-            registered = true;
-          },
-          getLanguage() {
-            if (fail && failure === 'lookup throws') throw new Error(failure);
-            if (fail && failure === 'lookup false') return false;
-            return registered;
-          },
-          highlight(text) { return { value: String(text) }; },
-        };
-      },
-    };
-    const loader = createHljsLoader({
-      loadCore: async () => { coreCalls += 1; return { default: factory }; },
-      loadGrammar: async () => { grammarCalls += 1; return { default: grammar }; },
-    });
-    assert.equal(await loader.forLanguage('javascript'), null, failure);
-    assert.ok(await loader.forLanguage('javascript'), `${failure} retry succeeds`);
-    assert.equal(instances, 2, `${failure} builds a fresh instance`);
-    assert.equal(coreCalls, 1, `${failure} reuses the core factory`);
-    assert.equal(grammarCalls, 4, `${failure} reuses every cached grammar function`);
-  }
-});
-
-test('bad module and instance shapes degrade to null', async () => {
-  const badCore = createHljsLoader({
-    loadCore: async () => ({ default: {} }), loadGrammar: async () => ({ default: grammar }),
-  });
-  assert.equal(await badCore.forLanguage('javascript'), null);
-
-  const badGrammar = createHljsLoader({
-    loadCore: async () => ({ default: fakeFactory() }), loadGrammar: async () => ({ default: {} }),
-  });
-  assert.equal(await badGrammar.forLanguage('javascript'), null);
-
-  const badInstance = createHljsLoader({
-    loadCore: async () => ({ default: { newInstance: () => ({}) } }),
-    loadGrammar: async () => ({ default: grammar }),
-  });
-  assert.equal(await badInstance.forLanguage('javascript'), null);
-});
-
-test('bound highlighter returns value and pins the primary language options', async () => {
-  const log = [];
-  const loader = createHljsLoader({
-    loadCore: async () => ({ default: fakeFactory(log) }),
-    loadGrammar: async () => ({ default: grammar }),
-  });
-  const bound = await loader.forLanguage('javascript');
-  assert.equal(bound.highlight('const x = 1;'), 'javascript:const x = 1;');
-  const call = log.find(([kind]) => kind === 'highlight');
-  assert.deepEqual(call[2], { language: 'javascript', ignoreIllegals: true });
-  assert.throws(() => bound.highlight('x', 'python'), /language mismatch/);
-});
-
-test('throwing highlighters and invalid highlight results fail synchronously', async () => {
-  for (const result of [null, {}, { value: 1 }]) {
-    const loader = createHljsLoader({
-      loadCore: async () => ({
-        default: {
-          newInstance: () => ({
-            registerLanguage() {},
-            getLanguage() { return true; },
-            highlight() { return result; },
-          }),
-        },
-      }),
-      loadGrammar: async () => ({ default: grammar }),
-    });
-    const bound = await loader.forLanguage('javascript');
-    assert.ok(bound);
-    assert.throws(() => bound.highlight('x'), /invalid highlight result/);
-  }
-
-  const throwing = createHljsLoader({
-    loadCore: async () => ({
-      default: {
-        newInstance: () => ({
-          registerLanguage() {},
-          getLanguage() { return true; },
-          highlight() { throw new Error('highlight failed'); },
-        }),
-      },
-    }),
-    loadGrammar: async () => ({ default: grammar }),
-  });
-  const bound = await throwing.forLanguage('javascript');
-  assert.throws(() => bound.highlight('x'), /highlight failed/);
-});
-
-test('async loader and binding failures produce no unhandled rejection', async () => {
-  const unhandled = [];
-  const onUnhandled = (reason) => unhandled.push(reason);
-  process.on('unhandledRejection', onUnhandled);
-  try {
-    const importFailure = createHljsLoader({
-      loadCore: async () => { throw new Error('core failed'); },
-      loadGrammar: async () => { throw new Error('grammar failed'); },
-    });
-    assert.equal(await importFailure.forLanguage('javascript'), null);
-
-    const registrationFailure = createHljsLoader({
-      loadCore: async () => ({
-        default: {
-          newInstance: () => ({
-            registerLanguage() { throw new Error('register failed'); },
-            getLanguage() { throw new Error('lookup should not run'); },
-            highlight() { return { value: '' }; },
-          }),
-        },
-      }),
-      loadGrammar: async () => ({ default: grammar }),
-    });
-    assert.equal(await registrationFailure.forLanguage('javascript'), null);
-    await new Promise((resolve) => setImmediate(resolve));
-  } finally {
-    process.off('unhandledRejection', onUnhandled);
-  }
-  assert.deepEqual(unhandled, []);
-});
-
-test('real isolated instances keep XML output independent of JavaScript load order', async () => {
-  const loader = createHljsLoader(realAssets);
-  const xml = await loader.forLanguage('xml');
-  const source = '<script>const x = 1;</script>';
-  const before = xml.highlight(source);
-  assert.match(before, /language-javascript/, 'the script body is highlighted, not plain');
-  await loader.forLanguage('javascript');
-  assert.equal(xml.highlight(source), before);
-
-  const reverse = createHljsLoader(realAssets);
-  await reverse.forLanguage('javascript');
-  const after = (await reverse.forLanguage('xml')).highlight(source);
-  assert.equal(after, before);
+      const reverse = createHljsLoader(realAssets);
+      await reverse.forLanguage('javascript');
+      const after = (await reverse.forLanguage('xml')).highlight(source);
+      assert.equal(after, before);
+    } },
+  ]);
 });

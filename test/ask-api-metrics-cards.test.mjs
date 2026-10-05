@@ -15,6 +15,7 @@ import { WebSocket } from 'ws';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 import { _resetForTests as closeDbForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -144,82 +145,88 @@ test('the mock proposes a `record` change: the parent re-validates the input and
   assert.equal(stored.state, 'proposed', 'persisted');
 });
 
-test('apply: the switch flips on this machine, the card turns applied with the result, the notice row and the event turn follow', async () => {
-  const { card, thread } = await proposeMetrics();
-  assert.equal(readPrefs(projectKey).record, true, 'precondition');
-  const before = (await snapshot(thread.id)).messages.filter((m) => m.role === 'assistant').length;
-  const w = openWs();
-  await w.opened;
-  const r = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'applied' });
-  assert.equal(r.status, 200, await r.clone().text());
-  const j = await r.json();
-  assert.equal(j.block.state, 'applied');
-  assert.deepEqual(j.block.card.result, { ok: true, detail: '"Include my runs" is now off' });
-  assert.equal(j.block.card.summary, 'Turn "Include my runs" off for demo', 'the rest of the card survives the sub-patch');
-  assert.equal(readPrefs(projectKey).record, false, 'the change happened server-side, behind the click');
-  assert.ok(j.turn && (j.turn.assistantMessageId || j.turn.deferred), 'the event turn started');
-  const reply = await waitForAsync(async () => eventReply(thread.id, before).catch(() => null));
-  assert.match(reply.text, /Applied\./, 'the mock answered the applied event');
-  const s = await snapshot(thread.id);
-  const notice = s.messages.find((m) => m.role === 'user' && (m.blocks || []).some((b) => b.kind === 'notice' && b.synthetic));
-  assert.ok(notice, 'the synthetic notice row exists');
-  assert.equal(notice.blocks[0].text, 'Applied — Turn "Include my runs" off for demo · "Include my runs" is now off');
-  assert.match(notice.text, /^\[worca event\] metrics card card_[0-9a-f]{8} applied; "Turn 'Include my runs' off for demo"; 'Include my runs' is now off$/);
-  assert.ok(frames(w.msgs, thread.id, 'ask-message').length >= 1, 'other tabs get the flipped message');
-  w.ws.close();
-  // A second verb on a non-proposed card is refused, as is a wrong verb anywhere.
-  assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'applied' })).status, 409);
-  assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'saved' })).status, 400);
-  writePrefs(projectKey, { record: true });   // back to the fixture's state for the next test
+test('metrics card apply flips the switch (applied + notice + event turn); decline changes nothing', async () => {
+  await checkRows([
+    { name: 'apply: the switch flips on this machine, the card turns applied with the result, the notice row and the event turn follow', run: async () => {
+      const { card, thread } = await proposeMetrics();
+      assert.equal(readPrefs(projectKey).record, true, 'precondition');
+      const before = (await snapshot(thread.id)).messages.filter((m) => m.role === 'assistant').length;
+      const w = openWs();
+      await w.opened;
+      const r = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'applied' });
+      assert.equal(r.status, 200, await r.clone().text());
+      const j = await r.json();
+      assert.equal(j.block.state, 'applied');
+      assert.deepEqual(j.block.card.result, { ok: true, detail: '"Include my runs" is now off' });
+      assert.equal(j.block.card.summary, 'Turn "Include my runs" off for demo', 'the rest of the card survives the sub-patch');
+      assert.equal(readPrefs(projectKey).record, false, 'the change happened server-side, behind the click');
+      assert.ok(j.turn && (j.turn.assistantMessageId || j.turn.deferred), 'the event turn started');
+      const reply = await waitForAsync(async () => eventReply(thread.id, before).catch(() => null));
+      assert.match(reply.text, /Applied\./, 'the mock answered the applied event');
+      const s = await snapshot(thread.id);
+      const notice = s.messages.find((m) => m.role === 'user' && (m.blocks || []).some((b) => b.kind === 'notice' && b.synthetic));
+      assert.ok(notice, 'the synthetic notice row exists');
+      assert.equal(notice.blocks[0].text, 'Applied — Turn "Include my runs" off for demo · "Include my runs" is now off');
+      assert.match(notice.text, /^\[worca event\] metrics card card_[0-9a-f]{8} applied; "Turn 'Include my runs' off for demo"; 'Include my runs' is now off$/);
+      assert.ok(frames(w.msgs, thread.id, 'ask-message').length >= 1, 'other tabs get the flipped message');
+      w.ws.close();
+      // A second verb on a non-proposed card is refused, as is a wrong verb anywhere.
+      assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'applied' })).status, 409);
+      assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'saved' })).status, 400);
+      writePrefs(projectKey, { record: true });   // back to the fixture's state for the next test
+    } },
+    { name: 'decline: the card flips to declined, nothing changes, the event turn confirms', run: async () => {
+      const { card, thread } = await proposeMetrics();
+      const before = (await snapshot(thread.id)).messages.filter((m) => m.role === 'assistant').length;
+      const r = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'declined' });
+      assert.equal(r.status, 200, await r.clone().text());
+      const j = await r.json();
+      assert.equal(j.block.state, 'declined');
+      assert.equal(j.block.card.result, undefined);
+      assert.equal(readPrefs(projectKey).record, true, 'untouched');
+      const reply = await waitForAsync(async () => eventReply(thread.id, before).catch(() => null));
+      assert.match(reply.text, /Declined — nothing changed\./);
+      const s = await snapshot(thread.id);
+      const notice = s.messages.find((m) => m.role === 'user' && (m.blocks || []).some((b) => b.kind === 'notice' && b.synthetic));
+      assert.equal(notice.blocks[0].text, 'Declined — Turn "Include my runs" off for demo');
+      assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'declined' })).status, 409);
+    } },
+  ]);
 });
 
-test('decline: the card flips to declined, nothing changes, the event turn confirms', async () => {
-  const { card, thread } = await proposeMetrics();
-  const before = (await snapshot(thread.id)).messages.filter((m) => m.role === 'assistant').length;
-  const r = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'declined' });
-  assert.equal(r.status, 200, await r.clone().text());
-  const j = await r.json();
-  assert.equal(j.block.state, 'declined');
-  assert.equal(j.block.card.result, undefined);
-  assert.equal(readPrefs(projectKey).record, true, 'untouched');
-  const reply = await waitForAsync(async () => eventReply(thread.id, before).catch(() => null));
-  assert.match(reply.text, /Declined — nothing changed\./);
-  const s = await snapshot(thread.id);
-  const notice = s.messages.find((m) => m.role === 'user' && (m.blocks || []).some((b) => b.kind === 'notice' && b.synthetic));
-  assert.equal(notice.blocks[0].text, 'Declined — Turn "Include my runs" off for demo');
-  assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'declined' })).status, 409);
-});
-
-test('a failing apply turns the card failed with the error and still runs the event turn', async () => {
-  const { card, thread } = await proposeMetrics();
-  // The project vanishes before the click: applyMetricsChange cannot resolve its path (removeProject takes the NAME).
-  const { removeProject, addProject } = await import('../src/core/projects.mjs');
-  await removeProject('demo');
-  try {
-    const before = (await snapshot(thread.id)).messages.filter((m) => m.role === 'assistant').length;
-    const r = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'applied' });
-    assert.equal(r.status, 200, await r.clone().text());
-    const j = await r.json();
-    assert.equal(j.block.state, 'failed');
-    assert.match(j.block.error, /unknown projectKey/);
-    assert.equal(j.block.card.result.ok, false); assert.equal(j.block.card.result.code, 'NOT_FOUND');
-    const reply = await waitForAsync(async () => eventReply(thread.id, before).catch(() => null));
-    assert.match(reply.text, /The change failed/);
-    const s = await snapshot(thread.id);
-    const notice = s.messages.find((m) => m.role === 'user' && (m.blocks || []).some((b) => b.kind === 'notice' && b.synthetic));
-    assert.match(notice.blocks[0].text, /^Could not apply — Turn "Include my runs" off for demo: unknown projectKey/);
-  } finally {
-    await addProject({ name: 'demo', path: projectDir });
-  }
-});
-
-test('after the failure the re-added project proposes again; the persisted card keeps its type through the flips', async () => {
-  const { card, thread } = await proposeMetrics();
-  const before = (await snapshot(thread.id)).messages.filter((m) => m.role === 'assistant').length;
-  await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'declined' });
-  await waitForAsync(async () => eventReply(thread.id, before).catch(() => null));
-  const s = await snapshot(thread.id);
-  const stored = s.messages.flatMap((m) => m.blocks || []).find((b) => b.kind === 'card' && b.id === card.id);
-  assert.equal(stored.state, 'declined');
-  assert.equal(stored.card.type, 'metrics');
+test('a failing apply fails the card with the error, still runs the event turn, and a re-added project proposes again (type kept through the flips)', async () => {
+  await checkRows([
+    { name: 'a failing apply turns the card failed with the error and still runs the event turn', run: async () => {
+      const { card, thread } = await proposeMetrics();
+      // The project vanishes before the click: applyMetricsChange cannot resolve its path (removeProject takes the NAME).
+      const { removeProject, addProject } = await import('../src/core/projects.mjs');
+      await removeProject('demo');
+      try {
+        const before = (await snapshot(thread.id)).messages.filter((m) => m.role === 'assistant').length;
+        const r = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'applied' });
+        assert.equal(r.status, 200, await r.clone().text());
+        const j = await r.json();
+        assert.equal(j.block.state, 'failed');
+        assert.match(j.block.error, /unknown projectKey/);
+        assert.equal(j.block.card.result.ok, false); assert.equal(j.block.card.result.code, 'NOT_FOUND');
+        const reply = await waitForAsync(async () => eventReply(thread.id, before).catch(() => null));
+        assert.match(reply.text, /The change failed/);
+        const s = await snapshot(thread.id);
+        const notice = s.messages.find((m) => m.role === 'user' && (m.blocks || []).some((b) => b.kind === 'notice' && b.synthetic));
+        assert.match(notice.blocks[0].text, /^Could not apply — Turn "Include my runs" off for demo: unknown projectKey/);
+      } finally {
+        await addProject({ name: 'demo', path: projectDir });
+      }
+    } },
+    { name: 'after the failure the re-added project proposes again; the persisted card keeps its type through the flips', run: async () => {
+      const { card, thread } = await proposeMetrics();
+      const before = (await snapshot(thread.id)).messages.filter((m) => m.role === 'assistant').length;
+      await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'declined' });
+      await waitForAsync(async () => eventReply(thread.id, before).catch(() => null));
+      const s = await snapshot(thread.id);
+      const stored = s.messages.flatMap((m) => m.blocks || []).find((b) => b.kind === 'card' && b.id === card.id);
+      assert.equal(stored.state, 'declined');
+      assert.equal(stored.card.type, 'metrics');
+    } },
+  ]);
 });

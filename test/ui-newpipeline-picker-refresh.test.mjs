@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -75,16 +76,33 @@ function go(window, hash) {
 
 const optionIds = (sel) => [...sel.options].map((o) => o.value);
 
-test('a workflow saved while away shows in the picker on returning to New Pipeline (no reload)', async () => {
+test('workflows and guardrail sets created while away show in the pickers on returning to New Pipeline, and boot fetches the workflow list once', async () => {
   const { window, server } = await boot();
-  const sel = window.document.getElementById('workflowSelect');
-  assert.deepEqual(optionIds(sel), ['wf_auto', 'wf_default'], 'boot: Auto + Default only');
+  await checkRows([
+    // First: the count is of the boot's own fetches, before any re-entry re-fetches the list.
+    { name: 'boot itself does not double-fetch the workflow list (loadConfig owns the first fill)', run: async () => {
+      const listCalls = server.calls.filter((u) => u.endsWith('/api/workflows')).length;
+      assert.equal(listCalls, 1);
+    } },
+    { name: 'a workflow saved while away shows in the picker on returning to New Pipeline (no reload)', run: async () => {
+      const sel = window.document.getElementById('workflowSelect');
+      assert.deepEqual(optionIds(sel), ['wf_auto', 'wf_default'], 'boot: Auto + Default only');
 
-  await go(window, 'composer');
-  server.workflows.push(WF_A);                       // what Composer's save does server-side
-  await go(window, 'new');
-  assert.deepEqual(optionIds(sel), ['wf_auto', 'wf_default', 'wf_a'], 'picker re-fetched on re-entry');
-  assert.equal(sel.value, 'wf_default', 'active selection preserved');
+      await go(window, 'composer');
+      server.workflows.push(WF_A);                       // what Composer's save does server-side
+      await go(window, 'new');
+      assert.deepEqual(optionIds(sel), ['wf_auto', 'wf_default', 'wf_a'], 'picker re-fetched on re-entry');
+      assert.equal(sel.value, 'wf_default', 'active selection preserved');
+    } },
+    { name: 'a guardrail set created while away shows in the picker on returning', run: async () => {
+      const sel = window.document.getElementById('guardrailsSelect');
+      assert.deepEqual(optionIds(sel), ['permissive']);
+      await go(window, 'guardrails');
+      server.guardrails.push({ id: 'gs_strict', name: 'Strict-ish', settings: {} });
+      await go(window, 'new');
+      assert.deepEqual(optionIds(sel), ['permissive', 'gs_strict']);
+    } },
+  ]);
 });
 
 test('re-entry drops the per-id memo so a re-saved workflow repaints with its new topology', async () => {
@@ -104,20 +122,4 @@ test('re-entry drops the per-id memo so a re-saved workflow repaints with its ne
   await go(window, 'new');
   assert.equal(sel.value, 'wf_a', 'selection kept across the refresh');
   assert.deepEqual(rows(), ['s0_0', 's1_0'], 'accordion painted from the re-fetched topology');
-});
-
-test('a guardrail set created while away shows in the picker on returning', async () => {
-  const { window, server } = await boot();
-  const sel = window.document.getElementById('guardrailsSelect');
-  assert.deepEqual(optionIds(sel), ['permissive']);
-  await go(window, 'guardrails');
-  server.guardrails.push({ id: 'gs_strict', name: 'Strict-ish', settings: {} });
-  await go(window, 'new');
-  assert.deepEqual(optionIds(sel), ['permissive', 'gs_strict']);
-});
-
-test('boot itself does not double-fetch the workflow list (loadConfig owns the first fill)', async () => {
-  const { server } = await boot();
-  const listCalls = server.calls.filter((u) => u.endsWith('/api/workflows')).length;
-  assert.equal(listCalls, 1);
 });

@@ -7,16 +7,17 @@ import { join } from 'node:path';
 import { _resetForTests } from '../src/core/db.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
 import { persistResults, persistDiffPatch, readRunContextBundle } from '../src/core/results.mjs';
-import { listArtifacts } from '../src/core/artifacts.mjs';
+import { listArtifacts, readPipelineByKey } from '../src/core/artifacts.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
-let home, prevHome, pipelineDir, id;
+let home, prevHome, pipelineDir, id, key;
 
 before(async () => {
   home = await mkdtemp(join(tmpdir(), 'worca-cc-resp-'));
   prevHome = process.env.WORCA_HOME; process.env.WORCA_HOME = home;
   _resetForTests();
   // seedPipeline(projectDir) routes through production writers; returns { id, dir, key }.
-  ({ id, dir: pipelineDir } = await seedPipeline(join(home, 'proj')));
+  ({ id, dir: pipelineDir, key } = await seedPipeline(join(home, 'proj')));
   await mkdir(pipelineDir, { recursive: true });
 });
 
@@ -26,26 +27,37 @@ after(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-test('persistResults writes results.json and indexes it', async () => {
-  await persistResults(pipelineDir, { summary: { filesNew: 1 } });
-  const onDisk = JSON.parse(await readFile(join(pipelineDir, 'results.json'), 'utf8'));
-  assert.equal(onDisk.summary.filesNew, 1);
-  const arts = await listArtifacts(id);
-  assert.ok(arts.some((a) => a.kind === 'results' && a.relPath === 'results.json'));
+test('persistResults + persistDiffPatch write and index their files; readRunContextBundle returns both', async () => {
+  await checkRows([
+    { name: 'persistResults writes results.json and indexes it', run: async () => {
+      await persistResults(pipelineDir, { summary: { filesNew: 1 } });
+      const onDisk = JSON.parse(await readFile(join(pipelineDir, 'results.json'), 'utf8'));
+      assert.equal(onDisk.summary.filesNew, 1);
+      const arts = await listArtifacts(id);
+      assert.ok(arts.some((a) => a.kind === 'results' && a.relPath === 'results.json'));
+    } },
+    { name: 'persistDiffPatch writes diff-patch.patch and indexes it', run: async () => {
+      await persistDiffPatch(pipelineDir, 'diff --git a b\n');
+      const txt = await readFile(join(pipelineDir, 'diff-patch.patch'), 'utf8');
+      assert.match(txt, /diff --git/);
+      const arts = await listArtifacts(id);
+      assert.ok(arts.some((a) => a.kind === 'diff-patch'));
+    } },
+    { name: 'readRunContextBundle returns the persisted bundle', run: async () => {
+      assert.equal(typeof readRunContextBundle, 'function');
+      const bundle = await readRunContextBundle(pipelineDir, id);
+      assert.equal(bundle.results.summary.filesNew, 1);
+      assert.match(bundle.diffPatch, /diff --git/);
+      assert.ok(Array.isArray(bundle.reviews));
+    } },
+  ]);
 });
 
-test('persistDiffPatch writes diff-patch.patch and indexes it', async () => {
-  await persistDiffPatch(pipelineDir, 'diff --git a b\n');
-  const txt = await readFile(join(pipelineDir, 'diff-patch.patch'), 'utf8');
-  assert.match(txt, /diff --git/);
-  const arts = await listArtifacts(id);
-  assert.ok(arts.some((a) => a.kind === 'diff-patch'));
-});
-
-test('readRunContextBundle returns the persisted bundle', async () => {
-  assert.equal(typeof readRunContextBundle, 'function');
-  const bundle = await readRunContextBundle(pipelineDir, id);
-  assert.equal(bundle.results.summary.filesNew, 1);
-  assert.match(bundle.diffPatch, /diff --git/);
-  assert.ok(Array.isArray(bundle.reviews));
+// The read API on the same seeded run: persisted results come back; there is no overview yet.
+test('readPipelineByKey includes persisted results and null overview', async () => {
+  await persistResults(pipelineDir, { summary: { filesNew: 2 }, newFiles: [], changedFiles: [], keyThingsToCheck: [], nitpicks: [] });
+  const data = await readPipelineByKey(key, id);
+  assert.ok(data, 'pipeline found');
+  assert.equal(data.results.summary.filesNew, 2);
+  assert.equal(data.overview, null);
 });

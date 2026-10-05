@@ -23,7 +23,7 @@
 //              `MOCK_ASK: <questionsFile>` so the mock writes a step_questions round.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -31,6 +31,7 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 import { GRAPH_DEFAULT_WORKFLOW } from '../src/core/graph/builtin-workflows.mjs';
 import { writeGraphWorkflow } from '../src/core/workflows.mjs';
 import { readStepQuestions } from '../src/core/artifacts.mjs';
@@ -49,15 +50,8 @@ after(() => Promise.all(scratch.map((d) => rm(d, { recursive: true, force: true 
 
 /** A real repo with one commit on `main` — the shape every run flow needs. */
 function freshRepo(prefix = 'worca-cc-cliix-repo-') {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = templateRepo('cliix-repo', { branch: 'main', user: true, files: { 'seed.txt': 'seed\n' }, prefix });
   scratch.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  writeFileSync(join(dir, 'seed.txt'), 'seed\n');
-  g(['add', '-A']);
-  g(['commit', '-qm', 'init']);
   return dir;
 }
 

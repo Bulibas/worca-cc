@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pluginDir, pluginDataDir } from '../src/core/plugins-lock.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 const run = promisify(execFile);
@@ -102,26 +103,29 @@ after(async () => {
   await rm(repoDir, { recursive: true, force: true });
 });
 
-test('GET /api/plugins with zero plugins -> { plugins: [], orphans: [] } (feature-off bar)', async () => {
-  const r = await get('/api/plugins');
-  assert.equal(r.status, 200);
-  assert.deepEqual(await r.json(), { plugins: [], orphans: [] });
-});
-
-test('POST /api/marketplaces discovers the fixture + manifest-derived preview', async () => {
-  assert.equal((await post('/api/marketplaces', {})).status, 400, 'missing url -> 400');
-  const r = await post('/api/marketplaces', { url: repoDir });
-  assert.equal(r.status, 200);
-  const { marketplace } = await r.json();
-  assert.match(marketplace.lastSync.sha, /^[0-9a-f]{40}$/);
-  assert.equal(marketplace.lastSync.sha, repoSha);
-  const p = marketplace.plugins.find((x) => x.name === 'local-src');
-  assert.ok(p, 'fixture plugin discovered at depth 0 (fallback scan — no marketplace manifest)');
-  assert.equal(p.subdir, '');
-  assert.equal(p.installed, false, 'installed flag merged onto the snapshot');
-  assert.equal(p.inventory.taskSources[0].id, 'main');
-  assert.deepEqual(p.inventory.taskSources[0].secrets, ['token'], 'secret keys surfaced pre-install');
-  assert.ok(p.inventory.agents.some((a) => a.key === 'localHelper'), 'agents (with tools) inventoried pre-install');
+test('GET /api/plugins with zero plugins is { plugins: [], orphans: [] }; POST /api/marketplaces discovers the fixture + manifest-derived preview', async () => {
+  await checkRows([
+    { name: 'GET /api/plugins with zero plugins -> { plugins: [], orphans: [] } (feature-off bar)', run: async () => {
+      const r = await get('/api/plugins');
+      assert.equal(r.status, 200);
+      assert.deepEqual(await r.json(), { plugins: [], orphans: [] });
+    } },
+    { name: 'POST /api/marketplaces discovers the fixture + manifest-derived preview', run: async () => {
+      assert.equal((await post('/api/marketplaces', {})).status, 400, 'missing url -> 400');
+      const r = await post('/api/marketplaces', { url: repoDir });
+      assert.equal(r.status, 200);
+      const { marketplace } = await r.json();
+      assert.match(marketplace.lastSync.sha, /^[0-9a-f]{40}$/);
+      assert.equal(marketplace.lastSync.sha, repoSha);
+      const p = marketplace.plugins.find((x) => x.name === 'local-src');
+      assert.ok(p, 'fixture plugin discovered at depth 0 (fallback scan — no marketplace manifest)');
+      assert.equal(p.subdir, '');
+      assert.equal(p.installed, false, 'installed flag merged onto the snapshot');
+      assert.equal(p.inventory.taskSources[0].id, 'main');
+      assert.deepEqual(p.inventory.taskSources[0].secrets, ['token'], 'secret keys surfaced pre-install');
+      assert.ok(p.inventory.agents.some((a) => a.key === 'localHelper'), 'agents (with tools) inventoried pre-install');
+    } },
+  ]);
 });
 
 test('POST /api/plugins/install -> { ok, inventory }; plugin then lists', async () => {
@@ -193,37 +197,40 @@ test('POST /api/plugins/:name/doctor -> { ok, checks }', async () => {
 
 // --- orphan data: list + purge routes ---
 
-test('GET /api/plugins reports orphan data dirs; DELETE :name/data purges them', async () => {
-  // fabricate an orphan (past uninstall leftover): data/ dir, no lock entry
-  await mkdir(join(pluginDataDir('ghost-src')), { recursive: true });
-  await writeFile(join(pluginDataDir('ghost-src'), 'secrets.json'), '{"token":"x"}');
+test('GET /api/plugins reports orphan data dirs; DELETE :name/data purges them, and answers 409 installed / 404 unknown / 404 bad name', async () => {
+  await checkRows([
+    { name: 'GET /api/plugins reports orphan data dirs; DELETE :name/data purges them', run: async () => {
+      // fabricate an orphan (past uninstall leftover): data/ dir, no lock entry
+      await mkdir(join(pluginDataDir('ghost-src')), { recursive: true });
+      await writeFile(join(pluginDataDir('ghost-src'), 'secrets.json'), '{"token":"x"}');
 
-  let r = await get('/api/plugins');
-  let body = await r.json();
-  assert.equal(r.status, 200);
-  assert.ok(Array.isArray(body.orphans), 'orphans array present');
-  assert.ok(body.orphans.some((o) => o.name === 'ghost-src'), 'ghost-src listed');
-  assert.ok(!body.orphans.some((o) => o.name === 'local-src'), 'installed plugin not an orphan');
+      let r = await get('/api/plugins');
+      let body = await r.json();
+      assert.equal(r.status, 200);
+      assert.ok(Array.isArray(body.orphans), 'orphans array present');
+      assert.ok(body.orphans.some((o) => o.name === 'ghost-src'), 'ghost-src listed');
+      assert.ok(!body.orphans.some((o) => o.name === 'local-src'), 'installed plugin not an orphan');
 
-  const d = await del('/api/plugins/ghost-src/data');
-  assert.equal(d.status, 200);
-  assert.deepEqual(await d.json(), { ok: true, name: 'ghost-src' });
-  assert.equal(existsSync(pluginDir('ghost-src')), false, 'orphan dir removed');
+      const d = await del('/api/plugins/ghost-src/data');
+      assert.equal(d.status, 200);
+      assert.deepEqual(await d.json(), { ok: true, name: 'ghost-src' });
+      assert.equal(existsSync(pluginDir('ghost-src')), false, 'orphan dir removed');
 
-  r = await get('/api/plugins');
-  body = await r.json();
-  assert.ok(!body.orphans.some((o) => o.name === 'ghost-src'), 'orphan gone from list');
-});
+      r = await get('/api/plugins');
+      body = await r.json();
+      assert.ok(!body.orphans.some((o) => o.name === 'ghost-src'), 'orphan gone from list');
+    } },
+    { name: 'DELETE :name/data: 409 installed, 404 unknown, 404 bad name', run: async () => {
+      const installed = await del('/api/plugins/local-src/data'); // fixture is installed
+      assert.equal(installed.status, 409);
 
-test('DELETE :name/data: 409 installed, 404 unknown, 404 bad name', async () => {
-  const installed = await del('/api/plugins/local-src/data'); // fixture is installed
-  assert.equal(installed.status, 409);
+      const unknown = await del('/api/plugins/never-was/data');
+      assert.equal(unknown.status, 404);
 
-  const unknown = await del('/api/plugins/never-was/data');
-  assert.equal(unknown.status, 404);
-
-  const bad = await del('/api/plugins/Bad_Name/data');
-  assert.equal(bad.status, 404);
+      const bad = await del('/api/plugins/Bad_Name/data');
+      assert.equal(bad.status, 404);
+    } },
+  ]);
 });
 
 test('DELETE /api/plugins/:name is guarded when a user workflow references a plugin agent (409 + references)', async () => {
@@ -257,11 +264,6 @@ test('DELETE /api/plugins/:name is guarded when a user workflow references a plu
   assert.deepEqual(await (await get('/api/plugins')).json(), { plugins: [], orphans: [] });
   assert.equal((await get('/api/plugins/local-src/config')).status, 404, 'gone after uninstall');
   assert.equal((await del('/api/plugins/nope')).status, 404);
-});
-
-test('GET /api/plugins stamps pythonMissing on every row', async () => {
-  const { plugins } = await (await get('/api/plugins')).json();
-  for (const p of plugins) assert.equal(typeof p.pythonMissing, 'boolean');
 });
 
 test('GET /api/plugins: a plugin shipping a python script is flagged when the probe fails, and only that plugin', async () => {

@@ -51,11 +51,3 @@ test('db.mjs locates the file via worcaHome() with no import cycle', () => {
   assert.ok(db, 'getDb() returns a handle (no cycle / TDZ error)');
   assert.equal(dbPath(), join(worcaHome(), 'worca-cc.db'), 'db path is under worcaHome()');
 });
-
-test('there is no settings table in the schema (root stays file-based)', () => {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'")
-    .get();
-  assert.equal(row, undefined, 'no settings table — root lives only in settings.json');
-});

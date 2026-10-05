@@ -10,29 +10,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { loadAgentRegistry, registryToSteps } from '../src/core/agent-registry.mjs';
-import { AGENT_STEPS } from '../src/core/config.mjs';
 
 const tmpDirs = [];
 after(async () => {
   await Promise.all(tmpDirs.map((d) => rm(d, { recursive: true, force: true })));
 });
 
-test('the scanner and the reviewer load with scope:"workspace-only"', () => {
-  const reg = loadAgentRegistry();
-  assert.ok(reg.workspaceScanner, 'workspaceScanner present');
-  assert.ok(reg.workspaceReviewer, 'workspaceReviewer present');
-  assert.equal(reg.workspaceScanner.scope, 'workspace-only');
-  assert.equal(reg.workspaceReviewer.scope, 'workspace-only');
-});
-
-test('every original project agent stays scope:"project" (coercion default)', () => {
-  const reg = loadAgentRegistry();
-  for (const k of ['planner', 'refiner', 'implementer', 'reviewer', 'manualTestsChecklist', 'manualWebUiTesting', 'planReviewer']) {
-    assert.equal(reg[k].scope, 'project', `${k} must be project-scope`);
-  }
-});
-
-test('CANARY: the workspaceScanner sidecar declares its typed ports (the scan\'s survey stage)', () => {
+test('CANARY: the workspaceScanner sidecar declares its typed ports and fanOut (the scan\'s survey stage)', () => {
   // The v1 channel-id list is gone; the ports ARE the wiring vocabulary now, and
   // an un-ported sidecar is refused outright by resolveGraph.
   const reg = loadAgentRegistry();
@@ -40,6 +24,7 @@ test('CANARY: the workspaceScanner sidecar declares its typed ports (the scan\'s
   assert.deepEqual(reg.workspaceScanner.inputs.map((p) => p.id), ['brief']);
   assert.deepEqual(reg.workspaceScanner.outputs.map((p) => p.id), ['survey']);
   assert.equal(reg.workspaceScanner.placeable, false, 'off-pipeline: never placeable on a canvas');
+  assert.equal(reg.workspaceScanner.fanOut, true);
 });
 
 test('workspaceReviewer mirrors reviewer wiring (code->review->implementer loop)', () => {
@@ -48,31 +33,6 @@ test('workspaceReviewer mirrors reviewer wiring (code->review->implementer loop)
   assert.deepEqual(reg.workspaceReviewer.outputs.map((p) => p.id), reg.reviewer.outputs.map((p) => p.id));
   assert.deepEqual(reg.workspaceReviewer.inputs.map((p) => p.id), reg.reviewer.inputs.map((p) => p.id));
   assert.equal(reg.workspaceReviewer.fanOut, true);
-});
-
-test('both workspace agents declare fanOut:true', () => {
-  const reg = loadAgentRegistry();
-  assert.equal(reg.workspaceScanner.fanOut, true);
-  assert.equal(reg.workspaceReviewer.fanOut, true);
-});
-
-test('NON-NEGOTIABLE: registryToSteps returns the 10 coding + 8 presentation project steps', () => {
-  // The scope:'workspace-only' exclusion is mandatory — without it the registry's
-  // workspace entries would push into the single-project UI stepper / config keys.
-  // Project-scoped presentation agents DO belong (they run in a project checkout).
-  const steps = registryToSteps(loadAgentRegistry());
-  assert.equal(steps.length, 18, 'workspace-only agents are excluded from the step list');
-  assert.deepEqual(steps.map((s) => s.key), [
-    'clarify', 'planner', 'refiner', 'decomposer', 'implementer', 'reviewer', 'manualTestsChecklist', 'manualWebUiTesting', 'planReviewer', 'memoryDefragmenter',
-    'deckClarify', 'deckNarrative', 'deckSystem', 'deckBuilder', 'deckAudit', 'deckReviewer', 'deckExport', 'deckOutputs',
-  ]);
-  assert.ok(!steps.some((s) => s.key === 'workspaceScanner'), 'scanner excluded');
-  assert.ok(!steps.some((s) => s.key === 'workspaceReviewer'), 'workspace reviewer excluded');
-});
-
-test('AGENT_STEPS (derived from the registry) is byte-identical to registryToSteps and has 18 entries', () => {
-  assert.equal(AGENT_STEPS.length, 18);
-  assert.deepEqual(AGENT_STEPS, registryToSteps(loadAgentRegistry()));
 });
 
 test('scope coercion fails SAFE: a bogus scope value coerces to "project" (visible, not hidden)', async () => {

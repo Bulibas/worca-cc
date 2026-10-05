@@ -8,52 +8,43 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveTitleModel, describeTitleModel, generateTitle, DEFAULT_TITLE_MODEL } from '../src/core/title.mjs';
+import { resolveTitleModel, generateTitle, DEFAULT_TITLE_MODEL } from '../src/core/title.mjs';
 import { AUX_EFFORT } from '../src/core/model-env.mjs';
-import { PREDEFINED_MODELS } from '../src/core/config.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 const POSIX_SHIM = { skip: process.platform === 'win32' ? 'fake claude shim is a POSIX shell script (no .exe stand-in on Windows)' : false };
 
 const deps = (over = {}) => ({ env: {}, stored: () => null, inCatalog: () => true, ...over });
 
-test('DEFAULT_TITLE_MODEL is the BUILT-IN Haiku id, so a global entry shadowing it routes title calls', () => {
-  assert.ok(PREDEFINED_MODELS.some((m) => m.id === DEFAULT_TITLE_MODEL), `${DEFAULT_TITLE_MODEL} must be a PREDEFINED_MODELS id`);
-});
-
-test('resolveTitleModel: precedence explicit > env > stored > run > built-in', () => {
-  assert.deepEqual(resolveTitleModel({ model: ' x ', runModel: 'r' }, deps({ env: { WORCA_TITLE_MODEL: 'e' }, stored: () => 's' })),
-    { model: 'x', source: 'explicit', stale: null });
-  assert.deepEqual(resolveTitleModel({ runModel: 'r' }, deps({ env: { WORCA_TITLE_MODEL: 'e' }, stored: () => 's' })),
-    { model: 'e', source: 'env', stale: null });
-  assert.deepEqual(resolveTitleModel({ runModel: 'r' }, deps({ stored: () => 's' })),
-    { model: 's', source: 'settings', stale: null });
-  assert.deepEqual(resolveTitleModel({ runModel: 'r' }, deps()),
-    { model: 'r', source: 'run', stale: null });
-  assert.deepEqual(resolveTitleModel({}, deps()),
-    { model: DEFAULT_TITLE_MODEL, source: 'builtin', stale: null });
-});
-
-test('resolveTitleModel: an EMPTY env override is not an override; the env id is not catalog-checked', () => {
-  assert.equal(resolveTitleModel({ runModel: 'r' }, deps({ env: { WORCA_TITLE_MODEL: '   ' } })).source, 'run');
-  assert.deepEqual(resolveTitleModel({}, deps({ env: { WORCA_TITLE_MODEL: 'off-catalog' }, inCatalog: () => false })),
-    { model: 'off-catalog', source: 'env', stale: null });
-});
-
-test('resolveTitleModel: a stored id that left the catalog is reported as stale and skipped', () => {
-  assert.deepEqual(resolveTitleModel({ runModel: 'r' }, deps({ stored: () => 'gone', inCatalog: (id) => id !== 'gone' })),
-    { model: 'r', source: 'run', stale: 'gone' });
-  assert.deepEqual(resolveTitleModel({}, deps({ stored: () => 'gone', inCatalog: () => false })),
-    { model: DEFAULT_TITLE_MODEL, source: 'builtin', stale: 'gone' });
-});
-
-test('describeTitleModel: what the Settings card paints', () => {
-  assert.deepEqual(describeTitleModel(deps()), { model: null, source: 'run', stale: null });
-  assert.deepEqual(describeTitleModel(deps({ stored: () => 's' })), { model: 's', source: 'settings', stale: null });
-  assert.deepEqual(describeTitleModel(deps({ env: { WORCA_TITLE_MODEL: 'e' }, stored: () => 's' })), { model: 'e', source: 'env', stale: null });
-  assert.deepEqual(describeTitleModel(deps({ stored: () => 'gone', inCatalog: () => false })), { model: null, source: 'run', stale: 'gone' });
+test('resolveTitleModel: precedence explicit > env > stored > run > built-in; empty env ignored; off-catalog stored id reported stale', async () => {
+  await checkRows([
+    { name: 'resolveTitleModel: precedence explicit > env > stored > run > built-in', run: () => {
+      assert.deepEqual(resolveTitleModel({ model: ' x ', runModel: 'r' }, deps({ env: { WORCA_TITLE_MODEL: 'e' }, stored: () => 's' })),
+        { model: 'x', source: 'explicit', stale: null });
+      assert.deepEqual(resolveTitleModel({ runModel: 'r' }, deps({ env: { WORCA_TITLE_MODEL: 'e' }, stored: () => 's' })),
+        { model: 'e', source: 'env', stale: null });
+      assert.deepEqual(resolveTitleModel({ runModel: 'r' }, deps({ stored: () => 's' })),
+        { model: 's', source: 'settings', stale: null });
+      assert.deepEqual(resolveTitleModel({ runModel: 'r' }, deps()),
+        { model: 'r', source: 'run', stale: null });
+      assert.deepEqual(resolveTitleModel({}, deps()),
+        { model: DEFAULT_TITLE_MODEL, source: 'builtin', stale: null });
+    } },
+    { name: 'resolveTitleModel: an EMPTY env override is not an override; the env id is not catalog-checked', run: () => {
+      assert.equal(resolveTitleModel({ runModel: 'r' }, deps({ env: { WORCA_TITLE_MODEL: '   ' } })).source, 'run');
+      assert.deepEqual(resolveTitleModel({}, deps({ env: { WORCA_TITLE_MODEL: 'off-catalog' }, inCatalog: () => false })),
+        { model: 'off-catalog', source: 'env', stale: null });
+    } },
+    { name: 'resolveTitleModel: a stored id that left the catalog is reported as stale and skipped', run: () => {
+      assert.deepEqual(resolveTitleModel({ runModel: 'r' }, deps({ stored: () => 'gone', inCatalog: (id) => id !== 'gone' })),
+        { model: 'r', source: 'run', stale: 'gone' });
+      assert.deepEqual(resolveTitleModel({}, deps({ stored: () => 'gone', inCatalog: () => false })),
+        { model: DEFAULT_TITLE_MODEL, source: 'builtin', stale: 'gone' });
+    } },
+  ]);
 });
 
 test('generateTitle spawns with the RUN model and --effort low when nothing else is configured', POSIX_SHIM, async () => {

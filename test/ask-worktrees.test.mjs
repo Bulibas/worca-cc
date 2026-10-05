@@ -4,6 +4,7 @@
 // updates, the sweep, and the unminted-id doctrine.
 import { test, after, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync, rmSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -11,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipeline, seedWorkspacePipeline } from './helpers/db-seed.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 import { addProject } from '../src/core/projects.mjs';
 import { createThread, deleteThread } from '../src/core/ask/store.mjs';
 import { prepare, getDb, _resetForTests } from '../src/core/db.mjs';
@@ -37,13 +39,9 @@ after(() => {
 const created = [];
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true }))));
 async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-awt-'));
+  const dir = templateRepo('awt', { branch: 'main', user: true, files: { 'README.md': '# hi\n' } });
   created.push(dir);
   const g = (args) => spawnSync('git', args, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   g(['checkout', '-qb', 'worca-cc/feat-00000001']);
   await writeFile(join(dir, 'feat.txt'), 'F\n');
   g(['add', '-A']); g(['commit', '-qm', 'feat']);
@@ -113,53 +111,56 @@ test('caps: 6th per-thread and 16th global are refused with actionable errors', 
   for (const tt of others) await removeThreadWorktrees(tt.id);
 });
 
-test('run-id sugar: single-project run resolves the feature branch; deleted branch errors with the diff hint', async () => {
-  const repo = await freshRepo();
-  (await addProject({ name: 'awt-run', path: repo }));            // registers + writes store_meta
-  const t = createThread();
-  // seedPipeline(projectDir, state) is POSITIONAL and MINTS its own id
-  // (db-seed.mjs: callers MUST use the returned {id}, never a hardcoded one).
-  const run = await seedPipeline(repo, { status: 'done',
-    branch: { source: 'main', feature: 'worca-cc/feat-00000001' } });
-  const wt = await openAskWorktree({ threadId: t.id, runId: run.id });
-  assert.equal(wt.ref, 'worca-cc/feat-00000001');
-  assert.equal(wt.runId, run.id);
-  assert.ok(existsSync(join(wt.path, 'feat.txt')));
-  spawnSync('git', ['branch', '-D', 'worca-cc/feat-00000001'], { cwd: repo });
-  await assert.rejects(() => openAskWorktree({ threadId: t.id, runId: run.id }), /no longer exists.*get_run_diff/);
-  await assert.rejects(() => openAskWorktree({ threadId: t.id, runId: 'ffffffff' }), /run not found/);
-});
-
-test('run-id sugar: workspace run needs projectKey and resolves the member branch', async () => {
-  const repoA = await freshRepo();
-  const repoB = await freshRepo();
-  const t = createThread();
-  // seedWorkspacePipeline(primaryDir, workspaceKey, state, projects) is POSITIONAL
-  // and mints its id. The members/branches the impl reads come from `state`
-  // (workspace_meta.projects / .branches); the 4th arg only seeds store_meta, and
-  // its second writeState re-serializes workspace_meta FROM state, so `projects`
-  // must be repeated inside state or meta.projects persists as [] ("one of: none").
-  const members = [
-    { projectKey: 'alpha-00000001', projectDir: repoA, projectName: 'alpha' },
-    { projectKey: 'beta-00000002',  projectDir: repoB, projectName: 'beta'  },
-  ];
-  const run = await seedWorkspacePipeline(repoA, 'wks-demo-00000001', {
-    status: 'done',
-    projects: members,                                 // -> workspace_meta.projects
-    projectKeys: members.map((m) => m.projectKey),
-    branches: {                                         // -> workspace_meta.branches
-      'alpha-00000001': { source: 'main', feature: 'worca-cc/feat-00000001' },
-      'beta-00000002':  { source: 'main', feature: 'worca-cc/feat-00000001' },
-    },
-  }, members);
-  await assert.rejects(() => openAskWorktree({ threadId: t.id, runId: run.id }), /workspace run.*alpha-00000001.*beta-00000002/s);
-  const wt = await openAskWorktree({ threadId: t.id, runId: run.id, projectKey: 'beta-00000002' });
-  assert.equal(wt.projectDir, repoB);                  // row.project_dir stored VERBATIM (not realpath'd)
-  assert.equal(wt.ref, 'worca-cc/feat-00000001');
-  // §5 step 3 (deleted-branch) applies to workspace members too — pins A8.
-  spawnSync('git', ['branch', '-D', 'worca-cc/feat-00000001'], { cwd: repoB });
-  await assert.rejects(() => openAskWorktree({ threadId: t.id, runId: run.id, projectKey: 'beta-00000002' }),
-    /no longer exists.*get_run_diff/);
+test('run-id sugar: a single-project run resolves the feature branch; a workspace run needs projectKey and resolves the member branch; a deleted branch errors with the get_run_diff hint', async () => {
+  await checkRows([
+    { name: 'run-id sugar: single-project run resolves the feature branch; deleted branch errors with the diff hint', run: async () => {
+      const repo = await freshRepo();
+      (await addProject({ name: 'awt-run', path: repo }));            // registers + writes store_meta
+      const t = createThread();
+      // seedPipeline(projectDir, state) is POSITIONAL and MINTS its own id
+      // (db-seed.mjs: callers MUST use the returned {id}, never a hardcoded one).
+      const run = await seedPipeline(repo, { status: 'done',
+        branch: { source: 'main', feature: 'worca-cc/feat-00000001' } });
+      const wt = await openAskWorktree({ threadId: t.id, runId: run.id });
+      assert.equal(wt.ref, 'worca-cc/feat-00000001');
+      assert.equal(wt.runId, run.id);
+      assert.ok(existsSync(join(wt.path, 'feat.txt')));
+      spawnSync('git', ['branch', '-D', 'worca-cc/feat-00000001'], { cwd: repo });
+      await assert.rejects(() => openAskWorktree({ threadId: t.id, runId: run.id }), /no longer exists.*get_run_diff/);
+      await assert.rejects(() => openAskWorktree({ threadId: t.id, runId: 'ffffffff' }), /run not found/);
+    } },
+    { name: 'run-id sugar: workspace run needs projectKey and resolves the member branch', run: async () => {
+      const repoA = await freshRepo();
+      const repoB = await freshRepo();
+      const t = createThread();
+      // seedWorkspacePipeline(primaryDir, workspaceKey, state, projects) is POSITIONAL
+      // and mints its id. The members/branches the impl reads come from `state`
+      // (workspace_meta.projects / .branches); the 4th arg only seeds store_meta, and
+      // its second writeState re-serializes workspace_meta FROM state, so `projects`
+      // must be repeated inside state or meta.projects persists as [] ("one of: none").
+      const members = [
+        { projectKey: 'alpha-00000001', projectDir: repoA, projectName: 'alpha' },
+        { projectKey: 'beta-00000002',  projectDir: repoB, projectName: 'beta'  },
+      ];
+      const run = await seedWorkspacePipeline(repoA, 'wks-demo-00000001', {
+        status: 'done',
+        projects: members,                                 // -> workspace_meta.projects
+        projectKeys: members.map((m) => m.projectKey),
+        branches: {                                         // -> workspace_meta.branches
+          'alpha-00000001': { source: 'main', feature: 'worca-cc/feat-00000001' },
+          'beta-00000002':  { source: 'main', feature: 'worca-cc/feat-00000001' },
+        },
+      }, members);
+      await assert.rejects(() => openAskWorktree({ threadId: t.id, runId: run.id }), /workspace run.*alpha-00000001.*beta-00000002/s);
+      const wt = await openAskWorktree({ threadId: t.id, runId: run.id, projectKey: 'beta-00000002' });
+      assert.equal(wt.projectDir, repoB);                  // row.project_dir stored VERBATIM (not realpath'd)
+      assert.equal(wt.ref, 'worca-cc/feat-00000001');
+      // §5 step 3 (deleted-branch) applies to workspace members too — pins A8.
+      spawnSync('git', ['branch', '-D', 'worca-cc/feat-00000001'], { cwd: repoB });
+      await assert.rejects(() => openAskWorktree({ threadId: t.id, runId: run.id, projectKey: 'beta-00000002' }),
+        /no longer exists.*get_run_diff/);
+    } },
+  ]);
 });
 
 test('navigation note updates ref + commit; thread delete removes checkouts, rows and git registrations', async () => {
@@ -285,59 +286,65 @@ async function clonedRepo(preClone = []) {
   return { clone, push };
 }
 
-test('#527 open_worktree: a bare remote-only branch resolves to origin/<name> with resolvedFrom', async () => {
-  const { clone, push } = await clonedRepo();
-  await push('feat/remote');
-  const p = (await addProject({ name: 'awt-remote', path: clone })).find((x) => x.name === 'awt-remote');
-  const t = createThread();
-  const wt = await openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'feat/remote' });
-  assert.equal(wt.ref, 'origin/feat/remote');
-  assert.equal(wt.resolvedFrom, 'feat/remote');
-  assert.equal('stale' in wt, false);
-  assert.ok(existsSync(join(wt.path, 'feat_remote.txt')));
-  await assert.rejects(() => openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'nowhere' }), /ref does not resolve: "nowhere"/);
-  const local = await openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'main' });
-  assert.equal(local.ref, 'main');
-  assert.equal('resolvedFrom' in local, false);
-  await removeThreadWorktrees(t.id);
+test('#527 open_worktree: a bare remote-only branch resolves to origin/<name> (resolvedFrom); <remote>/<name> without a remote is a plain "does not resolve"', async () => {
+  await checkRows([
+    { name: '#527 open_worktree: a bare remote-only branch resolves to origin/<name> with resolvedFrom', run: async () => {
+      const { clone, push } = await clonedRepo();
+      await push('feat/remote');
+      const p = (await addProject({ name: 'awt-remote', path: clone })).find((x) => x.name === 'awt-remote');
+      const t = createThread();
+      const wt = await openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'feat/remote' });
+      assert.equal(wt.ref, 'origin/feat/remote');
+      assert.equal(wt.resolvedFrom, 'feat/remote');
+      assert.equal('stale' in wt, false);
+      assert.ok(existsSync(join(wt.path, 'feat_remote.txt')));
+      await assert.rejects(() => openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'nowhere' }), /ref does not resolve: "nowhere"/);
+      const local = await openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'main' });
+      assert.equal(local.ref, 'main');
+      assert.equal('resolvedFrom' in local, false);
+      await removeThreadWorktrees(t.id);
+    } },
+    { name: '#527 open_worktree: <remote>/<name> in a project with no remote is a plain "does not resolve" (no fetch note)', run: async () => {
+      const { clone } = await clonedRepo();
+      spawnSync('git', ['remote', 'remove', 'origin'], { cwd: clone });
+      const p = (await addProject({ name: 'awt-noremote', path: clone })).find((x) => x.name === 'awt-noremote');
+      const t = createThread();
+      await assert.rejects(() => openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'origin/feat' }),
+        (err) => /ref does not resolve: "origin\/feat"$/.test(err.message));
+      await removeThreadWorktrees(t.id);
+    } },
+  ]);
 });
 
-test('#527 open_worktree: origin/<name> pushed since the last fetch is fetched and opened as given', async () => {
-  const { clone, push } = await clonedRepo();
-  await push('feat/late');
-  const p = (await addProject({ name: 'awt-late', path: clone })).find((x) => x.name === 'awt-late');
-  const t = createThread();
-  const wt = await openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'origin/feat/late' });
-  assert.equal(wt.ref, 'origin/feat/late');
-  assert.equal('resolvedFrom' in wt, false);
-  await assert.rejects(() => openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'origin/never' }), /ref does not resolve/);
-  await removeThreadWorktrees(t.id);
-});
-
-test('#527 open_worktree: <remote>/<name> in a project with no remote is a plain "does not resolve" (no fetch note)', async () => {
-  const { clone } = await clonedRepo();
-  spawnSync('git', ['remote', 'remove', 'origin'], { cwd: clone });
-  const p = (await addProject({ name: 'awt-noremote', path: clone })).find((x) => x.name === 'awt-noremote');
-  const t = createThread();
-  await assert.rejects(() => openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'origin/feat' }),
-    (err) => /ref does not resolve: "origin\/feat"$/.test(err.message));
-  await removeThreadWorktrees(t.id);
-});
-
-test('#527 open_worktree: a failed fetch still opens a previously fetched remote-only branch, stale', async () => {
-  const { clone } = await clonedRepo(['feat/old']);     // origin/feat/old came with the clone
-  const p = (await addProject({ name: 'awt-stale', path: clone })).find((x) => x.name === 'awt-stale');
-  const t = createThread();
-  gitSyncTesting.setRunner(async (args, o) => (args[0] === 'fetch'
-    ? { ok: false, stdout: '', stderr: 'fatal: unable to access: Could not resolve host: github.com', code: 128, timedOut: false }
-    : gitSyncTesting.defaultRun(args, o)));
-  try {
-    const wt = await openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'feat/old' });
-    assert.equal(wt.ref, 'origin/feat/old');
-    assert.equal(wt.resolvedFrom, 'feat/old');
-    assert.equal(wt.stale, true);
-    assert.ok('fetchedAt' in wt);
-    await assert.rejects(() => openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'feat/missing' }), /the remote could not be fetched/);
-  } finally { gitSyncTesting.reset(); }
-  await removeThreadWorktrees(t.id);
+test('#527 open_worktree: origin/<name> pushed since the last fetch is fetched and opened; a failed fetch still opens a previously fetched branch, marked stale', async () => {
+  await checkRows([
+    { name: '#527 open_worktree: origin/<name> pushed since the last fetch is fetched and opened as given', run: async () => {
+      const { clone, push } = await clonedRepo();
+      await push('feat/late');
+      const p = (await addProject({ name: 'awt-late', path: clone })).find((x) => x.name === 'awt-late');
+      const t = createThread();
+      const wt = await openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'origin/feat/late' });
+      assert.equal(wt.ref, 'origin/feat/late');
+      assert.equal('resolvedFrom' in wt, false);
+      await assert.rejects(() => openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'origin/never' }), /ref does not resolve/);
+      await removeThreadWorktrees(t.id);
+    } },
+    { name: '#527 open_worktree: a failed fetch still opens a previously fetched remote-only branch, stale', run: async () => {
+      const { clone } = await clonedRepo(['feat/old']);     // origin/feat/old came with the clone
+      const p = (await addProject({ name: 'awt-stale', path: clone })).find((x) => x.name === 'awt-stale');
+      const t = createThread();
+      gitSyncTesting.setRunner(async (args, o) => (args[0] === 'fetch'
+        ? { ok: false, stdout: '', stderr: 'fatal: unable to access: Could not resolve host: github.com', code: 128, timedOut: false }
+        : gitSyncTesting.defaultRun(args, o)));
+      try {
+        const wt = await openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'feat/old' });
+        assert.equal(wt.ref, 'origin/feat/old');
+        assert.equal(wt.resolvedFrom, 'feat/old');
+        assert.equal(wt.stale, true);
+        assert.ok('fetchedAt' in wt);
+        await assert.rejects(() => openAskWorktree({ threadId: t.id, projectKey: p.key, ref: 'feat/missing' }), /the remote could not be fetched/);
+      } finally { gitSyncTesting.reset(); }
+      await removeThreadWorktrees(t.id);
+    } },
+  ]);
 });

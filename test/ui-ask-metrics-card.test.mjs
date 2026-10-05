@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 
 import { makePanel } from './helpers/ask-panel-harness.mjs';
 import { stampFrames } from './helpers/ask-frames.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const TID = 'ask_00000001';
 const MID = 'askm_00000001';
@@ -59,64 +60,70 @@ async function openWith(block, recorder = {}) {
 }
 const proposed = (card) => ({ kind: 'card', id: CARD_ID, state: 'proposed', card });
 
-test('proposed: summary, target, note, effects, the kind chip and the two verbs; Apply posts applied', async () => {
-  const rec = {};
-  const ctx = await openWith(proposed(RECORD_CARD), rec);
-  const el = ctx.doc.querySelector('.ask-card.ask-mcard');
-  assert.ok(el, 'the metrics card renders as its own card, not the run form');
-  assert.equal(el.getAttribute('data-ask-mcard'), 'proposed');
-  assert.equal(el.querySelector('.ask-mcard-title').textContent, 'Proposed metrics change');
-  assert.equal(el.querySelector('.ask-mcard-kind').textContent, 'Include my runs');
-  assert.equal(el.querySelector('.ask-mcard-summary').textContent, 'Turn "Include my runs" off for proj');
-  assert.equal(el.querySelector('.ask-mcard-target').textContent, 'project proj');
-  assert.equal(el.querySelector('.ask-mcard-note').textContent, 'you asked to stop recording here');
-  assert.deepEqual([...el.querySelectorAll('.ask-mcard-effects li')].map((li) => li.textContent), RECORD_CARD.effects);
-  assert.ok(!el.querySelector('.ask-card-brief'), 'no run-form fields');
-  const apply = el.querySelector('[data-ask-mc-apply]');
-  assert.equal(apply.textContent, 'Apply');
-  apply.click();
-  await ctx.tick(); await ctx.tick();
-  assert.deepEqual(rec.cardBodies, [{ state: 'applied' }]);
+test('metrics card: proposed renders summary/target/effects; Apply posts applied, Decline posts declined, a failed POST shows its error and re-enables', async () => {
+  await checkRows([
+    { name: 'proposed: summary, target, note, effects, the kind chip and the two verbs; Apply posts applied', run: async () => {
+      const rec = {};
+      const ctx = await openWith(proposed(RECORD_CARD), rec);
+      const el = ctx.doc.querySelector('.ask-card.ask-mcard');
+      assert.ok(el, 'the metrics card renders as its own card, not the run form');
+      assert.equal(el.getAttribute('data-ask-mcard'), 'proposed');
+      assert.equal(el.querySelector('.ask-mcard-title').textContent, 'Proposed metrics change');
+      assert.equal(el.querySelector('.ask-mcard-kind').textContent, 'Include my runs');
+      assert.equal(el.querySelector('.ask-mcard-summary').textContent, 'Turn "Include my runs" off for proj');
+      assert.equal(el.querySelector('.ask-mcard-target').textContent, 'project proj');
+      assert.equal(el.querySelector('.ask-mcard-note').textContent, 'you asked to stop recording here');
+      assert.deepEqual([...el.querySelectorAll('.ask-mcard-effects li')].map((li) => li.textContent), RECORD_CARD.effects);
+      assert.ok(!el.querySelector('.ask-card-brief'), 'no run-form fields');
+      const apply = el.querySelector('[data-ask-mc-apply]');
+      assert.equal(apply.textContent, 'Apply');
+      apply.click();
+      await ctx.tick(); await ctx.tick();
+      assert.deepEqual(rec.cardBodies, [{ state: 'applied' }]);
+    } },
+    { name: 'Decline posts declined; a failed POST shows in .ask-card-err and re-enables the button', run: async () => {
+      const rec = { cardResponse: { ok: false, status: 409, json: async () => ({ error: 'turn in flight' }) } };
+      const ctx = await openWith(proposed(RECORD_CARD), rec);
+      const el = ctx.doc.querySelector('.ask-card.ask-mcard');
+      const decline = el.querySelector('[data-ask-mc-decline]');
+      decline.click();
+      await ctx.tick(); await ctx.tick();
+      assert.deepEqual(rec.cardBodies, [{ state: 'declined' }]);
+      assert.match(el.querySelector('.ask-card-err').textContent, /still replying/);
+      assert.equal(decline.disabled, false);
+    } },
+  ]);
 });
 
-test('Decline posts declined; a failed POST shows in .ask-card-err and re-enables the button', async () => {
-  const rec = { cardResponse: { ok: false, status: 409, json: async () => ({ error: 'turn in flight' }) } };
-  const ctx = await openWith(proposed(RECORD_CARD), rec);
-  const el = ctx.doc.querySelector('.ask-card.ask-mcard');
-  const decline = el.querySelector('[data-ask-mc-decline]');
-  decline.click();
-  await ctx.tick(); await ctx.tick();
-  assert.deepEqual(rec.cardBodies, [{ state: 'declined' }]);
-  assert.match(el.querySelector('.ask-card-err').textContent, /still replying/);
-  assert.equal(decline.disabled, false);
-});
-
-test('applied: check line, the result detail, the per-member list for route_members; no verbs', async () => {
-  const ctx = await openWith({ kind: 'card', id: CARD_ID, state: 'applied', card: { ...ROUTE_CARD, result: { ok: true, home: 'acme/proj', detail: '1 routed · 1 skipped · 1 failed',
-    results: [{ slug: 'acme/a', result: 'routed' }, { slug: 'acme/b', result: 'skipped', reason: 'already records on its own branch' }, { slug: 'acme/c', result: 'failed', error: 'push rejected', hint: 'exempt worca-metrics from branch protection' }] } } });
-  const el = ctx.doc.querySelector('.ask-card.ask-mcard');
-  assert.equal(el.getAttribute('data-ask-mcard'), 'applied');
-  assert.equal(el.querySelector('.ask-mcard-title').textContent, 'Applied metrics change');
-  assert.equal(el.querySelector('.ask-mcard-kind').textContent, 'Route members');
-  assert.ok(el.querySelector('.ask-mcard-summary svg'), 'the check mark');
-  assert.equal(el.querySelector('.ask-mcard-target').textContent, 'workspace team');
-  assert.equal(el.querySelector('.ask-mcard-detail').textContent, '1 routed · 1 skipped · 1 failed');
-  const rows = [...el.querySelectorAll('.ask-mcard-results li')];
-  assert.deepEqual(rows.map((li) => [li.className, li.querySelector('.mono').textContent]), [['is-routed', 'acme/a'], ['is-skipped', 'acme/b'], ['is-failed', 'acme/c']]);
-  assert.match(rows[2].textContent, /push rejected/); assert.match(rows[2].querySelector('.ask-mcard-hint').textContent, /branch protection/);
-  assert.ok(!el.querySelector('.ask-mcard-effects'), 'effects are for the decision, not the receipt');
-  assert.ok(!el.querySelector('[data-ask-mc-apply]') && !el.querySelector('[data-ask-mc-decline]'));
-});
-
-test('failed and declined states', async () => {
-  const failed = await openWith({ kind: 'card', id: CARD_ID, state: 'failed', error: 'push rejected by hook', card: { ...RECORD_CARD, result: { ok: false, error: 'push rejected by hook', code: 'PUSH_REJECTED', hint: 'exempt worca-metrics' } } });
-  const el = failed.doc.querySelector('.ask-card.ask-mcard');
-  assert.equal(el.querySelector('.ask-mcard-title').textContent, 'Metrics change failed');
-  assert.equal(el.querySelector('.ask-mcard-failed').textContent, 'Could not apply: push rejected by hook');
-  assert.equal(el.querySelector('.ask-mcard-hint').textContent, 'exempt worca-metrics');
-  assert.ok(!el.querySelector('[data-ask-mc-apply]'));
-  const declined = await openWith({ kind: 'card', id: CARD_ID, state: 'declined', card: RECORD_CARD });
-  const stub = declined.doc.querySelector('.ask-card-stub');
-  assert.equal(stub.textContent, 'Declined — Turn "Include my runs" off for proj');
-  assert.ok(!declined.doc.querySelector('.ask-mcard'));
+test('metrics card terminal states: applied receipt with per-member results, failed with hint, declined stub — none offers the verbs', async () => {
+  await checkRows([
+    { name: 'applied: check line, the result detail, the per-member list for route_members; no verbs', run: async () => {
+      const ctx = await openWith({ kind: 'card', id: CARD_ID, state: 'applied', card: { ...ROUTE_CARD, result: { ok: true, home: 'acme/proj', detail: '1 routed · 1 skipped · 1 failed',
+        results: [{ slug: 'acme/a', result: 'routed' }, { slug: 'acme/b', result: 'skipped', reason: 'already records on its own branch' }, { slug: 'acme/c', result: 'failed', error: 'push rejected', hint: 'exempt worca-metrics from branch protection' }] } } });
+      const el = ctx.doc.querySelector('.ask-card.ask-mcard');
+      assert.equal(el.getAttribute('data-ask-mcard'), 'applied');
+      assert.equal(el.querySelector('.ask-mcard-title').textContent, 'Applied metrics change');
+      assert.equal(el.querySelector('.ask-mcard-kind').textContent, 'Route members');
+      assert.ok(el.querySelector('.ask-mcard-summary svg'), 'the check mark');
+      assert.equal(el.querySelector('.ask-mcard-target').textContent, 'workspace team');
+      assert.equal(el.querySelector('.ask-mcard-detail').textContent, '1 routed · 1 skipped · 1 failed');
+      const rows = [...el.querySelectorAll('.ask-mcard-results li')];
+      assert.deepEqual(rows.map((li) => [li.className, li.querySelector('.mono').textContent]), [['is-routed', 'acme/a'], ['is-skipped', 'acme/b'], ['is-failed', 'acme/c']]);
+      assert.match(rows[2].textContent, /push rejected/); assert.match(rows[2].querySelector('.ask-mcard-hint').textContent, /branch protection/);
+      assert.ok(!el.querySelector('.ask-mcard-effects'), 'effects are for the decision, not the receipt');
+      assert.ok(!el.querySelector('[data-ask-mc-apply]') && !el.querySelector('[data-ask-mc-decline]'));
+    } },
+    { name: 'failed and declined states', run: async () => {
+      const failed = await openWith({ kind: 'card', id: CARD_ID, state: 'failed', error: 'push rejected by hook', card: { ...RECORD_CARD, result: { ok: false, error: 'push rejected by hook', code: 'PUSH_REJECTED', hint: 'exempt worca-metrics' } } });
+      const el = failed.doc.querySelector('.ask-card.ask-mcard');
+      assert.equal(el.querySelector('.ask-mcard-title').textContent, 'Metrics change failed');
+      assert.equal(el.querySelector('.ask-mcard-failed').textContent, 'Could not apply: push rejected by hook');
+      assert.equal(el.querySelector('.ask-mcard-hint').textContent, 'exempt worca-metrics');
+      assert.ok(!el.querySelector('[data-ask-mc-apply]'));
+      const declined = await openWith({ kind: 'card', id: CARD_ID, state: 'declined', card: RECORD_CARD });
+      const stub = declined.doc.querySelector('.ask-card-stub');
+      assert.equal(stub.textContent, 'Declined — Turn "Include my runs" off for proj');
+      assert.ok(!declined.doc.querySelector('.ask-mcard'));
+    } },
+  ]);
 });

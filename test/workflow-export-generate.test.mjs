@@ -6,6 +6,7 @@ import { join, sep } from 'node:path';
 import { applyExport, planExport, distinctAgents } from '../src/core/workflow-export.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { writeKeyGraph, writeLevelsGraph } from './helpers/export-fixtures.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -29,29 +30,60 @@ const dirs = [];
 const tmp = async () => { const d = await mkdtemp(join(tmpdir(), 'wf-exp-')); dirs.push(d); return d; };
 after(async () => { await Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true }))); });
 
-test('default workflow → SKILL.md preserves step order, marks parallel groups, derives gate names on both sides', async () => {
+test('wf_default export: step order + gate names, ask hoist, feedback-loop dispatch names, branch isolation / never commits, clarify consumer reads the answers file', async () => {
   const dest = await tmp();
   await applyExport({ workflowId: 'wf_default', destination: 'project', projectDir: dest, onConflict: 'overwrite' });
   const skill = await readFile(join(dest, '.claude/skills/default/SKILL.md'), 'utf8');
-  assert.ok(skill.indexOf('## Step 1') < skill.indexOf('## Step 2'));
-  assert.match(skill, /## Invariants/);
-  // reviewer→implementer gate is 'impl-review' on both write (produces) and read (loop)
-  assert.match(skill, /impl-review-cycle<N>\.json/);            // loop read
-  assert.match(skill, /\$RUN_DIR\/impl-review-cycle1\.json/);   // reviewer's produces line
-  // implementer CONSUMES the reviewer's review (producer-aware) → also impl-review, not refine-review
-  const implBlock = skill.slice(skill.indexOf('Dispatch `worca-cc-implementer`'));
-  assert.match(implBlock.slice(0, 400), /Consumes:.*impl-review-cycle1\.json/);
-  // the refine self-loop uses 'refine-review'
-  assert.match(skill, /refine-review-cycle<N>\.json/);
-});
-
-test('askQuestions node emits the emit-questions + body-asks pattern; fanOut adds Agent + clause', async () => {
-  const dest = await tmp();
-  await applyExport({ workflowId: 'wf_default', destination: 'project', projectDir: dest, onConflict: 'overwrite' });
-  const skill = await readFile(join(dest, '.claude/skills/default/SKILL.md'), 'utf8');
-  assert.match(skill, /YOU\*\* call\s+`AskUserQuestion`/s);      // hoist proven in SKILL body
-  const clarify = await readFile(join(dest, '.claude/agents/worca-cc-clarify.md'), 'utf8');
-  assert.match(clarify, /\{"questions":\[\{"question"/);         // emit-as-JSON clause in the agent
+  await checkRows([
+    { name: 'default workflow → SKILL.md preserves step order, marks parallel groups, derives gate names on both sides', run: () => {
+      assert.ok(skill.indexOf('## Step 1') < skill.indexOf('## Step 2'));
+      assert.match(skill, /## Invariants/);
+      // reviewer→implementer gate is 'impl-review' on both write (produces) and read (loop)
+      assert.match(skill, /impl-review-cycle<N>\.json/);            // loop read
+      assert.match(skill, /\$RUN_DIR\/impl-review-cycle1\.json/);   // reviewer's produces line
+      // implementer CONSUMES the reviewer's review (producer-aware) → also impl-review, not refine-review
+      const implBlock = skill.slice(skill.indexOf('Dispatch `worca-cc-implementer`'));
+      assert.match(implBlock.slice(0, 400), /Consumes:.*impl-review-cycle1\.json/);
+      // the refine self-loop uses 'refine-review'
+      assert.match(skill, /refine-review-cycle<N>\.json/);
+    } },
+    { name: 'askQuestions node emits the emit-questions + body-asks pattern; fanOut adds Agent + clause', run: async () => {
+      assert.match(skill, /YOU\*\* call\s+`AskUserQuestion`/s);      // hoist proven in SKILL body
+      const clarify = await readFile(join(dest, '.claude/agents/worca-cc-clarify.md'), 'utf8');
+      assert.match(clarify, /\{"questions":\[\{"question"/);         // emit-as-JSON clause in the agent
+    } },
+    { name: 'feedback loops name the real dispatch agents, not raw node keys', run: () => {
+      // refiner self-loop and reviewer→implementer loop must use dispatch names on BOTH sides.
+      assert.match(skill, /## Feedback loop: worca-cc-plan-refiner → itself/);
+      assert.match(skill, /## Feedback loop: worca-cc-code-reviewer → worca-cc-implementer/);
+      assert.match(skill, /re-dispatch `worca-cc-plan-refiner`/);
+      // the raw node keys must never appear as a loop's dispatch target
+      assert.doesNotMatch(skill, /## Feedback loop: refiner →/);
+      assert.doesNotMatch(skill, /## Feedback loop: reviewer →/);
+    } },
+    { name: 'exported skill isolates the run on a branch and never commits', run: () => {
+      // Setup: reuse a named branch or auto-create; guarded on being inside a git work tree.
+      assert.match(skill, /git rev-parse --is-inside-work-tree/);
+      assert.match(skill, /git switch "\$BRANCH" 2>\/dev\/null \|\| git switch -c "\$BRANCH"/);
+      assert.match(skill, /BRANCH="worca\/default-\$\(date/);
+      // artifacts kept local-only (never committed) via the repo-local exclude file
+      assert.match(skill, /\.git\/info\/exclude/);
+      // invariant: never add/commit/push; leave changes uncommitted
+      assert.match(skill, /Never `git add`, `git commit`, or `git push`/);
+      assert.match(skill, /uncommitted/);
+    } },
+    // REGRESSION GUARD (#2): a clarify CONSUMER must be pointed at the answers the runner writes
+    // (clarify-answers.json), not the producer's questions (clarify.json). The producing (ask) node
+    // still writes clarify.json.
+    { name: 'clarify consumer reads clarify-answers.json; producer writes clarify.json', run: () => {
+      // The planner consumes 'clarify' → its Consumes line names the ANSWERS file.
+      const plannerBlock = skill.slice(skill.indexOf('Dispatch `worca-cc-planner`'));
+      assert.match(plannerBlock.slice(0, 400), /Consumes:.*clarify-answers\.json/);
+      assert.doesNotMatch(plannerBlock.slice(0, 400), /Consumes:.*[^-]clarify\.json/);
+      // The ask hoist still writes the QUESTIONS to clarify.json.
+      assert.match(skill, /\$RUN_DIR\/clarify\.json/);
+    } },
+  ]);
 });
 
 test('parallel group in one step is marked "dispatch all nodes in parallel"', async () => {
@@ -64,49 +96,6 @@ test('parallel group in one step is marked "dispatch all nodes in parallel"', as
   await applyExport({ workflowId: tpl.id, destination: 'project', projectDir: dest, onConflict: 'overwrite' });
   const skill = await readFile(join(dest, `.claude/skills/parallel-fixture/SKILL.md`), 'utf8');
   assert.match(skill, /## Step 2 \(dispatch all nodes in parallel\)/);
-});
-
-test('feedback loops name the real dispatch agents, not raw node keys', async () => {
-  const dest = await tmp();
-  await applyExport({ workflowId: 'wf_default', destination: 'project', projectDir: dest, onConflict: 'overwrite' });
-  const skill = await readFile(join(dest, '.claude/skills/default/SKILL.md'), 'utf8');
-  // refiner self-loop and reviewer→implementer loop must use dispatch names on BOTH sides.
-  assert.match(skill, /## Feedback loop: worca-cc-plan-refiner → itself/);
-  assert.match(skill, /## Feedback loop: worca-cc-code-reviewer → worca-cc-implementer/);
-  assert.match(skill, /re-dispatch `worca-cc-plan-refiner`/);
-  // the raw node keys must never appear as a loop's dispatch target
-  assert.doesNotMatch(skill, /## Feedback loop: refiner →/);
-  assert.doesNotMatch(skill, /## Feedback loop: reviewer →/);
-});
-
-test('exported skill isolates the run on a branch and never commits', async () => {
-  const dest = await tmp();
-  await applyExport({ workflowId: 'wf_default', destination: 'project', projectDir: dest, onConflict: 'overwrite' });
-  const skill = await readFile(join(dest, '.claude/skills/default/SKILL.md'), 'utf8');
-  // Setup: reuse a named branch or auto-create; guarded on being inside a git work tree.
-  assert.match(skill, /git rev-parse --is-inside-work-tree/);
-  assert.match(skill, /git switch "\$BRANCH" 2>\/dev\/null \|\| git switch -c "\$BRANCH"/);
-  assert.match(skill, /BRANCH="worca\/default-\$\(date/);
-  // artifacts kept local-only (never committed) via the repo-local exclude file
-  assert.match(skill, /\.git\/info\/exclude/);
-  // invariant: never add/commit/push; leave changes uncommitted
-  assert.match(skill, /Never `git add`, `git commit`, or `git push`/);
-  assert.match(skill, /uncommitted/);
-});
-
-// REGRESSION GUARD (#2): a clarify CONSUMER must be pointed at the answers the runner writes
-// (clarify-answers.json), not the producer's questions (clarify.json). The producing (ask) node
-// still writes clarify.json.
-test('clarify consumer reads clarify-answers.json; producer writes clarify.json', async () => {
-  const dest = await tmp();
-  await applyExport({ workflowId: 'wf_default', destination: 'project', projectDir: dest, onConflict: 'overwrite' });
-  const skill = await readFile(join(dest, '.claude/skills/default/SKILL.md'), 'utf8');
-  // The planner consumes 'clarify' → its Consumes line names the ANSWERS file.
-  const plannerBlock = skill.slice(skill.indexOf('Dispatch `worca-cc-planner`'));
-  assert.match(plannerBlock.slice(0, 400), /Consumes:.*clarify-answers\.json/);
-  assert.doesNotMatch(plannerBlock.slice(0, 400), /Consumes:.*[^-]clarify\.json/);
-  // The ask hoist still writes the QUESTIONS to clarify.json.
-  assert.match(skill, /\$RUN_DIR\/clarify\.json/);
 });
 
 // (The v1 "ambiguous 'review' producer" warning was removed with the v1 connectsTo
@@ -171,52 +160,55 @@ test('includeAgents=false warns that dispatched agents are not exported', async 
 // forms entirely — structurally, since makeAgentMd emits frontmatter + the agent's
 // markdown BODY and never reads the sidecar — and WARNS, so an author is not left
 // believing their review form travelled with the skill.
-test('an agent with ask forms exports without them, and the export says so', async () => {
-  const { createAgent } = await import('../src/core/agent-store.mjs');
-  await createAgent({
-    meta: {
-      key: 'formPicker', displayName: 'Form Picker', metaVersion: 2, description: 'exports without forms',
-      uiPhase: 'implement', order: 51, runnerType: 'producer',
-      asksQuestions: true, questionsDefault: true,
-      inputs: [{ id: 'task', type: 'md', required: true }],
-      outputs: [{ id: 'notes', type: 'md', filename: 'notes.md', store: 'run' }],
-      tools: ['Read', 'Write', 'AskUserQuestion'],
-      ask: { forms: { 'review-mockups': {
-        version: 1, title: 'Review mockups',
-        data: { type: 'object', properties: { summary: { type: 'string' } } },
-        answer: { type: 'object', required: ['verdict'], properties: {
-          verdict: { type: 'string', enum: ['approve', 'changes'], default: 'approve' } } },
-        layout: [{ widget: 'select', field: 'verdict', label: 'Verdict' }],
-        example: { summary: 'Two directions.' },
-      } } },
-    },
-    markdown: '# Form Picker\n\nPick one.\n',
-  });
-  const tpl = await writeKeyGraph({ id: 'wf_exp_forms', name: 'Forms export', keys: ['formPicker'] });
-  const dest = await tmp();
-  const out = await applyExport({ workflowId: tpl.id, destination: 'project', projectDir: dest, onConflict: 'overwrite' });
+test('ask forms are dropped from an export with a warning; a form-less workflow gets no forms warning', async () => {
+  await checkRows([
+    { name: 'an agent with ask forms exports without them, and the export says so', run: async () => {
+      const { createAgent } = await import('../src/core/agent-store.mjs');
+      await createAgent({
+        meta: {
+          key: 'formPicker', displayName: 'Form Picker', metaVersion: 2, description: 'exports without forms',
+          uiPhase: 'implement', order: 51, runnerType: 'producer',
+          asksQuestions: true, questionsDefault: true,
+          inputs: [{ id: 'task', type: 'md', required: true }],
+          outputs: [{ id: 'notes', type: 'md', filename: 'notes.md', store: 'run' }],
+          tools: ['Read', 'Write', 'AskUserQuestion'],
+          ask: { forms: { 'review-mockups': {
+            version: 1, title: 'Review mockups',
+            data: { type: 'object', properties: { summary: { type: 'string' } } },
+            answer: { type: 'object', required: ['verdict'], properties: {
+              verdict: { type: 'string', enum: ['approve', 'changes'], default: 'approve' } } },
+            layout: [{ widget: 'select', field: 'verdict', label: 'Verdict' }],
+            example: { summary: 'Two directions.' },
+          } } },
+        },
+        markdown: '# Form Picker\n\nPick one.\n',
+      });
+      const tpl = await writeKeyGraph({ id: 'wf_exp_forms', name: 'Forms export', keys: ['formPicker'] });
+      const dest = await tmp();
+      const out = await applyExport({ workflowId: tpl.id, destination: 'project', projectDir: dest, onConflict: 'overwrite' });
 
-  assert.ok(
-    out.warnings.some((w) => /formPicker/.test(w) && /review-mockups/.test(w) && /not exported/.test(w)),
-    JSON.stringify(out.warnings));
+      assert.ok(
+        out.warnings.some((w) => /formPicker/.test(w) && /review-mockups/.test(w) && /not exported/.test(w)),
+        JSON.stringify(out.warnings));
 
-  const md = await readFile(join(dest, '.claude/agents/formPicker.md'), 'utf8');
-  assert.equal(/review-mockups/.test(md), false, 'no form id reaches the exported agent');
-  assert.equal(/answerSchema|"values"|ask-forms/.test(md), false, 'no form contract reaches the exported agent');
-  assert.equal(/"ask"/.test(md), false, 'the sidecar ask block is never emitted');
-  // The generic ask-hoist clause is byte-identical to a formless agent's.
-  assert.match(md, /\{"questions":\[\{"question"/);
+      const md = await readFile(join(dest, '.claude/agents/formPicker.md'), 'utf8');
+      assert.equal(/review-mockups/.test(md), false, 'no form id reaches the exported agent');
+      assert.equal(/answerSchema|"values"|ask-forms/.test(md), false, 'no form contract reaches the exported agent');
+      assert.equal(/"ask"/.test(md), false, 'the sidecar ask block is never emitted');
+      // The generic ask-hoist clause is byte-identical to a formless agent's.
+      assert.match(md, /\{"questions":\[\{"question"/);
 
-  const skill = await readFile(join(dest, '.claude/skills/forms-export/SKILL.md'), 'utf8');
-  assert.equal(/review-mockups/.test(skill), false);
-  assert.match(skill, /YOU\*\* call\s+`AskUserQuestion`/s, 'the hoist instruction is unchanged');
-});
-
-test('an agent WITHOUT forms produces no forms warning', async () => {
-  // Not wf_default: it places the reviewer, which ships the P5 reference form and
-  // therefore DOES warn. A form-less built-in keeps the pin saying what its title says.
-  const tpl = await writeKeyGraph({ id: 'wf_exp_noforms', name: 'No forms export', keys: ['planner'] });
-  const dest = await tmp();
-  const out = await applyExport({ workflowId: tpl.id, destination: 'project', projectDir: dest, onConflict: 'overwrite' });
-  assert.equal(out.warnings.some((w) => /not exported/.test(w) && /form/.test(w)), false, JSON.stringify(out.warnings));
+      const skill = await readFile(join(dest, '.claude/skills/forms-export/SKILL.md'), 'utf8');
+      assert.equal(/review-mockups/.test(skill), false);
+      assert.match(skill, /YOU\*\* call\s+`AskUserQuestion`/s, 'the hoist instruction is unchanged');
+    } },
+    { name: 'an agent WITHOUT forms produces no forms warning', run: async () => {
+      // Not wf_default: it places the reviewer, which ships the P5 reference form and
+      // therefore DOES warn. A form-less built-in keeps the pin saying what its title says.
+      const tpl = await writeKeyGraph({ id: 'wf_exp_noforms', name: 'No forms export', keys: ['planner'] });
+      const dest = await tmp();
+      const out = await applyExport({ workflowId: tpl.id, destination: 'project', projectDir: dest, onConflict: 'overwrite' });
+      assert.equal(out.warnings.some((w) => /not exported/.test(w) && /form/.test(w)), false, JSON.stringify(out.warnings));
+    } },
+  ]);
 });

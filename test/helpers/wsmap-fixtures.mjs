@@ -1,7 +1,8 @@
 // test/helpers/wsmap-fixtures.mjs
 // Fixture workspaces for the workspace-map detector tests (P3, P4). Each member
-// is a fresh git repo with its files committed, so listMemberFiles sees them the
-// way extract does. runDetector replays extract's per-member loop for ONE
+// is a git repo copied from one `git init` template with its files written
+// untracked, so listMemberFiles (--others) sees them the way extract does.
+// runDetector replays extract's per-member loop for ONE
 // detector (claims → detect → finish) WITHOUT extract's try/catch: a detector
 // that throws fails the test instead of being swallowed. It also stamps each
 // fact with `norm` (normKey) and `test` (isTestPath) exactly as extract does.
@@ -13,6 +14,7 @@ import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { listMemberFiles, readText, isTestPath } from '../../src/core/workspace-map/files.mjs';
 import { normKey } from '../../src/shared/workspace-map/keys.mjs';
+import { templateRepo } from './git-dir.mjs';
 
 const KINDS = ['http', 'grpc', 'graphql', 'topic', 'pkg', 'db', 'service', 'other'];
 
@@ -22,28 +24,21 @@ function git(cwd, args) {
   return r.stdout;
 }
 
-/** Writes files into fresh git repos, one per member, commits them; returns Member[]
+/** Writes files into git repos, one per member (each a copy of one `git init` template; nothing
+ *  is committed, so no global hook — a secret scanner — sees the fake secrets); returns Member[]
  *  (dir = projectDir) and a cleanup function. spec: { [memberName]: { [relPath]: string } }.
  *  remotes: { [memberName]: originUrl } adds `origin` to that member's repo. */
 export async function makeWorkspace(spec, { prefix = 'worca-cc-wsmap-', remotes = {} } = {}) {
   const root = await mkdtemp(join(tmpdir(), prefix));
   const members = [];
   for (const name of Object.keys(spec).sort()) {
-    const dir = join(root, name);
-    await mkdir(dir, { recursive: true });
-    git(dir, ['init', '-q', '-b', 'main']);
-    git(dir, ['config', 'user.email', 't@t']);
-    git(dir, ['config', 'user.name', 't']);
-    git(dir, ['config', 'core.autocrlf', 'false']);
-    git(dir, ['config', 'commit.gpgsign', 'false']);
+    const dir = templateRepo(name, { commit: false, into: join(root, name) });
     for (const [rel, content] of Object.entries(spec[name])) {
       const abs = join(dir, ...rel.split('/'));
       await mkdir(dirname(abs), { recursive: true });
       await writeFile(abs, content);
     }
     if (remotes[name]) git(dir, ['remote', 'add', 'origin', remotes[name]]);
-    git(dir, ['add', '-A']);
-    git(dir, ['commit', '-q', '--no-verify', '--allow-empty', '-m', 'fixture']); // no global hook (a secret scanner) sees the fake secrets
     members.push({ key: name, name, dir, projectDir: dir });
   }
   return { root, members, cleanup: () => rm(root, { recursive: true, force: true, maxRetries: 3 }) };
