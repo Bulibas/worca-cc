@@ -1,10 +1,15 @@
 // test/ui-sidebar-counts.test.mjs
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const htmlPath = join(__dirname, '../ui/public/index.html');
@@ -25,7 +30,7 @@ function makeWsStub(wsBox) {
 async function boot({ counts = { pipelines: 0, projects: 0, workspaces: 0 }, hash = '' } = {}) {
   const calls = [];
   const box = { counts };                                 // mutable so a test can change the server's reply
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: `http://localhost:4321/#${hash}` });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: `http://localhost:4321/#${hash}` }));
   const { window } = dom;
   const wsBox = {};
   window.Element.prototype.scrollIntoView = function () {};
@@ -55,42 +60,32 @@ async function boot({ counts = { pipelines: 0, projects: 0, workspaces: 0 }, has
 // bare label, whatever /api/counts reports.
 const navButton = (doc, nav) => doc.querySelector(`.nav button[data-nav="${nav}"]`);
 
-test('only Runs and Schedules carry a count badge in the sidebar markup', () => {
-  const doc = new JSDOM(readFileSync(htmlPath, 'utf8')).window.document;
-  const counted = [...doc.querySelectorAll('.nav button[data-nav]')]
-    .filter((b) => b.querySelector('.nav-count'))
-    .map((b) => b.dataset.nav);
-  assert.deepEqual(counted, ['runs', 'schedules']);
-  for (const id of ['nav-history-count', 'nav-projects-count', 'nav-workspaces-count'])
-    assert.equal(doc.getElementById(id), null, `#${id} is gone`);
-});
-
-test('boot paints Runs + Schedules from /api/counts and no number on Projects/Workspaces', async () => {
-  const { window } = await boot({
+test('boot paints Runs + Schedules from /api/counts (no number on Projects/Workspaces), and a projects-changed broadcast re-reads /api/counts', async () => {
+  const { window, wsBox, calls, box } = await boot({
     counts: { pipelines: 7, projects: 3, workspaces: 2, schedules: { scheduled: 4, missed: 1, recurring: 0, unread: 0 } },
   });
   const doc = window.document;
-  assert.equal(doc.querySelector('#nav-running-count').textContent, '0');
-  assert.equal(doc.querySelector('#nav-schedules-count').textContent, '5');
-  for (const nav of ['projects', 'workspaces']) {
-    const b = navButton(doc, nav);
-    assert.ok(b, `${nav} nav button present`);
-    assert.equal(b.querySelector('.nav-count'), null, `${nav} has no count badge`);
-    assert.doesNotMatch(b.textContent, /\d/, `${nav} shows no number`);
-  }
-});
+  await checkRows([
+    { name: 'boot paints Runs + Schedules from /api/counts and no number on Projects/Workspaces', run: async () => {
+      assert.equal(doc.querySelector('#nav-running-count').textContent, '0');
+      assert.equal(doc.querySelector('#nav-schedules-count').textContent, '5');
+      for (const nav of ['projects', 'workspaces']) {
+        const b = navButton(doc, nav);
+        assert.ok(b, `${nav} nav button present`);
+        assert.equal(b.querySelector('.nav-count'), null, `${nav} has no count badge`);
+        assert.doesNotMatch(b.textContent, /\d/, `${nav} shows no number`);
+      }
+    } },
+    { name: 'a projects-changed broadcast re-reads /api/counts without adding a number to Projects', run: async () => {
+      box.counts = { pipelines: 0, projects: 2, workspaces: 0 };   // server now reports 2
+      const before = calls.filter((u) => u.includes('/api/counts')).length;
+      wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'projects-changed', action: 'created' }) });
+      await new Promise((r) => setTimeout(r, 5));
 
-test('a projects-changed broadcast re-reads /api/counts without adding a number to Projects', async () => {
-  const { window, wsBox, calls, box } = await boot({ counts: { pipelines: 0, projects: 1, workspaces: 0 } });
-  const doc = window.document;
-
-  box.counts = { pipelines: 0, projects: 2, workspaces: 0 };   // server now reports 2
-  const before = calls.filter((u) => u.includes('/api/counts')).length;
-  wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'projects-changed', action: 'created' }) });
-  await new Promise((r) => setTimeout(r, 5));
-
-  assert.ok(calls.filter((u) => u.includes('/api/counts')).length > before, 're-read /api/counts');
-  assert.doesNotMatch(navButton(doc, 'projects').textContent, /\d/, 'Projects shows no number');
+      assert.ok(calls.filter((u) => u.includes('/api/counts')).length > before, 're-read /api/counts');
+      assert.doesNotMatch(navButton(doc, 'projects').textContent, /\d/, 'Projects shows no number');
+    } },
+  ]);
 });
 
 test('pipelines-changed while on Runs reloads the list (rows reflect a delete)', async () => {

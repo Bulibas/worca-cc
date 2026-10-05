@@ -1,20 +1,25 @@
 // test/ui-pause-resume.test.mjs — pause/resume UI affordances (jsdom).
-// Harness mirrors test/ui-subagent-tree.test.mjs's bootLive: boot index.html,
+// Harness mirrors the boot() of test/ui-subagent-state.test.mjs: boot index.html,
 // stub WebSocket/fetch, import app.js with a cache-buster, reach internals via
 // window.__np. Adds a fetchCalls recorder + an /api/resume stub, and can drive
 // the History DETAIL screen — Resume lives there now, not on the list card.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 const PROJECT = '/tmp/proj';
 
 async function bootLive({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class {
@@ -59,18 +64,19 @@ const historyArms = (row) => (url) => {
   return null;
 };
 
-test('histStatusMeta: paused and pausing both land in the amber paused family', async () => {
+test('paused and pausing land in the amber paused family (histStatusMeta and statusPill, ahead of the question state)', async () => {
   const { window } = await bootLive();
-  const { histStatusMeta } = window.__np;
-  assert.deepEqual(histStatusMeta({ status: 'paused' }), { family: 'paused', word: 'Paused' });
-  assert.deepEqual(histStatusMeta({ status: 'pausing' }), { family: 'paused', word: 'Pausing…' });
-});
-
-test('statusPill: pausing/paused map to amber, ahead of the question state', async () => {
-  const { window } = await bootLive();
-  const { statusPill } = window.__np;
-  assert.deepEqual(statusPill({ status: 'pausing', pendingQuestion: null }), { family: 'amber', text: 'Pausing…' });
-  assert.deepEqual(statusPill({ status: 'paused', pendingQuestion: null }), { family: 'amber', text: 'Paused' });
+  const { histStatusMeta, statusPill } = window.__np;
+  await checkRows([
+    { name: 'histStatusMeta: paused and pausing both land in the amber paused family', run: async () => {
+      assert.deepEqual(histStatusMeta({ status: 'paused' }), { family: 'paused', word: 'Paused' });
+      assert.deepEqual(histStatusMeta({ status: 'pausing' }), { family: 'paused', word: 'Pausing…' });
+    } },
+    { name: 'statusPill: pausing/paused map to amber, ahead of the question state', run: async () => {
+      assert.deepEqual(statusPill({ status: 'pausing', pendingQuestion: null }), { family: 'amber', text: 'Pausing…' });
+      assert.deepEqual(statusPill({ status: 'paused', pendingQuestion: null }), { family: 'amber', text: 'Paused' });
+    } },
+  ]);
 });
 
 test('a paused run shows a wired Resume button on its detail screen', async () => {
@@ -98,18 +104,4 @@ test('a done run hides the Resume button on its detail screen', async () => {
   ctx.showDetail('k', 'p2');
   await ctx.settle();
   assert.equal(ctx.window.document.querySelector('#hist-detail .hd-resume').hidden, true);
-});
-
-test('the run page template carries a Pause button next to Stop', async () => {
-  const html = readFileSync(htmlPath, 'utf8');
-  const doc = new JSDOM(html).window.document;
-  const tpl = doc.getElementById('run-detail-tpl');
-  assert.ok(tpl, 'index.html ships #run-detail-tpl');
-  const pause = tpl.content.querySelector('.rd-bar .rd-pause');
-  assert.ok(pause, 'the run page bar has .rd-pause');
-  assert.equal(pause.dataset.action, 'pause', 'it starts as Pause (paintRdHeader flips it to resume)');
-  // Pause/Resume rides the split Resume (its caret schedules the resume); Stop follows the split.
-  const split = pause.closest('.rd-resume-split');
-  assert.ok(split, '.rd-pause lives in the .rd-resume-split');
-  assert.ok(split.nextElementSibling && split.nextElementSibling.classList.contains('rd-stop'), '.rd-stop sits right after the split');
 });

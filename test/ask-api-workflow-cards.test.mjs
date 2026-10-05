@@ -18,12 +18,14 @@ import http from 'node:http';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 import { _resetForTests as closeDbForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { holdMockTurn, isToolResult } from './helpers/ask-hold.mjs';
 
 useTempHome(after);
 
 const origCwd = process.cwd();
 let cwdSandbox = null;
-let homeDir, srv, base, wsBase, mod, prevHome;
+let homeDir, srv, base, wsBase, mod, prevHome, prevOsHome, prevProfile;
 let projectDir, projectDir2, projectKey, workspaceId;
 const JSONH = { 'Content-Type': 'application/json' };
 const MODEL = { model: 'claude-opus-5-5', effort: 'high' };
@@ -42,6 +44,10 @@ before(async () => {
   homeDir = await mkdtemp(join(tmpdir(), 'worca-cc-askwfcards-'));
   prevHome = process.env.WORCA_HOME;
   process.env.WORCA_HOME = homeDir;
+  // settings.json lives under HOME, not WORCA_HOME: the budget tests' cost-limit
+  // setters must never write the developer's real ~/.worca-cc/settings.json.
+  prevOsHome = process.env.HOME; prevProfile = process.env.USERPROFILE;
+  process.env.HOME = homeDir; process.env.USERPROFILE = homeDir;
   process.env.WORCA_MOCK = '1';
   mod = await import('../ui/server.mjs');
   srv = mod.server;
@@ -84,6 +90,8 @@ after(async () => {
     ]);
   }
   if (prevHome === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prevHome;
+  if (prevOsHome === undefined) delete process.env.HOME; else process.env.HOME = prevOsHome;
+  if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
   delete process.env.WORCA_MOCK;
   process.chdir(origCwd);
   // A stopped orchestrator still flushes artifacts for a few ticks, so a plain
@@ -152,13 +160,32 @@ async function proposeWorkflow(context, text) {
 const NEW_TEXT = 'build me an auto workflow for this plan:\n# Rename\nrename pauseReason to pauseCause everywhere';
 const TWIN_TEXT = 'make a workflow: refactor the auth module so that sessions expire after thirty minutes and refresh tokens rotate on every use';
 
-test('workflow card: building → proposed with the REAL manifest, card.type=workflow, the tool row labelled, cost 0 in mock', async () => {
-  const { building, card } = await proposeWorkflow({ projectKey }, NEW_TEXT);
-  assert.equal(building.id, card.id); assert.equal(building.card.type, 'workflow'); assert.equal(building.card.trace.step, 1);
-  assert.equal(card.card.projectKey, projectKey); assert.equal(card.card.match, null);
-  assert.ok(card.card.manifest.graph.nodes.length >= 3 && card.card.order.length === 1, 'implement-only: task → implementer → end');
-  assert.equal(card.card.shape.taskKind, 'plan-complete-small');
-  assert.equal(card.card.costUsd, 0);
+test('workflow card building → proposed with the real manifest; the event turn\'s context lists it by type and name', async () => {
+  await checkRows([
+    { name: 'workflow card: building → proposed with the REAL manifest, card.type=workflow, the tool row labelled, cost 0 in mock', run: async () => {
+      const { building, card } = await proposeWorkflow({ projectKey }, NEW_TEXT);
+      assert.equal(building.id, card.id); assert.equal(building.card.type, 'workflow'); assert.equal(building.card.trace.step, 1);
+      assert.equal(card.card.projectKey, projectKey); assert.equal(card.card.match, null);
+      assert.ok(card.card.manifest.graph.nodes.length >= 3 && card.card.order.length === 1, 'implement-only: task → implementer → end');
+      assert.equal(card.card.shape.taskKind, 'plan-complete-small');
+      assert.equal(card.card.costUsd, 0);
+    } },
+    { name: 'context header: the event turn\'s prompt lists the workflow card by type and name', run: async () => {
+      const { thread, card } = await proposeWorkflow({ projectKey }, NEW_TEXT);
+      const w = openWs(); await w.opened;
+      await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'declined' });
+      await waitFor(() => frames(w.msgs, thread.id, 'ask-done').length >= 1);
+      // The mock echoes the FIRST line of the user text as its answer, and the context block precedes it — read the
+      // header the SERVER built from the turn's own restored prompt instead: resolveAskContext's cards line.
+      // targetName is the seeded project's name ('demo'): the MOCK child returns projectName:null,
+      // so this passes only through the parent's own lookup in revalidateWorkflowProposal (v4).
+      assert.equal(card.card.projectName, 'demo', 'the parent resolved the project name the mock child could not');
+      const ctx = await mod._testing.resolveAskContext(thread.id, { projectKey }, [], null);
+      const mine = (ctx.cards || []).find((c) => c.id === card.id);
+      assert.deepEqual(mine, { id: card.id, type: 'workflow', state: 'declined', name: card.card.name, workflowId: null, targetName: 'demo' });
+      w.ws.close();
+    } },
+  ]);
 });
 
 test('save (new row): writes origin=auto with the node tunables baked in, flips to saved with workflowId, stores the synthetic notice row and starts the event turn — whose mock proposes a run when thenRun', async () => {
@@ -221,88 +248,84 @@ test('save (twin = the built-in Default): adopts it, writes nothing, ignores nam
   w.ws.close();
 });
 
-test('a save DURING a running turn is queued until it ends', async () => {
-  // propose while a slow turn streams, save immediately — the event turn starts after ask-done
+test('a save DURING a running turn is queued until it ends', async (tc) => {
+  // propose while a slow turn is held open, save — the event turn starts after ask-done
+  const release = holdMockTurn(tc, isToolResult);
   const t2 = await newThread();
   const w2 = openWs(`?threadId=${t2.id}`); await w2.opened;
   await post(`/api/ask/threads/${t2.id}/messages`, { text: `MOCK_SLOW ${NEW_TEXT}`, ...MODEL, context: { projectKey } });
   const proposed = await waitFor(() => frames(w2.msgs, t2.id, 'ask-card').find((f) => f.block.state === 'proposed'));
+  await waitFor(() => release.reached() >= 1);
+  assert.equal(frames(w2.msgs, t2.id, 'ask-done').length, 0, 'the held turn still streams');
   const s = await post(`/api/ask/threads/${t2.id}/cards/${proposed.block.id}`, { state: 'saved' });
   assert.deepEqual((await s.json()).turn, { deferred: true });
+  release();
   await waitFor(() => frames(w2.msgs, t2.id, 'ask-done').length >= 2, 15_000);
   const snap2 = await snapshot(t2.id);
   assert.ok(snap2.messages.some((m) => m.role === 'user' && m.blocks?.[0]?.synthetic), 'the queued event turn ran after the first turn settled');
   w2.ws.close();
 });
 
-test('context header: the event turn\'s prompt lists the workflow card by type and name', async () => {
-  const { thread, card } = await proposeWorkflow({ projectKey }, NEW_TEXT);
-  const w = openWs(); await w.opened;
-  await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'declined' });
-  await waitFor(() => frames(w.msgs, thread.id, 'ask-done').length >= 1);
-  // The mock echoes the FIRST line of the user text as its answer, and the context block precedes it — read the
-  // header the SERVER built from the turn's own restored prompt instead: resolveAskContext's cards line.
-  // targetName is the seeded project's name ('demo'): the MOCK child returns projectName:null,
-  // so this passes only through the parent's own lookup in revalidateWorkflowProposal (v4).
-  assert.equal(card.card.projectName, 'demo', 'the parent resolved the project name the mock child could not');
-  const ctx = await mod._testing.resolveAskContext(thread.id, { projectKey }, [], null);
-  const mine = (ctx.cards || []).find((c) => c.id === card.id);
-  assert.deepEqual(mine, { id: card.id, type: 'workflow', state: 'declined', name: card.card.name, workflowId: null, targetName: 'demo' });
-  w.ws.close();
-});
-
-test('a queued event turn that cannot start (total cost window spent by the turn it waited on) posts a system notice instead of vanishing; the queue is not stranded', async () => {
-  // v7 (PD5/PD26/PD29): the starter runs from settleJob AFTER the finished turn booked its spend, so budgetStatus().blocked can be true exactly then.
-  const { setTotalCostLimitUsd } = await import('../src/core/settings.mjs');
-  const { recordAskCostDelta, budgetStatus } = await import('../src/core/cost-budget.mjs');
-  const t = await newThread();
-  const w = openWs(); await w.opened;                                        // bare: opened BEFORE the turn — live frames reach every socket
-  try {
-    await post(`/api/ask/threads/${t.id}/messages`, { text: `MOCK_SLOW ${NEW_TEXT}`, ...MODEL, context: { projectKey } });
-    const proposed = await waitFor(() => frames(w.msgs, t.id, 'ask-card').find((f) => f.block.state === 'proposed'));
-    await setTotalCostLimitUsd(1);
-    recordAskCostDelta({ threadId: t.id, messageId: 'msg_budget02', amountUsd: 1.5 });
-    assert.equal(budgetStatus().blocked, true, 'fixture: the window is spent while the slow turn still streams');
-    const s = await post(`/api/ask/threads/${t.id}/cards/${proposed.block.id}`, { state: 'saved' });
-    assert.equal(s.status, 200);
-    const body = await s.json();
-    assert.equal(body.block.state, 'saved', 'the flip stands (PD5)');
-    assert.deepEqual(body.turn, { deferred: true });
-    await waitFor(() => frames(w.msgs, t.id, 'ask-done').length >= 1, 15_000);   // the slow turn ends → settleJob → drainAskDeferred → 403 at START
-    const notice = await waitFor(() => frames(w.msgs, t.id, 'ask-message').find((f) => f.message.role === 'system' && /could not reply to the workflow card/.test(f.message.text)));
-    assert.equal(notice.message.text, 'Ask Worca could not reply to the workflow card: total cost limit reached');
-    assert.equal(notice.message.blocks[0].kind, 'notice');
-    const snap = await snapshot(t.id);
-    assert.equal(snap.messages.filter((m) => m.status === 'streaming').length, 0, 'no assistant row was opened');
-    assert.equal(snap.messages.filter((m) => m.role === 'user' && m.blocks?.[0]?.synthetic).length, 0, 'no synthetic user row either: the reservation failed before any write');
-    assert.equal(frames(w.msgs, t.id, 'ask-start').length, 1, 'only the typed turn ever started');
-  } finally {
-    await setTotalCostLimitUsd(null);
-    w.ws.close();
-  }
-});
-
-test('an event turn that fails IMMEDIATELY (no turn was running) posts the same system notice — the flip has already replaced the card element the inline error would have landed on', async () => {
-  const { setTotalCostLimitUsd } = await import('../src/core/settings.mjs');
-  const { recordAskCostDelta, budgetStatus } = await import('../src/core/cost-budget.mjs');
-  const { thread, card } = await proposeWorkflow({ projectKey }, NEW_TEXT);
-  const w = openWs(); await w.opened;
-  try {
-    await setTotalCostLimitUsd(1);
-    recordAskCostDelta({ threadId: thread.id, messageId: 'msg_budget03', amountUsd: 1.5 });
-    assert.equal(budgetStatus().blocked, true, 'fixture: the window is spent with NO turn running');
-    const r = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'declined' });
-    assert.equal(r.status, 200);
-    const body = await r.json();
-    assert.equal(body.block.state, 'declined', 'the flip stands');
-    assert.equal(body.turn.status, 403);
-    assert.equal(body.turn.error, 'total cost limit reached', 'the API client still gets the machine-readable error');
-    const notice = await waitFor(() => frames(w.msgs, thread.id, 'ask-message').find((f) => f.message.role === 'system' && /could not reply to the workflow card/.test(f.message.text)));
-    assert.equal(notice.message.text, 'Ask Worca could not reply to the workflow card: total cost limit reached');
-    assert.equal(notice.message.blocks[0].kind, 'notice');
-    assert.equal(frames(w.msgs, thread.id, 'ask-start').length, 0, 'no turn ever started');
-  } finally {
-    await setTotalCostLimitUsd(null);
-    w.ws.close();
-  }
+test('an event turn that cannot start (queued behind a spent cost window, or failing immediately) posts a system notice; the queue is not stranded', async () => {
+  await checkRows([
+    { name: 'a queued event turn that cannot start (total cost window spent by the turn it waited on) posts a system notice instead of vanishing; the queue is not stranded', run: async () => {
+      // v7 (PD5/PD26/PD29): the starter runs from settleJob AFTER the finished turn booked its spend, so budgetStatus().blocked can be true exactly then.
+      const { setTotalCostLimitUsd } = await import('../src/core/settings.mjs');
+      const { recordAskCostDelta, budgetStatus } = await import('../src/core/cost-budget.mjs');
+      const t = await newThread();
+      const w = openWs(); await w.opened;                                        // bare: opened BEFORE the turn — live frames reach every socket
+      const release = holdMockTurn(null, isToolResult);                         // a checkRows row: disposed in this row's own finally
+      try {
+        await post(`/api/ask/threads/${t.id}/messages`, { text: `MOCK_SLOW ${NEW_TEXT}`, ...MODEL, context: { projectKey } });
+        const proposed = await waitFor(() => frames(w.msgs, t.id, 'ask-card').find((f) => f.block.state === 'proposed'));
+        await waitFor(() => release.reached() >= 1);
+        assert.equal(frames(w.msgs, t.id, 'ask-done').length, 0, 'the held turn still streams');
+        await setTotalCostLimitUsd(1);
+        recordAskCostDelta({ threadId: t.id, messageId: 'msg_budget02', amountUsd: 1.5 });
+        assert.equal(budgetStatus().blocked, true, 'fixture: the window is spent while the slow turn still streams');
+        const s = await post(`/api/ask/threads/${t.id}/cards/${proposed.block.id}`, { state: 'saved' });
+        assert.equal(s.status, 200);
+        const body = await s.json();
+        assert.equal(body.block.state, 'saved', 'the flip stands (PD5)');
+        assert.deepEqual(body.turn, { deferred: true });
+        release();
+        await waitFor(() => frames(w.msgs, t.id, 'ask-done').length >= 1, 15_000);   // the slow turn ends → settleJob → drainAskDeferred → 403 at START
+        const notice = await waitFor(() => frames(w.msgs, t.id, 'ask-message').find((f) => f.message.role === 'system' && /could not reply to the workflow card/.test(f.message.text)));
+        assert.equal(notice.message.text, 'Ask Worca could not reply to the workflow card: total cost limit reached');
+        assert.equal(notice.message.blocks[0].kind, 'notice');
+        const snap = await snapshot(t.id);
+        assert.equal(snap.messages.filter((m) => m.status === 'streaming').length, 0, 'no assistant row was opened');
+        assert.equal(snap.messages.filter((m) => m.role === 'user' && m.blocks?.[0]?.synthetic).length, 0, 'no synthetic user row either: the reservation failed before any write');
+        assert.equal(frames(w.msgs, t.id, 'ask-start').length, 1, 'only the typed turn ever started');
+      } finally {
+        release.dispose();
+        await setTotalCostLimitUsd(null);
+        w.ws.close();
+      }
+    } },
+    { name: 'an event turn that fails IMMEDIATELY (no turn was running) posts the same system notice — the flip has already replaced the card element the inline error would have landed on', run: async () => {
+      const { setTotalCostLimitUsd } = await import('../src/core/settings.mjs');
+      const { recordAskCostDelta, budgetStatus } = await import('../src/core/cost-budget.mjs');
+      const { thread, card } = await proposeWorkflow({ projectKey }, NEW_TEXT);
+      const w = openWs(); await w.opened;
+      try {
+        await setTotalCostLimitUsd(1);
+        recordAskCostDelta({ threadId: thread.id, messageId: 'msg_budget03', amountUsd: 1.5 });
+        assert.equal(budgetStatus().blocked, true, 'fixture: the window is spent with NO turn running');
+        const r = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'declined' });
+        assert.equal(r.status, 200);
+        const body = await r.json();
+        assert.equal(body.block.state, 'declined', 'the flip stands');
+        assert.equal(body.turn.status, 403);
+        assert.equal(body.turn.error, 'total cost limit reached', 'the API client still gets the machine-readable error');
+        const notice = await waitFor(() => frames(w.msgs, thread.id, 'ask-message').find((f) => f.message.role === 'system' && /could not reply to the workflow card/.test(f.message.text)));
+        assert.equal(notice.message.text, 'Ask Worca could not reply to the workflow card: total cost limit reached');
+        assert.equal(notice.message.blocks[0].kind, 'notice');
+        assert.equal(frames(w.msgs, thread.id, 'ask-start').length, 0, 'no turn ever started');
+      } finally {
+        await setTotalCostLimitUsd(null);
+        w.ws.close();
+      }
+    } },
+  ]);
 });

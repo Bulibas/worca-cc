@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { _resetForTests } from '../src/core/db.mjs';
 import { writeStoreMeta } from '../src/core/artifacts.mjs';
 import { seedPipeline, seedWorkspacePipeline } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let home, prevHome, srv, base, mod, run, ws;
 
@@ -83,16 +84,30 @@ after(async () => {
 
 const url = (suffix = '') => `/api/history/${run.key}/${run.id}/comments${suffix}`;
 
-test('POST -> GET: author user, line_text captured server-side, patchAvailable true', async () => {
-  const created = await post(url(), { path: 'src/a.js', side: 'new', line: 3, body: 'needs a test' });
-  assert.equal(created.status, 201);
-  assert.match(created.body.comment.id, /^dc_[0-9a-f]{8}$/);
-  assert.equal(created.body.comment.lineText, 'added');
-  assert.equal(created.body.comment.author, 'user');
-  const listed = await j(url());
-  assert.equal(listed.status, 200);
-  assert.equal(listed.body.patchAvailable, true);
-  assert.deepEqual(listed.body.comments.map((c) => c.id), [created.body.comment.id]);
+test('CRUD: POST -> GET (author, server-side line_text, patchAvailable), PATCH toggles, DELETE removes, 404/400 on unknown/malformed ids and bad body', async () => {
+  await checkRows([
+    { name: 'POST -> GET: author user, line_text captured server-side, patchAvailable true', run: async () => {
+      const created = await post(url(), { path: 'src/a.js', side: 'new', line: 3, body: 'needs a test' });
+      assert.equal(created.status, 201);
+      assert.match(created.body.comment.id, /^dc_[0-9a-f]{8}$/);
+      assert.equal(created.body.comment.lineText, 'added');
+      assert.equal(created.body.comment.author, 'user');
+      const listed = await j(url());
+      assert.equal(listed.status, 200);
+      assert.equal(listed.body.patchAvailable, true);
+      assert.deepEqual(listed.body.comments.map((c) => c.id), [created.body.comment.id]);
+    } },
+    { name: 'PATCH toggles, DELETE removes, unknown ids 404, malformed ids 400, bad body 400', run: async () => {
+      const c = (await post(url(), { path: 'src/a.js', side: 'old', line: 2, body: 'why' })).body.comment;
+      assert.equal((await patch(url(`/${c.id}`), { resolved: true })).body.comment.resolved, true);
+      assert.equal((await patch(url(`/${c.id}`), { resolved: false })).body.comment.resolvedAt, null);
+      assert.equal((await patch(url(`/${c.id}`), { resolved: 'yes' })).status, 400);
+      assert.equal((await patch(url('/dc_00000000'), { resolved: true })).status, 404);
+      assert.equal((await patch(url('/nope'), { resolved: true })).status, 400);
+      assert.equal((await del(url(`/${c.id}`))).status, 200);
+      assert.equal((await del(url(`/${c.id}`))).status, 404);
+    } },
+  ]);
 });
 
 test('POST: anchor validation refuses a bad path/side/line with a 400 that says why', async () => {
@@ -112,25 +127,21 @@ test('POST: anchor validation refuses a bad path/side/line with a 400 that says 
   }
 });
 
-test('PATCH toggles, DELETE removes, unknown ids 404, malformed ids 400, bad body 400', async () => {
-  const c = (await post(url(), { path: 'src/a.js', side: 'old', line: 2, body: 'why' })).body.comment;
-  assert.equal((await patch(url(`/${c.id}`), { resolved: true })).body.comment.resolved, true);
-  assert.equal((await patch(url(`/${c.id}`), { resolved: false })).body.comment.resolvedAt, null);
-  assert.equal((await patch(url(`/${c.id}`), { resolved: 'yes' })).status, 400);
-  assert.equal((await patch(url('/dc_00000000'), { resolved: true })).status, 404);
-  assert.equal((await patch(url('/nope'), { resolved: true })).status, 400);
-  assert.equal((await del(url(`/${c.id}`))).status, 200);
-  assert.equal((await del(url(`/${c.id}`))).status, 404);
-});
-
-test("a comment of another run is never reachable through this run's URL", async () => {
+test("another run's comment is never reachable through this run's URL (DELETE/PATCH/replies all 404)", async () => {
   const otherDir = await mkdtemp(join(tmpdir(), 'worca-cc-dcapi-other-'));
   const other = await seedPipeline(otherDir, { title: 'Other', status: 'done' });
   await writeFile(join(other.dir, 'diff-patch.patch'), PATCH, 'utf8');
-  const mine = (await post(`/api/history/${other.key}/${other.id}/comments`,
+  const theirs = (await post(`/api/history/${other.key}/${other.id}/comments`,
     { path: 'src/a.js', side: 'new', line: 1, body: 'elsewhere' })).body.comment;
-  assert.equal((await del(url(`/${mine.id}`))).status, 404, 'scoped by (storeKey, pipelineId)');
-  assert.equal((await patch(url(`/${mine.id}`), { resolved: true })).status, 404);
+  await checkRows([
+    { name: "a comment of another run is never reachable through this run's URL", run: async () => {
+      assert.equal((await del(url(`/${theirs.id}`))).status, 404, 'scoped by (storeKey, pipelineId)');
+      assert.equal((await patch(url(`/${theirs.id}`), { resolved: true })).status, 404);
+    } },
+    { name: "a reply to another run's comment is not reachable through this run's URL", run: async () => {
+      assert.equal((await post(url(`/${theirs.id}/replies`), { body: 'x' })).status, 404);
+    } },
+  ]);
 });
 
 test('GET /api/diff-comments/counts is keyed "<storeKey>/<pipelineId>"', async () => {
@@ -164,18 +175,28 @@ test('workspace runs go through the twin route (the history :key regex forbids t
     'the slashed key can never reach the project route family');
 });
 
-test('a run with no patch: creation refused with 409, list still answers', async () => {
-  // The archive path deletes comments outright (D1), so this covers the OTHER way a
-  // run can be uncommentable: the artifact is simply not there.
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-dcapi-nopatch-'));
-  const gone = await seedPipeline(dir, { title: 'Gone', status: 'done' });
-  const goneUrl = `/api/history/${gone.key}/${gone.id}/comments`;
-  const r = await post(goneUrl, { path: 'src/a.js', side: 'new', line: 1, body: 'x' });
-  assert.equal(r.status, 409);
-  assert.match(r.body.error, /no stored diff/);
-  const listed = await j(goneUrl);
-  assert.equal(listed.status, 200);
-  assert.deepEqual(listed.body, { comments: [], patchAvailable: false, protectedPaths: [] });
+test('run-level error paths: an unknown run 404s on every verb; a run with no patch refuses creation (409) but still lists', async () => {
+  await checkRows([
+    { name: 'a run with no patch: creation refused with 409, list still answers', run: async () => {
+      // The archive path deletes comments outright (D1), so this covers the OTHER way a
+      // run can be uncommentable: the artifact is simply not there.
+      const dir = await mkdtemp(join(tmpdir(), 'worca-cc-dcapi-nopatch-'));
+      const gone = await seedPipeline(dir, { title: 'Gone', status: 'done' });
+      const goneUrl = `/api/history/${gone.key}/${gone.id}/comments`;
+      const r = await post(goneUrl, { path: 'src/a.js', side: 'new', line: 1, body: 'x' });
+      assert.equal(r.status, 409);
+      assert.match(r.body.error, /no stored diff/);
+      const listed = await j(goneUrl);
+      assert.equal(listed.status, 200);
+      assert.deepEqual(listed.body, { comments: [], patchAvailable: false, protectedPaths: [] });
+    } },
+    { name: 'an unknown run 404s on every verb', run: async () => {
+      const ghost = `/api/history/${run.key}/00000000/comments`;
+      assert.equal((await j(ghost)).status, 404);
+      assert.equal((await post(ghost, { path: 'src/a.js', side: 'new', line: 1, body: 'x' })).status, 404);
+      assert.equal((await del(`${ghost}/dc_00000000`)).status, 404);
+    } },
+  ]);
 });
 
 test('GET reports the sections the protected-path floor will refuse', async () => {
@@ -188,42 +209,38 @@ test('GET reports the sections the protected-path floor will refuse', async () =
     /protected path/);
 });
 
-test('an unknown run 404s on every verb', async () => {
-  const ghost = `/api/history/${run.key}/00000000/comments`;
-  assert.equal((await j(ghost)).status, 404);
-  assert.equal((await post(ghost, { path: 'src/a.js', side: 'new', line: 1, body: 'x' })).status, 404);
-  assert.equal((await del(`${ghost}/dc_00000000`)).status, 404);
-});
-
-test('every mutation broadcasts diff-comments-changed with ids only', async () => {
-  ws = new WebSocket(`ws://127.0.0.1:${srv.address().port}/ws`);
-  const frames = [];
-  ws.on('message', (d) => { try { frames.push(JSON.parse(String(d))); } catch { /* ignore */ } });
-  await new Promise((r) => ws.on('open', r));
-  const c = (await post(url(), { path: 'src/a.js', side: 'new', line: 4, body: 'poke' })).body.comment;
-  await patch(url(`/${c.id}`), { resolved: true });
-  await del(url(`/${c.id}`));
-  const pokes = () => frames.filter((f) => f.type === 'diff-comments-changed');
-  const deadline = Date.now() + 2000;
-  while (pokes().length < 3 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
-  assert.equal(pokes().length, 3);
-  assert.deepEqual(pokes()[0], { type: 'diff-comments-changed', storeKey: run.key, pipelineId: run.id });
-});
-
-test('emitDiffCommentsChanged resolves an id to its store key and pokes; an unknown id pokes nothing', async () => {
-  // The MCP child's write lands in another process; this is the parent-side half of
-  // that path (the reducer half is pinned in test/ask-events.test.mjs).
-  const sock = new WebSocket(`ws://127.0.0.1:${srv.address().port}/ws`);
-  const seen = [];
-  sock.on('message', (d) => { try { seen.push(JSON.parse(String(d))); } catch { /* ignore */ } });
-  await new Promise((r) => sock.on('open', r));
-  assert.equal(mod._testing.emitDiffCommentsChanged('00000000'), false, 'unknown id: no row, no frame');
-  assert.equal(mod._testing.emitDiffCommentsChanged(run.id), true);
-  const pokes = () => seen.filter((f) => f.type === 'diff-comments-changed');
-  const deadline = Date.now() + 2000;
-  while (!pokes().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
-  assert.deepEqual(pokes(), [{ type: 'diff-comments-changed', storeKey: run.key, pipelineId: run.id }]);
-  sock.close();
+test('diff-comments-changed: every HTTP mutation and emitDiffCommentsChanged(id) broadcast ids only; an unknown id pokes nothing', async () => {
+  await checkRows([
+    { name: 'every mutation broadcasts diff-comments-changed with ids only', run: async () => {
+      ws = new WebSocket(`ws://127.0.0.1:${srv.address().port}/ws`);
+      const frames = [];
+      ws.on('message', (d) => { try { frames.push(JSON.parse(String(d))); } catch { /* ignore */ } });
+      await new Promise((r) => ws.on('open', r));
+      const c = (await post(url(), { path: 'src/a.js', side: 'new', line: 4, body: 'poke' })).body.comment;
+      await patch(url(`/${c.id}`), { resolved: true });
+      await del(url(`/${c.id}`));
+      const pokes = () => frames.filter((f) => f.type === 'diff-comments-changed');
+      const deadline = Date.now() + 2000;
+      while (pokes().length < 3 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+      assert.equal(pokes().length, 3);
+      assert.deepEqual(pokes()[0], { type: 'diff-comments-changed', storeKey: run.key, pipelineId: run.id });
+    } },
+    { name: 'emitDiffCommentsChanged resolves an id to its store key and pokes; an unknown id pokes nothing', run: async () => {
+      // The MCP child's write lands in another process; this is the parent-side half of
+      // that path (the reducer half is pinned in test/ask-events.test.mjs).
+      const sock = new WebSocket(`ws://127.0.0.1:${srv.address().port}/ws`);
+      const seen = [];
+      sock.on('message', (d) => { try { seen.push(JSON.parse(String(d))); } catch { /* ignore */ } });
+      await new Promise((r) => sock.on('open', r));
+      assert.equal(mod._testing.emitDiffCommentsChanged('00000000'), false, 'unknown id: no row, no frame');
+      assert.equal(mod._testing.emitDiffCommentsChanged(run.id), true);
+      const pokes = () => seen.filter((f) => f.type === 'diff-comments-changed');
+      const deadline = Date.now() + 2000;
+      while (!pokes().length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+      assert.deepEqual(pokes(), [{ type: 'diff-comments-changed', storeKey: run.key, pipelineId: run.id }]);
+      sock.close();
+    } },
+  ]);
 });
 
 test('POST /:cid/replies: 201 with the root anchor; nested/empty 400; foreign 404; the reply follows its root', async () => {
@@ -251,13 +268,4 @@ test('POST /:cid/replies: 201 with the root anchor; nested/empty 400; foreign 40
   assert.equal((await j(url())).body.comments.find((c) => c.id === r.body.comment.id).resolved, true, 'mirrored');
   assert.equal((await del(url(`/${root.id}`))).status, 200);
   assert.equal((await j(url())).body.comments.some((c) => c.id === r.body.comment.id), false, 'the reply went with its root');
-});
-
-test("a reply to another run's comment is not reachable through this run's URL", async () => {
-  const otherDir = await mkdtemp(join(tmpdir(), 'worca-cc-dcapi-other2-'));
-  const other = await seedPipeline(otherDir, { title: 'Other', status: 'done' });
-  await writeFile(join(other.dir, 'diff-patch.patch'), PATCH, 'utf8');
-  const theirs = (await post(`/api/history/${other.key}/${other.id}/comments`,
-    { path: 'src/a.js', side: 'new', line: 1, body: 'elsewhere' })).body.comment;
-  assert.equal((await post(url(`/${theirs.id}/replies`), { body: 'x' })).status, 404);
 });

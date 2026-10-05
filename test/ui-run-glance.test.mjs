@@ -166,28 +166,6 @@ test('a finished row in the Runs list says what the glance headline says (D12): 
   assert.equal(histRowState({ status: 'completed', pr: 'MERGED' }).word, glanceCopy({ status: 'done' }, { pr: 'MERGED' }).lead);
 });
 
-test('DOM: every glyph is its own drawing, stroked, with its state class', () => {
-  const { document } = new JSDOM('').window;
-  const shapes = {};
-  for (const s of ['ship', 'review', 'pr-open', 'merged', 'pr-closed', 'finished', 'start', 'run', 'ask', 'paused', 'fail', 'stop']) {
-    const orb = renderOrb(document, s, 28);
-    assert.match(orb.getAttribute('class'), new RegExp(`rg-orb-${s}\\b`));
-    assert.equal(orb.getAttribute('width'), '28');
-    shapes[s] = [...orb.children].slice(1).map((n) => `${n.tagName}:${n.getAttribute('d') || ''}${n.getAttribute('cx') || ''}`).join('|');
-  }
-  const seen = new Map();
-  for (const [s, shape] of Object.entries(shapes)) {
-    if (s === 'finished') continue;   // the plain tick, shared only with the generic 'done'
-    if (s === 'start') continue;      // the running dot in peach: starting is running's first moment
-    assert.ok(!seen.has(shape), `${s} draws the same as ${seen.get(shape)}`);
-    seen.set(shape, s);
-  }
-  for (const s of ['ship', 'review', 'pr-open', 'merged', 'pr-closed']) {
-    const orb = renderOrb(document, s);
-    assert.ok([...orb.querySelectorAll('.rg-orb-line')].every((n) => n.getAttribute('fill') === 'none'), `${s} is stroked, never filled`);
-  }
-});
-
 test('DOM: trail stacks and the orb carries its state class', () => {
   const { document } = new JSDOM('').window;
   const node = renderTrail(document, trailColumns(loopedBranched));

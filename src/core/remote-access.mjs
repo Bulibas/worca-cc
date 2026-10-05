@@ -13,6 +13,7 @@
 //
 // Fail closed: an allowlist without an identity check is a startup error unless
 // the insecure flag says so explicitly. With none of these set, nothing changes.
+import os from 'node:os';
 import { createAccessVerifier, normalizeTeamDomain } from './cf-access.mjs';
 
 export const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
@@ -120,6 +121,19 @@ export function createHostGuard(allowedHosts = []) {
 export function isInContainer(req) {
   return LOOPBACK_ADDRS.has(req.socket?.remoteAddress)
     && LOCAL_HOSTNAMES.has(hostnameOf(req.headers.host));
+}
+
+const unmapV4 = (a) => String(a || '').replace(/^::ffff:/i, '').toLowerCase();
+/**
+ * The TCP peer is one of this machine's own addresses (any interface, loopback included).
+ * With agent isolation on (#529 D4) such a caller may be the agent: in local mode the host guard
+ * accepts `Host: localhost` from any peer, so isInContainer alone misses the container's eth0.
+ */
+export function isPeerThisMachine(req, ifaces = os.networkInterfaces()) {
+  const peer = unmapV4(req?.socket?.remoteAddress);
+  if (!peer) return false;
+  for (const list of Object.values(ifaces || {})) for (const i of list || []) if (unmapV4(i?.address) === peer) return true;
+  return false;
 }
 
 /**

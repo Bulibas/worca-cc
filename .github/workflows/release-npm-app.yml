@@ -17,7 +17,37 @@ permissions:
   contents: read
 
 jobs:
+  # A 4-way split of every tier: tools/test.mjs balances test/*.mjs by
+  # test/timings.json, one runner each. A single runner took ~17 of a ~21-minute release.
+  # Nothing publishes unless every shard passes on the tagged commit.
+  test:
+    name: npm test (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # No build step: plain Node ESM plus a vanilla HTML/CSS/JS frontend.
+      - name: Run tests
+        env:
+          WORCA_TEST_SHARD: ${{ matrix.shard }}/4
+        run: npm test
+
   build-and-publish:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -58,10 +88,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      # No build step: plain Node ESM plus a vanilla HTML/CSS/JS frontend.
-      - name: Run tests
-        run: npm test
 
       - name: Determine npm dist-tag
         id: dist-tag

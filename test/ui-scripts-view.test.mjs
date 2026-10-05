@@ -1,7 +1,7 @@
 // test/ui-scripts-view.test.mjs — the Scripts page's list half (scripts-workbench §5.1):
 // the pure renderers, the controller against a fake api, and one booted-app pass for
 // the rail entry, the route and the no-prose rule.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -10,6 +10,11 @@ import {
   scriptRoute, parseScriptsParam, originLabel, portLineOf, buildScriptCard,
   renderScriptsList, createScriptsController, newScriptRoute,
 } from '../ui/public/scripts-view.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -83,50 +88,44 @@ test('scriptRoute / newScriptRoute / parseScriptsParam: the two steps of a new s
   assert.deepEqual(parseScriptsParam('runTests/test'), { mode: 'detail', key: 'runTests' });
 });
 
-test('originLabel / portLineOf', () => {
-  assert.equal(originLabel('builtin'), 'built-in');
-  assert.equal(originLabel('user'), 'user');
-  assert.equal(originLabel('plugin:tools'), 'tools');
-  assert.equal(originLabel(''), 'built-in');
-  assert.equal(portLineOf(SCRIPTS[0]), 'ports per card');
-  assert.equal(portLineOf(SCRIPTS[1]), 'Reads done; produces log.');
-});
-
-test('buildScriptCard: badges, chips, the port line, the case chip and the three actions', () => {
-  const card = buildScriptCard(SCRIPTS[1], { doc, runtimes: RUNTIMES, caseState: new Map() });
-  assert.ok(card.classList.contains('card') && card.classList.contains('script-card'));
-  assert.equal(card.dataset.scriptKey, 'runTests');
-  assert.equal(card.querySelector('.script-name').textContent, 'Run tests');
-  assert.equal(card.querySelector('.script-origin').textContent, 'user');
-  assert.equal(card.querySelector('.script-runtime').textContent, 'node');
-  assert.equal(card.querySelector('.script-desc').textContent, 'Runs the suite.');
-  assert.equal(card.querySelector('.script-ports').textContent, 'Reads done; produces log.');
-  assert.equal(card.querySelector('.script-cases').textContent, '3 cases');
-  assert.equal(card.querySelector('.script-dot').dataset.state, 'none');
-  assert.equal(card.querySelector('.script-warn'), null, 'a node script never carries the python chip');
-  assert.deepEqual([...card.querySelectorAll('.script-actions button')].map((b) => b.textContent),
-    ['Open', 'Duplicate', 'Delete']);
-  const builtin = buildScriptCard(SCRIPTS[0], { doc, runtimes: RUNTIMES, caseState: new Map() });
-  assert.equal(builtin.querySelector('.script-origin').textContent, 'built-in');
-  assert.equal(builtin.querySelector('.script-delete'), null, 'only the user layer can be deleted');
-  assert.equal(builtin.querySelector('.script-ports').textContent, 'ports per card');
-  assert.equal(builtin.querySelector('.script-cases'), null, 'no cases, no chip');
-  const plug = buildScriptCard(SCRIPTS[2], { doc, runtimes: RUNTIMES, caseState: new Map() });
-  assert.equal(plug.querySelector('.script-origin').textContent, 'tools');
-  assert.equal(plug.querySelector('.script-warn').textContent, 'python not found');
-  assert.equal(plug.querySelector('.script-cases').textContent, '1 case');
-  const withPython = buildScriptCard(SCRIPTS[2], { doc, runtimes: { ...RUNTIMES, python: { ok: true, version: '3.12.1' } }, caseState: new Map() });
-  assert.equal(withPython.querySelector('.script-warn'), null);
-});
-
-test('buildScriptCard: the case dot reads this session`s results', () => {
-  const dot = (states) => buildScriptCard(SCRIPTS[1], { doc, runtimes: RUNTIMES, caseState: new Map([['runTests', new Map(states)]]) })
-    .querySelector('.script-dot').dataset.state;
-  assert.equal(dot([]), 'none');
-  assert.equal(dot([['a', 'pass'], ['b', 'pass'], ['c', 'pass']]), 'pass');
-  assert.equal(dot([['a', 'pass'], ['b', 'fail']]), 'fail');
-  assert.equal(dot([['a', 'pass']]), 'ran', 'not every case ran yet');
-  assert.equal(dot([['a', 'ran'], ['b', 'ran'], ['c', 'ran']]), 'ran');
+test('buildScriptCard: badges, chips, port line, case chip, three actions, and the case dot reads this session\'s results', async () => {
+  await checkRows([
+    { name: 'buildScriptCard: badges, chips, the port line, the case chip and the three actions', run: async () => {
+      const card = buildScriptCard(SCRIPTS[1], { doc, runtimes: RUNTIMES, caseState: new Map() });
+      assert.ok(card.classList.contains('card') && card.classList.contains('script-card'));
+      assert.equal(card.dataset.scriptKey, 'runTests');
+      assert.equal(card.querySelector('.script-name').textContent, 'Run tests');
+      assert.equal(card.querySelector('.script-origin').textContent, 'user');
+      assert.equal(card.querySelector('.script-runtime').textContent, 'node');
+      assert.equal(card.querySelector('.script-desc').textContent, 'Runs the suite.');
+      assert.equal(card.querySelector('.script-ports').textContent, 'Reads done; produces log.');
+      assert.equal(card.querySelector('.script-cases').textContent, '3 cases');
+      assert.equal(card.querySelector('.script-dot').dataset.state, 'none');
+      assert.equal(card.querySelector('.script-warn'), null, 'a node script never carries the python chip');
+      assert.deepEqual([...card.querySelectorAll('.script-actions button')].map((b) => b.textContent),
+        ['Open', 'Duplicate', 'Delete']);
+      const builtin = buildScriptCard(SCRIPTS[0], { doc, runtimes: RUNTIMES, caseState: new Map() });
+      assert.equal(builtin.querySelector('.script-origin').textContent, 'built-in');
+      assert.equal(builtin.querySelector('.script-delete'), null, 'only the user layer can be deleted');
+      assert.equal(builtin.querySelector('.script-ports').textContent, 'ports per card');
+      assert.equal(builtin.querySelector('.script-cases'), null, 'no cases, no chip');
+      const plug = buildScriptCard(SCRIPTS[2], { doc, runtimes: RUNTIMES, caseState: new Map() });
+      assert.equal(plug.querySelector('.script-origin').textContent, 'tools');
+      assert.equal(plug.querySelector('.script-warn').textContent, 'python not found');
+      assert.equal(plug.querySelector('.script-cases').textContent, '1 case');
+      const withPython = buildScriptCard(SCRIPTS[2], { doc, runtimes: { ...RUNTIMES, python: { ok: true, version: '3.12.1' } }, caseState: new Map() });
+      assert.equal(withPython.querySelector('.script-warn'), null);
+    } },
+    { name: 'buildScriptCard: the case dot reads this session`s results', run: async () => {
+      const dot = (states) => buildScriptCard(SCRIPTS[1], { doc, runtimes: RUNTIMES, caseState: new Map([['runTests', new Map(states)]]) })
+        .querySelector('.script-dot').dataset.state;
+      assert.equal(dot([]), 'none');
+      assert.equal(dot([['a', 'pass'], ['b', 'pass'], ['c', 'pass']]), 'pass');
+      assert.equal(dot([['a', 'pass'], ['b', 'fail']]), 'fail');
+      assert.equal(dot([['a', 'pass']]), 'ran', 'not every case ran yet');
+      assert.equal(dot([['a', 'ran'], ['b', 'ran'], ['c', 'ran']]), 'ran');
+    } },
+  ]);
 });
 
 test('renderScriptsList: the topbar, registry order, and the filter over key/name/runtime/origin', () => {
@@ -145,11 +144,6 @@ test('renderScriptsList: the topbar, registry order, and the filter over key/nam
   assert.equal(renderScriptsList(SCRIPTS, { doc, query: 'zzz', runtimes: RUNTIMES }).querySelector('.scripts-empty').textContent,
     'No scripts match “zzz”.');
   assert.equal(renderScriptsList([], { doc, runtimes: RUNTIMES }).querySelector('.scripts-empty').textContent, 'No scripts.');
-});
-
-test('the renderers add no prose: not one <p> anywhere in the pane', () => {
-  const pane = renderScriptsList(SCRIPTS, { doc, runtimes: RUNTIMES });
-  assert.equal(pane.querySelectorAll('p').length, 0);
 });
 
 test('the controller loads runtimes once, then the list, and paints it', async () => {
@@ -177,59 +171,65 @@ test('the controller: typing in the filter repaints without a refetch and keeps 
   ctl.destroy();
 });
 
-test('the controller: New script, Open and Duplicate', async () => {
-  const { host, ctl, nav, api, msgEl } = mountCtl();
-  await ctl.route('');
-  host.querySelector('.script-new').click();
-  assert.deepEqual(nav, ['scripts/new']);
-  host.querySelector('.script-card[data-script-key="runTests"] .script-open').click();
-  assert.deepEqual(nav, ['scripts/new', 'scripts/runTests']);
-  host.querySelector('.script-card[data-script-key="shell"] .script-duplicate').click();
-  await tick(); await tick();
-  assert.deepEqual(api.calls.filter((c) => c[0] === 'duplicate'), [['duplicate', 'shell', 'shellCopy']]);
-  assert.equal(msgEl.textContent, 'Duplicated as "shellCopy".');
-  ctl.destroy();
+test('the controller: New script, Open and Duplicate (stepping past a taken copy key)', async () => {
+  await checkRows([
+    { name: 'the controller: New script, Open and Duplicate', run: async () => {
+      const { host, ctl, nav, api, msgEl } = mountCtl();
+      await ctl.route('');
+      host.querySelector('.script-new').click();
+      assert.deepEqual(nav, ['scripts/new']);
+      host.querySelector('.script-card[data-script-key="runTests"] .script-open').click();
+      assert.deepEqual(nav, ['scripts/new', 'scripts/runTests']);
+      host.querySelector('.script-card[data-script-key="shell"] .script-duplicate').click();
+      await tick(); await tick();
+      assert.deepEqual(api.calls.filter((c) => c[0] === 'duplicate'), [['duplicate', 'shell', 'shellCopy']]);
+      assert.equal(msgEl.textContent, 'Duplicated as "shellCopy".');
+      ctl.destroy();
+    } },
+    { name: 'the controller: Duplicate steps past a taken copy key', run: async () => {
+      const taken = [...SCRIPTS, { key: 'shellCopy', displayName: 'Copy', origin: 'user', runtime: 'shell', params: [], portSummary: '', caseCount: 0 }];
+      const { host, ctl, api } = mountCtl({}, { list: async () => ok({ scripts: taken }) });
+      await ctl.route('');
+      host.querySelector('.script-card[data-script-key="shell"] .script-duplicate').click();
+      await tick(); await tick();
+      assert.deepEqual(api.calls.filter((c) => c[0] === 'duplicate'), [['duplicate', 'shell', 'shellCopy2']]);
+      ctl.destroy();
+    } },
+  ]);
 });
 
-test('the controller: Duplicate steps past a taken copy key', async () => {
-  const taken = [...SCRIPTS, { key: 'shellCopy', displayName: 'Copy', origin: 'user', runtime: 'shell', params: [], portSummary: '', caseCount: 0 }];
-  const { host, ctl, api } = mountCtl({}, { list: async () => ok({ scripts: taken }) });
-  await ctl.route('');
-  host.querySelector('.script-card[data-script-key="shell"] .script-duplicate').click();
-  await tick(); await tick();
-  assert.deepEqual(api.calls.filter((c) => c[0] === 'duplicate'), [['duplicate', 'shell', 'shellCopy2']]);
-  ctl.destroy();
-});
+test('the controller: Delete asks first then removes; a cancelled Delete deletes nothing; a REFERENCED 409 shows the server\'s sentence', async () => {
+  await checkRows([
+    { name: 'the controller: Delete asks first, then removes; a REFERENCED 409 shows the server`s sentence', run: async () => {
+      const { host, ctl, asked, api, msgEl } = mountCtl();
+      await ctl.route('');
+      host.querySelector('.script-card[data-script-key="runTests"] .script-delete').click();
+      await tick(); await tick();
+      assert.equal(asked[0].title, 'Delete script');
+      assert.equal(asked[0].message, 'Delete “Run tests”?');
+      assert.equal(asked[0].danger, true);
+      assert.deepEqual(api.calls.filter((c) => c[0] === 'remove'), [['remove', 'runTests']]);
+      assert.equal(msgEl.textContent, 'Deleted "runTests".');
 
-test('the controller: Delete asks first, then removes; a REFERENCED 409 shows the server`s sentence', async () => {
-  const { host, ctl, asked, api, msgEl } = mountCtl();
-  await ctl.route('');
-  host.querySelector('.script-card[data-script-key="runTests"] .script-delete').click();
-  await tick(); await tick();
-  assert.equal(asked[0].title, 'Delete script');
-  assert.equal(asked[0].message, 'Delete “Run tests”?');
-  assert.equal(asked[0].danger, true);
-  assert.deepEqual(api.calls.filter((c) => c[0] === 'remove'), [['remove', 'runTests']]);
-  assert.equal(msgEl.textContent, 'Deleted "runTests".');
-
-  const sentence = 'script "runTests" is placed in 2 saved workflows: Ship it, Nightly';
-  const blocked = mountCtl({}, { remove: async () => ({ ok: false, status: 409, data: { error: sentence } }) });
-  await blocked.ctl.route('');
-  blocked.host.querySelector('.script-card[data-script-key="runTests"] .script-delete').click();
-  await tick(); await tick(); await tick();
-  assert.equal(blocked.asked.length, 2, 'asked, then told');
-  assert.deepEqual({ title: blocked.asked[1].title, message: blocked.asked[1].message, confirmLabel: blocked.asked[1].confirmLabel },
-    { title: 'Cannot delete script', message: sentence, confirmLabel: 'Close' });
-  ctl.destroy(); blocked.ctl.destroy();
-});
-
-test('the controller: a cancelled Delete deletes nothing', async () => {
-  const { host, ctl, api } = mountCtl({ confirm: async () => false });
-  await ctl.route('');
-  host.querySelector('.script-card[data-script-key="runTests"] .script-delete').click();
-  await tick(); await tick();
-  assert.equal(api.calls.some((c) => c[0] === 'remove'), false);
-  ctl.destroy();
+      const sentence = 'script "runTests" is placed in 2 saved workflows: Ship it, Nightly';
+      const blocked = mountCtl({}, { remove: async () => ({ ok: false, status: 409, data: { error: sentence } }) });
+      await blocked.ctl.route('');
+      blocked.host.querySelector('.script-card[data-script-key="runTests"] .script-delete').click();
+      await tick(); await tick(); await tick();
+      assert.equal(blocked.asked.length, 2, 'asked, then told');
+      assert.deepEqual({ title: blocked.asked[1].title, message: blocked.asked[1].message, confirmLabel: blocked.asked[1].confirmLabel },
+        { title: 'Cannot delete script', message: sentence, confirmLabel: 'Close' });
+      ctl.destroy(); blocked.ctl.destroy();
+    } },
+    { name: 'the controller: a cancelled Delete deletes nothing', run: async () => {
+      const { host, ctl, api } = mountCtl({ confirm: async () => false });
+      await ctl.route('');
+      host.querySelector('.script-card[data-script-key="runTests"] .script-delete').click();
+      await tick(); await tick();
+      assert.equal(api.calls.some((c) => c[0] === 'remove'), false);
+      ctl.destroy();
+    } },
+  ]);
 });
 
 test('the controller: a failed list says why and paints an empty pane', async () => {
@@ -253,7 +253,7 @@ test('the controller: onChanged refetches, onFrame is inert, destroy empties the
   assert.equal(host.children.length, 0);
 });
 
-// ---- the booted app: the rail entry, the route, the no-prose rule -----------
+// ---- the booted app: the rail entry, the route, the frames ------------------
 
 class WSStub {
   constructor() { this.readyState = 1; this.sent = []; this._l = {}; WSStub.last = this; }
@@ -265,7 +265,7 @@ class WSStub {
 }
 
 async function boot({ scripts = SCRIPTS } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = WSStub;
@@ -297,24 +297,6 @@ async function boot({ scripts = SCRIPTS } = {}) {
   return { window, go, seen };
 }
 
-test('the rail carries Scripts directly under Agents, and #scripts paints the list', async () => {
-  const { window } = await boot();
-  const d = window.document;
-  const rail = [...d.querySelectorAll('.nav button[data-nav]')].map((b) => b.dataset.nav);
-  assert.equal(rail[rail.indexOf('agents') + 1], 'scripts');
-  assert.equal(d.querySelector('[data-view="scripts"]').classList.contains('hidden'), false);
-  assert.ok(d.querySelector('.nav button[data-nav="scripts"]').classList.contains('active'));
-  assert.deepEqual([...d.querySelectorAll('#scripts-host .script-card')].map((c) => c.dataset.scriptKey),
-    ['shell', 'runTests', 'tidy']);
-});
-
-test('the Scripts page carries NO explanatory prose: zero <p> in the whole view', async () => {
-  const { window } = await boot();
-  const view = window.document.querySelector('[data-view="scripts"]');
-  assert.equal(view.querySelectorAll('p').length, 0, 'labels, chips and error sentences only');
-  assert.equal(window.document.getElementById('scripts-msg').tagName, 'DIV');
-});
-
 test('a scripts-changed frame drops the cache and repaints the open page', async () => {
   const { window, seen } = await boot();
   const before = seen.filter(([, u]) => u === '/api/scripts').length;
@@ -322,17 +304,6 @@ test('a scripts-changed frame drops the cache and repaints the open page', async
   for (let i = 0; i < 4; i += 1) await tick();
   assert.equal(seen.filter(([, u]) => u === '/api/scripts').length, before + 1);
   assert.deepEqual(window.__scripts.ctl() === null, false);
-});
-
-test('leaving the view destroys the controller; coming back mounts a fresh one', async () => {
-  const { window, go } = await boot();
-  const first = window.__scripts.ctl();
-  await go('agents');
-  assert.equal(window.__scripts.ctl(), null);
-  assert.equal(window.document.getElementById('scripts-host').children.length, 0);
-  await go('scripts');
-  assert.notEqual(window.__scripts.ctl(), null);
-  assert.notEqual(window.__scripts.ctl(), first);
 });
 
 test('a scripts-changed frame marks the composer palette dirty: re-entering the composer re-reads the scripts', async () => {

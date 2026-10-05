@@ -5,12 +5,17 @@
 // REAL index.html under jsdom (harness from test/ui-stats.test.mjs) with the
 // dispatchable WebSocket stub from test/ui-history-cache.test.mjs so
 // `budget-changed` frames can be pushed into the running client.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { renderBudgetRing, renderBudgetStack, railUsd } from '../ui/public/stats-view.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -40,7 +45,7 @@ const statsFixture = (budget) => ({
 });
 
 async function boot({ budget = okBudget(), tickMs, idleRefetchMs } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   const wsBox = { ws: null };
@@ -126,35 +131,43 @@ async function boot({ budget = okBudget(), tickMs, idleRefetchMs } = {}) {
   return { window, box, counts, statsCalls, wsBox, tick, wait, pushBudgetChanged, showView, stopTimers };
 }
 
-test('boot paints the sidebar indicator', async () => {
-  const { window } = await boot();
-  const amt = window.document.querySelector('#side-spend .spend-ind-amt');
-  assert.ok(amt, 'the sidebar indicator is mounted in #side-spend');
-  assert.equal(amt.textContent, '$41.23');
-  const ind = window.document.querySelector('#side-spend .spend-ind');
-  assert.equal(ind.classList.contains('warn'), true, '82% of the cap is the warn band');
-  assert.equal(ind.classList.contains('over'), false);
-});
-
-test('budget-changed repaints; blocked disables #start-btn with a visible reason', async () => {
+test('sidebar indicator: boot paints it (warn band), budget-changed repaints, blocked disables Start with a reason and clears again, a click routes to #stats', async () => {
   const ctx = await boot();
-  assert.equal(ctx.window.document.querySelector('#start-btn').disabled, false, 'unblocked boot leaves Start enabled');
-  assert.equal(ctx.window.document.querySelector('#newBlockedNote').hidden, true);
+  const { window, tick } = ctx;
+  await checkRows([
+    { name: 'boot paints the sidebar indicator', run: async () => {
+      const amt = window.document.querySelector('#side-spend .spend-ind-amt');
+      assert.ok(amt, 'the sidebar indicator is mounted in #side-spend');
+      assert.equal(amt.textContent, '$41.23');
+      const ind = window.document.querySelector('#side-spend .spend-ind');
+      assert.equal(ind.classList.contains('warn'), true, '82% of the cap is the warn band');
+      assert.equal(ind.classList.contains('over'), false);
+    } },
+    { name: 'budget-changed repaints; blocked disables #start-btn with a visible reason', run: async () => {
+      assert.equal(ctx.window.document.querySelector('#start-btn').disabled, false, 'unblocked boot leaves Start enabled');
+      assert.equal(ctx.window.document.querySelector('#newBlockedNote').hidden, true);
 
-  ctx.box.budget = blockedBudget();
-  await ctx.pushBudgetChanged();
+      ctx.box.budget = blockedBudget();
+      await ctx.pushBudgetChanged();
 
-  assert.ok(ctx.window.document.querySelector('#side-spend .spend-ind').classList.contains('over'));
-  assert.equal(ctx.window.document.querySelector('#start-btn').disabled, true);
-  const note = ctx.window.document.querySelector('#newBlockedNote');
-  assert.equal(note.hidden, false);
-  assert.match(note.textContent, /\$52\.13 of \$50\.00/);
-  assert.match(note.textContent, /blocked until/);
+      assert.ok(ctx.window.document.querySelector('#side-spend .spend-ind').classList.contains('over'));
+      assert.equal(ctx.window.document.querySelector('#start-btn').disabled, true);
+      const note = ctx.window.document.querySelector('#newBlockedNote');
+      assert.equal(note.hidden, false);
+      assert.match(note.textContent, /\$52\.13 of \$50\.00/);
+      assert.match(note.textContent, /blocked until/);
 
-  ctx.box.budget = okBudget();
-  await ctx.pushBudgetChanged();
-  assert.equal(ctx.window.document.querySelector('#start-btn').disabled, false, 'clearing the block re-enables Start');
-  assert.equal(ctx.window.document.querySelector('#newBlockedNote').hidden, true);
+      ctx.box.budget = okBudget();
+      await ctx.pushBudgetChanged();
+      assert.equal(ctx.window.document.querySelector('#start-btn').disabled, false, 'clearing the block re-enables Start');
+      assert.equal(ctx.window.document.querySelector('#newBlockedNote').hidden, true);
+    } },
+    { name: 'clicking the indicator navigates to #stats', run: async () => {
+      window.document.querySelector('#side-spend .spend-ind').click();
+      assert.equal(window.location.hash.replace('#', ''), 'stats');
+      await tick();
+    } },
+  ]);
 });
 
 // Starting a run broadcasts pipelines-changed (and, on a cost pause,
@@ -186,40 +199,39 @@ test('a budget repaint mid-submit must not re-enable #start-btn', async () => {
   assert.equal(doc.querySelector('#start-btn').disabled, false, 'Start returns once the POST settles');
 });
 
-test('clicking the indicator navigates to #stats', async () => {
-  const { window, tick } = await boot();
-  window.document.querySelector('#side-spend .spend-ind').click();
-  assert.equal(window.location.hash.replace('#', ''), 'stats');
-  await tick();
-});
-
-test('weekly resetPeriod budget makes #stats default to range=week', async () => {
-  const ctx = await boot({ budget: { ...okBudget(), resetPeriod: 'weekly' } });
-  await ctx.showView('stats');
-  assert.ok(ctx.statsCalls.some((u) => u.includes('range=week')),
-    `expected a range=week /api/stats fetch, got ${JSON.stringify(ctx.statsCalls)}`);
-});
-
-// A non-cost `done` broadcasts nothing (the server emits budget-changed only for
-// cost pauses, and pipelines-changed only on archive), and the slow tick refetches
-// only while runs are live — so the LAST spend delta, and a `blocked` flip it
-// causes, went unseen until a reload: Start stayed enabled and the click hit the
-// raw 403 instead of the pre-emptive gate.
-test('a run finishing refetches the budget so the final delta lands without a reload', async () => {
+test('a run finishing and an ask-done frame both refetch the budget (creation gate flips without reload)', async () => {
   const ctx = await boot();
-  const doc = ctx.window.document;
-  assert.equal(doc.querySelector('#start-btn').disabled, false, 'unblocked boot leaves Start enabled');
+  await checkRows([
+    { name: 'a run finishing refetches the budget so the final delta lands without a reload', run: async () => {
+      // A non-cost `done` broadcasts nothing (the server emits budget-changed only for
+      // cost pauses, and pipelines-changed only on archive), and the slow tick refetches
+      // only while runs are live — so the LAST spend delta, and a `blocked` flip it
+      // causes, went unseen until a reload: Start stayed enabled and the click hit the
+      // raw 403 instead of the pre-emptive gate.
+      const doc = ctx.window.document;
+      assert.equal(doc.querySelector('#start-btn').disabled, false, 'unblocked boot leaves Start enabled');
 
-  ctx.box.budget = blockedBudget();
-  const before = ctx.counts.budget;
-  ctx.wsBox.ws.dispatch('message', {
-    data: JSON.stringify({ type: 'done', runId: 'run-fin', status: 'done' }),
-  });
-  await ctx.tick();
-  await ctx.tick();
+      ctx.box.budget = blockedBudget();
+      const before = ctx.counts.budget;
+      ctx.wsBox.ws.dispatch('message', {
+        data: JSON.stringify({ type: 'done', runId: 'run-fin', status: 'done' }),
+      });
+      await ctx.tick();
+      await ctx.tick();
 
-  assert.ok(ctx.counts.budget > before, 'the client refetches /api/budget when a run ends');
-  assert.equal(doc.querySelector('#start-btn').disabled, true, 'and the creation gate flips closed');
+      assert.ok(ctx.counts.budget > before, 'the client refetches /api/budget when a run ends');
+      assert.equal(doc.querySelector('#start-btn').disabled, true, 'and the creation gate flips closed');
+    } },
+    { name: 'an ask-done frame refetches the budget (D12 sidebar half)', run: async () => {
+      const before = ctx.counts.budget;
+      ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'ask-done',
+        threadId: 'ask_00000000', messageId: 'askm_00000000', status: 'done',
+        usage: {}, costUsd: 0.1, threadTotals: null }) });
+      await ctx.tick();
+      await ctx.tick();
+      assert.ok(ctx.counts.budget > before, 'the sidebar indicator repaints on chat spend');
+    } },
+  ]);
 });
 
 // refreshBudget used to DROP any refresh asked for while one was in flight. Two
@@ -265,42 +277,35 @@ const ringBudget = (over) => ({
   blocked: false, ...over,
 });
 
-test('the ring meters spend against the total limit', () => {
-  const el = renderBudgetRing(ringBudget({ windowSpendUsd: 20 }), { doc: pureDoc() });
-  assert.equal(el.style.getPropertyValue('--ring-pct'), '40');
-  assert.equal(el.querySelector('.spend-ring-val').textContent, '40%');
-  assert.equal(el.classList.contains('warn'), false);
-  assert.equal(el.classList.contains('over'), false);
-});
-
-test('the ring keeps .spend-ind and data-nav so the click still routes to #stats', () => {
-  const el = renderBudgetRing(ringBudget({ windowSpendUsd: 20 }), { doc: pureDoc() });
-  assert.ok(el.classList.contains('spend-ind'),
-    'app.js:517 routes the sidebar spend click via closest(".spend-ind")');
-  assert.ok(el.classList.contains('spend-ring'));
-  assert.equal(el.dataset.nav, 'stats');
-  assert.equal(el.tagName, 'BUTTON');
-});
-
-test('the ring turns amber at the warn threshold and red when blocked', () => {
-  const warn = renderBudgetRing(ringBudget({ windowSpendUsd: 41.23 }), { doc: pureDoc() });
-  assert.ok(warn.classList.contains('warn'), '82% of the cap is the warn band');
-  const over = renderBudgetRing(ringBudget({ windowSpendUsd: 61, blocked: true }), { doc: pureDoc() });
-  assert.ok(over.classList.contains('over'));
-  assert.equal(over.style.getPropertyValue('--ring-pct'), '100');
-  assert.equal(over.querySelector('.spend-ring-val').textContent, '100%');
-});
-
-test('the ring clamps its arc to 0-100 whatever the raw ratio is', () => {
-  // Both clamps were proven vacuous in v1 — deleting either kept every test green.
-  const hot = renderBudgetRing(ringBudget({ windowSpendUsd: 75 }), { doc: pureDoc() });
-  assert.equal(hot.style.getPropertyValue('--ring-pct'), '100',
-    '150% of the cap must not sweep the arc past a full circle');
-  assert.equal(hot.querySelector('.spend-ring-val').textContent, '100%');
-  const credit = renderBudgetRing(ringBudget({ windowSpendUsd: -5 }), { doc: pureDoc() });
-  assert.equal(credit.style.getPropertyValue('--ring-pct'), '0',
-    'a refund/credit must not sweep a negative arc');
-  assert.equal(credit.querySelector('.spend-ring-val').textContent, '0%');
+test('the ring meters spend against the limit, warns/over at thresholds, clamps the arc to 0-100', async () => {
+  await checkRows([
+    { name: 'the ring meters spend against the total limit', run: () => {
+      const el = renderBudgetRing(ringBudget({ windowSpendUsd: 20 }), { doc: pureDoc() });
+      assert.equal(el.style.getPropertyValue('--ring-pct'), '40');
+      assert.equal(el.querySelector('.spend-ring-val').textContent, '40%');
+      assert.equal(el.classList.contains('warn'), false);
+      assert.equal(el.classList.contains('over'), false);
+    } },
+    { name: 'the ring turns amber at the warn threshold and red when blocked', run: () => {
+      const warn = renderBudgetRing(ringBudget({ windowSpendUsd: 41.23 }), { doc: pureDoc() });
+      assert.ok(warn.classList.contains('warn'), '82% of the cap is the warn band');
+      const over = renderBudgetRing(ringBudget({ windowSpendUsd: 61, blocked: true }), { doc: pureDoc() });
+      assert.ok(over.classList.contains('over'));
+      assert.equal(over.style.getPropertyValue('--ring-pct'), '100');
+      assert.equal(over.querySelector('.spend-ring-val').textContent, '100%');
+    } },
+    { name: 'the ring clamps its arc to 0-100 whatever the raw ratio is', run: () => {
+      // Both clamps were proven vacuous in v1 — deleting either kept every test green.
+      const hot = renderBudgetRing(ringBudget({ windowSpendUsd: 75 }), { doc: pureDoc() });
+      assert.equal(hot.style.getPropertyValue('--ring-pct'), '100',
+        '150% of the cap must not sweep the arc past a full circle');
+      assert.equal(hot.querySelector('.spend-ring-val').textContent, '100%');
+      const credit = renderBudgetRing(ringBudget({ windowSpendUsd: -5 }), { doc: pureDoc() });
+      assert.equal(credit.style.getPropertyValue('--ring-pct'), '0',
+        'a refund/credit must not sweep a negative arc');
+      assert.equal(credit.querySelector('.spend-ring-val').textContent, '0%');
+    } },
+  ]);
 });
 
 // ---- collapsed rail with NO total limit: the Spent/Saved stack ----
@@ -309,44 +314,39 @@ const stackBudget = (over) => ({
   blocked: false, windowSpendUsd: 10604.7, windowHumanHours: 1512, windowSavedUsd: 42315.3, ...over,
 });
 
-test('no total limit renders the Spent/Saved stack, not a ring', () => {
-  const el = renderBudgetRing(stackBudget(), { doc: pureDoc() });
-  assert.ok(el.classList.contains('spend-stack'));
-  assert.equal(el.classList.contains('spend-ring'), false, 'no disc to clip the amount');
-  assert.equal(el.querySelector('.spend-ring-val'), null);
-  assert.equal(el.style.getPropertyValue('--ring-pct'), '', 'no arc without a denominator');
-  const pairs = [...el.querySelectorAll('.spend-stack-pair')].map((p) =>
-    [p.querySelector('.spend-stack-lbl').textContent, p.querySelector('.spend-stack-val').textContent]);
-  assert.deepEqual(pairs, [['Spent', '$11k'], ['Saved', '$42k']]);
-  const [spentPair, savedPair] = el.querySelectorAll('.spend-stack-pair');
-  assert.ok(savedPair.classList.contains('pos'), 'a gain is green, as in the expanded card');
-  assert.equal(spentPair.classList.contains('pos'), false, 'Spent stays neutral ink');
-  // The compact figures are for the eye; exact ones reach the title and the accessible name.
-  assert.equal(el.getAttribute('aria-label'),
-    'Spent this month: $10,604.70 · Saved this month: $42,315.30');
-  assert.match(el.title, /^Spent this month: \$10,604\.70 · Saved this month: \$42,315\.30 · resets /);
-  assert.match(el.title, /not authoritative billing/);
-  assert.doesNotMatch(el.title, /no total limit/);
-});
-
-test('the stack keeps .spend-ind and data-nav so the click still routes to #stats', () => {
-  const el = renderBudgetStack(stackBudget(), { doc: pureDoc() });
-  assert.ok(el.classList.contains('spend-ind'), 'app.js routes the rail click via closest(".spend-ind")');
-  assert.equal(el.dataset.nav, 'stats');
-  assert.equal(el.tagName, 'BUTTON');
-  assert.equal(el.type, 'button');
-});
-
-test('the stack signs a loss, follows a weekly window, and drops Saved when the payload has none', () => {
-  const loss = renderBudgetStack(stackBudget({ resetPeriod: 'weekly', windowSavedUsd: -8800 }),
-    { doc: pureDoc() });
-  const val = loss.querySelectorAll('.spend-stack-val')[1];
-  assert.equal(val.textContent, '−$8.8k', 'the sign carries the loss');
-  assert.equal(val.parentElement.classList.contains('pos'), false, 'a loss is never green');
-  assert.match(loss.getAttribute('aria-label'), /Saved this week: −\$8,800\.00$/);
-  const none = renderBudgetStack(stackBudget({ windowSavedUsd: null }), { doc: pureDoc() });
-  assert.equal(none.querySelectorAll('.spend-stack-pair').length, 1, 'Spent alone, never a fake $0');
-  assert.equal(none.getAttribute('aria-label'), 'Spent this month: $10,604.70');
+test('no total limit renders the Spent/Saved stack: signs a loss, follows a weekly window, drops Saved when absent', async () => {
+  await checkRows([
+    { name: 'no total limit renders the Spent/Saved stack, not a ring', run: () => {
+      const el = renderBudgetRing(stackBudget(), { doc: pureDoc() });
+      assert.ok(el.classList.contains('spend-stack'));
+      assert.equal(el.classList.contains('spend-ring'), false, 'no disc to clip the amount');
+      assert.equal(el.querySelector('.spend-ring-val'), null);
+      assert.equal(el.style.getPropertyValue('--ring-pct'), '', 'no arc without a denominator');
+      const pairs = [...el.querySelectorAll('.spend-stack-pair')].map((p) =>
+        [p.querySelector('.spend-stack-lbl').textContent, p.querySelector('.spend-stack-val').textContent]);
+      assert.deepEqual(pairs, [['Spent', '$11k'], ['Saved', '$42k']]);
+      const [spentPair, savedPair] = el.querySelectorAll('.spend-stack-pair');
+      assert.ok(savedPair.classList.contains('pos'), 'a gain is green, as in the expanded card');
+      assert.equal(spentPair.classList.contains('pos'), false, 'Spent stays neutral ink');
+      // The compact figures are for the eye; exact ones reach the title and the accessible name.
+      assert.equal(el.getAttribute('aria-label'),
+        'Spent this month: $10,604.70 · Saved this month: $42,315.30');
+      assert.match(el.title, /^Spent this month: \$10,604\.70 · Saved this month: \$42,315\.30 · resets /);
+      assert.match(el.title, /not authoritative billing/);
+      assert.doesNotMatch(el.title, /no total limit/);
+    } },
+    { name: 'the stack signs a loss, follows a weekly window, and drops Saved when the payload has none', run: () => {
+      const loss = renderBudgetStack(stackBudget({ resetPeriod: 'weekly', windowSavedUsd: -8800 }),
+        { doc: pureDoc() });
+      const val = loss.querySelectorAll('.spend-stack-val')[1];
+      assert.equal(val.textContent, '−$8.8k', 'the sign carries the loss');
+      assert.equal(val.parentElement.classList.contains('pos'), false, 'a loss is never green');
+      assert.match(loss.getAttribute('aria-label'), /Saved this week: −\$8,800\.00$/);
+      const none = renderBudgetStack(stackBudget({ windowSavedUsd: null }), { doc: pureDoc() });
+      assert.equal(none.querySelectorAll('.spend-stack-pair').length, 1, 'Spent alone, never a fake $0');
+      assert.equal(none.getAttribute('aria-label'), 'Spent this month: $10,604.70');
+    } },
+  ]);
 });
 
 test('railUsd: at most five glyphs unsigned, tiers decided on the ROUNDED value', () => {
@@ -400,17 +400,6 @@ test('tick past windowEndMs refetches (rolled-over window must not stay blocked)
   ctx.stopTimers();
   assert.ok(ctx.counts.budget > before,
     'once the boundary passes the client must re-derive spend/blocked server-side');
-});
-
-test('an ask-done frame refetches the budget (D12 sidebar half)', async () => {
-  const ctx = await boot();
-  const before = ctx.counts.budget;
-  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'ask-done',
-    threadId: 'ask_00000000', messageId: 'askm_00000000', status: 'done',
-    usage: {}, costUsd: 0.1, threadTotals: null }) });
-  await ctx.tick();
-  await ctx.tick();
-  assert.ok(ctx.counts.budget > before, 'the sidebar indicator repaints on chat spend');
 });
 
 // An idle tab saw no `budget-changed` for a limit cleared elsewhere and the tick

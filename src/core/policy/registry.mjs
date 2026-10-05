@@ -16,6 +16,7 @@
 // format change). Every field lists the kinds it accepts; the editor disables the rest.
 
 import { domainError } from '../web-allowlist.mjs';
+import { FIELD_LABELS } from '../../shared/away-mode/labels.mjs';
 
 export const POLICY_SCHEMA = 1;
 export const KINDS = Object.freeze(['default', 'soft', 'hard']);
@@ -27,6 +28,7 @@ export const TEXT_MAX = 200;
 
 const GROUPS = Object.freeze({
   cost: 'Cost', ask: 'Ask Worca', guardrails: 'Guardrails', models: 'Models', plugins: 'Plugins', runs: 'Runs',
+  night: 'Away mode',
 });
 
 /**
@@ -54,11 +56,30 @@ export const FIELDS = Object.freeze([
   { key: 'models.hideBuiltins', group: 'models', label: 'Hide built-in models', help: 'Cosmetic; ids still resolve.', type: 'bool', kinds: ['default'], local: 'hideBuiltinModels' },
   { key: 'plugins.marketplaces', group: 'plugins', label: 'Marketplaces', help: 'Added to every teammate once; a local removal is remembered.', type: 'string[]', kinds: ['default'] },
   { key: 'plugins.required', group: 'plugins', label: 'Required plugins', help: 'Missing or below the floor: the setup checklist offers to install, with consent. Never automatic.', type: 'plugins', kinds: ['soft'] },
+  // MCP registry spec §11.1. `workspaceRuns: false`: refused in the workspaceRuns block (a workspace run takes only the workspace policy's Team set).
+  { key: 'mcp.required', group: 'plugins', label: 'Required MCP servers', help: 'Each developer turns them on with consent; they join the Team set. Never automatic.', type: 'mcpServers', kinds: ['soft'], workspaceRuns: false },
   { key: 'plugins.blocked', group: 'plugins', label: 'Blocked plugins', help: 'An enabled blocked plugin warns and is recorded; it is never disabled for you.', type: 'string[]', kinds: ['soft'] },
   { key: 'workflows.default', group: 'runs', label: 'Default workflow', help: 'A built-in (wf_*) or plugin (wfp_*) workflow id. Applies when the project has no active workflow.', type: 'string', kinds: ['default'] },
   { key: 'run.humanInLoop', group: 'runs', label: 'Human in the loop', help: 'Applies until the project sets its own switch.', type: 'bool', kinds: ['default'] },
   { key: 'metrics.record', group: 'runs', label: 'Record runs to team metrics', help: 'Expected on: the Projects cell hints when "Include my runs" is off.', type: 'bool', kinds: ['soft'] },
   { key: 'worca.minVersion', group: 'runs', label: 'Minimum Worca version', help: 'An older client shows a banner and logs a note.', type: 'semver', kinds: ['soft'] },
+  // Away mode (src/core/night/*): `night: true` makes validateValue run the night leaf's own
+  // field rules after the base-type check, so the rules live in one place. Labels: src/shared/away-mode/labels.mjs.
+  { key: 'night.enabled', group: 'night', label: FIELD_LABELS.enabled.label, help: FIELD_LABELS.enabled.hint || 'On: All runs. Off: Only runs I marked.', type: 'bool', kinds: ['default'], night: true },
+  { key: 'night.window', group: 'night', label: FIELD_LABELS.window.label, help: FIELD_LABELS.window.hint, type: 'string', kinds: ['default'], night: true },
+  { key: 'night.timeZone', group: 'night', label: FIELD_LABELS.timeZone.label, help: FIELD_LABELS.timeZone.hint, type: 'string', kinds: ['default'], night: true },
+  { key: 'night.graceMinutes', group: 'night', label: FIELD_LABELS.graceMinutes.label, help: FIELD_LABELS.graceMinutes.hint, type: 'int', min: 1, max: 1440, kinds: ['default'], night: true },
+  { key: 'night.strategy', group: 'night', label: FIELD_LABELS.strategy.label, help: FIELD_LABELS.strategy.hint, type: 'enum', values: ['weights', 'analysis', 'mixed'], kinds: ['default'], night: true },
+  { key: 'night.minConfidence', group: 'night', label: FIELD_LABELS.minConfidence.label, help: FIELD_LABELS.minConfidence.hint, type: 'int', min: 0, max: 100, kinds: ['default'], night: true },
+  { key: 'night.minMargin', group: 'night', label: FIELD_LABELS.minMargin.label, help: FIELD_LABELS.minMargin.hint, type: 'int', min: 0, max: 100, kinds: ['default'], night: true },
+  { key: 'night.criteria', group: 'night', label: FIELD_LABELS.criteria.label, help: FIELD_LABELS.criteria.hint, type: 'criteria', kinds: ['default'], night: true },
+  { key: 'night.neverDecide', group: 'night', label: FIELD_LABELS.neverDecide.label, help: FIELD_LABELS.neverDecide.hint, type: 'string[]', kinds: ['default'], night: true },
+  { key: 'night.spendCapUsd', group: 'night', label: FIELD_LABELS.spendCapUsd.label, help: FIELD_LABELS.spendCapUsd.hint, type: 'usd-or-null', min: 0.1, max: 10000, kinds: ['default'], night: true },
+  { key: 'night.maxDecisions', group: 'night', label: FIELD_LABELS.maxDecisions.label, help: FIELD_LABELS.maxDecisions.hint, type: 'int', min: 1, max: 500, kinds: ['default'], night: true },
+  { key: 'night.maxExtraCycles', group: 'night', label: FIELD_LABELS.maxExtraCycles.label, help: FIELD_LABELS.maxExtraCycles.hint, type: 'int', min: 0, max: 10, kinds: ['default'], night: true },
+  { key: 'night.allowCostCapOverride', group: 'night', label: FIELD_LABELS.allowCostCapOverride.label, help: FIELD_LABELS.allowCostCapOverride.hint, type: 'bool', kinds: ['default'], night: true },
+  { key: 'night.deciderModel', group: 'night', label: FIELD_LABELS.deciderModel.label, help: FIELD_LABELS.deciderModel.hint, type: 'string', kinds: ['default'], night: true },
+  { key: 'night.deciderEffort', group: 'night', label: FIELD_LABELS.deciderEffort.label, help: FIELD_LABELS.deciderEffort.hint, type: 'enum', values: [...NIGHT_EFFORTS], kinds: ['default'], night: true },
 ]);
 
 const BY_KEY = new Map(FIELDS.map((f) => [f.key, f]));
@@ -72,9 +93,12 @@ const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:\-[\]]{0,199}$/;
 const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]{0,63}$/;
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
-// The one import: the zero-import model-env leaf, for the bridged-model
-// `upstream` validator every catalog layer shares (model-bridge-design.md §6.3).
+// Zero-import leaves only: model-env for the bridged-model `upstream` validator every
+// catalog layer shares (model-bridge-design.md §6.3), night/config for the night.* rules.
 import { assertModelUpstream, upstreamEnvConflict } from '../model-env.mjs';
+import { fieldError as nightFieldError, NIGHT_EFFORTS } from '../night/config.mjs';
+// The MCP definition rules (MCP registry spec §4.1, §4.3): pure, shared with manual definitions.
+import { validateMcpDefinition, screenNonSecretValue, SERVER_NAME_RE } from '../mcp/definitions.mjs';
 
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const clip = (v, max = TEXT_MAX) => {
@@ -89,8 +113,73 @@ const finiteNum = (v) => typeof v === 'number' && Number.isFinite(v);
 export function looksLikeSecret(v) {
   const s = String(v ?? '');
   if (/^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(s)) return false;           // ${VAR} indirection is the sanctioned form
-  if (/^(sk-|xox[abp]-|ghp_|gho_|github_pat_|glpat-|AKIA|eyJ[A-Za-z0-9_-]{10,}\.)/.test(s)) return true;
-  return /^[A-Za-z0-9+/_=-]{40,}$/.test(s);                                 // a long opaque token
+  // No `{n,}` run over the text: V8 keeps a backtrack entry per character and throws RangeError on a run of
+  // about 5.5M characters (a policy doc, a manifest, an 8 MB body). `run` = the length of the leading run.
+  const run = (outside) => { const i = s.search(outside); return i < 0 ? s.length : i; };
+  if (/^(sk-|xox[abp]-|ghp_|gho_|github_pat_|glpat-|AKIA)/.test(s)) return true;
+  if (s.startsWith('eyJ') && run(/[^A-Za-z0-9_-]/) >= 13 && s[run(/[^A-Za-z0-9_-]/)] === '.') return true;
+  if (/^(\/|\.\/|~\/|[A-Za-z]:[\\/])/.test(s)) return false;                // a path, not a token
+  return s.length >= 40 && run(/[^A-Za-z0-9+/_=-]/) === s.length;          // a long opaque token
+}
+
+const MCP_VALUE_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
+// A policy value in a message: a JSON object whose `toString` is no function throws in String(), so show it as JSON.
+const shown = (x) => (typeof x === 'string' ? x : JSON.stringify(x) ?? String(x));
+/** One `mcp.required` entry → { entry } normalised (§4.1 shape, defaults filled), or { error }. */
+function normalizeMcpEntry(e) {
+  if (!isPlainObject(e)) return { error: 'must be an object' };
+  const { values: rawValues, ...rest } = e;
+  let entry; let fields = null;
+  if (rest.plugin !== undefined) {
+    if (!(typeof rest.plugin === 'string' && PLUGIN_NAME_RE.test(rest.plugin))) return { error: `plugin "${shown(rest.plugin)}" is not a valid plugin name` };
+    if (!(typeof rest.server === 'string' && SERVER_NAME_RE.test(rest.server))) return { error: `server "${shown(rest.server)}" is not a valid server name` };
+    entry = { plugin: rest.plugin, server: rest.server };
+  } else {
+    const { name, ...raw } = rest;
+    const { def, errors } = validateMcpDefinition(raw, { name, source: 'policy' });
+    if (!def) return { error: errors[0] };
+    for (const k of ['args', 'env', 'headers']) if (def[k] && !Object.keys(def[k]).length) delete def[k];   // empty ≡ absent (consent hash)
+    entry = { name, ...def };
+    fields = new Map(def.fields.map((f) => [f.key, f]));
+  }
+  if (rawValues !== undefined) {
+    if (!isPlainObject(rawValues)) return { error: 'values must be an object' };
+    const values = {};
+    for (const [k, v] of Object.entries(rawValues)) {
+      const f = fields ? fields.get(k) : null;
+      if (fields ? !f : !MCP_VALUE_KEY_RE.test(k)) return { error: `values.${k}: no such field` };
+      if (f?.secret) return { error: `values.${k}: a secret field — each developer sets it` };
+      const bad = typeof v === 'string' ? screenNonSecretValue(v) : 'must be a string';
+      if (bad) return { error: `values.${k}: ${bad}` };
+      values[k] = v;
+    }
+    if (Object.keys(values).length) entry.values = values;
+  }
+  return { entry };
+}
+const mcpLabel = (e, i) => (!isPlainObject(e) ? `entry ${i + 1}`
+  : typeof e.plugin === 'string' ? `${e.plugin}/${shown(e.server)}` : typeof e.name === 'string' ? e.name : `entry ${i + 1}`);
+/** Keep the valid `mcp.required` entries; one "<label>: <why>" per dropped entry (a bad entry never drops the field). */
+function normalizeMcpRequired(list) {
+  const value = []; const dropped = []; const seen = new Set();
+  list.forEach((e, i) => {
+    const { entry, error } = normalizeMcpEntry(e);
+    const id = entry && (entry.plugin ? `plugin:${entry.plugin}/${entry.server}` : `inline:${entry.name}`);
+    const why = error || (seen.has(id) ? 'listed twice' : null);
+    if (why) { dropped.push(`${mcpLabel(e, i)}: ${why}`); return; }
+    seen.add(id); value.push(entry);
+  });
+  return { value, dropped };
+}
+/**
+ * Did this build read every `mcp.required` entry of a doc, given its normalizer warnings (MCP registry spec §11.2)?
+ * An entry it dropped (a newer rule, a typo, a plugin missing from plugins.required) is still listed by the team:
+ * its Team state stays and its `policy:` server does not retire.
+ */
+export function mcpListComplete(warnings = []) {
+  // Every `mcp.required:` warning drops an entry or the field, except "hard … — treated as soft", which keeps them all.
+  return !warnings.some((w) => typeof w === 'string'
+    && (w === 'unknown field mcp.required' || (w.startsWith('mcp.required:') && !w.endsWith('treated as soft'))));
 }
 
 /**
@@ -98,6 +187,12 @@ export function looksLikeSecret(v) {
  * Shared by the editor (before publish) and the reader (dropping bad fields with a warning).
  */
 export function validateValue(meta, value) {
+  const err = baseError(meta, value);
+  if (err || !meta.night) return err;
+  return nightFieldError(meta.key.slice('night.'.length), value);
+}
+
+function baseError(meta, value) {
   switch (meta.type) {
     case 'usd': return finiteNum(value) && value > 0 ? null : 'must be a positive number of USD';
     case 'usd-or-null':
@@ -142,6 +237,10 @@ export function validateValue(meta, value) {
       }
       return null;
     }
+    case 'criteria': return isPlainObject(value) ? null : 'must be an object of criterion → weight';
+    case 'mcpServers':
+      if (!Array.isArray(value)) return 'must be a list of MCP server entries';
+      return normalizeMcpRequired(value).dropped[0] ?? null;
     default: return 'unknown field type';
   }
 }
@@ -164,16 +263,18 @@ export function normalizeEntry(key, raw) {
     else if (kind === 'hard' && meta.kinds.includes('default')) { warning = `${key}: hard constraints are not enforced by this version — treated as default`; }
     else return { entry: null, warning: `${key}: kind "${kind}" is not allowed (accepts ${meta.kinds.join(' | ')})` };
   }
-  const err = validateValue(meta, raw.value);
+  // mcpServers: a per-entry normalizer — bad entries are dropped one warning each, the rest stays.
+  const mcp = meta.type === 'mcpServers' && Array.isArray(raw.value) ? normalizeMcpRequired(raw.value) : null;
+  const err = mcp ? null : validateValue(meta, raw.value);
   if (err) return { entry: null, warning: `${key}: ${err}` };
-  const entry = { kind, value: raw.value };
+  const entry = { kind, value: mcp ? mcp.value : raw.value };
   for (const a of meta.attrs || []) {
     if (raw[a] === undefined) continue;
     if (a === 'onBreach') { if (ON_BREACH.includes(raw[a])) entry.onBreach = raw[a]; else warning ||= `${key}: onBreach must be pause | warn (ignored)`; }
     else if (a === 'requireReason') { if (typeof raw[a] === 'boolean') entry.requireReason = raw[a]; else warning ||= `${key}: requireReason must be true | false (ignored)`; }
     else if (a === 'window') { if (WINDOWS.includes(raw[a])) entry.window = raw[a]; else warning ||= `${key}: window must be weekly | monthly (ignored)`; }
   }
-  return { entry, warning };
+  return { entry, warning, dropped: (mcp?.dropped || []).map((d) => `${key}: ${d} — entry dropped`) };
 }
 
 /** The kind the RUNTIME applies: hard is reserved and reads as soft (or default when the field is default-only). */
@@ -187,8 +288,9 @@ function normalizeFieldMap(raw, warnings, prefix = '') {
   if (raw == null) return out;
   if (!isPlainObject(raw)) { warnings.push(`${prefix || 'fields'}: not an object — ignored`); return out; }
   for (const key of Object.keys(raw)) {
-    const { entry, warning } = normalizeEntry(key, raw[key]);
-    if (warning) warnings.push(prefix ? `${prefix}.${warning}` : warning);
+    if (prefix === 'workspaceRuns' && fieldMeta(key)?.workspaceRuns === false) { warnings.push(`workspaceRuns.${key}: not allowed for workspace runs — dropped`); continue; }
+    const { entry, warning, dropped = [] } = normalizeEntry(key, raw[key]);
+    for (const w of warning ? [warning, ...dropped] : dropped) warnings.push(prefix ? `${prefix}.${w}` : w);
     if (entry) out[key] = entry;
   }
   return out;
@@ -286,6 +388,16 @@ export function normalizePolicyDoc(raw) {
       models: normalizeModels(raw.catalogs?.models, warnings),
     },
   };
+  // §11.1 cross-field rule: a plugin reference's plugin must be in the same doc's plugins.required.
+  const mcp = doc.fields['mcp.required'];
+  if (mcp) {
+    const plugins = new Set((doc.fields['plugins.required']?.value || []).map((p) => p.name));
+    mcp.value = mcp.value.filter((e) => {
+      if (!e.plugin || plugins.has(e.plugin)) return true;
+      warnings.push(`mcp.required: ${e.plugin}/${e.server}: plugin ${e.plugin} is not in plugins.required — entry dropped`);
+      return false;
+    });
+  }
   if (delegateTo) doc.delegateTo = delegateTo;
   return { doc, warnings, unknownSchema: false, delegateTo };
 }

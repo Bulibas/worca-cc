@@ -1,0 +1,18 @@
+{
+  "name": "atlassian-mcp",
+  "version": "0.1.0",
+  "description": "Atlassian Rovo MCP server: Jira, Confluence and Compass for pipeline agents and Ask Worca",
+  "license": "MIT",
+  "engines": { "worca-cc-api": ">=5 <6" },
+  "mcpServers": {
+    "atlassian": {
+      "type": "http",
+      "url": "https://mcp.atlassian.com/v2/mcp",
+      "headers": { "Authorization": { "field": "credentials", "prefix": "Basic " } },
+      "fields": [
+        { "key": "credentials", "label": "Base64 of email:API token", "secret": true, "required": true }
+      ],
+      "description": "Jira, Confluence and Compass through the Atlassian Rovo MCP server (API token auth)"
+    }
+  }
+}

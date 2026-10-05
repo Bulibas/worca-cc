@@ -4,11 +4,16 @@
 // suite, no shared harness), with a `runResponse` override, a `runBodies`
 // recorder and five extra fetch arms feeding the card's option loaders and the
 // New-Pipeline form's workflow/guardrail/workspace/branch loaders.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -83,7 +88,7 @@ function askArms(url, opts) {
 // mutates it between two card renders to model a row saved mid-chat.
 async function boot({ url = 'http://localhost:4317/', runResponse = null, workflows = null } = {}) {
   const wfList = workflows || [{ id: 'wf_default', name: 'Default' }, { id: 'wf_review', name: 'Review only' }];
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
 
@@ -217,47 +222,38 @@ test('ui-ask-card: a 403 stays on the editable card with the error inline', asyn
   assert.ok(ctx.window.document.querySelector('.ask-card-brief'), 'still editable');
 });
 
-test('ui-ask-card: a 409 sync-diverged asks once, then resends with syncPolicy (no syncBeforeStart) (#527)', async () => {
-  const refusal = { code: 'sync-diverged', error: 'dev diverged', options: ['origin', 'cancel'],
-    members: [{ projectKey: 'proj-00000001', base: 'dev', remote: 'origin', ahead: 1, behind: 2 }] };
-  const ctx = await boot({ runResponse: (n) => (n === 1 ? { ok: false, status: 409, json: async () => refusal } : null) });
-  await openCard(ctx, CARD);
-  ctx.window.document.querySelector('[data-ask-card-start]').click();
-  await settle(ctx.window, 6);
-  const go = [...ctx.window.document.querySelectorAll('.sync-modal button')].find((b) => b.textContent === 'Start from origin/dev');
-  assert.ok(go, 'the refusal card offers the remote start');
-  go.click();
-  await settle(ctx.window, 6);
-  assert.equal(ctx.runBodies.length, 2);
-  assert.equal(ctx.runBodies[1].syncPolicy, 'origin');
-  assert.equal('syncBeforeStart' in ctx.runBodies[1], false, 'the project default applies');
-  assert.equal(ctx.window.document.querySelector('.ask-card-err').textContent, '');
-});
-
-test('ui-ask-card: cancelling the sync refusal posts nothing more and says so (#527)', async () => {
-  const refusal = { code: 'sync-fetch-failed', error: 'offline', options: ['last-fetch', 'cancel'], fetchKind: 'network',
-    members: [{ projectKey: 'proj-00000001', base: 'dev', remote: 'origin', fetchKind: 'network' }] };
-  const ctx = await boot({ runResponse: () => ({ ok: false, status: 409, json: async () => refusal }) });
-  await openCard(ctx, CARD);
-  ctx.window.document.querySelector('[data-ask-card-start]').click();
-  await settle(ctx.window, 6);
-  const cancel = [...ctx.window.document.querySelectorAll('.sync-modal button')].find((b) => b.textContent === 'Cancel');
-  cancel.click();
-  await settle(ctx.window, 6);
-  assert.equal(ctx.runBodies.length, 1);
-  assert.equal(ctx.window.document.querySelector('.ask-card-err').textContent, 'Start cancelled.');
-});
-
-test('ui-ask-card: the proposed source carries its sourceRef note; another pick clears it (#527)', async () => {
-  const ctx = await boot();
-  await openCard(ctx, { ...CARD, sourceRef: { ref: 'origin/dev', remoteOnly: true, behind: 0, stale: false } });
-  const sel = ctx.window.document.querySelector('.ask-card-source');
-  const hint = sel.closest('.ask-rp-field').querySelector('.ask-rp-hint');
-  assert.ok(hint, 'the Source branch label carries a hint');
-  assert.equal(hint.textContent, ' · from origin/dev (remote only)');
-  sel.value = 'main';
-  sel.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
-  assert.equal(hint.textContent, '', 'the note describes the proposed branch only');
+test('ui-ask-card: a 409 sync refusal asks once — the remote choice resends with syncPolicy, Cancel posts nothing more (#527)', async () => {
+  await checkRows([
+    { name: 'ui-ask-card: a 409 sync-diverged asks once, then resends with syncPolicy (no syncBeforeStart) (#527)', run: async () => {
+      const refusal = { code: 'sync-diverged', error: 'dev diverged', options: ['origin', 'cancel'],
+        members: [{ projectKey: 'proj-00000001', base: 'dev', remote: 'origin', ahead: 1, behind: 2 }] };
+      const ctx = await boot({ runResponse: (n) => (n === 1 ? { ok: false, status: 409, json: async () => refusal } : null) });
+      await openCard(ctx, CARD);
+      ctx.window.document.querySelector('[data-ask-card-start]').click();
+      await settle(ctx.window, 6);
+      const go = [...ctx.window.document.querySelectorAll('.sync-modal button')].find((b) => b.textContent === 'Start from origin/dev');
+      assert.ok(go, 'the refusal card offers the remote start');
+      go.click();
+      await settle(ctx.window, 6);
+      assert.equal(ctx.runBodies.length, 2);
+      assert.equal(ctx.runBodies[1].syncPolicy, 'origin');
+      assert.equal('syncBeforeStart' in ctx.runBodies[1], false, 'the project default applies');
+      assert.equal(ctx.window.document.querySelector('.ask-card-err').textContent, '');
+    } },
+    { name: 'ui-ask-card: cancelling the sync refusal posts nothing more and says so (#527)', run: async () => {
+      const refusal = { code: 'sync-fetch-failed', error: 'offline', options: ['last-fetch', 'cancel'], fetchKind: 'network',
+        members: [{ projectKey: 'proj-00000001', base: 'dev', remote: 'origin', fetchKind: 'network' }] };
+      const ctx = await boot({ runResponse: () => ({ ok: false, status: 409, json: async () => refusal }) });
+      await openCard(ctx, CARD);
+      ctx.window.document.querySelector('[data-ask-card-start]').click();
+      await settle(ctx.window, 6);
+      const cancel = [...ctx.window.document.querySelectorAll('.sync-modal button')].find((b) => b.textContent === 'Cancel');
+      cancel.click();
+      await settle(ctx.window, 6);
+      assert.equal(ctx.runBodies.length, 1);
+      assert.equal(ctx.window.document.querySelector('.ask-card-err').textContent, 'Start cancelled.');
+    } },
+  ]);
 });
 
 test('ui-ask-card: Not now dismisses; the flip renders the stub', async () => {
@@ -271,36 +267,39 @@ test('ui-ask-card: Not now dismisses; the flip renders the stub', async () => {
   assert.ok(ctx.window.document.querySelector('.ask-card-stub'));
 });
 
-test('ui-ask-card: Open in New Pipeline prefills the project form with the source forced to prompt', async () => {
-  const ctx = await boot();
-  await openCard(ctx, CARD);
-  ctx.window.document.querySelector('.ask-card-brief').value = 'edited before handoff';
-  ctx.window.document.querySelector('[data-ask-card-open-np]').click();
-  await settle(ctx.window, 8); // the async applier awaits workflows/guardrails/branches
-  const doc = ctx.window.document;
-  assert.equal(ctx.window.location.hash, '#new');
-  assert.equal(doc.querySelector('.ask-sheet').hidden, true, 'the sheet closed');
-  assert.equal(doc.querySelector('#prompt').value, 'edited before handoff');
-  assert.equal(doc.querySelector('#title').value, 'Fix login');
-  assert.equal(doc.querySelector('#workflowSelect').value, 'wf_review');
-  assert.equal(doc.querySelector('#guardrailsSelect').value, 'normal');
-  assert.equal(doc.querySelector('#featureBranch').value, 'worca/fix-login');
-  assert.equal(doc.querySelector('#sourceBranch').value, 'dev');
-  assert.equal(doc.querySelector('#advanced-config').open, true);
-  assert.equal(doc.querySelector('#prompt-pane').classList.contains('hidden'), false, 'prompt source visible');
-});
-
-test('ui-ask-card: Open in New Pipeline for a workspace card selects the workspace and the member overrides', async () => {
-  const ctx = await boot();
-  await openCard(ctx, WS_CARD);
-  ctx.window.document.querySelector('[data-ask-card-open-np]').click();
-  await settle(ctx.window, 10);
-  const doc = ctx.window.document;
-  assert.equal(ctx.window.location.hash, '#new');
-  assert.equal(doc.querySelector('#workspaceSelect').value, 'wks-team-00000001');
-  const member = [...doc.querySelectorAll('select.ws-src-select')].find((s) => s.dataset.projectKey === 'lib-00000002');
-  assert.ok(member, 'per-member selects rebuilt');
-  assert.equal(member.value, 'release');
+test('ui-ask-card: Open in New Pipeline prefills the form — project fields, or the workspace + member source overrides', async () => {
+  await checkRows([
+    { name: 'ui-ask-card: Open in New Pipeline prefills the project form with the source forced to prompt', run: async () => {
+      const ctx = await boot();
+      await openCard(ctx, CARD);
+      ctx.window.document.querySelector('.ask-card-brief').value = 'edited before handoff';
+      ctx.window.document.querySelector('[data-ask-card-open-np]').click();
+      await settle(ctx.window, 8); // the async applier awaits workflows/guardrails/branches
+      const doc = ctx.window.document;
+      assert.equal(ctx.window.location.hash, '#new');
+      assert.equal(doc.querySelector('.ask-sheet').hidden, true, 'the sheet closed');
+      assert.equal(doc.querySelector('#prompt').value, 'edited before handoff');
+      assert.equal(doc.querySelector('#title').value, 'Fix login');
+      assert.equal(doc.querySelector('#workflowSelect').value, 'wf_review');
+      assert.equal(doc.querySelector('#guardrailsSelect').value, 'normal');
+      assert.equal(doc.querySelector('#featureBranch').value, 'worca/fix-login');
+      assert.equal(doc.querySelector('#sourceBranch').value, 'dev');
+      assert.equal(doc.querySelector('#advanced-config').open, true);
+      assert.equal(doc.querySelector('#prompt-pane').classList.contains('hidden'), false, 'prompt source visible');
+    } },
+    { name: 'ui-ask-card: Open in New Pipeline for a workspace card selects the workspace and the member overrides', run: async () => {
+      const ctx = await boot();
+      await openCard(ctx, WS_CARD);
+      ctx.window.document.querySelector('[data-ask-card-open-np]').click();
+      await settle(ctx.window, 10);
+      const doc = ctx.window.document;
+      assert.equal(ctx.window.location.hash, '#new');
+      assert.equal(doc.querySelector('#workspaceSelect').value, 'wks-team-00000001');
+      const member = [...doc.querySelectorAll('select.ws-src-select')].find((s) => s.dataset.projectKey === 'lib-00000002');
+      assert.ok(member, 'per-member selects rebuilt');
+      assert.equal(member.value, 'release');
+    } },
+  ]);
 });
 
 test('ui-ask-card: a workspace card Start posts the workspace §9.4 body from inside the app', async () => {
@@ -319,16 +318,38 @@ test('ui-ask-card: a workspace card Start posts the workspace §9.4 body from in
   assert.equal(ctx.window.location.hash, before, 'no navigation');
 });
 
-test('ui-ask-card: Open in New Pipeline carries the attachment pills into the extras file list', async () => {
-  const ctx = await boot();
-  await openCard(ctx, ATT_CARD);
-  await settle(ctx.window, 4);                       // the lane loaded
-  ctx.window.document.querySelector('[data-ask-card-open-np]').click();
-  await settle(ctx.window, 12);                      // attachment fetch → prefill → view switch
-  assert.equal(ctx.window.location.hash, '#new');
-  const pills = [...ctx.window.document.querySelectorAll('#extrasPills .extra-pill .extra-pill-name')].map((p) => p.textContent);
-  assert.deepEqual(pills, ['notes.md']);
-  assert.equal(ctx.window.document.querySelector('#title').value, 'Fix login');
+test('ui-ask-card: the handoff owns the extras list — card pills arrive, a stale earlier pick is cleared', async () => {
+  await checkRows([
+    { name: 'ui-ask-card: Open in New Pipeline carries the attachment pills into the extras file list', run: async () => {
+      const ctx = await boot();
+      await openCard(ctx, ATT_CARD);
+      await settle(ctx.window, 4);                       // the lane loaded
+      ctx.window.document.querySelector('[data-ask-card-open-np]').click();
+      await settle(ctx.window, 12);                      // attachment fetch → prefill → view switch
+      assert.equal(ctx.window.location.hash, '#new');
+      const pills = [...ctx.window.document.querySelectorAll('#extrasPills .extra-pill .extra-pill-name')].map((p) => p.textContent);
+      assert.deepEqual(pills, ['notes.md']);
+      assert.equal(ctx.window.document.querySelector('#title').value, 'Fix login');
+    } },
+    { name: 'ui-ask-card: a handoff with no pills clears the extras the user picked earlier', run: async () => {
+      const ctx = await boot();
+      const doc = ctx.window.document;
+      // Seed the New Pipeline form the way the OS picker does (the FileList is read-only).
+      const input = doc.querySelector('#extras');
+      Object.defineProperty(input, 'files', { value: [new ctx.window.File(['x'], 'stale.md', { type: 'text/plain' })], configurable: true });
+      input.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
+      assert.deepEqual([...doc.querySelectorAll('#extrasPills .extra-pill-name')].map((p) => p.textContent), ['stale.md']);
+      await openCard(ctx, CARD);                         // CARD carries no attachments
+      await settle(ctx.window, 4);
+      doc.querySelector('[data-ask-card-open-np]').click();
+      await settle(ctx.window, 12);
+      assert.equal(ctx.window.location.hash, '#new');
+      assert.deepEqual([...doc.querySelectorAll('#extrasPills .extra-pill-name')].map((p) => p.textContent), [],
+        'the handoff owns the extras list — the old pick must not upload into this run');
+      assert.equal(doc.querySelector('#extrasPills').hidden, true);
+      assert.equal(doc.querySelector('#extrasNote').textContent, 'Leave empty and the run gets no extra files.');
+    } },
+  ]);
 });
 
 test('ui-ask-card: Start from inside the app writes the lane edits, then posts the §9.4 body + title + extras', async () => {
@@ -351,25 +372,6 @@ test('ui-ask-card: Start from inside the app writes the lane edits, then posts t
   assert.equal(ctx.runBodies[0].title, 'Fix login');
   assert.deepEqual(ctx.runBodies[0].extras, [{ name: 'notes.md', dataBase64: 'aGVsbG8=' }]);
   assert.equal(ctx.window.location.hash, before, 'the page does not navigate');
-});
-
-test('ui-ask-card: a handoff with no pills clears the extras the user picked earlier', async () => {
-  const ctx = await boot();
-  const doc = ctx.window.document;
-  // Seed the New Pipeline form the way the OS picker does (the FileList is read-only).
-  const input = doc.querySelector('#extras');
-  Object.defineProperty(input, 'files', { value: [new ctx.window.File(['x'], 'stale.md', { type: 'text/plain' })], configurable: true });
-  input.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
-  assert.deepEqual([...doc.querySelectorAll('#extrasPills .extra-pill-name')].map((p) => p.textContent), ['stale.md']);
-  await openCard(ctx, CARD);                         // CARD carries no attachments
-  await settle(ctx.window, 4);
-  doc.querySelector('[data-ask-card-open-np]').click();
-  await settle(ctx.window, 12);
-  assert.equal(ctx.window.location.hash, '#new');
-  assert.deepEqual([...doc.querySelectorAll('#extrasPills .extra-pill-name')].map((p) => p.textContent), [],
-    'the handoff owns the extras list — the old pick must not upload into this run');
-  assert.equal(doc.querySelector('#extrasPills').hidden, true);
-  assert.equal(doc.querySelector('#extrasNote').textContent, 'Leave empty and the run gets no extra files.');
 });
 
 const listCalls = (ctx) => ctx.calls.filter((c) => c.url.split('?')[0].endsWith('/api/workflows')).length;

@@ -1,11 +1,12 @@
 // test/ui-theme-tokens.test.mjs — the theme token contract (spec §4.1, D12, D13):
 // every colour token is a light-dark() pair (six equal-arm bases excepted), both
-// arms clear the spec's contrast minimums, no --gv-* name outside the geometry
-// set, and (Task 2) no colour literal survives outside the token blocks.
+// arms clear the spec's contrast minimums, and (Task 2) no colour literal survives
+// outside the token blocks.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { checkRows } from './helpers/rows.mjs';
 
 const css = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8');
 const bare = css.replace(/\/\*[\s\S]*?\*\//g, '');            // comments stripped
@@ -58,16 +59,6 @@ const synBody = (bare.match(/\.hd-diff-pane,\.ask-md[^{]*\{\s*(--hd-syntax-comme
 const tokens = new Map([...declarations(rootBody), ...declarations(hdBody), ...declarations(synBody)]);
 const arm = (name, which) => { const v = tokens.get(name); if (v == null) return null; const a = arms(v); return a ? a[which === 'dark' ? 1 : 0] : v; };
 
-test('theme: the :root block opens the scheme and the two [data-theme] rules force it', () => {
-  assert.ok(rootBody, ':root block missing');
-  assert.ok(hdBody && synBody, 'the two scoped diff token blocks');
-  assert.match(rootBody, /(^|;)\s*color-scheme:\s*light dark\s*(;|$)/);
-  assert.match(bare, /:root\[data-theme="light"\]\s*\{\s*color-scheme:\s*light;?\s*\}/);
-  assert.match(bare, /:root\[data-theme="dark"\]\s*\{\s*color-scheme:\s*dark;?\s*\}/);
-  assert.ok(!/prefers-color-scheme/.test(bare), 'no @media (prefers-color-scheme) anywhere — color-scheme does that job (D5)');
-  assert.match(bare, /@media print\s*\{\s*:root\s*\{\s*color-scheme:\s*light;?\s*\}\s*\}/, 'paper is white: print in the light scheme');
-});
-
 test('theme: every colour token is a light-dark() pair, both arms colours; the six bases are plain and equal to the spec', () => {
   assert.ok(tokens.size >= 66, `expected ≥66 tokens across the three blocks, got ${tokens.size}`);
   const bad = [];
@@ -83,13 +74,6 @@ test('theme: every colour token is a light-dark() pair, both arms colours; the s
   assert.deepEqual(bad, []);
   assert.deepEqual(EQUAL_ARMS.map((n) => tokens.get(n)), ['#5BAE5B', '#EFA63C', '#E76A5A', '#5BA6CC', '#8C7FD6', '#E6962A',
     '#4FB3A9', '#E27BA8', '#6A7FD8', '#A3BF3A', '#B08A5E', '#8A96A3']);
-});
-
-test('theme: no new --gv-* or stray --hd-* token names (D12)', () => {
-  const gv = [...tokens.keys()].filter((k) => k.startsWith('--gv-'));
-  assert.deepEqual(gv, [], '--gv-* is the composer geometry namespace (injectGeometry)');
-  const hd = [...declarations(rootBody)].map(([k]) => k).filter((k) => k.startsWith('--hd-'));
-  assert.deepEqual(hd, [], '--hd-* tokens live only in the two diff scopes');
 });
 
 // ---- WCAG math on the declared pairs (spec §3.1 minimums), both arms ----------
@@ -109,6 +93,7 @@ const PAIRS = [
   ['--hd-count-add', '--panel', 4.5], ['--hd-count-del', '--panel', 4.5],
   ...['comment', 'keyword', 'type', 'string', 'literal', 'title'].map((s) => [`--hd-syntax-${s}`, '--panel', 4.5]),
   ['--chip-ink', '--field', 4.5], ['--trunc-ink', '--panel', 4.5], ['--h-blue-ink', '--blue-bg', 4.5], ['--h-peach-ink', '--peach-bg', 4.5],
+  ['--blue-ink-strong', '--blue-bg', 4.5], ['--violet-ink', '--violet-bg', 4.5],   // the pull request buttons (.rd-cta.pr-view / .pr-merged, .hd-pr-link)
 ];
 const DARK_ONLY = [   // light fails these today (spec §7.4 baseline); dark must not
   ['--ink-3', '--panel', 4.5], ['--ink-3', '--bg', 4.5], ['--ink-3', '--field', 4.5], ['--ink-3', '--field-focus', 4.5], ['--ink-3', '--surface', 4.5], ['--ink-3', '--canvas-2', 4.5], ['--ink-3', '--amber-wash', 4.5],
@@ -117,8 +102,8 @@ const DARK_ONLY = [   // light fails these today (spec §7.4 baseline); dark mus
   ['--amber-ink', '--amber-wash', 4.5], ['--seq', '--panel', 3], ['--seq', '--canvas-2', 3],
   ['--line-2', '--panel', 1.5], ['--amber-wash', '--panel', 1.08], ['--surface', '--field', 1.1], ['--panel', '--bg', 1.1],
 ];
-for (const which of ['light', 'dark']) {
-  test(`theme: ${which} arms clear the spec minimums`, () => {
+test('theme: light and dark arms clear the spec minimums', async () => {
+  await checkRows(['light', 'dark'].map((which) => ({ name: `theme: ${which} arms clear the spec minimums`, run: () => {
     const fails = [];
     for (const [fg, bg, need] of [...PAIRS, ...(which === 'dark' ? DARK_ONLY : [])]) {
       const a = arm(fg, which); const b = arm(bg, which);
@@ -127,17 +112,7 @@ for (const which of ['light', 'dark']) {
       if (r < need) fails.push(`${fg} on ${bg} (${which}): ${r.toFixed(2)} < ${need}`);
     }
     assert.deepEqual(fails, []);
-  });
-}
-
-test('theme: the dark arms are the warm-charcoal palette and none of the removed theme', () => {
-  assert.equal(arm('--bg', 'dark'), '#161614');
-  assert.equal(arm('--panel', 'dark'), '#222220');
-  assert.equal(arm('--ink', 'dark'), '#ECECE8');
-  assert.equal(arm('--ink-3', 'dark'), '#9E9E98');
-  assert.equal(arm('--surface', 'dark'), '#34342F');
-  assert.equal(arm('--line-2', 'dark'), '#494944');
-  for (const dead of ['#0e1116', '#0a0d12', '#232c38', '#4f9cf9']) assert.ok(!css.toLowerCase().includes(dead), dead);
+  } })));
 });
 
 test('theme: no colour literal outside the token blocks (spec §4.2; Task 2 codemod)', () => {

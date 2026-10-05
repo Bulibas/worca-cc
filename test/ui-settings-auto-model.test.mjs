@@ -1,11 +1,17 @@
 // test/ui-settings-auto-model.test.mjs — the "Auto workflow model" settings card (spec D14 / §7.7).
 // Boot preamble copied from test/ui-settings-title-model.test.mjs:32-80 (house convention: duplicated
 // per suite); its openSettings awaits three ticks, which the card's own /api/config round-trip needs.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast, edit } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -19,7 +25,7 @@ const SETTINGS = {
 const settle = async (window, n = 3) => { for (let i = 0; i < n; i += 1) await new Promise((r) => setTimeout(r, 0)); };
 
 async function boot({ configOk = true } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
@@ -60,23 +66,37 @@ async function boot({ configOk = true } = {}) {
   return { window, posts, tick, openSettings, setSettings };
 }
 
-test('the card sits after Title generation on the Models tab; options come from the catalog; the note names the effective source', async () => {
-  const { window, openSettings } = await boot(); await openSettings();
-  const ids = [...window.document.querySelectorAll('.view[data-view="settings"] section.card.settings-card')].map((c) => c.id);
-  assert.equal(ids[ids.indexOf('title-model-settings-card') + 1], 'auto-model-settings-card');
-  assert.equal(window.document.getElementById('auto-model-settings-card').closest('.settings-pane').dataset.tab, 'models');
-  const sel = window.document.getElementById('autoModel');
-  assert.deepEqual([...sel.options].map((o) => o.value), ['', 'claude-opus-5-5', 'claude-sonnet-5']);
-  assert.equal(sel.options[0].textContent, 'Default (Sonnet-class)');
-  assert.equal(sel.value, '');
-  assert.match(window.document.getElementById('autoModelEnvNote').textContent, /Auto classifies with claude-sonnet-5 \(the default\)/);
+test('the Auto model card (Models tab, after Title generation) lists the catalog with Default first, names the effective source, and Use default posts an empty autoWorkflowModel', async () => {
+  const { window, openSettings, posts, setSettings } = await boot(); await openSettings();
+  await checkRows([
+    { name: 'the card sits after Title generation on the Models tab; options come from the catalog; the note names the effective source', run: async () => {
+      const ids = [...window.document.querySelectorAll('.view[data-view="settings"] section.card.settings-card')].map((c) => c.id);
+      assert.equal(ids[ids.indexOf('title-model-settings-card') + 1], 'auto-model-settings-card');
+      assert.equal(window.document.getElementById('auto-model-settings-card').closest('.settings-pane').dataset.tab, 'models');
+      const sel = window.document.getElementById('autoModel');
+      assert.deepEqual([...sel.options].map((o) => o.value), ['', 'claude-opus-5-5', 'claude-sonnet-5']);
+      assert.equal(sel.options[0].textContent, 'Default (Sonnet-class)');
+      assert.equal(sel.value, '');
+      assert.match(window.document.getElementById('autoModelEnvNote').textContent, /Auto classifies with claude-sonnet-5 \(the default\)/);
+    } },
+    // The card's own "back to the default" affordance — nothing pinned the empty POST.
+    { name: 'Use default posts an empty autoWorkflowModel', run: async () => {
+      setSettings({ autoWorkflowModel: 'claude-opus-5-5', autoWorkflowModelEffective: { model: 'claude-opus-5-5', source: 'settings' } });
+      await openSettings();
+      window.document.getElementById('autoModelReset').click(); await settle(window);
+      assert.deepEqual(posts.at(-1), { autoWorkflowModel: '' });
+    } },
+  ]);
 });
 
 test('Save posts autoWorkflowModel; env override paints a warning; a stored id that left the catalog paints "not installed"', async () => {
   const { window, openSettings, posts, setSettings } = await boot(); await openSettings();
-  const sel = window.document.getElementById('autoModel'); sel.value = 'claude-opus-5-5';
+  const sel = window.document.getElementById('autoModel');
+  assert.equal(window.document.getElementById('autoModelSave').disabled, true, 'Save starts disabled');
+  edit(window, sel, 'claude-opus-5-5');
   window.document.getElementById('autoModelSave').click(); await settle(window);
   assert.deepEqual(posts.at(-1), { autoWorkflowModel: 'claude-opus-5-5' });
+  assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Saved', detail: 'Applies to the next Auto run.', action: '' });
   setSettings({ autoWorkflowModel: 'claude-opus-5-5', autoWorkflowModelEffective: { model: 'claude-haiku-4-5', source: 'env' } }); await openSettings();
   assert.match(window.document.getElementById('autoModelEnvNote').textContent, /WORCA_AUTO_MODEL is set in the environment: Auto uses claude-haiku-4-5/);
   setSettings({ autoWorkflowModel: 'claude-gone-1', autoWorkflowModelEffective: { model: 'claude-sonnet-5', source: 'default' } }); await openSettings();
@@ -98,15 +118,11 @@ test('a failed catalog GET never becomes a "no longer in the catalog" verdict', 
   assert.equal(sel.value, 'claude-opus-5-5');
   assert.doesNotMatch(window.document.getElementById('autoModelEnvNote').textContent, /no longer in the catalog/);
   assert.equal(window.document.getElementById('autoModelTest').disabled, false, 'Test stays available');
-  window.document.getElementById('autoModelSave').click(); await settle(window);
-  assert.deepEqual(posts.at(-1), { autoWorkflowModel: 'claude-opus-5-5' }, 'Save is not refused');
-});
-
-// The card's own "back to the default" affordance — nothing pinned the empty POST.
-test('Use default posts an empty autoWorkflowModel', async () => {
-  const { window, openSettings, posts, setSettings } = await boot();
-  setSettings({ autoWorkflowModel: 'claude-opus-5-5', autoWorkflowModelEffective: { model: 'claude-opus-5-5', source: 'settings' } });
-  await openSettings();
-  window.document.getElementById('autoModelReset').click(); await settle(window);
-  assert.deepEqual(posts.at(-1), { autoWorkflowModel: '' });
+  const save = window.document.getElementById('autoModelSave');
+  edit(window, sel, '');
+  edit(window, sel, 'claude-opus-5-5');
+  assert.equal(save.disabled, true, 'a reverted card is clean');
+  edit(window, sel, '');
+  save.click(); await settle(window);
+  assert.deepEqual(posts.at(-1), { autoWorkflowModel: '' }, 'Save is not refused');
 });

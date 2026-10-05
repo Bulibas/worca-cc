@@ -1,9 +1,15 @@
 // test/ui-settings-workspace-scan.test.mjs — Settings › Runs › Workspaces (the scan models card). Boot preamble copied from test/ui-settings-auto-model.test.mjs:4-61 (house convention).
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast, edit } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -22,7 +28,7 @@ const SETTINGS = {
 const settle = async (window, n = 3) => { for (let i = 0; i < n; i += 1) await new Promise((r) => setTimeout(r, 0)); };
 
 async function boot({ configOk = true } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
@@ -65,28 +71,30 @@ async function boot({ configOk = true } = {}) {
 
 const vals = (doc) => ['wsScanModel', 'wsScanEffort', 'wsAgentModel', 'wsAgentEffort'].map((id) => doc.getElementById(id).value);
 
-test('the Workspaces card sits on the Runs tab between Scheduled runs and Chat notifications and shows the defaults', async () => {
-  const { window, openSettings } = await boot(); await openSettings();
-  const doc = window.document;
-  const runsIds = [...doc.querySelectorAll('.settings-pane[data-tab="runs"] section.card.settings-card')].map((c) => c.id);
-  assert.deepEqual(runsIds, ['budget-settings-card', 'sync-settings-card', 'schedule-settings-card', 'ws-scan-models-card', 'chat-settings-card']);
-  assert.equal(doc.querySelector('#ws-scan-models-card h2').textContent.trim(), 'Workspaces');
-  assert.equal(doc.getElementById('ws-scan-models-card').dataset.minLevel, 'advanced');
-  assert.deepEqual(vals(doc), ['claude-sonnet-5', 'medium', 'sonnet', 'medium']);
-});
-
-test('Save posts the four picks; Use default posts null; changing the scan model repaints its efforts', async () => {
+test('the Workspaces card (Runs tab) shows the defaults; Save posts the four picks, Use default posts null, a scan model change repaints its efforts', async () => {
   const { window, openSettings, posts, tick } = await boot(); await openSettings();
   const doc = window.document;
-  doc.getElementById('wsScanModel').value = 'claude-opus-5-5';
-  doc.getElementById('wsScanModel').dispatchEvent(new window.Event('change'));
-  doc.getElementById('wsScanEffort').value = 'xhigh';
-  doc.getElementById('wsAgentModel').value = 'fable';
-  doc.getElementById('wsAgentEffort').value = 'high';
-  doc.getElementById('wsScanModelsSave').click(); await tick(); await tick();
-  assert.deepEqual(posts.at(-1), { workspaceScan: { scanModel: 'claude-opus-5-5', scanEffort: 'xhigh', agentModel: 'fable', agentEffort: 'high' } });
-  doc.getElementById('wsScanModelsReset').click(); await tick(); await tick();
-  assert.deepEqual(posts.at(-1), { workspaceScan: null });
+  await checkRows([
+    { name: 'the Workspaces card sits on the Runs tab between Scheduled runs and Chat notifications and shows the defaults', run: async () => {
+      const runsIds = [...doc.querySelectorAll('.settings-pane[data-tab="runs"] section.card.settings-card')].map((c) => c.id);
+      assert.deepEqual(runsIds, ['budget-settings-card', 'night-settings-card', 'sync-settings-card', 'schedule-settings-card', 'actions-settings-card', 'ws-scan-models-card', 'chat-settings-card']);
+      assert.equal(doc.querySelector('#ws-scan-models-card h2').textContent.trim(), 'Workspaces');
+      assert.equal(doc.getElementById('ws-scan-models-card').dataset.minLevel, 'advanced');
+      assert.deepEqual(vals(doc), ['claude-sonnet-5', 'medium', 'sonnet', 'medium']);
+    } },
+    { name: 'Save posts the four picks; Use default posts null; changing the scan model repaints its efforts', run: async () => {
+      assert.equal(doc.getElementById('wsScanModelsSave').disabled, true, 'Save starts disabled');
+      edit(window, doc.getElementById('wsScanModel'), 'claude-opus-5-5');
+      edit(window, doc.getElementById('wsScanEffort'), 'xhigh');
+      edit(window, doc.getElementById('wsAgentModel'), 'fable');
+      edit(window, doc.getElementById('wsAgentEffort'), 'high');
+      doc.getElementById('wsScanModelsSave').click(); await tick(); await tick();
+      assert.deepEqual(posts.at(-1), { workspaceScan: { scanModel: 'claude-opus-5-5', scanEffort: 'xhigh', agentModel: 'fable', agentEffort: 'high' } });
+      assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Saved', detail: 'Applies to the next scan.', action: '' });
+      doc.getElementById('wsScanModelsReset').click(); await tick(); await tick();
+      assert.deepEqual(posts.at(-1), { workspaceScan: null });
+    } },
+  ]);
 });
 
 test('a stored scan model that left the catalog is shown as not installed and Save refuses it', async () => {
@@ -98,7 +106,8 @@ test('a stored scan model that left the catalog is shown as not installed and Sa
   assert.equal(sel.options[sel.selectedIndex].disabled, true);
   assert.match(doc.getElementById('wsScanModelsNote').textContent, /no longer in the catalog/);
   const before = posts.length;
+  assert.equal(doc.getElementById('wsScanModelsSave').disabled, true, 'the painted card is clean');
   doc.getElementById('wsScanModelsSave').click(); await tick();
   assert.equal(posts.length, before, 'nothing posted');
-  assert.match(doc.getElementById('wsScanModelsMsg').textContent, /no longer installed/);
+  assert.equal(doc.getElementById('wsScanModelsMsg'), null, 'no save line');
 });

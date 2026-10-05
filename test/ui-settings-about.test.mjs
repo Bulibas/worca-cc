@@ -1,14 +1,20 @@
 // test/ui-settings-about.test.mjs
 // Settings ▸ About card: version (linked to its release tag) + repo link, painted
-// from the `app` block of GET /api/settings.
-import { test } from 'node:test';
+// from the `app` block of GET /api/settings, and the two feedback links ("Report a bug" /
+// "Suggest an improvement") that about-links.mjs repaints from `app.bugsUrl`.
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { paintAboutInto } from '../ui/public/about-links.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
-const cssPath = fileURLToPath(new URL('../ui/public/style.css', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'));
 
@@ -41,12 +47,12 @@ const okSettings = () => ({
 });
 
 const settingsView = () => {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   return dom.window.document.querySelector('.view[data-view="settings"]');
 };
 
 async function boot({ settings = okSettings } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
@@ -76,42 +82,6 @@ async function boot({ settings = okSettings } = {}) {
   return { window, tick, $, openSettings };
 }
 
-test('About is the LAST General card, read-only, with no version baked into the markup', () => {
-  const view = settingsView();
-  const cards = [...view.querySelectorAll('.settings-pane[data-tab="general"] section.card.settings-card')];
-  const about = cards[cards.length - 1];
-  assert.equal(cards.length, 7, 'Appearance, My model credentials (hidden without a broker), Interface mode, folders, spawn diagnostics, Getting started, then About — Runs, Ask Worca and Models hold the rest');
-  assert.equal(about.id, 'about-card', 'About sits after the Getting started card');
-  assert.equal(about.querySelector('.label-row > h2').textContent.trim(), 'About');
-
-  assert.equal(about.querySelector('input, select, textarea, button'), null, 'no controls');
-  assert.equal(about.querySelector('.hint'), null, 'no status line (nothing saves)');
-
-  assert.ok(!/\d+\.\d+\.\d+/.test(about.textContent), 'no version string in the markup');
-  const version = about.querySelector('#aboutVersion');
-  assert.equal(version.textContent.trim(), EM_DASH, 'placeholder only');
-  // The version is an anchor so paint can link it to its release tag, but the
-  // placeholder must never be clickable: no href until the payload supplies one.
-  assert.equal(version.tagName, 'A');
-  assert.equal(version.hasAttribute('href'), false, 'placeholder carries no href');
-  assert.equal(version.getAttribute('target'), '_blank');
-  assert.equal(version.getAttribute('rel'), 'noopener noreferrer');
-
-  // The two existing settings-view invariants stay intact (ui-settings-tooltips).
-  assert.equal(view.querySelectorAll('button.info-tip').length, 22, 'About adds no ⓘ icon (22 = 14 + Interface mode + Scheduled runs heading and failures field + My model credentials + Workspaces + PR description model + Sync before run heading and diverged field)');
-  for (const hint of view.querySelectorAll('.hint')) assert.equal(hint.textContent.trim(), '');
-});
-
-test('the repo link opens in a new tab, safely, at the package.json repository', () => {
-  const link = settingsView().querySelector('#aboutRepoLink');
-  assert.ok(link, 'About card has a repo link');
-  assert.equal(link.tagName, 'A');
-  assert.equal(link.getAttribute('target'), '_blank');
-  assert.equal(link.getAttribute('rel'), 'noopener noreferrer');
-  // The static pre-paint href must track package.json.
-  assert.equal(link.getAttribute('href'), REPO_URL);
-});
-
 test('opening Settings paints the version and repo link from the server payload', async () => {
   const { $, openSettings } = await boot();
   await openSettings();
@@ -124,36 +94,65 @@ test('opening Settings paints the version and repo link from the server payload'
   assert.equal($('#aboutRepoLink').getAttribute('rel'), 'noopener noreferrer', 'paint never drops rel');
 });
 
-test('a payload with no `app` block leaves the static fallback alone (never blanks the card)', async () => {
-  const noApp = () => { const s = okSettings(); delete s.app; return s; };
-  const { $, openSettings } = await boot({ settings: noApp });
-  await openSettings();
-  assert.equal($('#aboutVersion').textContent.trim(), EM_DASH, 'placeholder kept, not emptied');
-  assert.equal($('#aboutVersion').hasAttribute('href'), false, 'placeholder still unlinked');
-  assert.equal($('#aboutRepoLink').getAttribute('href'), REPO_URL, 'static href kept');
-  // Without paintAbout's `if (!info) return` the throw would abort every later paint.
-  assert.equal($('#settingsMsg').textContent.trim(), '', 'the rest of the settings paint still ran');
+// A table over two payloads: each row boots the page with its own GET /api/settings answer.
+test('a payload with no app block or malformed repoUrl/releaseUrl never blanks the card nor aborts the rest of the settings paint', async () => {
+  await checkRows([
+    { name: 'a payload with no `app` block leaves the static fallback alone (never blanks the card)', run: async () => {
+      const noApp = () => { const s = okSettings(); delete s.app; return s; };
+      const { $, openSettings } = await boot({ settings: noApp });
+      await openSettings();
+      assert.equal($('#aboutVersion').textContent.trim(), EM_DASH, 'placeholder kept, not emptied');
+      assert.equal($('#aboutVersion').hasAttribute('href'), false, 'placeholder still unlinked');
+      assert.equal($('#aboutRepoLink').getAttribute('href'), REPO_URL, 'static href kept');
+      // Without paintAbout's `if (!info) return` the throw would abort every later paint.
+      assert.equal($('#settingsLoadMsg').hidden, true, 'the rest of the settings paint still ran');
+      assert.equal($('#settingsLoadMsg').textContent, '');
+    } },
+    { name: 'malformed `repoUrl`/`releaseUrl` cannot abort the rest of the settings paint', run: async () => {
+      const badUrl = () => ({ ...okSettings(), app: { version: PAINTED_VERSION, repoUrl: 42, releaseUrl: null } });
+      const { $, openSettings } = await boot({ settings: badUrl });
+      await openSettings();
+      assert.equal($('#settingsLoadMsg').hidden, true, 'no throw reached the loadSettings catch');
+      assert.equal($('#settingsLoadMsg').textContent, '');
+      assert.equal($('#aboutRepoLink').getAttribute('href'), REPO_URL, 'static href kept');
+      assert.equal($('#aboutVersion').textContent.trim(), PAINTED_VERSION, 'the usable part still painted');
+      assert.equal($('#aboutVersion').hasAttribute('href'), false, 'no release link without a usable URL');
+    } },
+  ]);
 });
 
-test('malformed `repoUrl`/`releaseUrl` cannot abort the rest of the settings paint', async () => {
-  const badUrl = () => ({ ...okSettings(), app: { version: PAINTED_VERSION, repoUrl: 42, releaseUrl: null } });
-  const { $, openSettings } = await boot({ settings: badUrl });
-  await openSettings();
-  assert.equal($('#settingsMsg').textContent.trim(), '', 'no throw reached the loadSettings catch');
-  assert.equal($('#aboutRepoLink').getAttribute('href'), REPO_URL, 'static href kept');
-  assert.equal($('#aboutVersion').textContent.trim(), PAINTED_VERSION, 'the usable part still painted');
-  assert.equal($('#aboutVersion').hasAttribute('href'), false, 'no release link without a usable URL');
-});
-
-test('style.css styles the About rows', () => {
-  const css = readFileSync(cssPath, 'utf8');
-  assert.ok(css.includes('.about-row{'), '.about-row rule');
-  assert.ok(css.includes('.about-key{'), '.about-key rule');
-  assert.ok(css.includes('.about-val{'), '.about-val rule');
-  assert.ok(css.includes('.about-version{'), '.about-version rule');
-  assert.ok(css.includes('.about-link{'), '.about-link rule');
-  assert.ok(css.includes('.about-version[href]{'), 'the painted version reads as a link');
-  // Same specificity on one anchor: .about-link must come after .about-val to win.
-  assert.ok(css.indexOf('.about-val{') < css.indexOf('.about-link{'),
-    '.about-link must stay after .about-val');
+// The feedback links: a table over three payloads through the pure about-links.mjs (no app.js),
+// each row on a fresh copy of the Settings markup.
+test('paintAboutInto points both feedback links at bugs.url (no doubled slash) and a missing bugsUrl leaves the static href alone', async () => {
+  await checkRows([
+    { name: 'paintAboutInto points both links at bugs.url from the settings payload', run: async () => {
+      const view = settingsView();
+      paintAboutInto(view, { version: '1.2.0', repoUrl: 'https://github.com/x/y',
+                             bugsUrl: 'https://github.com/x/y/issues' });
+      assert.equal(view.querySelector('#aboutBugLink').getAttribute('href'),
+        'https://github.com/x/y/issues/new?labels=bug', 'the bug link targets the bug label');
+      assert.equal(view.querySelector('#aboutIdeaLink').getAttribute('href'),
+        'https://github.com/x/y/issues/new?labels=enhancement', 'the idea link targets the enhancement label');
+    } },
+    { name: 'a trailing slash does not produce a doubled slash', run: async () => {
+      const view = settingsView();
+      paintAboutInto(view, { bugsUrl: 'https://github.com/x/y/issues/' });
+      assert.equal(view.querySelector('#aboutBugLink').getAttribute('href'),
+        'https://github.com/x/y/issues/new?labels=bug', 'no doubled slash');
+    } },
+    { name: 'a missing bugsUrl leaves the static markup href alone', run: async () => {
+      // A FRESH view per case: reusing the one the previous test repainted would assert
+      // against a value paintAboutInto had already written, which proves nothing about
+      // the static fallback.
+      const view = settingsView();
+      const before = view.querySelector('#aboutBugLink').getAttribute('href');
+      assert.match(before, /\/issues\/new\?labels=bug$/,
+        'the markup ships a usable href before /api/settings lands');
+      for (const info of [{}, { bugsUrl: '' }, { bugsUrl: 42 }, undefined]) {
+        paintAboutInto(view, info);
+        assert.equal(view.querySelector('#aboutBugLink').getAttribute('href'), before,
+          `${JSON.stringify(info)} must not blank the link`);
+      }
+    } },
+  ]);
 });

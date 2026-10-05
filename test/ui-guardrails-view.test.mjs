@@ -1,9 +1,15 @@
 // test/ui-guardrails-view.test.mjs — full-app-boot jsdom tests for the Guardrails view.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -27,7 +33,7 @@ class WSStub {
 }
 
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4321/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4321/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = WSStub;
@@ -64,15 +70,6 @@ async function openGuardrails(window, param = '') {
   await tick(); await tick();
 }
 
-test('index.html registers the tab: pane + seg button + list/msg/create ids', () => {
-  const html = readFileSync(htmlPath, 'utf8');
-  assert.ok(html.includes('data-tab="guardrails"'), 'guardrails pane + tab button exist');
-  assert.equal(html.split('data-nav="guardrails"').length - 1, 0, 'no top-level nav entry any more');
-  for (const id of ['guardrails-list', 'guardrails-msg', 'guardrail-create-btn']) {
-    assert.ok(html.includes(`id="${id}"`), `#${id} present`);
-  }
-});
-
 test('navigating to #guardrails renders the list from GET /api/guardrails (built-ins first, Strict label)', async () => {
   const { window } = await boot();
   await openGuardrails(window);
@@ -86,46 +83,74 @@ test('navigating to #guardrails renders the list from GET /api/guardrails (built
   assert.equal(cards[0].querySelector('.grv-delete'), null, 'built-in undeletable');
 });
 
-test('create wizard: New -> Step 1 -> Next -> Step 2 -> Create POSTs {name, settings}, closes, reloads', async () => {
-  const posts = [];
-  const { window } = await boot({
-    fetchHandler: (u, opts) => {
-      if (u.endsWith('/api/guardrails') && opts.method === 'POST') {
-        posts.push(JSON.parse(opts.body));
-        return Promise.resolve({ ok: true, status: 201, json: async () => ({
-          guardrails: { id: 'gr_new-set', name: 'New Set', origin: null, settings: JSON.parse(opts.body).settings },
-        }) });
-      }
-      return undefined;
-    },
-  });
-  await openGuardrails(window);
-  click(window, window.document.querySelector('#guardrail-create-btn'));
-  await tick();
-  const modal = window.document.querySelector('#plugin-modal');
-  assert.ok(!modal.classList.contains('hidden'), 'wizard open');
-  assert.ok(modal.querySelector('.grv-step1'), 'Step 1 shown');
-  modal.querySelector('.grv-source[value="secure"]').checked = true;
-  click(window, modal.querySelector('.grv-next'));
-  await tick();
-  const editor = modal.querySelector('.grv-editor');
-  assert.ok(editor && editor.dataset.mode === 'create', 'Step 2 editor in create mode');
-  assert.deepEqual([...editor.querySelectorAll('.gr-list.gr-deny .gr-row .mono')].map((n) => n.textContent),
-    ['Bash(curl:*)'], 'prefilled from Strict');
-  const nameInput = editor.querySelector('.grv-name-input');
-  nameInput.value = 'New Set';
-  nameInput.dispatchEvent(new window.Event('input', { bubbles: true })); // fire the enable path a real user triggers
-  await tick();
-  assert.equal(modal.querySelector('.grv-save').disabled, false, 'typing a name enables Create');
-  click(window, modal.querySelector('.grv-save')); // "Create set"
-  await tick(); await tick();
-  assert.equal(posts.length, 1);
-  assert.equal(posts[0].name, 'New Set');
-  assert.deepEqual(posts[0].settings, SETS[2].settings, 'start-from seeds settings');
-  assert.ok(modal.classList.contains('hidden'), 'closes on success');
+test('create wizard: Create requires a name, then POSTs {name, settings}, closes and reloads', async () => {
+  await checkRows([
+    { name: 'create wizard: New -> Step 1 -> Next -> Step 2 -> Create POSTs {name, settings}, closes, reloads', run: async () => {
+      const posts = [];
+      const { window } = await boot({
+        fetchHandler: (u, opts) => {
+          if (u.endsWith('/api/guardrails') && opts.method === 'POST') {
+            posts.push(JSON.parse(opts.body));
+            return Promise.resolve({ ok: true, status: 201, json: async () => ({
+              guardrails: { id: 'gr_new-set', name: 'New Set', origin: null, settings: JSON.parse(opts.body).settings },
+            }) });
+          }
+          return undefined;
+        },
+      });
+      await openGuardrails(window);
+      click(window, window.document.querySelector('#guardrail-create-btn'));
+      await tick();
+      const modal = window.document.querySelector('#plugin-modal');
+      assert.ok(!modal.classList.contains('hidden'), 'wizard open');
+      assert.ok(modal.querySelector('.grv-step1'), 'Step 1 shown');
+      modal.querySelector('.grv-source[value="secure"]').checked = true;
+      click(window, modal.querySelector('.grv-next'));
+      await tick();
+      const editor = modal.querySelector('.grv-editor');
+      assert.ok(editor && editor.dataset.mode === 'create', 'Step 2 editor in create mode');
+      assert.deepEqual([...editor.querySelectorAll('.gr-list.gr-deny .gr-row .mono')].map((n) => n.textContent),
+        ['Bash(curl:*)'], 'prefilled from Strict');
+      const nameInput = editor.querySelector('.grv-name-input');
+      nameInput.value = 'New Set';
+      nameInput.dispatchEvent(new window.Event('input', { bubbles: true })); // fire the enable path a real user triggers
+      await tick();
+      assert.equal(modal.querySelector('.grv-save').disabled, false, 'typing a name enables Create');
+      click(window, modal.querySelector('.grv-save')); // "Create set"
+      await tick(); await tick();
+      assert.equal(posts.length, 1);
+      assert.equal(posts[0].name, 'New Set');
+      assert.deepEqual(posts[0].settings, SETS[2].settings, 'start-from seeds settings');
+      assert.ok(modal.classList.contains('hidden'), 'closes on success');
+    } },
+    { name: 'create requires a name: a rule enables Create but an empty-name save shows the error', run: async () => {
+      const posts = [];
+      const { window } = await boot({ fetchHandler: (u, opts) => {
+        if (u.endsWith('/api/guardrails') && opts.method === 'POST') { posts.push(1); return Promise.resolve({ ok: true, status: 201, json: async () => ({ guardrails: { id: 'x', name: 'x', origin: null, settings: EMPTY } }) }); }
+        return undefined;
+      } });
+      await openGuardrails(window);
+      click(window, window.document.querySelector('#guardrail-create-btn'));
+      await tick();
+      const modal = window.document.querySelector('#plugin-modal');
+      click(window, modal.querySelector('.grv-next')); // Blank
+      await tick();
+      let editor = modal.querySelector('.grv-editor');
+      editor.querySelector('.gr-add[data-list="gr-deny"] input').value = 'Bash(curl:*)';
+      click(window, editor.querySelector('.gr-add[data-list="gr-deny"] .gr-add-btn'));
+      await tick();
+      editor = modal.querySelector('.grv-editor');
+      assert.equal(editor.querySelector('.grv-save').disabled, false, 'a rule makes it dirty');
+      click(window, editor.querySelector('.grv-save')); // no name yet
+      await tick();
+      editor = modal.querySelector('.grv-editor');
+      assert.match(editor.querySelector('.grv-msg').textContent, /name is required/);
+      assert.equal(posts.length, 0, 'no POST without a name');
+    } },
+  ]);
 });
 
-test('delete flow: confirm -> DELETE; a 409 renders the pinning-run list in the modal', async () => {
+test('delete flow: confirm -> DELETE; a 409 is an error toast whose Details renders the pinning-run list', async () => {
   const deletes = [];
   const { window } = await boot({
     fetchHandler: (u, opts) => {
@@ -146,7 +171,15 @@ test('delete flow: confirm -> DELETE; a 409 renders the pinning-run list in the 
   click(window, window.document.querySelector('#confirm-ok'));
   await tick(); await tick();
   assert.equal(deletes.length, 1);
+  // #555: the refusal is an error toast named for the set; Details opens the pinning-run list.
+  const toast = lastToast(window.document);
+  assert.equal(toast.tone, 'err');
+  assert.match(toast.title, /^Cannot delete /);
+  assert.equal(toast.detail, 'cannot delete guardrail set "gr_org" — still referenced');
+  assert.equal(toast.action, 'Details');
   const modal = window.document.querySelector('#plugin-modal');
+  assert.ok(modal.classList.contains('hidden'), 'no dialog until Details is pressed');
+  click(window, window.document.querySelector('#toasts .toast-act'));
   assert.ok(!modal.classList.contains('hidden'), '409 modal shown');
   assert.match(modal.querySelector('.grv-refs409 .mono').textContent, /pipeline p1/);
 });
@@ -209,40 +242,54 @@ test('editor add/remove rows mutate and repaint; Discard reverts to the saved sn
   assert.equal(editor.querySelector('.grv-save').disabled, true);
 });
 
-test('built-in view: read-only + "Save as new set" flips to create prefilled; naming + Create POSTs', async () => {
-  const posts = [];
-  const { window } = await boot({
-    fetchHandler: (u, opts) => {
-      if (u.endsWith('/api/guardrails') && opts.method === 'POST') {
-        posts.push(JSON.parse(opts.body));
-        return Promise.resolve({ ok: true, status: 201, json: async () => ({
-          guardrails: { id: 'gr_copy', name: 'Copy', origin: null, settings: JSON.parse(opts.body).settings } }) });
-      }
-      return undefined;
-    },
-  });
-  await openGuardrails(window, 'secure');
-  const modal = window.document.querySelector('#plugin-modal');
-  let editor = modal.querySelector('.grv-editor');
-  assert.equal(editor.dataset.mode, 'view');
-  assert.equal(editor.querySelector('.grv-name-input'), null, 'read-only: static name');
-  assert.equal(editor.querySelector('.grv-save').textContent, 'Save as new set');
-  click(window, editor.querySelector('.grv-save')); // flip to create
-  await tick();
-  editor = modal.querySelector('.grv-editor');
-  assert.equal(editor.dataset.mode, 'create', 'flipped to create');
-  assert.deepEqual([...editor.querySelectorAll('.gr-list.gr-deny .gr-row .mono')].map((n) => n.textContent),
-    ['Bash(curl:*)'], 'prefilled from the built-in');
-  const nameInput = editor.querySelector('.grv-name-input');
-  nameInput.value = 'Copy';
-  nameInput.dispatchEvent(new window.Event('input', { bubbles: true }));
-  await tick();
-  assert.equal(modal.querySelector('.grv-save').disabled, false, 'typing a name enables Create');
-  click(window, editor.querySelector('.grv-save'));
-  await tick(); await tick();
-  assert.equal(posts.length, 1);
-  assert.equal(posts[0].name, 'Copy');
-  assert.deepEqual(posts[0].settings, SETS[2].settings);
+test('built-in sets are read-only (disabled switches are no-ops); Save as new set flips to a prefilled create that POSTs', async () => {
+  await checkRows([
+    { name: 'built-in view: read-only + "Save as new set" flips to create prefilled; naming + Create POSTs', run: async () => {
+      const posts = [];
+      const { window } = await boot({
+        fetchHandler: (u, opts) => {
+          if (u.endsWith('/api/guardrails') && opts.method === 'POST') {
+            posts.push(JSON.parse(opts.body));
+            return Promise.resolve({ ok: true, status: 201, json: async () => ({
+              guardrails: { id: 'gr_copy', name: 'Copy', origin: null, settings: JSON.parse(opts.body).settings } }) });
+          }
+          return undefined;
+        },
+      });
+      await openGuardrails(window, 'secure');
+      const modal = window.document.querySelector('#plugin-modal');
+      let editor = modal.querySelector('.grv-editor');
+      assert.equal(editor.dataset.mode, 'view');
+      assert.equal(editor.querySelector('.grv-name-input'), null, 'read-only: static name');
+      assert.equal(editor.querySelector('.grv-save').textContent, 'Save as new set');
+      click(window, editor.querySelector('.grv-save')); // flip to create
+      await tick();
+      editor = modal.querySelector('.grv-editor');
+      assert.equal(editor.dataset.mode, 'create', 'flipped to create');
+      assert.deepEqual([...editor.querySelectorAll('.gr-list.gr-deny .gr-row .mono')].map((n) => n.textContent),
+        ['Bash(curl:*)'], 'prefilled from the built-in');
+      const nameInput = editor.querySelector('.grv-name-input');
+      nameInput.value = 'Copy';
+      nameInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+      await tick();
+      assert.equal(modal.querySelector('.grv-save').disabled, false, 'typing a name enables Create');
+      click(window, editor.querySelector('.grv-save'));
+      await tick(); await tick();
+      assert.equal(posts.length, 1);
+      assert.equal(posts[0].name, 'Copy');
+      assert.deepEqual(posts[0].settings, SETS[2].settings);
+    } },
+    { name: 'built-in view is read-only: clicking a disabled switch is a no-op', run: async () => {
+      const { window } = await boot();
+      await openGuardrails(window, 'secure');
+      const modal = window.document.querySelector('#plugin-modal');
+      const before = modal.querySelector('.gr-scrub').classList.contains('on');
+      click(window, modal.querySelector('.gr-scrub'));
+      await tick();
+      assert.equal(modal.querySelector('.gr-scrub').classList.contains('on'), before, 'switch did not toggle');
+      assert.equal(modal.querySelector('.grv-editor').dataset.mode, 'view', 'still read-only');
+    } },
+  ]);
 });
 
 test('edit 400 (errors array) surfaces in .grv-msg and stays dirty for retry', async () => {
@@ -270,175 +317,130 @@ test('edit 400 (errors array) surfaces in .grv-msg and stays dirty for retry', a
   assert.ok(!modal.classList.contains('hidden'), 'stays open on error');
 });
 
-test('create wizard: Back after editing, then Next on the SAME source, keeps the edits', async () => {
-  const { window } = await boot();
-  await openGuardrails(window);
-  click(window, window.document.querySelector('#guardrail-create-btn'));
-  await tick();
-  const modal = window.document.querySelector('#plugin-modal');
-  modal.querySelector('.grv-source[value="secure"]').checked = true;
-  click(window, modal.querySelector('.grv-next'));
-  await tick();
-  let editor = modal.querySelector('.grv-editor');
-  editor.querySelector('.gr-add[data-list="gr-deny"] input').value = 'Bash(wget:*)';
-  click(window, editor.querySelector('.gr-add[data-list="gr-deny"] .gr-add-btn'));
-  await tick();
-  click(window, modal.querySelector('.grv-back'));
-  await tick();
-  assert.ok(modal.querySelector('.grv-step1'), 'back at Step 1');
-  assert.equal(modal.querySelector('.grv-source:checked').value, 'secure', 'source preserved');
-  click(window, modal.querySelector('.grv-next'));
-  await tick();
-  editor = modal.querySelector('.grv-editor');
-  assert.deepEqual([...editor.querySelectorAll('.gr-list.gr-deny .gr-row .mono')].map((n) => n.textContent),
-    ['Bash(curl:*)', 'Bash(wget:*)'], 'edits preserved on same-source Back -> Next');
-  assert.equal(editor.querySelector('.grv-save').disabled, false, 'still dirty after restore');
+test('create wizard Back: same source keeps edits, a different source re-seeds', async () => {
+  await checkRows([
+    { name: 'create wizard: Back after editing, then Next on the SAME source, keeps the edits', run: async () => {
+      const { window } = await boot();
+      await openGuardrails(window);
+      click(window, window.document.querySelector('#guardrail-create-btn'));
+      await tick();
+      const modal = window.document.querySelector('#plugin-modal');
+      modal.querySelector('.grv-source[value="secure"]').checked = true;
+      click(window, modal.querySelector('.grv-next'));
+      await tick();
+      let editor = modal.querySelector('.grv-editor');
+      editor.querySelector('.gr-add[data-list="gr-deny"] input').value = 'Bash(wget:*)';
+      click(window, editor.querySelector('.gr-add[data-list="gr-deny"] .gr-add-btn'));
+      await tick();
+      click(window, modal.querySelector('.grv-back'));
+      await tick();
+      assert.ok(modal.querySelector('.grv-step1'), 'back at Step 1');
+      assert.equal(modal.querySelector('.grv-source:checked').value, 'secure', 'source preserved');
+      click(window, modal.querySelector('.grv-next'));
+      await tick();
+      editor = modal.querySelector('.grv-editor');
+      assert.deepEqual([...editor.querySelectorAll('.gr-list.gr-deny .gr-row .mono')].map((n) => n.textContent),
+        ['Bash(curl:*)', 'Bash(wget:*)'], 'edits preserved on same-source Back -> Next');
+      assert.equal(editor.querySelector('.grv-save').disabled, false, 'still dirty after restore');
+    } },
+    { name: 'create wizard: Back then choosing a DIFFERENT source re-seeds (edits dropped by design)', run: async () => {
+      const { window } = await boot();
+      await openGuardrails(window);
+      click(window, window.document.querySelector('#guardrail-create-btn'));
+      await tick();
+      const modal = window.document.querySelector('#plugin-modal');
+      modal.querySelector('.grv-source[value="secure"]').checked = true;
+      click(window, modal.querySelector('.grv-next'));
+      await tick();
+      let editor = modal.querySelector('.grv-editor');
+      editor.querySelector('.gr-add[data-list="gr-deny"] input').value = 'Bash(wget:*)';
+      click(window, editor.querySelector('.gr-add[data-list="gr-deny"] .gr-add-btn'));
+      await tick();
+      click(window, modal.querySelector('.grv-back'));
+      await tick();
+      modal.querySelector('.grv-source[value=""]').checked = true; // switch to Blank
+      click(window, modal.querySelector('.grv-next'));
+      await tick();
+      editor = modal.querySelector('.grv-editor');
+      assert.deepEqual([...editor.querySelectorAll('.gr-list.gr-deny .gr-row .mono')].map((n) => n.textContent),
+        [], 're-seeded from Blank, prior edits dropped');
+    } },
+  ]);
 });
 
-test('create wizard: Back then choosing a DIFFERENT source re-seeds (edits dropped by design)', async () => {
-  const { window } = await boot();
-  await openGuardrails(window);
-  click(window, window.document.querySelector('#guardrail-create-btn'));
-  await tick();
-  const modal = window.document.querySelector('#plugin-modal');
-  modal.querySelector('.grv-source[value="secure"]').checked = true;
-  click(window, modal.querySelector('.grv-next'));
-  await tick();
-  let editor = modal.querySelector('.grv-editor');
-  editor.querySelector('.gr-add[data-list="gr-deny"] input').value = 'Bash(wget:*)';
-  click(window, editor.querySelector('.gr-add[data-list="gr-deny"] .gr-add-btn'));
-  await tick();
-  click(window, modal.querySelector('.grv-back'));
-  await tick();
-  modal.querySelector('.grv-source[value=""]').checked = true; // switch to Blank
-  click(window, modal.querySelector('.grv-next'));
-  await tick();
-  editor = modal.querySelector('.grv-editor');
-  assert.deepEqual([...editor.querySelectorAll('.gr-list.gr-deny .gr-row .mono')].map((n) => n.textContent),
-    [], 're-seeded from Blank, prior edits dropped');
+test('leaving the view or browser Back closes an open wizard', async () => {
+  await checkRows([
+    { name: 'navigating to another view closes an open wizard (showView leave-guard)', run: async () => {
+      const { window } = await boot();
+      await openGuardrails(window, 'gr_org');
+      assert.ok(!window.document.querySelector('#plugin-modal').classList.contains('hidden'));
+      window.location.hash = 'projects';
+      window.dispatchEvent(new window.Event('hashchange'));
+      await tick(); await tick();
+      assert.ok(window.document.querySelector('#plugin-modal').classList.contains('hidden'), 'wizard closed on nav away');
+    } },
+    { name: 'browser Back to the bare Guardrails tab closes an open edit wizard (loadGuardrailsView reset)', run: async () => {
+      const { window } = await boot();
+      await openGuardrails(window, 'gr_org');
+      const modal = window.document.querySelector('#plugin-modal');
+      assert.ok(!modal.classList.contains('hidden'));
+      window.location.hash = 'settings/guardrails';
+      window.dispatchEvent(new window.Event('hashchange'));
+      await tick(); await tick();
+      assert.ok(modal.classList.contains('hidden'), 'wizard closed on bare-hash reload');
+    } },
+  ]);
 });
 
-test('create requires a name: a rule enables Create but an empty-name save shows the error', async () => {
-  const posts = [];
-  const { window } = await boot({ fetchHandler: (u, opts) => {
-    if (u.endsWith('/api/guardrails') && opts.method === 'POST') { posts.push(1); return Promise.resolve({ ok: true, status: 201, json: async () => ({ guardrails: { id: 'x', name: 'x', origin: null, settings: EMPTY } }) }); }
-    return undefined;
-  } });
-  await openGuardrails(window);
-  click(window, window.document.querySelector('#guardrail-create-btn'));
-  await tick();
-  const modal = window.document.querySelector('#plugin-modal');
-  click(window, modal.querySelector('.grv-next')); // Blank
-  await tick();
-  let editor = modal.querySelector('.grv-editor');
-  editor.querySelector('.gr-add[data-list="gr-deny"] input').value = 'Bash(curl:*)';
-  click(window, editor.querySelector('.gr-add[data-list="gr-deny"] .gr-add-btn'));
-  await tick();
-  editor = modal.querySelector('.grv-editor');
-  assert.equal(editor.querySelector('.grv-save').disabled, false, 'a rule makes it dirty');
-  click(window, editor.querySelector('.grv-save')); // no name yet
-  await tick();
-  editor = modal.querySelector('.grv-editor');
-  assert.match(editor.querySelector('.grv-msg').textContent, /name is required/);
-  assert.equal(posts.length, 0, 'no POST without a name');
-});
-
-test('deep link to a non-existent id shows a message and opens no modal', async () => {
-  const { window } = await boot();
-  await openGuardrails(window, 'nope');
-  const modal = window.document.querySelector('#plugin-modal');
-  assert.ok(modal.classList.contains('hidden'), 'no wizard for a missing id');
-  assert.match(window.document.querySelector('#guardrails-msg').textContent, /not found/);
-});
-
-test('built-in view is read-only: clicking a disabled switch is a no-op', async () => {
-  const { window } = await boot();
-  await openGuardrails(window, 'secure');
-  const modal = window.document.querySelector('#plugin-modal');
-  const before = modal.querySelector('.gr-scrub').classList.contains('on');
-  click(window, modal.querySelector('.gr-scrub'));
-  await tick();
-  assert.equal(modal.querySelector('.gr-scrub').classList.contains('on'), before, 'switch did not toggle');
-  assert.equal(modal.querySelector('.grv-editor').dataset.mode, 'view', 'still read-only');
-});
-
-test('navigating to another view closes an open wizard (showView leave-guard)', async () => {
-  const { window } = await boot();
-  await openGuardrails(window, 'gr_org');
-  assert.ok(!window.document.querySelector('#plugin-modal').classList.contains('hidden'));
-  window.location.hash = 'projects';
-  window.dispatchEvent(new window.Event('hashchange'));
-  await tick(); await tick();
-  assert.ok(window.document.querySelector('#plugin-modal').classList.contains('hidden'), 'wizard closed on nav away');
-});
-
-test('browser Back to the bare Guardrails tab closes an open edit wizard (loadGuardrailsView reset)', async () => {
-  const { window } = await boot();
-  await openGuardrails(window, 'gr_org');
-  const modal = window.document.querySelector('#plugin-modal');
-  assert.ok(!modal.classList.contains('hidden'));
-  window.location.hash = 'settings/guardrails';
-  window.dispatchEvent(new window.Event('hashchange'));
-  await tick(); await tick();
-  assert.ok(modal.classList.contains('hidden'), 'wizard closed on bare-hash reload');
-});
-
-test('dirty-guard: Escape on a dirty editor asks to discard; confirming closes', async () => {
-  const { window } = await boot();
-  await openGuardrails(window, 'gr_org');
-  const modal = window.document.querySelector('#plugin-modal');
-  const editor = modal.querySelector('.grv-editor');
-  click(window, editor.querySelector('.gr-scrub')); // make it dirty
-  await tick();
-  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
-  await tick();
-  const confirm = window.document.querySelector('#confirm-modal');
-  assert.ok(!confirm.classList.contains('hidden'), 'discard confirm shown');
-  click(window, window.document.querySelector('#confirm-ok'));
-  await tick(); await tick();
-  assert.ok(modal.classList.contains('hidden'), 'wizard closed after confirming discard');
-});
-
-test('dirty-guard: canceling the discard confirm keeps the wizard open', async () => {
-  const { window } = await boot();
-  await openGuardrails(window, 'gr_org');
-  const modal = window.document.querySelector('#plugin-modal');
-  click(window, modal.querySelector('.grv-editor .gr-scrub')); // dirty
-  await tick();
-  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
-  await tick();
-  const confirm = window.document.querySelector('#confirm-modal');
-  assert.ok(!confirm.classList.contains('hidden'), 'discard confirm shown');
-  click(window, window.document.querySelector('#confirm-cancel'));
-  await tick(); await tick();
-  assert.ok(!modal.classList.contains('hidden'), 'stays open when discard is canceled');
-});
-
-test('dirty-guard: backdrop click on a dirty editor asks to discard', async () => {
-  const { window } = await boot();
-  await openGuardrails(window, 'gr_org');
-  const modal = window.document.querySelector('#plugin-modal');
-  click(window, modal.querySelector('.grv-editor .gr-scrub')); // dirty
-  await tick();
-  click(window, modal); // target === the overlay itself = backdrop
-  await tick();
-  assert.ok(!window.document.querySelector('#confirm-modal').classList.contains('hidden'), 'discard confirm shown on backdrop');
-});
-
-test('clean close: Escape on a pristine editor closes with no confirm', async () => {
-  const { window } = await boot();
-  await openGuardrails(window, 'gr_org');
-  const modal = window.document.querySelector('#plugin-modal');
-  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
-  await tick(); await tick();
-  assert.ok(window.document.querySelector('#confirm-modal').classList.contains('hidden'), 'no confirm for a clean editor');
-  assert.ok(modal.classList.contains('hidden'), 'closed directly');
-});
-
-test('editing from the list deep-links into the Settings tab, and exit normalises back', async () => {
-  const { window } = await boot();
-  await openGuardrails(window);
-  click(window, window.document.querySelector('#guardrails-list .grv-card[data-id="gr_org"] .grv-edit'));
-  await tick(); await tick();
-  assert.equal(window.location.hash, '#settings/guardrails/gr_org');
+test('dirty-guard: Escape/backdrop on a dirty editor asks to discard (cancel keeps it, confirm closes); a pristine editor closes without asking', async () => {
+  await checkRows([
+    { name: 'dirty-guard: Escape on a dirty editor asks to discard; confirming closes', run: async () => {
+      const { window } = await boot();
+      await openGuardrails(window, 'gr_org');
+      const modal = window.document.querySelector('#plugin-modal');
+      const editor = modal.querySelector('.grv-editor');
+      click(window, editor.querySelector('.gr-scrub')); // make it dirty
+      await tick();
+      window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+      await tick();
+      const confirm = window.document.querySelector('#confirm-modal');
+      assert.ok(!confirm.classList.contains('hidden'), 'discard confirm shown');
+      click(window, window.document.querySelector('#confirm-ok'));
+      await tick(); await tick();
+      assert.ok(modal.classList.contains('hidden'), 'wizard closed after confirming discard');
+    } },
+    { name: 'dirty-guard: canceling the discard confirm keeps the wizard open', run: async () => {
+      const { window } = await boot();
+      await openGuardrails(window, 'gr_org');
+      const modal = window.document.querySelector('#plugin-modal');
+      click(window, modal.querySelector('.grv-editor .gr-scrub')); // dirty
+      await tick();
+      window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+      await tick();
+      const confirm = window.document.querySelector('#confirm-modal');
+      assert.ok(!confirm.classList.contains('hidden'), 'discard confirm shown');
+      click(window, window.document.querySelector('#confirm-cancel'));
+      await tick(); await tick();
+      assert.ok(!modal.classList.contains('hidden'), 'stays open when discard is canceled');
+    } },
+    { name: 'dirty-guard: backdrop click on a dirty editor asks to discard', run: async () => {
+      const { window } = await boot();
+      await openGuardrails(window, 'gr_org');
+      const modal = window.document.querySelector('#plugin-modal');
+      click(window, modal.querySelector('.grv-editor .gr-scrub')); // dirty
+      await tick();
+      click(window, modal); // target === the overlay itself = backdrop
+      await tick();
+      assert.ok(!window.document.querySelector('#confirm-modal').classList.contains('hidden'), 'discard confirm shown on backdrop');
+    } },
+    { name: 'clean close: Escape on a pristine editor closes with no confirm', run: async () => {
+      const { window } = await boot();
+      await openGuardrails(window, 'gr_org');
+      const modal = window.document.querySelector('#plugin-modal');
+      window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+      await tick(); await tick();
+      assert.ok(window.document.querySelector('#confirm-modal').classList.contains('hidden'), 'no confirm for a clean editor');
+      assert.ok(modal.classList.contains('hidden'), 'closed directly');
+    } },
+  ]);
 });

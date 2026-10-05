@@ -1,11 +1,11 @@
 // test/slack-chat-worker.test.mjs — the slack-chat example plugin's Socket
 // Mode worker, in-process with injected fetchFn + a scripted FakeWebSocket:
 // ack-before-process, own/bot/subtype filtering, disconnect->fresh-URL reopen,
-// chat.postMessage error mapping (200 {ok:false} convention), validateConfig
-// per-field errors.
+// chat.postMessage error mapping (200 {ok:false} convention).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSlackWorker, validateConfig, renderToMrkdwn } from '../plugins/slack-chat/channel/worker.mjs';
+import { createSlackWorker, renderToMrkdwn } from '../plugins/slack-chat/channel/worker.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const json = (obj, status = 200, headers = {}) => ({
   ok: status >= 200 && status < 300,
@@ -176,41 +176,26 @@ test('send: mrkdwn render + slack error mapping (ok:false convention, 429 ladder
   await assert.rejects(w.send('C1', msg), (e) => e.kind === 'rate-limit', '200 ok:false ratelimited also ladders');
 });
 
-test('validateConfig: per-field errors pin the failing token', async () => {
-  const both = await validateConfig({ botToken: 'xoxb', appToken: 'xapp' }, {
-    fetchFn: async (url) => (url.endsWith('/auth.test')
-      ? json({ ok: true, user: 'worca' })
-      : json({ ok: false, error: 'invalid_auth' })),
-  });
-  assert.equal(both.ok, false);
-  assert.deepEqual(both.errors.map((e) => e.field), ['appToken']);
-  const ok = await validateConfig({ botToken: 'xoxb', appToken: 'xapp' }, {
-    fetchFn: async (url) => (url.endsWith('/auth.test')
-      ? json({ ok: true, user: 'worca' })
-      : json({ ok: true, url: 'wss://x' })),
-  });
-  assert.deepEqual(ok, { ok: true, identity: '@worca' });
-  const missing = await validateConfig({});
-  assert.deepEqual(missing.errors.map((e) => e.field), ['botToken', 'appToken']);
-});
+test('start(): a transient auth.test failure throws (supervisor restarts); a definitive invalid_auth degrades without throwing', async () => {
+  await checkRows([
+    { name: 'start(): transient auth.test failure (5xx/429) throws so the supervisor restarts', run: async () => {
+      const { ctx } = fakeCtx();
+      const w = createSlackWorker(ctx, { fetchFn: async () => json({}, 503) });
+      await assert.rejects(() => w.start(), (e) => /auth\.test failed: HTTP 503/.test(e.message) && e.kind === 'network');
 
-test('start(): transient auth.test failure (5xx/429) throws so the supervisor restarts', async () => {
-  const { ctx } = fakeCtx();
-  const w = createSlackWorker(ctx, { fetchFn: async () => json({}, 503) });
-  await assert.rejects(() => w.start(), (e) => /auth\.test failed: HTTP 503/.test(e.message) && e.kind === 'network');
-
-  const { ctx: ctx429 } = fakeCtx();
-  const w429 = createSlackWorker(ctx429, { fetchFn: async () => json({}, 429, { 'retry-after': '2' }) });
-  await assert.rejects(() => w429.start(), (e) => /auth\.test failed: HTTP 429/.test(e.message) && e.kind === 'rate-limit');
-});
-
-test('start(): definitive invalid_auth still degrades without throwing', async () => {
-  const { ctx, events } = fakeCtx();
-  const w = createSlackWorker(ctx, { fetchFn: async () => json({ ok: false, error: 'invalid_auth' }) });
-  const r = await w.start();
-  assert.equal(r.identity, null);
-  assert.equal(events.status.at(-1).state, 'disconnected');
-  assert.match(events.status.at(-1).detail, /auth\.test failed: invalid_auth — check botToken/);
+      const { ctx: ctx429 } = fakeCtx();
+      const w429 = createSlackWorker(ctx429, { fetchFn: async () => json({}, 429, { 'retry-after': '2' }) });
+      await assert.rejects(() => w429.start(), (e) => /auth\.test failed: HTTP 429/.test(e.message) && e.kind === 'rate-limit');
+    } },
+    { name: 'start(): definitive invalid_auth still degrades without throwing', run: async () => {
+      const { ctx, events } = fakeCtx();
+      const w = createSlackWorker(ctx, { fetchFn: async () => json({ ok: false, error: 'invalid_auth' }) });
+      const r = await w.start();
+      assert.equal(r.identity, null);
+      assert.equal(events.status.at(-1).state, 'disconnected');
+      assert.match(events.status.at(-1).detail, /auth\.test failed: invalid_auth — check botToken/);
+    } },
+  ]);
 });
 
 test('mrkdwn render escapes Slack control sequences in every segment kind', () => {

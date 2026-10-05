@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { checkRows } from './helpers/rows.mjs';
 
 const SRC = readFileSync(fileURLToPath(new URL('../assets/deck-kit/deck-stage.js', import.meta.url)), 'utf8');
 
@@ -38,23 +39,25 @@ async function mount(skips, hash = '') {
   return active.getAttribute('data-label');
 }
 
-test('mount lands on the first live slide, never on a skipped one', async () => {
-  assert.equal(await mount([]), '01', 'nothing skipped: slide 1, as before');
-  assert.equal(await mount([0]), '02', 'slide 1 skipped');
-  assert.equal(await mount([0, 1, 4]), '03', 'a run of skipped slides is walked past');
-});
-
-test('a deep link onto a skipped slide moves to a live one', async () => {
-  assert.equal(await mount([], '#4'), '04', 'an ordinary deep link is untouched');
-  assert.equal(await mount([0], '#1'), '02', 'forward off a skipped slide');
-  assert.equal(await mount([4], '#5'), '06', 'forward again');
-  // Nothing live after it → search BACK, so a deck ending in skipped slides still
-  // opens somewhere you can present from.
-  assert.equal(await mount([5], '#6'), '05', 'back when the tail is skipped');
-});
-
-test('a deck with every slide skipped keeps the clamp, rather than nowhere', async () => {
-  assert.equal(await mount([0, 1, 2, 3, 4, 5]), '01');
+test('mount and deep links land on a live slide (forward, then back; all-skipped clamps)', async () => {
+  await checkRows([
+    { name: 'mount lands on the first live slide, never on a skipped one', run: async () => {
+      assert.equal(await mount([]), '01', 'nothing skipped: slide 1, as before');
+      assert.equal(await mount([0]), '02', 'slide 1 skipped');
+      assert.equal(await mount([0, 1, 4]), '03', 'a run of skipped slides is walked past');
+    } },
+    { name: 'a deep link onto a skipped slide moves to a live one', run: async () => {
+      assert.equal(await mount([], '#4'), '04', 'an ordinary deep link is untouched');
+      assert.equal(await mount([0], '#1'), '02', 'forward off a skipped slide');
+      assert.equal(await mount([4], '#5'), '06', 'forward again');
+      // Nothing live after it → search BACK, so a deck ending in skipped slides still
+      // opens somewhere you can present from.
+      assert.equal(await mount([5], '#6'), '05', 'back when the tail is skipped');
+    } },
+    { name: 'a deck with every slide skipped keeps the clamp, rather than nowhere', run: async () => {
+      assert.equal(await mount([0, 1, 2, 3, 4, 5]), '01');
+    } },
+  ]);
 });
 
 /** Mount, then run `mutate` against the live stage and report where it lands. */

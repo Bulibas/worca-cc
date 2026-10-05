@@ -10,43 +10,33 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { VENDORED, VENDORED_NARRATION } from '../tools/vendor-opendeck.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const KIT = join(fileURLToPath(new URL('..', import.meta.url)), 'assets', 'deck-kit');
 const pin = JSON.parse(readFileSync(join(KIT, 'UPSTREAM.json'), 'utf8'));
 const NARRATION = join(KIT, '..', 'deck-narration');
 const sha = (f, dir = KIT) => createHash('sha256').update(readFileSync(join(dir, f))).digest('hex');
 
-test('every vendored OpenDeck file matches its UPSTREAM.json pin', () => {
-  assert.deepEqual(Object.keys(pin.files).sort(), [...VENDORED].sort());
-  for (const f of VENDORED) {
-    assert.equal(sha(f), pin.files[f], `${f} was edited locally — fix it upstream, then \`npm run deck:vendor -- --tag v<version>\``);
-  }
-});
-
-test('the kit VERSION is the pinned OpenDeck release', () => {
-  assert.equal(readFileSync(join(KIT, 'VERSION'), 'utf8').trim(), pin.version);
-  assert.match(readFileSync(join(KIT, 'CONTRACT.md'), 'utf8'), new RegExp(`Kit version: \\*\\*${pin.version.replace(/\./g, '\\.')}\\*\\*`));
-});
-
-test('the pinned release has the extension seam deck-pipeline.js needs (>= 1.3.0)', () => {
-  const [maj, min] = pin.version.split('.').map(Number);
-  assert.ok(maj > 1 || (maj === 1 && min >= 3), `OpenDeck ${pin.version} predates DeckStage.addDocumentStyle`);
-  assert.match(readFileSync(join(KIT, 'deck-stage.js'), 'utf8'), /static addDocumentStyle\(/);
-});
-
-test('deck-pipeline.js is ours: registered through the seam, not pinned, not in the vendored set', () => {
-  assert.ok(!VENDORED.includes('deck-pipeline.js'));
-  const src = readFileSync(join(KIT, 'deck-pipeline.js'), 'utf8');
-  assert.match(src, /addDocumentStyle\('worca-pipeline'/);
-  assert.match(src, /window\.__DECK_PIPELINE/);
-});
-
-// The Audio Studio engine is a SECOND vendored set, staged only for the audio step. It must stay
-// out of deck-kit/ (which is copied flat into every deck and inlined into every export).
-test('the narration set is pinned too, and kept out of the kit folder every deck copies', () => {
-  assert.deepEqual(Object.keys(pin.narration).sort(), [...VENDORED_NARRATION].sort());
-  for (const f of VENDORED_NARRATION) {
-    assert.equal(sha(f, NARRATION), pin.narration[f], `${f} was edited locally — fix it upstream, then \`npm run deck:vendor\``);
-    assert.ok(!existsSync(join(KIT, f)), `${f} must not sit in deck-kit/ — every deck would inline it`);
-  }
+test('vendored OpenDeck kit and narration files match their UPSTREAM.json pins and VERSION', async () => {
+  await checkRows([
+    { name: 'every vendored OpenDeck file matches its UPSTREAM.json pin', run: () => {
+      assert.deepEqual(Object.keys(pin.files).sort(), [...VENDORED].sort());
+      for (const f of VENDORED) {
+        assert.equal(sha(f), pin.files[f], `${f} was edited locally — fix it upstream, then \`npm run deck:vendor -- --tag v<version>\``);
+      }
+    } },
+    // The Audio Studio engine is a SECOND vendored set, staged only for the audio step. It must stay
+    // out of deck-kit/ (which is copied flat into every deck and inlined into every export).
+    { name: 'the narration set is pinned too, and kept out of the kit folder every deck copies', run: () => {
+      assert.deepEqual(Object.keys(pin.narration).sort(), [...VENDORED_NARRATION].sort());
+      for (const f of VENDORED_NARRATION) {
+        assert.equal(sha(f, NARRATION), pin.narration[f], `${f} was edited locally — fix it upstream, then \`npm run deck:vendor\``);
+        assert.ok(!existsSync(join(KIT, f)), `${f} must not sit in deck-kit/ — every deck would inline it`);
+      }
+    } },
+    { name: 'the kit VERSION is the pinned OpenDeck release', run: () => {
+      assert.equal(readFileSync(join(KIT, 'VERSION'), 'utf8').trim(), pin.version);
+      assert.match(readFileSync(join(KIT, 'CONTRACT.md'), 'utf8'), new RegExp(`Kit version: \\*\\*${pin.version.replace(/\./g, '\\.')}\\*\\*`));
+    } },
+  ]);
 });

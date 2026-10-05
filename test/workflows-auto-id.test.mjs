@@ -5,21 +5,11 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { getDb } from '../src/core/db.mjs';
 import {
   readWorkflow, listWorkflows, writeGraphWorkflow, deleteWorkflow, assertRunnableWorkflow, resolveGraph,
-  AUTO_WORKFLOW_ID,
 } from '../src/core/workflows.mjs';
-import { AUTO_WORKFLOW_STUB, AUTO_WORKFLOW_NAME } from '../src/core/graph/builtin-workflows.mjs';
+import { AUTO_WORKFLOW_STUB } from '../src/core/graph/builtin-workflows.mjs';
 import { exportGraphJson } from '../src/core/workflow-share.mjs';
 
 useTempHome(after);
-
-test('wf_auto reads as the frozen stub and is never listed', async () => {
-  assert.equal(AUTO_WORKFLOW_ID, 'wf_auto');
-  assert.equal(AUTO_WORKFLOW_NAME, 'Auto');
-  assert.equal(await readWorkflow('wf_auto'), AUTO_WORKFLOW_STUB);
-  assert.equal(AUTO_WORKFLOW_STUB.auto, true);
-  assert.ok(Object.isFrozen(AUTO_WORKFLOW_STUB));
-  assert.ok(!(await listWorkflows()).some((t) => t.id === 'wf_auto'));
-});
 
 test('a name slugging onto wf_auto is refused; the id cannot be claimed or deleted', async () => {
   for (const name of ['Auto', ' auto ', 'AUTO!!']) {

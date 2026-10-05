@@ -34,32 +34,28 @@ test('speech: defaults; never an upstream provider', async () => {
   });
 });
 
-test('speech: nested patch, normalisation, ${VAR} key, clear back to default', async () => {
+// The engine switch rides the same patch: the built-in browser engine, a server, and off (tts).
+test('speech: nested patch incl. engine/pause, normalisation, ${VAR} key, clear back to default', async () => {
   await withSandbox(async () => {
     const c = await updateSpeech({
-      stt: { baseUrl: 'http://127.0.0.1:9000/v1/', language: 'BG', apiKey: '${WHISPER_KEY}' },
-      tts: { baseUrl: 'http://127.0.0.1:8880/v1', voice: 'af_heart', speed: '1.25' },
+      stt: { baseUrl: 'http://127.0.0.1:9000/v1/', language: 'BG', apiKey: '${WHISPER_KEY}', engine: 'Server', pause: '2.5' },
+      tts: { baseUrl: 'http://127.0.0.1:8880/v1', voice: 'af_heart', speed: '1.25', engine: 'off' },
     });
     assert.equal(c.stt.baseUrl, 'http://127.0.0.1:9000/v1');
     assert.equal(c.stt.language, 'bg');
     assert.equal(c.stt.apiKey, '${WHISPER_KEY}');
     assert.equal(c.tts.speed, 1.25);
-    const raw = JSON.parse(await readFile(settingsFile(), 'utf8'));
-    assert.deepEqual(raw.providers.speech.tts, { baseUrl: 'http://127.0.0.1:8880/v1', voice: 'af_heart', speed: 1.25 });
-    await updateSpeech({ stt: { baseUrl: '', language: null, apiKey: '' }, tts: { baseUrl: '', voice: '', speed: null } });
-    assert.deepEqual(speechConfig(), DEFAULTS);
-    assert.equal(readSettings().providers, undefined);
-  });
-});
-
-test('speech: engine switches between the built-in browser engine, a server, and off (tts)', async () => {
-  await withSandbox(async () => {
-    const c = await updateSpeech({ stt: { engine: 'Server', pause: '2.5' }, tts: { engine: 'off' } });
     assert.equal(c.stt.engine, 'server');
     assert.equal(c.stt.pause, 2.5);
     assert.equal(c.tts.engine, 'off');
-    await updateSpeech({ stt: { engine: '', pause: '' }, tts: { engine: null } });
+    const raw = JSON.parse(await readFile(settingsFile(), 'utf8'));
+    assert.deepEqual(raw.providers.speech.tts, { baseUrl: 'http://127.0.0.1:8880/v1', voice: 'af_heart', speed: 1.25, engine: 'off' });
+    await updateSpeech({
+      stt: { baseUrl: '', language: null, apiKey: '', engine: '', pause: '' },
+      tts: { baseUrl: '', voice: '', speed: null, engine: null },
+    });
     assert.deepEqual(speechConfig(), DEFAULTS);
+    assert.equal(readSettings().providers, undefined);
   });
 });
 

@@ -11,6 +11,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isValidAssetName, collectRequiredAssets, stageAssets } from '../src/core/run-assets.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 test('isValidAssetName rejects the path-segment escapes', () => {
   for (const ok of ['deck-kit', 'a', 'A.b_c-1']) assert.equal(isValidAssetName(ok), true, ok);
@@ -59,15 +60,32 @@ test('staging overwrites an agent edit from a previous cycle — the shipped ass
   } finally { await rm(root, { recursive: true, force: true }); await rm(target, { recursive: true, force: true }); }
 });
 
-test('stageAssets throws rather than staging a partial set', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'worca-assets-root-'));
-  const target = await mkdtemp(join(tmpdir(), 'worca-assets-target-'));
-  try {
-    await mkdir(join(root, 'assets', 'real'), { recursive: true });
-    await writeFile(join(root, 'assets', 'real', 'f'), 'x');
-    await assert.rejects(() => stageAssets(['real', 'missing'], { root, target }), /not found/);
-    await assert.rejects(() => stageAssets(['../escape'], { root, target }), /not a valid asset name/);
-  } finally { await rm(root, { recursive: true, force: true }); await rm(target, { recursive: true, force: true }); }
+test('stageAssets: a missing asset throws (no partial set) naming every place looked; an invalid name is refused', async () => {
+  await checkRows([
+    { name: 'stageAssets throws rather than staging a partial set', run: async () => {
+      const root = await mkdtemp(join(tmpdir(), 'worca-assets-root-'));
+      const target = await mkdtemp(join(tmpdir(), 'worca-assets-target-'));
+      try {
+        await mkdir(join(root, 'assets', 'real'), { recursive: true });
+        await writeFile(join(root, 'assets', 'real', 'f'), 'x');
+        await assert.rejects(() => stageAssets(['real', 'missing'], { root, target }), /not found/);
+        await assert.rejects(() => stageAssets(['../escape'], { root, target }), /not a valid asset name/);
+      } finally { await rm(root, { recursive: true, force: true }); await rm(target, { recursive: true, force: true }); }
+    } },
+    { name: 'a genuinely missing asset still names every place it was looked for', run: async () => {
+      const root = await mkdtemp(join(tmpdir(), 'worca-assets-root3-'));
+      const target = await mkdtemp(join(tmpdir(), 'worca-assets-target3-'));
+      try {
+        await mkdir(join(root, 'assets'), { recursive: true });
+        await assert.rejects(
+          () => stageAssets(['nope'], { root, target, pluginDirs: [{ plugin: 'acme', dir: '/does/not/exist' }] }),
+          (e) => /not found/.test(e.message) && e.message.includes('assets/nope'),
+        );
+      } finally {
+        for (const d of [root, target]) await rm(d, { recursive: true, force: true });
+      }
+    } },
+  ]);
 });
 
 test('the shipped deck agents declare the kit, so a run can never depend on finding it', async () => {
@@ -140,19 +158,5 @@ test("worca's own asset wins over a plugin of the same name", async () => {
       'a plugin cannot shadow a kit worca ships');
   } finally {
     for (const d of [root, plug, target]) await rm(d, { recursive: true, force: true });
-  }
-});
-
-test('a genuinely missing asset still names every place it was looked for', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'worca-assets-root3-'));
-  const target = await mkdtemp(join(tmpdir(), 'worca-assets-target3-'));
-  try {
-    await mkdir(join(root, 'assets'), { recursive: true });
-    await assert.rejects(
-      () => stageAssets(['nope'], { root, target, pluginDirs: [{ plugin: 'acme', dir: '/does/not/exist' }] }),
-      (e) => /not found/.test(e.message) && e.message.includes('assets/nope'),
-    );
-  } finally {
-    for (const d of [root, target]) await rm(d, { recursive: true, force: true });
   }
 });

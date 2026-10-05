@@ -2,12 +2,12 @@
 // columns, the request it builds, the frames it consumes and the cases it writes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import {
   renderBench, renderBenchResult, collectBenchRequest, collectCase, createBenchController,
   caseListFor, caseIdFrom, SCRATCH_LABEL, EXPECT_VERDICTS, MAX_CASES, MAX_CASE_NAME,
 } from '../ui/public/script-bench-view.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const win = new JSDOM('<!doctype html><body></body>').window;
 const doc = win.document;
@@ -55,74 +55,6 @@ test('caseListFor: shipped first, the overlay after, and the writable half', () 
   assert.equal(plug.writableIndex, 'userCases');
 });
 
-test('the four panels: the bar (folder, Test, Stop), the setup (params, port rows), the cases strip (dots, locks), the result', () => {
-  const root = renderBench(PLUGIN_DATA, { doc, projects: PROJECTS, highlight: async (t) => t,
-    caseState: new Map([['runTests', new Map([['c_failing', 'fail']])]]) });
-  assert.equal(root.dataset.scriptKey, 'runTests');
-  assert.deepEqual([...root.children].map((c) => c.className.split(' ')[0]), ['bench-bar', 'bench-col', 'bench-col', 'bench-col']);
-  assert.deepEqual([...root.querySelectorAll('.bench-col')].map((c) => c.querySelector('.bench-col-head').textContent),
-    ['Test inputs', 'Cases', 'Result']);
-  assert.deepEqual([...root.querySelectorAll('.bench-bar button')].map((b) => b.textContent), ['Test', 'Stop']);
-  assert.ok(root.querySelector('.bench-bar [data-field="bench:cwd"]'), 'the folder picker sits in the bar');
-  const rows = [...root.querySelectorAll('.bench-case-row')];
-  assert.deepEqual(rows.map((r) => r.dataset.caseId), ['c_failing', 'c_mine']);
-  assert.deepEqual(rows.map((r) => r.querySelector('.bench-case-name').textContent), ['failing suite', 'my input']);
-  assert.equal(rows[0].querySelector('.script-dot').dataset.state, 'fail');
-  assert.equal(rows[1].querySelector('.script-dot').dataset.state, 'none');
-  // A plugin's SHIPPED case is locked: no Rename, no Delete, no Update (below).
-  assert.equal(rows[0].querySelector('.bench-lock').textContent, 'shipped');
-  assert.equal(rows[0].querySelector('.bench-case-rename'), null);
-  assert.equal(rows[0].querySelector('.bench-case-delete'), null);
-  assert.equal(rows[1].querySelector('.bench-lock'), null);
-  assert.equal(rows[1].querySelector('.bench-case-rename').textContent, 'Rename');
-  assert.equal(rows[1].querySelector('.bench-case-delete').textContent, 'Delete');
-  assert.equal(root.querySelector('.bench-add-case').textContent, '+ Case');
-  assert.equal(root.querySelector('.bench-run-all').disabled, false);
-  assert.equal(root.querySelector('.bench-save-case').textContent, 'Save as case');
-  assert.equal(root.querySelector('.bench-case-update'), null, 'Update needs a writable case selected');
-  assert.ok(root.querySelector('.bench-cases input[data-field="bench:caseName"]'), 'the name row is inline, never a prompt');
-
-  const folder = root.querySelector('[data-field="bench:cwd"]');
-  assert.deepEqual([...folder.options].map((o) => [o.value, o.textContent, o.disabled]), [
-    ['', SCRATCH_LABEL, false],
-    ['project:worca-0001', 'worca — /home/u/worca', false],
-    ['project:gone-0002', 'gone — /home/u/gone', true],
-  ]);
-  assert.equal(root.querySelector('.bench-params [data-field="param:command"]').value, 'npm test');
-  const ports = [...root.querySelectorAll('.bench-port')];
-  assert.deepEqual(ports.map((p) => [p.dataset.port, p.dataset.type]), [['plan', 'md'], ['conf', 'json'], ['done', 'void']]);
-  assert.equal(ports[0].querySelector('[data-field="in:plan:bound"]').checked, false);
-  assert.ok(ports[0].querySelector('textarea[data-field="in:plan:text"]'));
-  assert.deepEqual([...ports[0].querySelectorAll('[data-in-src]')].map((b) => b.textContent), ['Text', 'File…', 'Run…']);
-  assert.equal(ports[2].querySelector('textarea'), null, 'a void port has no text box');
-  assert.equal(ports[2].querySelector('.bench-void-fired').textContent, 'fired');
-  assert.equal(root.querySelector('.bench-stop').disabled, true);
-  assert.equal(root.querySelector('.bench-status-text').textContent, 'idle');
-  assert.equal(root.querySelectorAll('p').length, 0, 'the bench carries no prose either');
-});
-
-test('the Expect row: `—` shows nothing else; a verdict brings the output chips and the summary field', () => {
-  assert.deepEqual(EXPECT_VERDICTS, ['clean', 'blocking', 'error']);
-  const root = render();
-  const sel = root.querySelector('[data-field="expect:verdict"]');
-  assert.equal(root.querySelector('.bench-expect-row .bench-zone').textContent, 'Expect');
-  assert.deepEqual([...sel.options].map((o) => [o.value, o.textContent]),
-    [['', '—'], ['clean', 'clean'], ['blocking', 'blocking'], ['error', 'error']]);
-  assert.equal(sel.value, '');
-  assert.equal(root.querySelector('[data-field="expect:summaryIncludes"]'), null, '`—` means expect: null');
-  assert.equal(root.querySelector('.bench-expect-chip'), null);
-  assert.equal(root.querySelector('.bench-expect-from-result').textContent, 'Use result');
-  assert.equal(root.querySelector('.bench-expect-from-result').disabled, true, 'nothing has run yet');
-  sel.value = 'blocking';
-  sel.dispatchEvent(new win.Event('change', { bubbles: true }));
-  assert.deepEqual([...root.querySelectorAll('.bench-expect-chip input')].map((c) => c.dataset.field),
-    ['expect:fired:log', 'expect:fired:fail', 'expect:fired:report', 'expect:fired:pass'], 'one chip per DECLARED output port, void included');
-  assert.deepEqual([...root.querySelectorAll('.bench-expect-chip')].map((c) => c.textContent), ['log', 'fail', 'report', 'pass']);
-  assert.ok(root.querySelector('[data-field="expect:summaryIncludes"]'));
-  assert.equal(root.querySelector('.bench-expect-row label.ins-label').textContent, 'Summary contains');
-  assert.equal(root.querySelectorAll('.bench-expect-row p').length, 0);
-});
-
 test('collectCase: the Task 1 Case shape, with expect null or filled', () => {
   const root = render();
   root.querySelector('[data-field="in:plan:bound"]').checked = true;
@@ -161,40 +93,88 @@ test('caseIdFrom slugs the name, keeps CASE_ID_RE and steps past a taken id', ()
   }
 });
 
-test('a config-ported script gets the port editor above the inputs', () => {
-  const cfg = { ...DATA, meta: { ...META, ports: 'config', inputs: undefined, outputs: undefined,
-    defaultPorts: { inputs: [{ id: 'in', type: 'md', required: false }], outputs: [{ id: 'out', type: 'md', when: 'always', filename: 'o.md' }] } } };
-  const root = render(cfg);
-  assert.ok(root.querySelector('.bench-setup .ins-port-editor'));
-  assert.deepEqual([...root.querySelectorAll('.bench-port')].map((p) => p.dataset.port), ['in']);
+test('a config-ported script: the port editor sits above the inputs, + input adds a BENCH row with Expect chips following the outputs, and an output type switch reshapes its row', async () => {
+  await checkRows([
+    { name: 'a config-ported script gets the port editor above the inputs', run: async () => {
+      const cfg = { ...DATA, meta: { ...META, ports: 'config', inputs: undefined, outputs: undefined,
+        defaultPorts: { inputs: [{ id: 'in', type: 'md', required: false }], outputs: [{ id: 'out', type: 'md', when: 'always', filename: 'o.md' }] } } };
+      const root = render(cfg);
+      assert.ok(root.querySelector('.bench-setup .ins-port-editor'));
+      assert.deepEqual([...root.querySelectorAll('.bench-port')].map((p) => p.dataset.port), ['in']);
+    } },
+    { name: 'a config-ported script: + input adds a row to the BENCH, and the Expect chips follow the outputs', run: async () => {
+      const b = mountBench(CFG);
+      b.root.querySelector('.bench-setup [data-port-add="inputs"]').click();
+      await flush();
+      assert.deepEqual([...b.root.querySelectorAll('.bench-port')].map((p) => p.dataset.port), ['in', 'in2']);
+      const sel = b.root.querySelector('[data-field="expect:verdict"]');
+      sel.value = 'clean';
+      sel.dispatchEvent(new win.Event('change', { bubbles: true }));
+      b.root.querySelector('.bench-setup [data-port-add="outputs"]').click();
+      await flush();
+      assert.deepEqual([...b.root.querySelectorAll('.bench-expect-chip input')].map((c) => c.dataset.field),
+        ['expect:fired:log', 'expect:fired:out'], 'the chips are the ports the bench declares now');
+      b.root.querySelector('.bench-setup .ins-prow[data-dir="inputs"][data-index="1"] .ins-prm').click();
+      await flush();
+      assert.deepEqual([...b.root.querySelectorAll('.bench-port')].map((p) => p.dataset.port), ['in']);
+      b.cleanup();
+    } },
+    { name: 'a config-ported script: switching an output`s type reshapes its row, filename box and all', run: async () => {
+      const b = mountBench(CFG);
+      const type = b.root.querySelector('.bench-setup .ins-prow[data-dir="outputs"] [data-field="port:outputs:0:type"]');
+      assert.equal(b.root.querySelector('.bench-setup .ins-prow[data-dir="outputs"] .ins-pfile').hidden, false);
+      type.value = 'void';
+      type.dispatchEvent(new win.Event('change', { bubbles: true }));
+      await flush();
+      assert.equal(b.root.querySelector('.bench-setup .ins-prow[data-dir="outputs"] .ins-pfile').hidden, true,
+        'a void output has no filename — the box goes, as it does on the Overview form');
+      const back = b.root.querySelector('.bench-setup .ins-prow[data-dir="outputs"] [data-field="port:outputs:0:type"]');
+      back.value = 'md';
+      back.dispatchEvent(new win.Event('change', { bubbles: true }));
+      await flush();
+      assert.equal(b.root.querySelector('.bench-setup .ins-prow[data-dir="outputs"] .ins-pfile').hidden, false);
+      // An INPUT's type change still keeps every other row's text.
+      b.root.querySelector('[data-field="in:in:text"]').value = 'kept';
+      const itype = b.root.querySelector('.bench-setup .ins-prow[data-dir="inputs"] [data-field="port:inputs:0:type"]');
+      itype.value = 'json';
+      itype.dispatchEvent(new win.Event('change', { bubbles: true }));
+      await flush();
+      assert.equal(b.root.querySelector('.bench-port').dataset.type, 'json');
+      assert.equal(b.root.querySelector('[data-field="in:in:text"]').value, 'kept');
+      b.cleanup();
+    } },
+  ]);
 });
 
-test('selecting a case fills the setup from it, EXPECTATION included', () => {
-  const b = mountBench();
-  const { root } = b;
-  root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case').click();
-  assert.equal(root.querySelector('[data-field="in:plan:bound"]').checked, true);
-  assert.equal(root.querySelector('[data-field="in:plan:text"]').value, '# Plan\n');
-  assert.equal(root.querySelector('[data-field="in:done:bound"]').checked, true);
-  assert.equal(root.querySelector('[data-field="in:conf:bound"]').checked, false);
-  assert.equal(root.querySelector('[data-field="param:command"]').value, 'npm test');
-  assert.equal(root.querySelector('[data-field="bench:cwd"]').value, '');
-  assert.equal(root.querySelector('[data-field="bench:caseName"]').value, 'failing suite');
-  assert.equal(root.querySelector('[data-field="expect:verdict"]').value, 'blocking');
-  assert.deepEqual([...root.querySelectorAll('.bench-expect-chip input')].filter((c) => c.checked).map((c) => c.dataset.field),
-    ['expect:fired:log', 'expect:fired:fail'], 'the stored expectation, chip for chip');
-  assert.ok(root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case').classList.contains('on'));
-  assert.ok(root.querySelector('.bench-case-update'), 'a writable case is selected, so Update appears');
-  b.cleanup();
-});
-
-test('selecting a SHIPPED case offers no Update', () => {
-  const b = mountBench(PLUGIN_DATA);
-  b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case').click();
-  assert.equal(b.root.querySelector('.bench-case-update'), null);
-  b.root.querySelector('.bench-case-row[data-case-id="c_mine"] .bench-case').click();
-  assert.ok(b.root.querySelector('.bench-case-update'), 'the overlay case is writable');
-  b.cleanup();
+test('selecting a case fills the setup from it (expectation included); a SHIPPED case offers no Update', async () => {
+  await checkRows([
+    { name: 'selecting a case fills the setup from it, EXPECTATION included', run: async () => {
+      const b = mountBench();
+      const { root } = b;
+      root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case').click();
+      assert.equal(root.querySelector('[data-field="in:plan:bound"]').checked, true);
+      assert.equal(root.querySelector('[data-field="in:plan:text"]').value, '# Plan\n');
+      assert.equal(root.querySelector('[data-field="in:done:bound"]').checked, true);
+      assert.equal(root.querySelector('[data-field="in:conf:bound"]').checked, false);
+      assert.equal(root.querySelector('[data-field="param:command"]').value, 'npm test');
+      assert.equal(root.querySelector('[data-field="bench:cwd"]').value, '');
+      assert.equal(root.querySelector('[data-field="bench:caseName"]').value, 'failing suite');
+      assert.equal(root.querySelector('[data-field="expect:verdict"]').value, 'blocking');
+      assert.deepEqual([...root.querySelectorAll('.bench-expect-chip input')].filter((c) => c.checked).map((c) => c.dataset.field),
+        ['expect:fired:log', 'expect:fired:fail'], 'the stored expectation, chip for chip');
+      assert.ok(root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case').classList.contains('on'));
+      assert.ok(root.querySelector('.bench-case-update'), 'a writable case is selected, so Update appears');
+      b.cleanup();
+    } },
+    { name: 'selecting a SHIPPED case offers no Update', run: async () => {
+      const b = mountBench(PLUGIN_DATA);
+      b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case').click();
+      assert.equal(b.root.querySelector('.bench-case-update'), null);
+      b.root.querySelector('.bench-case-row[data-case-id="c_mine"] .bench-case').click();
+      assert.ok(b.root.querySelector('.bench-case-update'), 'the overlay case is writable');
+      b.cleanup();
+    } },
+  ]);
 });
 
 test('collectBenchRequest: bound ports only, the two input shapes, the cwd choice', () => {
@@ -213,54 +193,6 @@ test('collectBenchRequest: bound ports only, the two input shapes, the cwd choic
   assert.deepEqual(collectBenchRequest(root, DATA).cwd, { kind: 'project', projectKey: 'worca-0001' });
   const draft = { meta: META, source: 'x', sourceWin32: null };
   assert.deepEqual(collectBenchRequest(root, DATA, { draft }).draft, draft);
-});
-
-test('renderBenchResult: status, fired chips, expect, one tab per non-void output plus verdict and envelope', async () => {
-  const mount = doc.createElement('div');
-  const rendered = [];
-  mount.appendChild(renderBenchResult(RESULT, {
-    doc, highlight: async (t) => `<i>${t}</i>`,
-    renderMarkdown: async (textValue, host) => { rendered.push(textValue); host.textContent = textValue; return host; },
-    outputHref: (port) => `/api/scripts/bench/b1/output/${port}`,
-  }));
-  await flush();
-  assert.equal(mount.querySelector('.bench-dot').dataset.status, 'blocking');
-  assert.equal(mount.querySelector('.bench-status-text').textContent, 'blocking');
-  assert.equal(mount.querySelector('.bench-exit').textContent, 'exit 1');
-  assert.equal(mount.querySelector('.bench-dur').textContent, '4.2 s');
-  assert.equal(mount.querySelector('.bench-summary').textContent, '212 passing, 3 failing');
-  assert.equal(mount.querySelector('.bench-draft').hidden, true);
-  assert.deepEqual([...mount.querySelectorAll('.bench-fired-chip')].map((c) => c.textContent), ['log', 'fail']);
-  assert.equal(mount.querySelector('.bench-expect-state').textContent, 'expect pass');
-  assert.deepEqual([...mount.querySelectorAll('.bench-tabs button')].map((b) => b.dataset.rtab),
-    ['log', 'log-out', 'report', 'verdict', 'envelope']);
-  assert.deepEqual([...mount.querySelectorAll('.bench-tabs button')].map((b) => b.textContent),
-    ['Log', 'log', 'report', 'verdict', 'envelope']);
-  assert.deepEqual(rendered, ['# Tests\n\nfailed'], 'the md output goes through the page`s sanitizer');
-  assert.equal(mount.querySelector('.bench-pane[data-rpane="report"] code').innerHTML, '<i>{\n  "failed": 3\n}</i>');
-  assert.equal(mount.querySelector('.bench-pane[data-rpane="report"] .bench-open-full').getAttribute('href'),
-    '/api/scripts/bench/b1/output/report');
-  assert.equal(mount.querySelector('.bench-pane[data-rpane="log-out"] .bench-open-full'), null, 'not truncated, no link');
-  assert.equal(mount.querySelector('.bench-pane[data-rpane="envelope"] code').textContent, RESULT.envelopePath);
-  assert.equal(mount.querySelector('.bench-pane[data-rpane="verdict"] code').textContent.includes('3 tests failed'), true);
-});
-
-test('renderBenchResult: the Raw toggle swaps the md pane, and a void output is a chip only', async () => {
-  const mount = doc.createElement('div');
-  mount.appendChild(renderBenchResult(RESULT, {
-    doc, highlight: async (t) => t,
-    renderMarkdown: async (textValue, host) => { host.className = 'artifact-markdown'; host.textContent = textValue; return host; },
-    outputHref: (port) => `/o/${port}`,
-  }));
-  await flush();
-  const pane = mount.querySelector('.bench-pane[data-rpane="log-out"]');
-  const toggle = pane.querySelector('.bench-raw');
-  assert.equal(toggle.textContent, 'Raw');
-  toggle.click();
-  await flush();
-  assert.equal(toggle.textContent, 'Rendered');
-  assert.equal(pane.querySelector('pre.bench-rawtext').textContent, '# Tests\n\nfailed');
-  assert.equal(mount.querySelector('.bench-tabs button[data-rtab="pass"]'), null, 'a void output gets no tab');
 });
 
 test('an execution error is a RESULT: status error, the message and the tail', async () => {
@@ -384,31 +316,34 @@ test('a refused POST is reported without a subscription', async () => {
   b.cleanup();
 });
 
-test('running a case sends its id and nothing else; the dot follows its expectation', async () => {
-  const b = mountBench();
-  b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case').click();
-  b.root.querySelector('.bench-run').click();
-  await flush();
-  assert.equal(b.calls[0][1].caseId, 'c_failing');
-  b.ctl.onFrame({ type: 'scriptbench-done', benchId: 'bench_1', result: { ...RESULT, expect: { pass: false, diffs: ['verdict: expected clean, got blocking'] } } });
-  await flush();
-  assert.deepEqual(b.states, [['runTests', 'c_failing', 'fail']]);
-  assert.equal(b.root.querySelector('.bench-expect-state').textContent, 'expect fail');
-  assert.deepEqual([...b.root.querySelectorAll('.bench-expect-diff')].map((d) => d.textContent), ['verdict: expected clean, got blocking']);
-  assert.equal(b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .script-dot').dataset.state, 'fail');
-  b.cleanup();
-});
-
-test('a case with no expectation reports `ran`', async () => {
-  const data = { ...DATA, cases: [{ ...CASE, expect: null }] };
-  const b = mountBench(data);
-  b.root.querySelector('.bench-case').click();
-  b.root.querySelector('.bench-run').click();
-  await flush();
-  b.ctl.onFrame({ type: 'scriptbench-done', benchId: 'bench_1', result: { ...RESULT, expect: null } });
-  await flush();
-  assert.deepEqual(b.states, [['runTests', 'c_failing', 'ran']]);
-  b.cleanup();
+test('running a case sends only its id, and the dot follows its expectation (or reads ran without one)', async () => {
+  await checkRows([
+    { name: 'running a case sends its id and nothing else; the dot follows its expectation', run: async () => {
+      const b = mountBench();
+      b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case').click();
+      b.root.querySelector('.bench-run').click();
+      await flush();
+      assert.equal(b.calls[0][1].caseId, 'c_failing');
+      b.ctl.onFrame({ type: 'scriptbench-done', benchId: 'bench_1', result: { ...RESULT, expect: { pass: false, diffs: ['verdict: expected clean, got blocking'] } } });
+      await flush();
+      assert.deepEqual(b.states, [['runTests', 'c_failing', 'fail']]);
+      assert.equal(b.root.querySelector('.bench-expect-state').textContent, 'expect fail');
+      assert.deepEqual([...b.root.querySelectorAll('.bench-expect-diff')].map((d) => d.textContent), ['verdict: expected clean, got blocking']);
+      assert.equal(b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .script-dot').dataset.state, 'fail');
+      b.cleanup();
+    } },
+    { name: 'a case with no expectation reports `ran`', run: async () => {
+      const data = { ...DATA, cases: [{ ...CASE, expect: null }] };
+      const b = mountBench(data);
+      b.root.querySelector('.bench-case').click();
+      b.root.querySelector('.bench-run').click();
+      await flush();
+      b.ctl.onFrame({ type: 'scriptbench-done', benchId: 'bench_1', result: { ...RESULT, expect: null } });
+      await flush();
+      assert.deepEqual(b.states, [['runTests', 'c_failing', 'ran']]);
+      b.cleanup();
+    } },
+  ]);
 });
 
 test('Run all sends { all: true }, tags lines per case and aggregates', async () => {
@@ -435,82 +370,88 @@ test('Run all sends { all: true }, tags lines per case and aggregates', async ()
   b.cleanup();
 });
 
-test('Use result fills the expect row from the result on screen', async () => {
-  const b = mountBench();
-  assert.equal(b.root.querySelector('.bench-expect-from-result').disabled, true, 'nothing has run yet');
-  b.root.querySelector('.bench-run').click();
-  await flush();
-  b.ctl.onFrame({ type: 'scriptbench-done', benchId: 'bench_1', result: { ...RESULT, expect: null } });
-  await flush();
-  const use = b.root.querySelector('.bench-expect-from-result');
-  assert.equal(use.disabled, false, 'a single-run result is on screen');
-  use.click();
-  await flush();
-  assert.equal(b.root.querySelector('[data-field="expect:verdict"]').value, 'blocking', 'from result.status');
-  assert.deepEqual([...b.root.querySelectorAll('.bench-expect-chip input')].filter((c) => c.checked).map((c) => c.dataset.field),
-    ['expect:fired:log', 'expect:fired:fail'], 'from result.fired, intersected with the DECLARED output ports');
-  assert.equal(b.root.querySelector('[data-field="expect:summaryIncludes"]').value, '', 'the summary is left alone');
-  assert.deepEqual(collectCase(b.root, b.data, { id: 'c-x', name: 'x' }).expect, { verdict: 'blocking', fired: ['log', 'fail'] });
-  // The next Run wipes the result pane, so there is nothing on screen to copy any
-  // more: the button must go back to disabled rather than offer the old run's verdict.
-  b.root.querySelector('.bench-run').click();
-  await flush();
-  assert.equal(b.root.querySelector('.bench-status-text').textContent, 'running');
-  assert.equal(b.root.querySelector('.bench-expect-from-result').disabled, true, 'the previous result is off the screen');
-  b.cleanup();
+test('Use result fills the Expect row from the result on screen, but not for a stopped result or a Run all', async () => {
+  await checkRows([
+    { name: 'Use result fills the expect row from the result on screen', run: async () => {
+      const b = mountBench();
+      assert.equal(b.root.querySelector('.bench-expect-from-result').disabled, true, 'nothing has run yet');
+      b.root.querySelector('.bench-run').click();
+      await flush();
+      b.ctl.onFrame({ type: 'scriptbench-done', benchId: 'bench_1', result: { ...RESULT, expect: null } });
+      await flush();
+      const use = b.root.querySelector('.bench-expect-from-result');
+      assert.equal(use.disabled, false, 'a single-run result is on screen');
+      use.click();
+      await flush();
+      assert.equal(b.root.querySelector('[data-field="expect:verdict"]').value, 'blocking', 'from result.status');
+      assert.deepEqual([...b.root.querySelectorAll('.bench-expect-chip input')].filter((c) => c.checked).map((c) => c.dataset.field),
+        ['expect:fired:log', 'expect:fired:fail'], 'from result.fired, intersected with the DECLARED output ports');
+      assert.equal(b.root.querySelector('[data-field="expect:summaryIncludes"]').value, '', 'the summary is left alone');
+      assert.deepEqual(collectCase(b.root, b.data, { id: 'c-x', name: 'x' }).expect, { verdict: 'blocking', fired: ['log', 'fail'] });
+      // The next Run wipes the result pane, so there is nothing on screen to copy any
+      // more: the button must go back to disabled rather than offer the old run's verdict.
+      b.root.querySelector('.bench-run').click();
+      await flush();
+      assert.equal(b.root.querySelector('.bench-status-text').textContent, 'running');
+      assert.equal(b.root.querySelector('.bench-expect-from-result').disabled, true, 'the previous result is off the screen');
+      b.cleanup();
+    } },
+    { name: 'Use result stays put for a stopped result, and a Run all offers nothing to copy', run: async () => {
+      const b = mountBench();
+      b.root.querySelector('.bench-run').click();
+      await flush();
+      b.ctl.onFrame({ type: 'scriptbench-done', benchId: 'bench_1', result: { ...RESULT, status: 'stopped', fired: [], expect: null } });
+      await flush();
+      b.root.querySelector('.bench-expect-from-result').click();
+      await flush();
+      assert.equal(b.root.querySelector('[data-field="expect:verdict"]').value, '', 'stopped is not an expectable verdict');
+      b.root.querySelector('.bench-run-all').click();
+      await flush();
+      b.ctl.onFrame({ type: 'scriptbench-done', benchId: 'bench_1', result: { cases: [{ caseId: 'c_failing', result: RESULT }], passed: 1, failed: 0, unchecked: 0 } });
+      await flush();
+      assert.equal(b.root.querySelector('.bench-expect-from-result').disabled, true, 'a Run all is not ONE result to copy');
+      b.cleanup();
+    } },
+  ]);
 });
 
-test('Use result stays put for a stopped result, and a Run all offers nothing to copy', async () => {
-  const b = mountBench();
-  b.root.querySelector('.bench-run').click();
-  await flush();
-  b.ctl.onFrame({ type: 'scriptbench-done', benchId: 'bench_1', result: { ...RESULT, status: 'stopped', fired: [], expect: null } });
-  await flush();
-  b.root.querySelector('.bench-expect-from-result').click();
-  await flush();
-  assert.equal(b.root.querySelector('[data-field="expect:verdict"]').value, '', 'stopped is not an expectable verdict');
-  b.root.querySelector('.bench-run-all').click();
-  await flush();
-  b.ctl.onFrame({ type: 'scriptbench-done', benchId: 'bench_1', result: { cases: [{ caseId: 'c_failing', result: RESULT }], passed: 1, failed: 0, unchecked: 0 } });
-  await flush();
-  assert.equal(b.root.querySelector('.bench-expect-from-result').disabled, true, 'a Run all is not ONE result to copy');
-  b.cleanup();
-});
-
-test('Save as case writes the whole list back, with the slugged id and the expectation', async () => {
-  const b = mountBench();
-  b.root.querySelector('[data-field="bench:caseName"]').value = 'lint only';
-  b.root.querySelector('[data-field="in:plan:bound"]').checked = true;
-  b.root.querySelector('[data-field="in:plan:text"]').value = '# Plan\n';
-  const sel = b.root.querySelector('[data-field="expect:verdict"]');
-  sel.value = 'clean';
-  sel.dispatchEvent(new win.Event('change', { bubbles: true }));
-  b.root.querySelector('[data-field="expect:fired:pass"]').checked = true;
-  b.root.querySelector('.bench-save-case').click();
-  await flush();
-  const [, key, cases] = b.calls.find((c) => c[0] === 'writeCases');
-  assert.equal(key, 'runTests');
-  assert.equal(cases.length, 2, 'the existing case plus the new one');
-  assert.equal(cases[1].id, 'lint-only');
-  assert.equal(cases[1].name, 'lint only');
-  assert.match(cases[1].id, /^[A-Za-z][A-Za-z0-9_-]{0,63}$/);
-  assert.deepEqual(cases[1].inputs, { plan: { text: '# Plan\n' } });
-  assert.deepEqual(cases[1].cwd, { kind: 'scratch' });
-  assert.deepEqual(cases[1].expect, { verdict: 'clean', fired: ['pass'] });
-  assert.deepEqual([...b.root.querySelectorAll('.bench-case-row')].map((r) => r.dataset.caseId), ['c_failing', 'lint-only']);
-  assert.ok(b.root.querySelector('.bench-case-row[data-case-id="lint-only"] .bench-case').classList.contains('on'),
-    'the new case is selected');
-  b.cleanup();
-});
-
-test('a second case of the same name gets a numbered id', async () => {
-  const b = mountBench({ ...DATA, cases: [{ ...CASE, id: 'lint-only', name: 'lint only' }] });
-  b.root.querySelector('[data-field="bench:caseName"]').value = 'lint only';
-  b.root.querySelector('.bench-save-case').click();
-  await flush();
-  const [, , cases] = b.calls.find((c) => c[0] === 'writeCases');
-  assert.deepEqual(cases.map((c) => c.id), ['lint-only', 'lint-only-2']);
-  b.cleanup();
+test('Save as case writes the whole list back with the slugged id and expectation; a same-named case gets a numbered id', async () => {
+  await checkRows([
+    { name: 'Save as case writes the whole list back, with the slugged id and the expectation', run: async () => {
+      const b = mountBench();
+      b.root.querySelector('[data-field="bench:caseName"]').value = 'lint only';
+      b.root.querySelector('[data-field="in:plan:bound"]').checked = true;
+      b.root.querySelector('[data-field="in:plan:text"]').value = '# Plan\n';
+      const sel = b.root.querySelector('[data-field="expect:verdict"]');
+      sel.value = 'clean';
+      sel.dispatchEvent(new win.Event('change', { bubbles: true }));
+      b.root.querySelector('[data-field="expect:fired:pass"]').checked = true;
+      b.root.querySelector('.bench-save-case').click();
+      await flush();
+      const [, key, cases] = b.calls.find((c) => c[0] === 'writeCases');
+      assert.equal(key, 'runTests');
+      assert.equal(cases.length, 2, 'the existing case plus the new one');
+      assert.equal(cases[1].id, 'lint-only');
+      assert.equal(cases[1].name, 'lint only');
+      assert.match(cases[1].id, /^[A-Za-z][A-Za-z0-9_-]{0,63}$/);
+      assert.deepEqual(cases[1].inputs, { plan: { text: '# Plan\n' } });
+      assert.deepEqual(cases[1].cwd, { kind: 'scratch' });
+      assert.deepEqual(cases[1].expect, { verdict: 'clean', fired: ['pass'] });
+      assert.deepEqual([...b.root.querySelectorAll('.bench-case-row')].map((r) => r.dataset.caseId), ['c_failing', 'lint-only']);
+      assert.ok(b.root.querySelector('.bench-case-row[data-case-id="lint-only"] .bench-case').classList.contains('on'),
+        'the new case is selected');
+      b.cleanup();
+    } },
+    { name: 'a second case of the same name gets a numbered id', run: async () => {
+      const b = mountBench({ ...DATA, cases: [{ ...CASE, id: 'lint-only', name: 'lint only' }] });
+      b.root.querySelector('[data-field="bench:caseName"]').value = 'lint only';
+      b.root.querySelector('.bench-save-case').click();
+      await flush();
+      const [, , cases] = b.calls.find((c) => c[0] === 'writeCases');
+      assert.deepEqual(cases.map((c) => c.id), ['lint-only', 'lint-only-2']);
+      b.cleanup();
+    } },
+  ]);
 });
 
 test('Save as case on a plugin script writes the W18 overlay, not the shipped file', async () => {
@@ -542,60 +483,75 @@ test('Update case overwrites the selected one in place and resets its dot', asyn
   b.cleanup();
 });
 
-test('Rename is inline: Enter commits, Escape cancels, and only the name moves', async () => {
-  const b = mountBench();
-  b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case-rename').click();
-  const box = b.root.querySelector('.bench-case-rename-input');
-  assert.equal(box.value, 'failing suite');
-  box.value = 'nope';
-  box.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  await flush();
-  assert.equal(b.calls.some((c) => c[0] === 'writeCases'), false);
-  assert.equal(b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case-name').textContent, 'failing suite');
+test('Rename is inline (Enter commits, Escape cancels, only the name moves) and a blank name is refused with Save\'s sentence', async () => {
+  await checkRows([
+    { name: 'Rename is inline: Enter commits, Escape cancels, and only the name moves', run: async () => {
+      const b = mountBench();
+      b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case-rename').click();
+      const box = b.root.querySelector('.bench-case-rename-input');
+      assert.equal(box.value, 'failing suite');
+      box.value = 'nope';
+      box.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await flush();
+      assert.equal(b.calls.some((c) => c[0] === 'writeCases'), false);
+      assert.equal(b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case-name').textContent, 'failing suite');
 
-  b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case-rename').click();
-  const box2 = b.root.querySelector('.bench-case-rename-input');
-  box2.value = '  still failing  ';
-  box2.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  await flush();
-  const [, , cases] = b.calls.find((c) => c[0] === 'writeCases');
-  assert.equal(cases.length, 1);
-  assert.equal(cases[0].id, 'c_failing', 'a rename never moves the id');
-  assert.equal(cases[0].name, 'still failing');
-  assert.deepEqual(cases[0].inputs, CASE.inputs, 'nothing but the name is touched');
-  assert.equal(b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case-name').textContent, 'still failing');
-  b.cleanup();
+      b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case-rename').click();
+      const box2 = b.root.querySelector('.bench-case-rename-input');
+      box2.value = '  still failing  ';
+      box2.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await flush();
+      const [, , cases] = b.calls.find((c) => c[0] === 'writeCases');
+      assert.equal(cases.length, 1);
+      assert.equal(cases[0].id, 'c_failing', 'a rename never moves the id');
+      assert.equal(cases[0].name, 'still failing');
+      assert.deepEqual(cases[0].inputs, CASE.inputs, 'nothing but the name is touched');
+      assert.equal(b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case-name').textContent, 'still failing');
+      b.cleanup();
+    } },
+    { name: 'a blank rename is refused with the same sentence Save uses', run: async () => {
+      const b = mountBench();
+      b.root.querySelector('.bench-case-rename').click();
+      const box = b.root.querySelector('.bench-case-rename-input');
+      box.value = '   ';
+      box.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await flush();
+      assert.equal(b.calls.some((c) => c[0] === 'writeCases'), false);
+      assert.equal(b.root.querySelector('.bench-msg').textContent, 'Name the case first.');
+      b.cleanup();
+    } },
+  ]);
 });
 
-test('a blank rename is refused with the same sentence Save uses', async () => {
-  const b = mountBench();
-  b.root.querySelector('.bench-case-rename').click();
-  const box = b.root.querySelector('.bench-case-rename-input');
-  box.value = '   ';
-  box.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  await flush();
-  assert.equal(b.calls.some((c) => c[0] === 'writeCases'), false);
-  assert.equal(b.root.querySelector('.bench-msg').textContent, 'Name the case first.');
-  b.cleanup();
-});
-
-test('Delete asks first, then writes the list without it and clears the setup', async () => {
-  const b = mountBench();
-  b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case').click();
-  b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case-delete').click();
-  await flush();
-  assert.deepEqual({ title: b.asked[0].title, message: b.asked[0].message, confirmLabel: b.asked[0].confirmLabel, danger: b.asked[0].danger },
-    { title: 'Delete case', message: 'Delete case "failing suite"?', confirmLabel: 'Delete', danger: true });
-  const [, , cases] = b.calls.find((c) => c[0] === 'writeCases');
-  assert.deepEqual(cases, []);
-  assert.equal(b.root.querySelector('.bench-case-row'), null);
-  assert.equal(b.root.querySelector('.bench-run-all').disabled, true);
-  assert.equal(b.root.querySelector('[data-field="bench:caseName"]').value, '', 'the selected case went, so the setup cleared');
-  assert.equal(b.root.querySelector('[data-field="expect:verdict"]').value, '');
-  // W15: the list card's dot counts the cases that ran THIS session, so a deleted
-  // one must stop colouring it — the `none` report is what drops the entry.
-  assert.deepEqual(b.states, [['runTests', 'c_failing', 'none']]);
-  b.cleanup();
+test('Delete asks first then writes the list without it and clears the setup; a cancelled Delete writes nothing', async () => {
+  await checkRows([
+    { name: 'Delete asks first, then writes the list without it and clears the setup', run: async () => {
+      const b = mountBench();
+      b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case').click();
+      b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case-delete').click();
+      await flush();
+      assert.deepEqual({ title: b.asked[0].title, message: b.asked[0].message, confirmLabel: b.asked[0].confirmLabel, danger: b.asked[0].danger },
+        { title: 'Delete case', message: 'Delete case "failing suite"?', confirmLabel: 'Delete', danger: true });
+      const [, , cases] = b.calls.find((c) => c[0] === 'writeCases');
+      assert.deepEqual(cases, []);
+      assert.equal(b.root.querySelector('.bench-case-row'), null);
+      assert.equal(b.root.querySelector('.bench-run-all').disabled, true);
+      assert.equal(b.root.querySelector('[data-field="bench:caseName"]').value, '', 'the selected case went, so the setup cleared');
+      assert.equal(b.root.querySelector('[data-field="expect:verdict"]').value, '');
+      // W15: the list card's dot counts the cases that ran THIS session, so a deleted
+      // one must stop colouring it — the `none` report is what drops the entry.
+      assert.deepEqual(b.states, [['runTests', 'c_failing', 'none']]);
+      b.cleanup();
+    } },
+    { name: 'a cancelled Delete writes nothing', run: async () => {
+      const b = mountBench(DATA, { confirm: async () => false });
+      b.root.querySelector('.bench-case-delete').click();
+      await flush();
+      assert.equal(b.calls.some((c) => c[0] === 'writeCases'), false);
+      assert.equal(b.root.querySelectorAll('.bench-case-row').length, 1);
+      b.cleanup();
+    } },
+  ]);
 });
 
 test('a rename or a delete of ANOTHER case leaves the Setup column exactly as it is', async () => {
@@ -684,15 +640,6 @@ test('a write that lands after the tab was left still updates the list the next 
   // the next case action sends as the whole list, so a stale copy undoes this write.
   assert.deepEqual(b.data.cases.map((c) => c.name), ['renamed on the way out']);
   b.root.remove();
-});
-
-test('a cancelled Delete writes nothing', async () => {
-  const b = mountBench(DATA, { confirm: async () => false });
-  b.root.querySelector('.bench-case-delete').click();
-  await flush();
-  assert.equal(b.calls.some((c) => c[0] === 'writeCases'), false);
-  assert.equal(b.root.querySelectorAll('.bench-case-row').length, 1);
-  b.cleanup();
 });
 
 test('a refused write shows the store`s sentence verbatim and keeps the list on screen', async () => {
@@ -868,49 +815,6 @@ test('a config-ported script: editing a port id moves the Inputs row with it, so
   b.cleanup();
 });
 
-test('a config-ported script: + input adds a row to the BENCH, and the Expect chips follow the outputs', async () => {
-  const b = mountBench(CFG);
-  b.root.querySelector('.bench-setup [data-port-add="inputs"]').click();
-  await flush();
-  assert.deepEqual([...b.root.querySelectorAll('.bench-port')].map((p) => p.dataset.port), ['in', 'in2']);
-  const sel = b.root.querySelector('[data-field="expect:verdict"]');
-  sel.value = 'clean';
-  sel.dispatchEvent(new win.Event('change', { bubbles: true }));
-  b.root.querySelector('.bench-setup [data-port-add="outputs"]').click();
-  await flush();
-  assert.deepEqual([...b.root.querySelectorAll('.bench-expect-chip input')].map((c) => c.dataset.field),
-    ['expect:fired:log', 'expect:fired:out'], 'the chips are the ports the bench declares now');
-  b.root.querySelector('.bench-setup .ins-prow[data-dir="inputs"][data-index="1"] .ins-prm').click();
-  await flush();
-  assert.deepEqual([...b.root.querySelectorAll('.bench-port')].map((p) => p.dataset.port), ['in']);
-  b.cleanup();
-});
-
-test('a config-ported script: switching an output`s type reshapes its row, filename box and all', async () => {
-  const b = mountBench(CFG);
-  const type = b.root.querySelector('.bench-setup .ins-prow[data-dir="outputs"] [data-field="port:outputs:0:type"]');
-  assert.equal(b.root.querySelector('.bench-setup .ins-prow[data-dir="outputs"] .ins-pfile').hidden, false);
-  type.value = 'void';
-  type.dispatchEvent(new win.Event('change', { bubbles: true }));
-  await flush();
-  assert.equal(b.root.querySelector('.bench-setup .ins-prow[data-dir="outputs"] .ins-pfile').hidden, true,
-    'a void output has no filename — the box goes, as it does on the Overview form');
-  const back = b.root.querySelector('.bench-setup .ins-prow[data-dir="outputs"] [data-field="port:outputs:0:type"]');
-  back.value = 'md';
-  back.dispatchEvent(new win.Event('change', { bubbles: true }));
-  await flush();
-  assert.equal(b.root.querySelector('.bench-setup .ins-prow[data-dir="outputs"] .ins-pfile').hidden, false);
-  // An INPUT's type change still keeps every other row's text.
-  b.root.querySelector('[data-field="in:in:text"]').value = 'kept';
-  const itype = b.root.querySelector('.bench-setup .ins-prow[data-dir="inputs"] [data-field="port:inputs:0:type"]');
-  itype.value = 'json';
-  itype.dispatchEvent(new win.Event('change', { bubbles: true }));
-  await flush();
-  assert.equal(b.root.querySelector('.bench-port').dataset.type, 'json');
-  assert.equal(b.root.querySelector('[data-field="in:in:text"]').value, 'kept');
-  b.cleanup();
-});
-
 test('a config-ported case carries its own port set, and selecting it restores it', async () => {
   const b = mountBench(CFG);
   b.root.querySelector('.bench-case-row[data-case-id="c_cfg"] .bench-case').click();
@@ -921,57 +825,63 @@ test('a config-ported case carries its own port set, and selecting it restores i
   b.cleanup();
 });
 
-test('destroy stops the bench it started, so the per-key slot is not held by a tab nobody is looking at', async () => {
-  const b = mountBench();
-  b.root.querySelector('.bench-run').click();
-  await flush();
-  b.ctl.destroy();
-  await flush();
-  assert.deepEqual(b.calls.filter((c) => c[0] === 'benchStop').map((c) => c[1]), ['bench_1']);
-  b.root.remove();
+test('destroy stops the bench it started (freeing the per-key slot) and asks for no stop when nothing runs', async () => {
+  await checkRows([
+    { name: 'destroy stops the bench it started, so the per-key slot is not held by a tab nobody is looking at', run: async () => {
+      const b = mountBench();
+      b.root.querySelector('.bench-run').click();
+      await flush();
+      b.ctl.destroy();
+      await flush();
+      assert.deepEqual(b.calls.filter((c) => c[0] === 'benchStop').map((c) => c[1]), ['bench_1']);
+      b.root.remove();
+    } },
+    { name: 'destroy asks for no stop when nothing is running', run: async () => {
+      const b = mountBench();
+      b.root.querySelector('.bench-run').click();
+      await flush();
+      b.ctl.onFrame({ type: 'scriptbench-done', benchId: 'bench_1', seq: 1, result: { ...RESULT, expect: null } });
+      await flush();
+      b.ctl.destroy();
+      await flush();
+      assert.equal(b.calls.some((c) => c[0] === 'benchStop'), false);
+      b.root.remove();
+    } },
+  ]);
 });
 
-test('destroy while the POST is still in flight stops the bench as soon as the answer names it', async () => {
-  let release;
-  const gate = new Promise((r) => { release = r; });
-  const b = mountBench(DATA, { api: { bench: async () => { await gate; return ok({ benchId: 'bench_late' }); } } });
-  b.root.querySelector('.bench-run').click();
-  await flush();
-  b.ctl.destroy();                                  // no benchId yet: nothing to stop
-  assert.equal(b.calls.some((c) => c[0] === 'benchStop'), false);
-  release();
-  await flush(6);
-  assert.deepEqual(b.calls.filter((c) => c[0] === 'benchStop').map((c) => c[1]), ['bench_late']);
-  b.root.remove();
-});
-
-test('Stop pressed while the POST is still in flight stops the bench once the answer names it', async () => {
-  let release;
-  const gate = new Promise((r) => { release = r; });
-  const b = mountBench(DATA, { api: { bench: async () => { await gate; return ok({ benchId: 'bench_late' }); } } });
-  b.root.querySelector('.bench-run').click();
-  await flush();
-  assert.equal(b.root.querySelector('.bench-stop').disabled, false, 'Stop is live from the first frame of the run');
-  b.root.querySelector('.bench-stop').click();       // no benchId yet: nothing to post
-  await flush();
-  assert.equal(b.calls.some((c) => c[0] === 'benchStop'), false);
-  release();
-  await flush(6);
-  assert.deepEqual(b.calls.filter((c) => c[0] === 'benchStop').map((c) => c[1]), ['bench_late'],
-    'the wish is honoured, never posted with an empty benchId');
-  b.cleanup();
-});
-
-test('destroy asks for no stop when nothing is running', async () => {
-  const b = mountBench();
-  b.root.querySelector('.bench-run').click();
-  await flush();
-  b.ctl.onFrame({ type: 'scriptbench-done', benchId: 'bench_1', seq: 1, result: { ...RESULT, expect: null } });
-  await flush();
-  b.ctl.destroy();
-  await flush();
-  assert.equal(b.calls.some((c) => c[0] === 'benchStop'), false);
-  b.root.remove();
+test('destroy or Stop pressed while the POST is in flight stops the bench as soon as the answer names it', async () => {
+  await checkRows([
+    { name: 'destroy while the POST is still in flight stops the bench as soon as the answer names it', run: async () => {
+      let release;
+      const gate = new Promise((r) => { release = r; });
+      const b = mountBench(DATA, { api: { bench: async () => { await gate; return ok({ benchId: 'bench_late' }); } } });
+      b.root.querySelector('.bench-run').click();
+      await flush();
+      b.ctl.destroy();                                  // no benchId yet: nothing to stop
+      assert.equal(b.calls.some((c) => c[0] === 'benchStop'), false);
+      release();
+      await flush(6);
+      assert.deepEqual(b.calls.filter((c) => c[0] === 'benchStop').map((c) => c[1]), ['bench_late']);
+      b.root.remove();
+    } },
+    { name: 'Stop pressed while the POST is still in flight stops the bench once the answer names it', run: async () => {
+      let release;
+      const gate = new Promise((r) => { release = r; });
+      const b = mountBench(DATA, { api: { bench: async () => { await gate; return ok({ benchId: 'bench_late' }); } } });
+      b.root.querySelector('.bench-run').click();
+      await flush();
+      assert.equal(b.root.querySelector('.bench-stop').disabled, false, 'Stop is live from the first frame of the run');
+      b.root.querySelector('.bench-stop').click();       // no benchId yet: nothing to post
+      await flush();
+      assert.equal(b.calls.some((c) => c[0] === 'benchStop'), false);
+      release();
+      await flush(6);
+      assert.deepEqual(b.calls.filter((c) => c[0] === 'benchStop').map((c) => c[1]), ['bench_late'],
+        'the wish is honoured, never posted with an empty benchId');
+      b.cleanup();
+    } },
+  ]);
 });
 
 test('Run all carries the unsaved draft too — the cases must not run yesterday`s program', async () => {
@@ -1041,50 +951,40 @@ test('the module`s DEFAULT highlighter ESCAPES: nothing reaches innerHTML raw (C
   root.remove();
 });
 
-test('the case dots are really painted: the .script-dot rules are not scoped to the list card', () => {
-  // The bench's case rows carry `i.script-dot` too (spec §5.3: green pass, red
-  // fail, grey ran, hollow not-run). A `.script-card`-scoped rule leaves them
-  // 0x0 and transparent, and a jsdom dataset assertion cannot see it.
-  const lines = readFileSync(new URL('../ui/public/style.css', import.meta.url), 'utf8').split('\n');
-  const ruleFor = (sel) => lines.find((l) => l.includes(sel)) || '';
-  for (const sel of ['.script-dot{', '.script-dot[data-state="pass"]', '.script-dot[data-state="fail"]', '.script-dot[data-state="ran"]']) {
-    const rule = ruleFor(sel);
-    assert.ok(rule, `no rule for ${sel}`);
-    assert.equal(rule.includes('.script-card'), false, `${sel} must reach the bench's case rows, not only the list card`);
-  }
-});
-
-test('setMeta: a changed declaration re-renders params and input rows IN PLACE, keeping what was typed by id; the next request uses it', async () => {
-  const b = mountBench();
-  b.root.querySelector('[data-field="in:plan:bound"]').checked = true;
-  b.root.querySelector('[data-field="in:plan:text"]').value = '# Plan\n';
-  b.root.querySelector('[data-field="param:command"]').value = 'npm run lint';
-  b.root.querySelector('.bench-result-body').dataset.marker = 'kept';
-  b.ctl.setMeta({ ...META,
-    inputs: [{ id: 'plan', type: 'md', required: false }, { id: 'diff', type: 'md', required: false }],
-    outputs: [{ id: 'log', type: 'md', when: 'always', filename: 'l.md' }],
-    params: [{ id: 'command', type: 'command', required: true }, { id: 'limit', type: 'number', default: 5 }] });
-  assert.deepEqual([...b.root.querySelectorAll('.bench-port')].map((p) => p.dataset.port), ['plan', 'diff']);
-  assert.equal(b.root.querySelector('[data-field="in:plan:bound"]').checked, true);
-  assert.equal(b.root.querySelector('[data-field="in:plan:text"]').value, '# Plan\n');
-  assert.equal(b.root.querySelector('[data-field="param:command"]').value, 'npm run lint', 'a typed param value survives');
-  assert.equal(b.root.querySelector('[data-field="param:limit"]').value, '5', 'a new param shows its default');
-  assert.equal(b.root.querySelector('.bench-result-body').dataset.marker, 'kept', 'never a remount');
-  assert.equal(b.data.meta.inputs.length, 2, 'the tree`s data follows the declaration');
-  b.root.querySelector('.bench-run').click();
-  await flush();
-  assert.deepEqual(Object.keys(b.calls[0][1].inputs), ['plan']);
-  assert.deepEqual(b.calls[0][1].params, { command: 'npm run lint', limit: 5 });
-  b.cleanup();
-});
-
-test('setMeta: the Expect chips follow the new outputs, and a selected case is not marked edited by the re-render', async () => {
-  const b = mountBench();
-  b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case').click();
-  b.ctl.setMeta({ ...META, outputs: [{ id: 'log', type: 'md', when: 'always', filename: 'l.md' }, { id: 'extra', type: 'void', when: 'always' }] });
-  assert.deepEqual([...b.root.querySelectorAll('[data-field^="expect:fired:"]')].map((c) => c.dataset.field), ['expect:fired:log', 'expect:fired:extra']);
-  assert.equal(b.root.querySelector('.bench-case-row[data-case-id="c_failing"]').dataset.edited, undefined);
-  b.cleanup();
+test('setMeta re-renders params/inputs/Expect chips in place keeping typed values by id, without marking a selected case edited', async () => {
+  await checkRows([
+    { name: 'setMeta: a changed declaration re-renders params and input rows IN PLACE, keeping what was typed by id; the next request uses it', run: async () => {
+      const b = mountBench();
+      b.root.querySelector('[data-field="in:plan:bound"]').checked = true;
+      b.root.querySelector('[data-field="in:plan:text"]').value = '# Plan\n';
+      b.root.querySelector('[data-field="param:command"]').value = 'npm run lint';
+      b.root.querySelector('.bench-result-body').dataset.marker = 'kept';
+      b.ctl.setMeta({ ...META,
+        inputs: [{ id: 'plan', type: 'md', required: false }, { id: 'diff', type: 'md', required: false }],
+        outputs: [{ id: 'log', type: 'md', when: 'always', filename: 'l.md' }],
+        params: [{ id: 'command', type: 'command', required: true }, { id: 'limit', type: 'number', default: 5 }] });
+      assert.deepEqual([...b.root.querySelectorAll('.bench-port')].map((p) => p.dataset.port), ['plan', 'diff']);
+      assert.equal(b.root.querySelector('[data-field="in:plan:bound"]').checked, true);
+      assert.equal(b.root.querySelector('[data-field="in:plan:text"]').value, '# Plan\n');
+      assert.equal(b.root.querySelector('[data-field="param:command"]').value, 'npm run lint', 'a typed param value survives');
+      assert.equal(b.root.querySelector('[data-field="param:limit"]').value, '5', 'a new param shows its default');
+      assert.equal(b.root.querySelector('.bench-result-body').dataset.marker, 'kept', 'never a remount');
+      assert.equal(b.data.meta.inputs.length, 2, 'the tree`s data follows the declaration');
+      b.root.querySelector('.bench-run').click();
+      await flush();
+      assert.deepEqual(Object.keys(b.calls[0][1].inputs), ['plan']);
+      assert.deepEqual(b.calls[0][1].params, { command: 'npm run lint', limit: 5 });
+      b.cleanup();
+    } },
+    { name: 'setMeta: the Expect chips follow the new outputs, and a selected case is not marked edited by the re-render', run: async () => {
+      const b = mountBench();
+      b.root.querySelector('.bench-case-row[data-case-id="c_failing"] .bench-case').click();
+      b.ctl.setMeta({ ...META, outputs: [{ id: 'log', type: 'md', when: 'always', filename: 'l.md' }, { id: 'extra', type: 'void', when: 'always' }] });
+      assert.deepEqual([...b.root.querySelectorAll('[data-field^="expect:fired:"]')].map((c) => c.dataset.field), ['expect:fired:log', 'expect:fired:extra']);
+      assert.equal(b.root.querySelector('.bench-case-row[data-case-id="c_failing"]').dataset.edited, undefined);
+      b.cleanup();
+    } },
+  ]);
 });
 
 test('unsaved: the case actions are off with a title, Run all is inert, run() and stop() are exposed and Test runs the draft', async () => {

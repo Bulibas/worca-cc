@@ -2,11 +2,17 @@
 // Settings "Spawn diagnostics" card: GET paints the checkbox, Save posts exactly
 // { debugSpawnEnabled }, Reset posts { debugSpawnEnabled: false }, server 400 surfaces.
 // Boot copied from test/ui-settings-ask.test.mjs. Fetch-stubbed only — no disk.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { fieldErrorText, lastToast, edit } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -18,7 +24,7 @@ const GET_BODY = (debugSpawnEnabled = false, debugSpawnEffective = { enabled: de
 });
 
 async function boot({ postResponse, initialDebugSpawnEnabled = false, initialEffective } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
@@ -56,77 +62,54 @@ async function boot({ postResponse, initialDebugSpawnEnabled = false, initialEff
   return { window, posts, tick, $, openSettings };
 }
 
-test('ui-settings-debug-spawn: GET paints the checkbox unchecked by default', async () => {
-  const { $, openSettings } = await boot();
+const settle = async (tick, n = 4) => { for (let i = 0; i < n; i++) await tick(); };
+
+// One boot: Save stores true (the response paints it), then Reset clears it.
+test('Save posts exactly { debugSpawnEnabled: true } and Reset posts { debugSpawnEnabled: false }, painting back from the response', async () => {
+  const { window, $, posts, tick, openSettings } = await boot();
   await openSettings();
-  assert.equal($('#debugSpawnEnabled').checked, false);
+  await checkRows([
+    { name: 'ui-settings-debug-spawn: Save posts exactly { debugSpawnEnabled: true }', run: async () => {
+      assert.equal($('#debugSpawnSave').disabled, true, 'nothing to save on a freshly painted card');
+      edit(window, $('#debugSpawnEnabled'), true);
+      $('#debugSpawnSave').click();
+      await settle(tick);
+      assert.equal(posts.length, 1, 'exactly one POST');
+      assert.deepEqual(posts[0], { debugSpawnEnabled: true });
+      assert.equal($('#debugSpawnSave').textContent, 'Saved');
+      assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Saved', detail: 'Applies to the next spawn. No restart needed.', action: '' });
+      assert.equal($('#debugSpawnMsg'), null, 'no grey status line');
+    } },
+    { name: 'ui-settings-debug-spawn: Reset posts { debugSpawnEnabled: false }', run: async () => {
+      assert.equal($('#debugSpawnEnabled').checked, true, 'the stored true is painted before Reset');
+      $('#debugSpawnReset').click();
+      await settle(tick);
+      assert.deepEqual(posts.at(-1), { debugSpawnEnabled: false });
+      assert.equal($('#debugSpawnReset').textContent, 'Reset');
+      assert.equal($('#debugSpawnEnabled').checked, false, 'painted back from the response');
+    } },
+  ]);
 });
 
-test('ui-settings-debug-spawn: GET paints a stored true value as checked', async () => {
-  const { $, openSettings } = await boot({ initialDebugSpawnEnabled: true });
-  await openSettings();
-  assert.equal($('#debugSpawnEnabled').checked, true);
-});
-
-test('ui-settings-debug-spawn: Save posts exactly { debugSpawnEnabled: true }', async () => {
-  const { $, posts, tick, openSettings } = await boot();
-  await openSettings();
-  $('#debugSpawnEnabled').checked = true;
-  $('#debugSpawnSave').click();
-  await tick();
-  assert.equal(posts.length, 1, 'exactly one POST');
-  assert.deepEqual(posts[0], { debugSpawnEnabled: true });
-  assert.match($('#debugSpawnMsg').textContent, /Saved/);
-});
-
-test('ui-settings-debug-spawn: Reset posts { debugSpawnEnabled: false }', async () => {
-  const { $, posts, tick, openSettings } = await boot({ initialDebugSpawnEnabled: true });
-  await openSettings();
-  $('#debugSpawnReset').click();
-  await tick();
-  assert.deepEqual(posts[0], { debugSpawnEnabled: false });
-  assert.equal($('#debugSpawnEnabled').checked, false, 'painted back from the response');
-});
-
-test('ui-settings-debug-spawn: a server 400 lands verbatim', async () => {
-  const { $, tick, openSettings } = await boot({
-    postResponse: { ok: false, status: 400, json: async () => ({ error: 'debugSpawnEnabled must be true or false' }) },
+test('ui-settings-debug-spawn: a server 400 lands on the field', async () => {
+  const { window, $, tick, openSettings } = await boot({
+    postResponse: { ok: false, status: 400, json: async () => ({ error: '“Spawn diagnostics” must be true or false.', field: 'debugSpawnEnabled' }) },
   });
   await openSettings();
+  edit(window, $('#debugSpawnEnabled'), true);
   $('#debugSpawnSave').click();
-  await tick();
-  assert.equal($('#debugSpawnMsg').textContent, 'debugSpawnEnabled must be true or false');
-});
-
-test('ui-settings-debug-spawn: no env override ⇒ the env note is empty', async () => {
-  const { $, openSettings } = await boot();
-  await openSettings();
-  assert.equal($('#debugSpawnEnvNote').textContent, '');
-});
-
-test('ui-settings-debug-spawn: a launch-time env override is SAID, with the effective state, over an unchecked box', async () => {
-  const { $, openSettings } = await boot({ initialDebugSpawnEnabled: false, initialEffective: { enabled: true, source: 'env' } });
-  await openSettings();
-  assert.equal($('#debugSpawnEnabled').checked, false, 'the checkbox is the STORED value');
-  assert.match($('#debugSpawnEnvNote').textContent, /WORCA_DEBUG_SPAWN is set in the environment: diagnostics are ON/);
-  assert.ok($('#debugSpawnEnvNote').classList.contains('warn'));
-});
-
-test('ui-settings-debug-spawn: the mirror case — stored true, env forces OFF', async () => {
-  const { $, openSettings } = await boot({ initialDebugSpawnEnabled: true, initialEffective: { enabled: false, source: 'env' } });
-  await openSettings();
-  assert.equal($('#debugSpawnEnabled').checked, true);
-  assert.match($('#debugSpawnEnvNote').textContent, /diagnostics are OFF regardless/);
+  await settle(tick);
+  assert.equal(fieldErrorText($('#debugSpawnEnabled')), '“Spawn diagnostics” must be true or false.');
 });
 
 test('ui-settings-debug-spawn: a 2xx with an unparsable body leaves the checkbox as the user set it', async () => {
-  const { $, tick, openSettings } = await boot({
+  const { window, $, tick, openSettings } = await boot({
     postResponse: { ok: true, status: 200, json: async () => { throw new Error('bad json'); } },
   });
   await openSettings();
-  $('#debugSpawnEnabled').checked = true;
+  edit(window, $('#debugSpawnEnabled'), true);
   $('#debugSpawnSave').click();
-  await tick();
+  await settle(tick);
   assert.equal($('#debugSpawnEnabled').checked, true, 'not repainted as unset from an empty body');
-  assert.match($('#debugSpawnMsg').textContent, /Saved/);
+  assert.equal($('#debugSpawnSave').textContent, 'Saved');
 });

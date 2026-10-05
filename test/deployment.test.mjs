@@ -24,6 +24,11 @@ test('githubMode names the mode, never the token', () => {
 test('deploymentFacts: null locally; the three facts otherwise, with no secret in them', () => {
   assert.equal(deploymentFacts({}, { projectsRoot: '/p' }), null);
   const f = deploymentFacts({ WORCA_CONTAINER: '1', GH_TOKEN: 'ghp_secret' }, { remoteMode: true, projectsRoot: '/data/projects' });
-  assert.deepEqual(f, { deployment: 'hosted', projectsRoot: '/data/projects', github: 'single' });
+  assert.deepEqual(f, { deployment: 'hosted', projectsRoot: '/data/projects', github: 'single', actions: 'off', terminal: 'off' });
   assert.ok(!JSON.stringify(f).includes('ghp_secret'));
+  // Actions: off on a hosted worca unless the operator opted in; never named elsewhere.
+  assert.equal(deploymentFacts({ WORCA_ACTIONS_REMOTE: '1' }, { remoteMode: true }).actions, undefined);
+  assert.equal(deploymentFacts({ WORCA_CONTAINER: '1' }).actions, undefined);
+  assert.equal(deploymentFacts({ WORCA_TERMINAL_REMOTE: '1' }, { remoteMode: true }).terminal, undefined);
+  assert.equal(deploymentFacts({ WORCA_CONTAINER: '1' }).terminal, undefined);
 });

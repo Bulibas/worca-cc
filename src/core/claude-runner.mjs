@@ -59,7 +59,7 @@ import { agentIdentity, agentSpawn, killAgentGroup, shareWithAgent } from './age
 import { agentIdentityFor } from './agent-pool.mjs';
 import { brokerEnabled, brokerInfo, mintSpawnToken, revokeSpawnToken, slotBaseUrl, slotOfBaseUrl } from './broker-client.mjs';
 import { resolveBillTo, normalizeBillTo, currentOwner } from './billing.mjs';
-import { redactSecrets, redactDeep } from './redact.mjs';
+import { redactSecrets, redactDeep, createRedactor } from './redact.mjs';
 import { MODEL_CREDENTIAL_ENV_KEYS } from './broker-guard.mjs';
 import { modelSlot } from './broker-routing.mjs';
 import { pluginModelRoute, syncPluginSlots } from './plugin-broker-slots.mjs';
@@ -420,6 +420,8 @@ export function mockEnabled(opts) {
  *   on the scan's two). Merged OVER the guardrail env and UNDER modelEnv (a catalog entry that sets the
  *   same key wins); string values only, reserved keys (isReservedModelEnvKey) dropped (cleanRunEnv).
  *   Absent ⇒ the spawn env is byte-identical.
+ * @param {string[]} [o.redactValues]  secret values to redact (MCP registry §5.5.3: the spawn's registry secrets):
+ *   every event, the result text and error messages, on the direct and the broker path. Absent ⇒ unchanged.
  * @returns {Promise<{text:string, exitCode:number}>}
  */
 export async function runClaude(o = {}) {
@@ -445,6 +447,7 @@ export async function runClaude(o = {}) {
     envAllowlist,
     modelEnv,
     spawnEnv,
+    redactValues,
     disallowedTools,
     workspaceWriteTargets,
     resumeSessionId,
@@ -507,6 +510,7 @@ export async function runClaude(o = {}) {
     envAllowlist,
     modelEnv,
     spawnEnv,
+    redactValues,
     disallowedTools,
     tools,
     strictMcpConfig,
@@ -799,8 +803,18 @@ export function stageClaudeInvocation(opts, { bin = DEFAULT_BIN, limit = ARGV_IN
   return { ...plan, dir };
 }
 
-function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, model, effort, onEvent, signal, bin, resumeSessionId, mcpConfigPath, mcpServerGrants, permissionRules, envScrub, envAllowlist, modelEnv, spawnEnv: runSpawnEnv, disallowedTools, tools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages, maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, addDirs, agents, argvInlineLimit, asAgent }) { // billTo/spawnKind/runId/threadId are consumed by runViaBroker
-  return new Promise((resolveP, rejectP) => {
+function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, model, effort, onEvent, signal, bin, resumeSessionId, mcpConfigPath, mcpServerGrants, permissionRules, envScrub, envAllowlist, modelEnv, spawnEnv: runSpawnEnv, redactValues, disallowedTools, tools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages, maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, addDirs, agents, argvInlineLimit, asAgent }) { // billTo/spawnKind/runId/threadId are consumed by runViaBroker
+  // MCP registry §5.5.3: with registry secrets in this spawn's env, every emit, the result text and the error
+  // message leave redacted — wrapped once here, so the broker path (which calls runReal) is covered too.
+  const redactor = Array.isArray(redactValues) && redactValues.length ? createRedactor(redactValues) : null;
+  if (redactor) { const emit = onEvent; onEvent = (e) => emit(redactor.deep(e)); }
+  return new Promise((resolveRaw, rejectRaw) => {
+    const resolveP = redactor ? (r) => resolveRaw({ ...r, text: redactor.text(r.text) }) : resolveRaw;
+    const rejectP = redactor ? (err) => {
+      if (err && typeof err.message === 'string') err.message = redactor.text(err.message);
+      if (err && typeof err.stack === 'string') err.stack = redactor.text(err.stack);
+      rejectRaw(err);
+    } : rejectRaw;
     // Per-model routing env (design §4.4), prepared BEFORE argv: reserved keys
     // are re-dropped here defensively — the write path already rejects them, so
     // a drop means a hand-edited settings file — and the surviving map is also
@@ -1101,7 +1115,8 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
       // an early 401 or session-limit notice followed by hundreds of KB of MCP
       // chatter would otherwise scroll past both the trim and the tail cap.
       if (!isBenignStderrLine(line)) stderrClass = strongestClass(stderrClass, classifyError(line));
-      stderrBuf += line + '\n';        // still the source of the exit-code detail
+      // MCP registry §5.5.3: redacted line by line, before the trims below can cut a secret in two.
+      stderrBuf += (redactor ? redactor.text(line) : line) + '\n';        // still the source of the exit-code detail
       // Rolling tail: bound memory against chatty MCP servers. Trim at 4x the
       // cap down to 2x — amortized, and the kept tail always exceeds
       // STDERR_DETAIL_MAX so the close handler's `… ` marker still fires.
@@ -1131,7 +1146,9 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
         // error wins. A notice alone still beats the opaque "no stderr".
         const fromStderr = stderrBuf.split('\n').filter((l) => !isBenignStderrLine(l)).join('\n').trim();
         const streamDetail = errorDetail || apiErrorText || bridgeFailureText;
-        const raw = fromStderr || streamDetail || stderrBuf.trim() || 'no stderr';
+        const found = fromStderr || streamDetail || stderrBuf.trim() || 'no stderr';
+        // Redacted before the tail cut below, which could leave a piece of a secret that no value matches (§5.5.3).
+        const raw = redactor ? redactor.text(found) : found;
         // Tail, not head: the terminal cause sits at the END of a long stderr.
         const detail = raw.length > STDERR_DETAIL_MAX ? `… ${raw.slice(-STDERR_DETAIL_MAX)}` : raw;
         const err = new Error(`${bin} exited with code ${code}: ${detail}`);
@@ -1263,7 +1280,8 @@ async function emitLog(onEvent, text) {
  * because three consumers need the vocabulary and none of them may hard-code it:
  * meta v2 validation (an unknown `mockRole` is a warning + drop), GET /api/agents
  * (the Agents view's role picker) and the graph executor's mock-role chain.
- * test/mock-writer-roles.test.mjs parses the switch and pins the lockstep.
+ * test/mock-graph.test.mjs ("MOCK_WRITER_ROLES is exactly the writer switch case set") parses the
+ * switch and pins the lockstep.
  */
 export const MOCK_WRITER_ROLES = new Set([
   'clarify', 'planner-plan', 'refiner', 'decomposer', 'implementer', 'reviewer', 'plan-review',
@@ -1277,7 +1295,7 @@ export const MOCK_ROLE_CLARIFY = 'clarify';
 export const MOCK_ROLE_DECOMPOSER = 'decomposer';
 
 /** The memory defragmenter's role, exported like the other two named roles (the switch below
- *  still uses the literal string: mock-writer-roles.test.mjs parses the switch arms). */
+ *  still uses the literal string: test/mock-graph.test.mjs parses the switch arms). */
 export const MOCK_ROLE_MEMORY_DEFRAG = 'memory-defrag';
 
 /**
@@ -1355,6 +1373,17 @@ function emitRaw(onEvent, raw) {
 
 const ASK_CONTEXT_BLOCK_RE = /\[worca context\][\s\S]*?\[\/worca context\]\s*/;
 
+/** Test seam: holdFrame(frame, index) may return a promise that holds a MOCK_SLOW turn after that
+ *  frame until it settles (or the turn is aborted). Unset = the real 300 ms per frame. */
+export const _testing = { holdFrame: null };
+function untilSettledOrAborted(p, signal) {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.resolve();
+  let onAbort;
+  const aborted = new Promise((r) => { onAbort = r; signal.addEventListener('abort', onAbort, { once: true }); });
+  return Promise.race([Promise.resolve(p), aborted]).finally(() => signal.removeEventListener('abort', onAbort));
+}
+
 /**
  * The offline Ask Worca assistant: frames in the shapes probed on claude 2.1.239
  * (system/init → message_start → text deltas → assistant blocks → tool_use /
@@ -1421,7 +1450,7 @@ async function mockAsk({ markers, prompt, cwd, onEvent, signal, resumeSessionId 
   const firstLine = userText.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || '';
   const ANSWER = `[mock] ${firstLine.slice(0, 200)}`;
   const init = { type: 'system', subtype: 'init', session_id: SID, cwd, model: 'mock', permissionMode: 'dontAsk',
-    tools: ['Task', 'mcp__worca__list_runs', 'mcp__worca__get_run', 'mcp__worca__propose_run', 'mcp__worca__propose_workflow', 'mcp__worca__propose_metrics_change', 'mcp__worca__propose_policy_change'],
+    tools: ['Task', 'mcp__worca__list_runs', 'mcp__worca__get_run', 'mcp__worca__propose_run', 'mcp__worca__propose_workflow', 'mcp__worca__propose_metrics_change', 'mcp__worca__propose_policy_change', 'mcp__worca__get_away_mode', 'mcp__worca__set_away_now', 'mcp__worca__set_run_away_mode', 'mcp__worca__propose_away_mode_change'],
     mcp_servers: [{ name: 'worca', status: 'connected' }], plugins: [], skills: [], slash_commands: [], agents: [], uuid: 'mock-uuid-init' };
   const mstart = (id) => ({ type: 'stream_event', event: { type: 'message_start', message: { id, model: 'mock', role: 'assistant', content: [], usage: USAGE } }, parent_tool_use_id: null, session_id: SID });
   const delta = (t) => ({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: t } }, parent_tool_use_id: null, session_id: SID });
@@ -1549,10 +1578,13 @@ async function mockAsk({ markers, prompt, cwd, onEvent, signal, resumeSessionId 
   }
 
   safeEmit(onEvent, { type: 'session', sessionId: SID });
-  for (const f of frames) {
+  for (const [i, f] of frames.entries()) {
     abortIfNeeded(signal);
     emitRaw(onEvent, f);
-    await new Promise((r) => setTimeout(r, slow ? 300 : 0));
+    const hold = slow && signal && typeof _testing.holdFrame === 'function' ? _testing.holdFrame(f, i) : null;
+    await (hold && typeof hold.then === 'function'
+      ? untilSettledOrAborted(hold, signal)
+      : new Promise((r) => setTimeout(r, slow && !_testing.holdFrame ? 300 : 0)));
   }
   abortIfNeeded(signal);
   if (fail || maxTurns || maxBudget) {
@@ -1745,6 +1777,9 @@ async function mockClarify(m, cycle, onEvent) {
               'Ignore and continue',
               'Reject at the boundary', // 4 options — exercises the upper bound
             ],
+            // Recommendation fields (normalizeClarify): bars, badge and night mode's weights strategy.
+            confidence: [70, 15, 5, 10],
+            recommended: 'Fail fast with a clear error',
             allowFreeText: true,
           },
           {

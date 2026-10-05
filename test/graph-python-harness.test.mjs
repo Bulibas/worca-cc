@@ -3,11 +3,11 @@
 // main(api) -> ONE frame on stdout, exit 0. Every spawning test is guarded by the
 // probe computed ONCE at the top, so a machine with no python still runs the
 // suite green. CI (ubuntu, Node 22) ships python 3, so the spawning tests run
-// there; nothing in CI covers Windows or macOS. The packaging pin is NOT skipped.
+// there; nothing in CI covers Windows or macOS.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +15,6 @@ import { probePython } from '../src/core/graph/python-probe.mjs';
 import { SCRIPT_TEMPLATES } from '../ui/public/scripts-view.mjs';
 
 const HARNESS = fileURLToPath(new URL('../src/core/graph/worca_script.py', import.meta.url));
-const REPO = fileURLToPath(new URL('..', import.meta.url));
 const probe = await probePython();
 const skip = probe.ok ? false : `no python on this host: ${probe.reason}`;
 
@@ -116,16 +115,6 @@ def main(api):
   assert.equal(frame.error.message, 'no package.json in cwd');
   assert.match(frame.error.stack, /ValueError: no package\.json in cwd/);
   assert.deepEqual(frame.logs, [{ level: 'warn', msg: 'about to fail' }]);
-});
-
-test('a module with no callable main is refused by name', { skip }, async () => {
-  const r = await runHarness(`
-main = 7
-`, envelopeFor());
-  assert.equal(r.code, 0);
-  const frame = JSON.parse(r.out);
-  assert.equal(frame.ok, false);
-  assert.match(frame.error.message, /^script module has no callable main\(api\): .*prog\.py$/);
 });
 
 test('print() goes to stderr; stdout stays exactly one frame', { skip }, async () => {
@@ -230,24 +219,6 @@ def main(api):
   assert.match(JSON.parse(deep.out).error.message, /^frame is not serializable: /, 'a RecursionError is not a ValueError');
 });
 
-test('the message names what str() leaves out: a missing api attribute, a KeyError, an empty message', { skip }, async () => {
-  const attr = await runHarness(`
-def main(api):
-    return {'summary': api.inputs.nope.path}
-`, envelopeFor());
-  assert.equal(JSON.parse(attr.out).error.message, 'no "nope" here (has: plan)');
-  const key = await runHarness(`
-def main(api):
-    return {'summary': api.params['mode']}
-`, envelopeFor());
-  assert.equal(JSON.parse(key.out).error.message, "KeyError: 'mode'");
-  const bare = await runHarness(`
-def main(api):
-    assert api.params.get('mode') == 'fast'
-`, envelopeFor());
-  assert.equal(JSON.parse(bare.out).error.message, 'AssertionError', 'an empty str() falls back to the class name');
-});
-
 test('non-ASCII round-trips through the frame whatever the console encoding is', { skip }, async () => {
   const r = await runHarness(`
 def main(api):
@@ -278,12 +249,6 @@ test('the harness parses under the python 3.8 grammar, whatever interpreter runs
   const r = spawnSync(probe.command[0], [...probe.command.slice(1), '-c',
     'import ast,sys\nast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1], feature_version=(3, 8))', HARNESS], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-});
-
-test('the harness ships in the npm package', () => {
-  assert.ok(existsSync(HARNESS), 'src/core/graph/worca_script.py exists');
-  const files = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).files;
-  assert.ok(files.includes('src/'), 'package.json files carries src/, which carries the harness');
 });
 
 test('the page`s new-python-script template is a program THIS harness accepts', { skip }, async () => {

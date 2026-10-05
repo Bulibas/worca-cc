@@ -27,6 +27,8 @@ import { brokerEnabled } from './broker-client.mjs';
 // Team policy defaults (team-policy design §6, §8): read from the discovery CACHE only (a leaf module).
 import { policyCatalogModels, teamDefault } from './policy/cache.mjs';
 import { PREDEFINED_LIST_PRICES } from './list-prices.mjs';
+import { validateNightPatch } from './night/config.mjs';
+import { normalizeProjectActions, EMPTY_PROJECT_ACTIONS } from './actions/model.mjs';
 
 /**
  * Recompute the agent step list FRESH from the layered registry (repo agents/ +
@@ -509,6 +511,7 @@ export function resolveModelCost(modelId, cliCostUsd, usage, costCfg = undefined
 // shape is pinned (test/config-models-global.test.mjs:205). The table itself lives
 // in the zero-import leaf list-prices.mjs (the credential broker prices budgets from
 // it too) and is re-exported here for existing importers.
+// A second display-only reader: the "≥$x" LOWER BOUND (floorUsd) of a run's AI call cut off before its result.
 export { PREDEFINED_LIST_PRICES };
 
 const FREE_RATES = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 });
@@ -976,7 +979,7 @@ export async function readRunConfig(projectDir) {
   // Forward any OTHER unknown keys verbatim too (future-proof, matches "preserve unknown").
   // prRemotes is the ship-it dialog's own preference (readPrRemotePrefs), not run config.
   for (const [k, v] of Object.entries(extra)) {
-    if (k !== 'webUiTesting' && k !== PR_REMOTES_KEY && k !== TEAM_METRICS_KEY && k !== TEAM_POLICY_KEY && k !== SYNC_PREFS_KEY && k !== 'humanInLoopSet' && !(k in out)) out[k] = v;
+    if (k !== 'webUiTesting' && k !== PR_REMOTES_KEY && k !== TEAM_METRICS_KEY && k !== TEAM_POLICY_KEY && k !== NIGHT_MODE_KEY && k !== SYNC_PREFS_KEY && k !== 'humanInLoopSet' && k !== ACTIONS_KEY && k !== ACTIONS_META_KEY && !(k in out)) out[k] = v;
   }
   const active = row && typeof row.active_workflow_id === 'string' ? row.active_workflow_id.trim() : '';
   // Spec §6.1 / D16: a project with no remembered New-pipeline choice starts on Auto — unless a
@@ -1218,7 +1221,7 @@ export const TEAM_METRICS_KEY = 'teamMetrics';
  */
 function assertProjectKey(key) {
   if (typeof key !== 'string' || !/^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/.test(key)) {
-    throw new TypeError(`team metrics prefs take a projectKey(), not ${JSON.stringify(key)} — did you pass a directory?`);
+    throw new TypeError(`project prefs take a projectKey(), not ${JSON.stringify(key)} — did you pass a directory?`);
   }
   return key;
 }
@@ -1251,6 +1254,53 @@ export function writeTeamMetricsPrefs(key, patch) {
   return next;
 }
 
+// ── Project actions (project_config.extra.actions / extra.actionsMeta) ─────
+// A project's setup command + actions (issue #529), and the last setup duration
+// used for the checkout estimate. Same KEY-taking contract as the team-metrics pair.
+const ACTIONS_KEY = 'actions';
+const ACTIONS_META_KEY = 'actionsMeta';
+
+/** A project's setup + actions (issue #529). Invalid stored data reads as empty. */
+export function readProjectActions(key) {
+  assertProjectKey(key);
+  const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
+  const extra = row ? parseJson(row.extra, {}) : {};
+  try { return normalizeProjectActions(extra[ACTIONS_KEY] || {}); } catch { return { ...EMPTY_PROJECT_ACTIONS, actions: [] }; }
+}
+
+/** Validate then store; throws ActionConfigError (400) before any write. */
+export function writeProjectActions(key, raw) {
+  assertProjectKey(key);
+  const next = normalizeProjectActions(raw);
+  writeExtraKey(key, ACTIONS_KEY, next);
+  return next;
+}
+
+export function readActionsMeta(key) {
+  assertProjectKey(key);
+  const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
+  const v = row ? parseJson(row.extra, {})[ACTIONS_META_KEY] : null;
+  return v && typeof v === 'object' ? v : {};
+}
+
+export function writeActionsMeta(key, patch) {
+  assertProjectKey(key);
+  writeExtraKey(key, ACTIONS_META_KEY, { ...readActionsMeta(key), ...patch });
+}
+
+function writeExtraKey(key, name, value) {
+  tx(() => {
+    const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
+    const extra = row ? parseJson(row.extra, {}) : {};
+    extra[name] = value;
+    prepare(`
+      INSERT INTO project_config (project_key, steps, custom_models, active_workflow_id, extra)
+      VALUES (?, '{}', '[]', NULL, ?)
+      ON CONFLICT(project_key) DO UPDATE SET extra = excluded.extra
+    `).run(key, JSON.stringify(extra));
+  });
+}
+
 // ── Team-policy preferences (project_config.extra.teamPolicy) ──────────────
 // The discovery cache for the worca-policy branch (team-policy design §9): the last
 // verdict, the document read from origin, the delegate marker, and the per-window
@@ -1276,6 +1326,42 @@ export function writeTeamPolicyPrefs(key, patch) {
     const cur = extra[TEAM_POLICY_KEY] && typeof extra[TEAM_POLICY_KEY] === 'object' ? extra[TEAM_POLICY_KEY] : {};
     next = { ...cur, ...patch };
     extra[TEAM_POLICY_KEY] = next;
+    prepare(`
+      INSERT INTO project_config (project_key, steps, custom_models, active_workflow_id, extra)
+      VALUES (?, '{}', '[]', NULL, ?)
+      ON CONFLICT(project_key) DO UPDATE SET extra = excluded.extra
+    `).run(key, JSON.stringify(extra));
+  });
+  return next;
+}
+
+// ── Night mode project layer (project_config.extra.nightMode) ────────────────
+// The project's own night mode fields (night/config.mjs); precedence project > user > team.
+export const NIGHT_MODE_KEY = 'nightMode';
+
+/** @returns {object|null} the project's night mode layer (only fields it set) */
+export function readNightModePrefs(key) {
+  assertProjectKey(key);
+  const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
+  const v = row ? parseJson(row.extra, {})[NIGHT_MODE_KEY] : null;
+  return v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length ? v : null;
+}
+
+/** Merge a validated patch (`__unset: [...]` removes fields; `null` clears the block). */
+export function writeNightModePrefs(key, patch) {
+  assertProjectKey(key);
+  const { __unset = [], ...rest } = patch || {};
+  const clean = patch === null ? null : validateNightPatch(rest, { level: 'project' });
+  let next = null;
+  tx(() => {
+    const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
+    const extra = row ? parseJson(row.extra, {}) : {};
+    if (clean === null) delete extra[NIGHT_MODE_KEY];
+    else {
+      next = { ...(extra[NIGHT_MODE_KEY] || {}), ...clean };
+      for (const k of Array.isArray(__unset) ? __unset : []) delete next[k];
+      if (Object.keys(next).length) extra[NIGHT_MODE_KEY] = next; else { delete extra[NIGHT_MODE_KEY]; next = null; }
+    }
     prepare(`
       INSERT INTO project_config (project_key, steps, custom_models, active_workflow_id, extra)
       VALUES (?, '{}', '[]', NULL, ?)

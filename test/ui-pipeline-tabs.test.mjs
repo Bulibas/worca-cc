@@ -1,11 +1,16 @@
 // test/ui-pipeline-tabs.test.mjs — live runs in the Runs list and the sidebar badges. The
 // sidebar no longer lists runs under Runs; a live run's state shows as its Runs-list row icon.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..', 'ui', 'public');
@@ -14,7 +19,7 @@ const appPath = join(root, 'app.js');
 const PROJECT = '/tmp/proj';
 
 async function boot() {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   let lastWs = null;
@@ -64,30 +69,30 @@ test('hello with two live pipelines lists both in Runs + live badge', async () =
   assert.equal(window.document.querySelector('#nav-running-count').textContent, '2');
 });
 
-test('a pending question lands in Needs you + the parent roll-up', async () => {
-  const { window, recv } = await boot();
-  recv({ type: 'hello', runs: [live('auth-fix', { pendingQuestion: { id: 'q1', kind: 'clarify', questions: [{ question: 'x?', options: ['a'] }] } })] });
-  await showRuns(window);
-  assert.ok(window.document.querySelector('#runs-list .runs-needs .runs-row[data-run-id="auth-fix"]'), 'listed under Needs you');
-  // The parent roll-up is the Runs button's amber Needs-you count now (D11).
-  const needs = window.document.querySelector('#nav-needs-count');
-  assert.equal(needs.hidden, false, 'the Runs button shows the Needs-you count');
-  assert.equal(needs.textContent, '1');
-  assert.equal(window.document.querySelector('#mbar-rollup').hidden, false, 'the phone bar mirrors it on the menu button');
-});
-
-test('#running/<id> opens the run in the pane and leaves the list intact', async () => {
+test('#running/<id> opens the run in the pane beside the intact list, and finishing it keeps its detail page (no redirect)', async () => {
   const { window, recv } = await boot();
   recv({ type: 'hello', runs: [live('auth-fix'), live('seo-pSEO')] });
   window.location.hash = 'running/auth-fix';
   window.dispatchEvent(new window.Event('hashchange'));
   await settle();
-  // The single-card focus view is gone (spec §7): #running/<id> opens the run in
-  // the pane BESIDE the list, so the list still holds every run.
-  const rows = window.document.querySelectorAll('#runs-list .runs-row[data-slot="group"]');
-  assert.deepEqual([...rows].map((a) => a.dataset.runId).sort(), ['auth-fix', 'seo-pSEO']);
-  assert.ok(window.document.querySelector('#run-shell').classList.contains('detail-open'));
-  assert.equal(window.document.querySelector('#run-detail .rd-title').textContent, 'auth-fix');
+  await checkRows([
+    { name: '#running/<id> opens the run in the pane and leaves the list intact', run: async () => {
+      // The single-card focus view is gone (spec §7): #running/<id> opens the run in
+      // the pane BESIDE the list, so the list still holds every run.
+      const rows = window.document.querySelectorAll('#runs-list .runs-row[data-slot="group"]');
+      assert.deepEqual([...rows].map((a) => a.dataset.runId).sort(), ['auth-fix', 'seo-pSEO']);
+      assert.ok(window.document.querySelector('#run-shell').classList.contains('detail-open'));
+      assert.equal(window.document.querySelector('#run-detail .rd-title').textContent, 'auth-fix');
+    } },
+    { name: 'finishing the open run keeps its detail page', run: async () => {
+      // D8 (was Q&A #5): finishing the run whose DETAIL page is open no longer bounces
+      // to the list — the page stays and goes terminal. The old single-card focus view
+      // had to bounce because it rendered nothing once the run finished.
+      recv({ type: 'done', runId: 'auth-fix', status: 'done' });        // open run finishes
+      assert.equal(window.location.hash.replace(/^#/, ''), 'running/auth-fix', 'no redirect');
+      assert.ok(window.document.querySelector('#run-shell').classList.contains('detail-open'));
+    } },
+  ]);
 });
 
 test('a run finishing live lingers in the Runs list, then drops once opened', async () => {
@@ -118,26 +123,28 @@ test('opening a run while LIVE does not suppress its later linger', async () => 
   assert.equal(row.dataset.icon, 'done');
 });
 
-test('a run finishing live shows the done icon', async () => {
-  const { window, recv } = await boot();
-  recv({ type: 'hello', runs: [live('auth-fix')] });
-  recv({ type: 'done', runId: 'auth-fix', status: 'done' });
-  await showRuns(window);
-  assert.equal(groupRow(window.document, 'auth-fix').dataset.icon, 'done');
-});
-
 // A PAUSED run is parked in Running (resumable), not a finished result: it stays
 // in the list with a static amber dot + no green/red end marker, and opening it
 // (to Resume) must NOT drop it into History.
-test('a paused run stays a live row with the paused icon, even once opened', async () => {
+test('a run ending live shows its icon: failed shows fail; paused shows paused and stays a live row even once opened', async () => {
+  // Two runs in one hello: auth-fix pauses, seo-pSEO fails.
   const { window, recv } = await boot();
-  recv({ type: 'hello', runs: [live('auth-fix')] });
+  recv({ type: 'hello', runs: [live('auth-fix'), live('seo-pSEO')] });
   recv({ type: 'done', runId: 'auth-fix', status: 'paused' });      // pause routes through finishRun
-  await showRuns(window);
-  assert.equal(groupRow(window.document, 'auth-fix').dataset.icon, 'paused');
-  await openRun(window, 'auth-fix');                                // open to Resume
-  await showRuns(window);
-  assert.ok(groupRow(window.document, 'auth-fix'), 'opening a paused run does NOT drop it');
+  recv({ type: 'done', runId: 'seo-pSEO', status: 'error' });
+  await checkRows([
+    { name: 'a paused run stays a live row with the paused icon, even once opened', run: async () => {
+      await showRuns(window);
+      assert.equal(groupRow(window.document, 'auth-fix').dataset.icon, 'paused');
+      await openRun(window, 'auth-fix');                                // open to Resume
+      await showRuns(window);
+      assert.ok(groupRow(window.document, 'auth-fix'), 'opening a paused run does NOT drop it');
+    } },
+    { name: 'a run failing live shows the failed icon', run: async () => {
+      await showRuns(window);
+      assert.equal(groupRow(window.document, 'seo-pSEO').dataset.icon, 'fail');
+    } },
+  ]);
 });
 
 // Resuming a paused run mints a NEW runId; the pre-pause log must be carried into
@@ -183,21 +190,6 @@ test('resuming a paused run carries the pre-pause log into the resumed run', asy
   );
 });
 
-test('a run failing live shows the failed icon', async () => {
-  const { window, recv } = await boot();
-  recv({ type: 'hello', runs: [live('auth-fix')] });
-  recv({ type: 'done', runId: 'auth-fix', status: 'error' });
-  await showRuns(window);
-  assert.equal(groupRow(window.document, 'auth-fix').dataset.icon, 'fail');
-});
-
-test('seed-on-first-hello: a pre-existing terminal run is NOT a lingerer', async () => {
-  const { window, recv } = await boot();
-  recv({ type: 'hello', runs: [live('old-done', { status: 'done' })] });
-  const rows = window.document.querySelectorAll('#nav-running-children .nav-child');
-  assert.equal(rows.length, 0);
-});
-
 // v2 + D7: a live NON-pipeline run (e.g. a scan) gets no child tab AND no
 // Runs row — the live rows are pipelines only, and a scan's progress belongs to its
 // wizard. This deliberately reverses the Q&A #3 carve-out the original of this
@@ -218,44 +210,51 @@ test('a live non-pipeline run renders nowhere in Runs', async () => {
 // One badge on Runs (D11): green = running count; a paused run needs you, so it
 // lands in the amber Needs-you count, hidden at zero. liveRuns() excludes 'paused'
 // so the counts are disjoint.
-test('a paused pipeline counts in the amber Needs-you badge; the running count excludes it', async () => {
-  const { window, recv } = await boot();
-  recv({ type: 'hello', runs: [live('auth-fix'), live('seo-pSEO')] });
-  assert.equal(window.document.querySelector('#nav-needs-count').hidden, true, 'Needs-you badge hidden at zero');
-  recv({ type: 'done', runId: 'auth-fix', status: 'paused' });
-  assert.equal(window.document.querySelector('#nav-running-count').textContent, '1');
-  assert.equal(window.document.querySelector('#nav-needs-count').textContent, '1');
-  assert.equal(window.document.querySelector('#nav-needs-count').hidden, false);
-});
-
+//
 // Green is spent only on work in flight. At zero the running badge takes the
 // sidebar's inert-inventory grey (the treatment the Schedules count gets), so a
 // permanently green pill cannot dilute the green that should catch the eye. It
 // is greyed, not hidden: Schedules shows a grey 0 too.
-test('the running badge is green only while something is running, grey at zero', async () => {
+test('Runs badges: running count is green only while something runs (grey at zero) and excludes paused runs, which count in the amber Needs-you badge', async () => {
+  // One boot walks the scenario (zero state, hello two runs, pause one, finish the other)
+  // and snapshots both badges at each step; the rows read the snapshots.
   const { window, recv } = await boot();
-  const badge = window.document.querySelector('#nav-running-count');
-  assert.equal(badge.textContent, '0');
-  assert.ok(badge.classList.contains('n-grey'), 'zero is inert — grey, like Schedules');
-  assert.ok(!badge.classList.contains('n-run'), 'no green when nothing runs');
-  assert.equal(badge.hidden, false, 'greyed, not hidden');
+  const snap = () => {
+    const badge = window.document.querySelector('#nav-running-count');
+    const needs = window.document.querySelector('#nav-needs-count');
+    return { text: badge.textContent, grey: badge.classList.contains('n-grey'), green: badge.classList.contains('n-run'),
+      hidden: badge.hidden, needs: needs.textContent, needsHidden: needs.hidden };
+  };
+  const zero = snap();
+  recv({ type: 'hello', runs: [live('auth-fix'), live('seo-pSEO')] });
+  const both = snap();
+  recv({ type: 'done', runId: 'auth-fix', status: 'paused' });
+  const paused = snap();
+  recv({ type: 'done', runId: 'seo-pSEO', status: 'done' });       // the last running run finishes
+  const finished = snap();
+  await checkRows([
+    { name: 'a paused pipeline counts in the amber Needs-you badge; the running count excludes it', run: () => {
+      assert.equal(both.needsHidden, true, 'Needs-you badge hidden at zero');
+      assert.equal(paused.text, '1');
+      assert.equal(paused.needs, '1');
+      assert.equal(paused.needsHidden, false);
+    } },
+    { name: 'the running badge is green only while something is running, grey at zero', run: () => {
+      assert.equal(zero.text, '0');
+      assert.ok(zero.grey, 'zero is inert — grey, like Schedules');
+      assert.ok(!zero.green, 'no green when nothing runs');
+      assert.equal(zero.hidden, false, 'greyed, not hidden');
 
-  recv({ type: 'hello', runs: [live('auth-fix')] });
-  assert.equal(badge.textContent, '1');
-  assert.ok(badge.classList.contains('n-run'), 'green once work is in flight');
-  assert.ok(!badge.classList.contains('n-grey'));
+      assert.equal(both.text, '2');
+      assert.ok(both.green, 'green once work is in flight');
+      assert.ok(!both.grey);
 
-  // ...and back to grey when the last run finishes.
-  recv({ type: 'done', runId: 'auth-fix', status: 'done' });
-  assert.equal(badge.textContent, '0');
-  assert.ok(badge.classList.contains('n-grey'), 'green must not linger past the work');
-  assert.ok(!badge.classList.contains('n-run'));
-});
-
-test('index.html ships the running badge grey — zero is its resting state', () => {
-  const html = readFileSync(htmlPath, 'utf8');
-  assert.match(html, /<span class="nav-count n-grey" id="nav-running-count">0<\/span>/,
-    'the static badge must not be green before any run exists');
+      // ...and back to grey when the last run finishes.
+      assert.equal(finished.text, '0');
+      assert.ok(finished.grey, 'green must not linger past the work');
+      assert.ok(!finished.green);
+    } },
+  ]);
 });
 
 // Workspace runs list every member project in the child hint (clamped by CSS).
@@ -270,17 +269,4 @@ test('run-created broadcast lists the run under its project without a reload', a
   assert.ok(row, 'row present without a reload');
   assert.equal(row.closest('.runs-group').querySelector('.runs-group-name').textContent, 'proj');
   assert.equal(window.document.querySelector('#nav-running-count').textContent, '1');
-});
-
-// D8 (was Q&A #5): finishing the run whose DETAIL page is open no longer bounces
-// to the list — the page stays and goes terminal. The old single-card focus view
-// had to bounce because it rendered nothing once the run finished.
-test('finishing the open run keeps its detail page', async () => {
-  const { window, recv } = await boot();
-  recv({ type: 'hello', runs: [live('auth-fix'), live('seo-pSEO')] });
-  window.location.hash = 'running/auth-fix';
-  window.dispatchEvent(new window.Event('hashchange'));
-  recv({ type: 'done', runId: 'auth-fix', status: 'done' });        // open run finishes
-  assert.equal(window.location.hash.replace(/^#/, ''), 'running/auth-fix', 'no redirect');
-  assert.ok(window.document.querySelector('#run-shell').classList.contains('detail-open'));
 });

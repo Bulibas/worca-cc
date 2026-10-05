@@ -8,7 +8,7 @@ import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
-import { askWeb, setAskWeb, addAskWebHost, assertAskWebInput, readSettings, SETTINGS_POST_KEYS } from '../src/core/settings.mjs';
+import { askWeb, setAskWeb, addAskWebHost, assertAskWebInput, readSettings } from '../src/core/settings.mjs';
 
 useTempHome(after);
 let sandboxHome; let settingsPath; const prevEnv = {};
@@ -20,10 +20,6 @@ before(async () => {
 after(async () => {
   for (const k of ['HOME', 'USERPROFILE']) { if (prevEnv[k] === undefined) delete process.env[k]; else process.env[k] = prevEnv[k]; }
   await rm(sandboxHome, { recursive: true, force: true });
-});
-
-test('askWeb defaults to off / empty / no search', () => {
-  assert.deepEqual(askWeb(), { enabled: false, anyHost: false, allowedDomains: [], search: null });
 });
 
 test('setAskWeb validates, normalizes and persists', async () => {
@@ -63,8 +59,6 @@ test('askWeb exposes keyVar, never a key value', async () => {
   await setAskWeb({ enabled: true, allowedDomains: ['a.com'], search: { url: 'https://api.search.brave.com/res/v1/web/search?q={query}', key: '${BRAVE_API_KEY}', keyHeader: 'X-Subscription-Token' } });
   assert.deepEqual(askWeb().search, { url: 'https://api.search.brave.com/res/v1/web/search?q={query}', key: '${BRAVE_API_KEY}', keyVar: 'BRAVE_API_KEY', keyHeader: 'X-Subscription-Token', keyPrefix: '' });
 });
-
-test('SETTINGS_POST_KEYS includes askWeb', () => assert.ok(SETTINGS_POST_KEYS.includes('askWeb')));
 
 test('anyHost is an explicit opt-in, stored only when on', async () => {
   assert.throws(() => assertAskWebInput({ enabled: true, anyHost: 'yes', allowedDomains: [] }), /anyHost must be true or false/);

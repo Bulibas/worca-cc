@@ -481,6 +481,11 @@ function answeredByOf(aWrap) {
   return aWrap && typeof aWrap.answeredBy === 'string' && aWrap.answeredBy ? { answeredBy: aWrap.answeredBy } : {};
 }
 
+/** `{night}` when night mode answered the round (src/core/night/*), else {} — additive like answeredBy. */
+function nightOf(aWrap) {
+  return aWrap && aWrap.night && typeof aWrap.night === 'object' ? { night: aWrap.night } : {};
+}
+
 function formFieldsOf(qWrap, aWrap) {
   const ask = formAskOf(qWrap, aWrap);
   return ask ? { ask, formAnswer: formAnswerOf(aWrap) } : {};
@@ -518,6 +523,7 @@ export function readStepQuestions(pipelineId) {
       // byte-identical; consumers test `row.ask`, never `'ask' in row`.
       ...formFieldsOf(qWrap, aWrap),
       ...answeredByOf(aWrap),
+      ...nightOf(aWrap),
     };
   });
 }
@@ -598,6 +604,7 @@ export function readPipelineExtras(pipelineId) {
     answers: Array.isArray(aWrap?.answers) ? aWrap.answers : [],
     ...formFieldsOf(qWrap, aWrap),   // spec §9: `ask` + `formAnswer` on a form row only
     ...answeredByOf(aWrap),
+    ...nightOf(aWrap),
   };
   const reviews = getDb().prepare(
     'SELECT kind, cycle, verdict FROM reviews WHERE pipeline_id = ? ORDER BY kind, cycle'
@@ -1426,7 +1433,7 @@ export async function writeState(pipelineDir, stateObj) {
       // v2 rows: execution_id === key. v1 rows leave every exec_* column NULL, so
       // the readers below reproduce today's exact shape for a v1 pipeline.
       const hasMeta = st.taskId != null || st.parentExecutionId != null || st.title != null || st.phaseOrdinal != null
-        || st.nodeKey != null || st.runtime != null || st.exitCode != null || st.bridgeCalls != null;
+        || st.nodeKey != null || st.runtime != null || st.exitCode != null || st.bridgeCalls != null || st.auxCosts != null || st.stoppedTurns != null;
       const meta = hasMeta
         ? s({ taskId: st.taskId ?? null, parentExecutionId: st.parentExecutionId ?? null,
               title: st.title ?? null, phaseOrdinal: st.phaseOrdinal ?? null,
@@ -1435,7 +1442,11 @@ export async function writeState(pipelineDir, stateObj) {
               // Model bridge (§8.6): requests the node initiated through the bridge.
               ...(st.bridgeCalls != null ? { bridgeCalls: st.bridgeCalls, bridgeContinued: st.bridgeContinued ?? 0 } : {}),
               // OpenRouter `:free` requests the node spent (openrouter-free.mjs).
-              ...(st.bridgeFreeCalls ? { bridgeFreeCalls: st.bridgeFreeCalls } : {}) })
+              ...(st.bridgeFreeCalls ? { bridgeFreeCalls: st.bridgeFreeCalls } : {}),
+              // Worca's own AI spend inside the step cost (Away mode, Auto workflow, run title).
+              ...(st.auxCosts ? { auxCosts: st.auxCosts } : {}),
+              // Agent turns cut before their `result`: a count and a lower bound, never in the cost.
+              ...(st.stoppedTurns ? { stoppedTurns: st.stoppedTurns } : {}) })
         : null;
       ins.run(
         id, st.key, st.nodeId ?? null, st.phase ?? null,
@@ -1460,6 +1471,21 @@ export async function writeState(pipelineDir, stateObj) {
     }
   });
   return obj;
+}
+
+/**
+ * The status of a pipeline row and the pause token its resume point carries (`pausedBy`; null
+ * when there is no row). A paused run harness compares them with its own token, to tell whether
+ * another writer — a resumed run's NEW harness — has taken the row over since it paused.
+ * @param {string} pipelineId
+ * @returns {{status:string|null, pausedBy:string|null}|null}
+ */
+export function pipelineRowStamp(pipelineId) {
+  if (!pipelineId) return null;
+  const row = getDb().prepare(`SELECT status,
+      json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pausedBy') AS paused_by
+    FROM pipelines WHERE id = ?`).get(pipelineId);
+  return row ? { status: row.status ?? null, pausedBy: row.paused_by ?? null } : null;
 }
 
 /**
@@ -1633,6 +1659,44 @@ export function claimPipelineOwnership(pipelineId, { pid = process.pid, host = h
 }
 
 /**
+ * Claim a PAUSED run for a stop (stop-paused.mjs): ONE atomic UPDATE flips it to
+ * `stopped` and drops its resume point, so a racing resume (resumeRun re-reads the row
+ * before it goes live) or a second stop loses — across processes too, SQLite serializes
+ * the write. False when the row is anything else by now (resumed, stopped, interrupted,
+ * archived, gone): the caller lost and must not touch it. An interrupted row never
+ * passes — it stays resumable.
+ * @param {string} pipelineId
+ * @returns {boolean} true only for the caller that flipped it
+ */
+export function claimPausedForStop(pipelineId) {
+  if (!pipelineId) return false;
+  const r = getDb().prepare(`
+    UPDATE pipelines SET status = 'stopped', resume_point = NULL, updated_at = ?
+    WHERE id = ? AND status = 'paused' AND archived_at IS NULL
+  `).run(new Date().toISOString(), pipelineId);
+  return r.changes === 1;
+}
+
+/**
+ * Take a parked run over for a resume — claimPausedForStop's twin: ONE atomic UPDATE flips the
+ * row to `running` and stamps this process as its owner, unless it has settled since (stopped,
+ * done, error). A resume and a stop of one paused run, in this process or two, can then never
+ * both win: whichever UPDATE lands first decides, and the other sees the row it left. True when
+ * there is no row (the caller's snapshot is all there is), false when the caller lost.
+ * @param {string} pipelineId
+ * @returns {boolean}
+ */
+export function claimForResume(pipelineId, { pid = process.pid, host = hostname(), now = Date.now() } = {}) {
+  if (!pipelineId) return true;
+  const ts = new Date(now).toISOString();
+  const r = getDb().prepare(`
+    UPDATE pipelines SET status = 'running', owner_pid = ?, owner_host = ?, heartbeat_at = ?, updated_at = ?
+    WHERE id = ? AND status NOT IN ('stopped', 'done', 'error')
+  `).run(pid, host, ts, ts, pipelineId);
+  return r.changes === 1 || !getDb().prepare('SELECT 1 FROM pipelines WHERE id = ?').get(pipelineId);
+}
+
+/**
  * Lightweight heartbeat tick: refresh heartbeat_at ONLY. Status-guarded so a beat that fires
  * after a terminal write is a no-op. Returns the number of rows updated (0 or 1).
  * @param {string} pipelineId
@@ -1681,10 +1745,11 @@ export function clearPipelineOwnership(pipelineId) {
  *     Preserves today's behavior for pre-v10 rows. NULL-timestamp ownerless rows return false.
  *
  * @param {object} row
- * @param {{ host:string, now:number, staleMs:number, hbStaleMs:number, pidAlive?:(pid:number)=>boolean }} ctx
+ * @param {{ host?:string, now?:number, staleMs?:number, hbStaleMs?:number, pidAlive?:(pid:number)=>boolean }} [ctx]
+ *        All defaulted (house values); the control CLI calls it with just a row.
  * @returns {boolean}
  */
-export function isDeadOwner(row, { host, now, staleMs, hbStaleMs, pidAlive = defaultPidAlive }) {
+export function isDeadOwner(row, { host = hostname(), now = Date.now(), staleMs = staleRunMs(), hbStaleMs = heartbeatStaleMs(), pidAlive = defaultPidAlive } = {}) {
   const ownedHere = row.owner_host === host && row.owner_pid != null;
 
   // Arm 1: dead pid on this host → dead immediately.
@@ -1775,8 +1840,9 @@ export function foreignActiveWorkspaceRuns(workspaceKey, { liveIds = [], pid = p
 }
 
 /**
- * Load everything resume needs for one pipeline: the raw pipelines row, the parsed
- * resume_point, and the saved steps (camelCase via rowToState, sessionId included).
+ * Load everything resume (and a paused run's stop) needs for one pipeline: the raw
+ * pipelines row, the parsed resume_point, the saved steps (camelCase via rowToState,
+ * sessionId included) and the full rowToState snapshot (`state`).
  * Returns null when the id is unknown. Pure read — no status checks here (callers
  * guard on row.status).
  */
@@ -1790,7 +1856,7 @@ export function readPipelineForResume(pipelineId) {
     resumePoint = null;
   }
   const state = rowToState(row);
-  return { row, resumePoint, steps: state?.steps || [] };
+  return { row, resumePoint, steps: state?.steps || [], state };
 }
 
 /**
@@ -1922,6 +1988,26 @@ export function retainedWorkFor(row) {
   }
   if (!members.length) return null;
   return { reason: members[0].code || 'unknown', members };
+}
+
+/** Checked-out members of a finished run (issue #529) — never an error, unlike retainedWorkFor. */
+export function checkoutRecordsFor(row) {
+  if (!row || typeof row !== 'object') return null;
+  const branch = typeof row.branch === 'string' ? j(row.branch, null) : row.branch;
+  const wm = typeof row.workspace_meta === 'string' ? j(row.workspace_meta, null) : row.workspace_meta;
+  const wsBranches = wm?.branches || row.branches;
+  const isWorkspace = row.target === 'workspace' && wsBranches && typeof wsBranches === 'object';
+  const candidates = isWorkspace ? Object.entries(wsBranches) : [[row.project_key ?? row.projectKey ?? null, branch]];
+  const members = [];
+  for (const [pk, br] of candidates) {
+    const c = br?.checkout;
+    // A linked folder (checkout.external) lives at checkout.dir; br.worktreeDir is the run's own path.
+    const dir = c?.external ? c.dir : br?.worktreeDir;
+    if (!c || !dir || !existsSync(dir)) continue;
+    members.push({ projectKey: pk || null, worktreeDir: dir, branch: br.feature || null,
+      at: c.at || null, policy: c.policy || 'on-demand', setup: c.setup || { status: 'none' }, ...(c.external ? { external: true } : {}) });
+  }
+  return members.length ? { members } : null;
 }
 
 // Kept local, not imported: results.mjs (which exports RESULTS_FILE) imports this module.
@@ -2085,6 +2171,7 @@ async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
     pauseReason: row.pause_reason ?? null,
     pauseDetail: row.pause_detail ?? null,
     retainedWork: retainedWorkFor(row),
+    checkout: checkoutRecordsFor(row),
     survived,
     added,
     removed,
@@ -2182,17 +2269,20 @@ export async function listPipelines(projectDir, opts = {}, workspaceKey) {
  *  projectName, projectDir}; workspace rows tag {projectKey:"workspaces/<wk>",
  *  projectName, workspaceName, projectDir:primaryPath, target:'workspace'}.
  *  `opts.limit` (positive integer) bounds the rows in SQL; `opts.lite` skips ALL git
- *  enrichment (survived/added/removed stay false/0/0). Both default off, so existing
- *  callers see exactly what they saw before. Workspace rows also carry `members[]`
- *  (per-member facts, tri-state `pr`; omitted in `lite`) — see rowToHistoryEntry. */
+ *  enrichment (survived/added/removed stay false/0/0); `opts.archived` flips the
+ *  soft-delete filter to `archived_at IS NOT NULL` and stamps each entry
+ *  {archived: true, archivedAt} — the Runs page's Archived feed. The default lists
+ *  active rows only, so existing callers see exactly what they saw before. Workspace
+ *  rows also carry `members[]` (per-member facts, tri-state `pr`; omitted in `lite`)
+ *  — see rowToHistoryEntry. */
 export async function listAllPipelines(opts = {}, { batchSize = 16 } = {}) {
   const rows = getDb().prepare(`
     SELECT id, project_key, workspace_key, target, title, status, started_at, updated_at,
-           total_cost_usd, total_active_ms, branch, workspace_meta, guardrails_id, started_by, pr_url,
+           total_cost_usd, total_active_ms, branch, workspace_meta, guardrails_id, started_by, pr_url, archived_at,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pauseReason') AS pause_reason,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pauseDetail') AS pause_detail
     FROM pipelines
-    WHERE archived_at IS NULL
+    WHERE archived_at IS ${opts.archived ? 'NOT NULL' : 'NULL'}
     ORDER BY COALESCE(updated_at, started_at) DESC, project_key, id
     LIMIT ?
   `).all(Number.isInteger(opts.limit) && opts.limit > 0 ? opts.limit : -1); // -1 = unlimited (SQLite)
@@ -2252,6 +2342,7 @@ export async function listAllPipelines(opts = {}, { batchSize = 16 } = {}) {
       if (!idx) { idx = await runDirIndex(t.pipelinesDir); dirIndexCache.set(t.pipelinesDir, idx); }
       t.row.dir = idx.get(t.row.id) || join(t.pipelinesDir, t.row.id);
       const e = await rowToHistoryEntry(t.row, t.repoDir, opts);
+      if (opts.archived) { e.archived = true; e.archivedAt = t.row.archived_at || null; }
       return Object.assign(e, t.tag); // same tag fields as before; tag has no `pr` key
     }));
     out.push(...built);
@@ -2365,6 +2456,8 @@ function stepRowToStep(r) {
     if (em.exitCode != null) step.exitCode = em.exitCode;
     if (em.bridgeCalls != null) { step.bridgeCalls = em.bridgeCalls; step.bridgeContinued = em.bridgeContinued ?? 0; }
     if (em.bridgeFreeCalls) step.bridgeFreeCalls = em.bridgeFreeCalls;
+    if (em.auxCosts && typeof em.auxCosts === 'object') step.auxCosts = em.auxCosts;
+    if (em.stoppedTurns && typeof em.stoppedTurns === 'object') step.stoppedTurns = em.stoppedTurns;
   }
   return step;
 }
@@ -2403,6 +2496,9 @@ function rowToState(row) {
     // v31 provenance: set when a schedule started this run (NULL = started by hand).
     scheduledFor: row.scheduled_for ?? null,
     scheduleId: row.schedule_id ?? null,
+    // The soft-delete stamp (pipeline-delete.mjs): NULL = an active run. By-id reads
+    // never filtered on it, so a deep-linked archived run's detail knows it is archived.
+    archivedAt: row.archived_at ?? null,
     // A retired v1 resume point was NULLed by the v2 upgrade: the run stays in
     // History with an honest status, but it can never be resumed again.
     resumable: row.resume_point != null,
@@ -2572,7 +2668,7 @@ export function runRootSweepLookups() {
     statusOf: (id) => rowById(id)?.status ?? null,
     retainOf: (id) => {
       const row = rowById(id);
-      return row ? retainedWorkFor(row) : null;
+      return row ? (retainedWorkFor(row) || checkoutRecordsFor(row)) : null;
     },
     membersOf: async (id) => {
       const row = rowById(id);
@@ -2677,10 +2773,15 @@ export async function readPipelineByKey(key, id) {
   // File-name literals inlined (not imported from results.mjs) to avoid a load-order
   // cycle: results.mjs imports recordArtifact/resolvePipelineId from this module.
   const dir = await runDirForRow(row);
+  const state = rowToState(row);
+  // A resume runs out of the run dir (its session + stepper state live there). Restore
+  // clears a reclaimed run's resume_point (pipeline-delete.mjs), but a dir wiped by hand
+  // keeps one — gate it on the dir actually existing (no dir, no resume; archive or not).
+  if (state.resumable && !(dir && existsSync(dir))) state.resumable = false;
   const results = await readJsonFile(join(dir, 'results.json'));
   const overview = await readJsonFile(join(dir, 'overview.json'));
   return {
-    state: rowToState(row),
+    state,
     auditMarkdown: buildAuditMarkdown(row),
     artifacts: await listArtifacts(row.id), // [{kind, relPath}] — drives the Live-logs dropdown (project + workspace)
     results,

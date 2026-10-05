@@ -2,6 +2,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { getDb } from '../src/core/db.mjs';
 import {
   readWorkflow, listWorkflows, writeGraphWorkflow, deleteWorkflow, assertRunnableWorkflow, resolveGraph, setWorkflowNodeDefaults,
@@ -14,30 +15,33 @@ import { createCatalog } from '../src/core/ask/catalog.mjs';
 
 useTempHome(after);
 
-test('the constant: one agent node between the task and End, the report wired to result, deep-frozen', () => {
-  const wf = GRAPH_MEMORY_DEFRAG_WORKFLOW;
-  assert.equal(MEMORY_DEFRAG_WORKFLOW_ID, 'wf_memory_defrag');
-  assert.equal(MEMORY_DEFRAG_WORKFLOW_NAME, 'Memory defragment');
-  assert.equal(wf.id, 'wf_memory_defrag'); assert.equal(wf.name, 'Memory defragment');
-  assert.equal(wf.version, 2); assert.equal(wf.domain, 'shared');
-  assert.deepEqual(wf.nodes.map((n) => [n.id, n.kind, n.key ?? null]), [['n_task', 'task', null], ['n_defrag', 'agent', 'memoryDefragmenter'], ['n_end', 'end', null]]);
-  assert.deepEqual(wf.wires.map((w) => `${w.from.node}.${w.from.port}->${w.to.node}.${w.to.port}`), ['n_task.task->n_defrag.task', 'n_defrag.report->n_end.result']);
-  assert.ok(Object.isFrozen(wf) && Object.isFrozen(wf.nodes[1]) && Object.isFrozen(wf.wires[0].from), 'deepFreeze, not Object.freeze');
-  assert.deepEqual([...RESERVED_WORKFLOW_IDS], ['wf_default', 'wf_auto', 'wf_memory_defrag', 'wf_workspace_scan']);
-  for (const id of ['wf_default', 'wf_auto', 'wf_memory_defrag', 'wf_workspace_scan']) assert.equal(isReservedWorkflowId(id), true, id);
-  assert.equal(isReservedWorkflowId('wf_memory-defrag'), false);
-});
-
-test('reserved: reads as the constant, never listed, the id cannot be claimed, undeletable, no stored defaults', async () => {
-  assert.equal(await readWorkflow('wf_memory_defrag'), GRAPH_MEMORY_DEFRAG_WORKFLOW);
-  assert.ok(!(await listWorkflows()).some((t) => t.id === 'wf_memory_defrag'));
-  const saved = await writeGraphWorkflow({ id: 'wf_memory_defrag', name: 'Mine', nodes: [], wires: [] });
-  assert.equal(saved.id, 'wf_mine', 'an explicit reserved id falls back to the slug of the name');
-  // slugify maps "_" to "-": no NAME can slug onto wf_memory_defrag, so the RESERVED_NAME arm never fires for it.
-  const slugged = await writeGraphWorkflow({ name: 'memory defrag', nodes: [], wires: [] });
-  assert.equal(slugged.id, 'wf_memory-defrag');
-  assert.equal(await deleteWorkflow('wf_memory_defrag'), false);
-  await assert.rejects(() => setWorkflowNodeDefaults('wf_memory_defrag', { n_defrag: { model: 'x' } }), /cannot store defaults/);
+test('wf_memory_defrag: the deep-frozen constant (one agent node, report → result) is reserved — read as the constant, never listed, unclaimable, undeletable, no stored defaults', async () => {
+  await checkRows([
+    { name: 'the constant: one agent node between the task and End, the report wired to result, deep-frozen', run: () => {
+      const wf = GRAPH_MEMORY_DEFRAG_WORKFLOW;
+      assert.equal(MEMORY_DEFRAG_WORKFLOW_ID, 'wf_memory_defrag');
+      assert.equal(MEMORY_DEFRAG_WORKFLOW_NAME, 'Memory defragment');
+      assert.equal(wf.id, 'wf_memory_defrag'); assert.equal(wf.name, 'Memory defragment');
+      assert.equal(wf.version, 2); assert.equal(wf.domain, 'shared');
+      assert.deepEqual(wf.nodes.map((n) => [n.id, n.kind, n.key ?? null]), [['n_task', 'task', null], ['n_defrag', 'agent', 'memoryDefragmenter'], ['n_end', 'end', null]]);
+      assert.deepEqual(wf.wires.map((w) => `${w.from.node}.${w.from.port}->${w.to.node}.${w.to.port}`), ['n_task.task->n_defrag.task', 'n_defrag.report->n_end.result']);
+      assert.ok(Object.isFrozen(wf) && Object.isFrozen(wf.nodes[1]) && Object.isFrozen(wf.wires[0].from), 'deepFreeze, not Object.freeze');
+      assert.deepEqual([...RESERVED_WORKFLOW_IDS], ['wf_default', 'wf_auto', 'wf_memory_defrag', 'wf_workspace_scan']);
+      for (const id of ['wf_default', 'wf_auto', 'wf_memory_defrag', 'wf_workspace_scan']) assert.equal(isReservedWorkflowId(id), true, id);
+      assert.equal(isReservedWorkflowId('wf_memory-defrag'), false);
+    } },
+    { name: 'reserved: reads as the constant, never listed, the id cannot be claimed, undeletable, no stored defaults', run: async () => {
+      assert.equal(await readWorkflow('wf_memory_defrag'), GRAPH_MEMORY_DEFRAG_WORKFLOW);
+      assert.ok(!(await listWorkflows()).some((t) => t.id === 'wf_memory_defrag'));
+      const saved = await writeGraphWorkflow({ id: 'wf_memory_defrag', name: 'Mine', nodes: [], wires: [] });
+      assert.equal(saved.id, 'wf_mine', 'an explicit reserved id falls back to the slug of the name');
+      // slugify maps "_" to "-": no NAME can slug onto wf_memory_defrag, so the RESERVED_NAME arm never fires for it.
+      const slugged = await writeGraphWorkflow({ name: 'memory defrag', nodes: [], wires: [] });
+      assert.equal(slugged.id, 'wf_memory-defrag');
+      assert.equal(await deleteWorkflow('wf_memory_defrag'), false);
+      await assert.rejects(() => setWorkflowNodeDefaults('wf_memory_defrag', { n_defrag: { model: 'x' } }), /cannot store defaults/);
+    } },
+  ]);
 });
 
 test('runnable: assertRunnableWorkflow validates the graph against the shipped registry; resolveGraph resolves the agent', async () => {

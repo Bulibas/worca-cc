@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { _resetForTests } from '../src/core/db.mjs';
 import { recordArtifact } from '../src/core/artifacts.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let homeDir, srv, base, prevHome, proj, id, dir;
 
@@ -37,7 +38,7 @@ after(async () => {
   await rm(proj, { recursive: true, force: true });
 });
 
-test('GET /api/runs/:id/artifacts lists attributed artifacts', async () => {
+test('GET /api/runs/:id/artifacts lists attributed artifacts and an uncapped list reports truncated: false', async () => {
   const res = await fetch(`${base}/api/runs/${id}/artifacts`);
   assert.equal(res.status, 200);
   const body = await res.json();
@@ -49,6 +50,7 @@ test('GET /api/runs/:id/artifacts lists attributed artifacts', async () => {
   assert.equal(plan.nodeId, 'planner');
   assert.equal(plan.cycle, 0);
   assert.equal(plan.bytes, 2);
+  assert.equal(body.truncated, false, 'an uncapped list reports truncated: false');
 });
 
 test('GET /api/runs/:id/artifacts 404s an unknown run', async () => {
@@ -73,12 +75,6 @@ test('GET /api/runs/:id/artifacts flags a truncated list instead of silently cut
   assert.equal(res.status, 200);
   assert.equal(body.artifacts.length, 200, 'still capped at the shared ceiling');
   assert.equal(body.truncated, true, 'and it says so');
-});
-
-test('an uncapped list reports truncated: false', async () => {
-  const res = await fetch(`${base}/api/runs/${id}/artifacts`);
-  const body = await res.json();
-  assert.equal(body.truncated, false);
 });
 
 // The 200-row cap was applied BEFORE the client's display filter, and rows come
@@ -129,24 +125,27 @@ test('GET /api/runs/:id/artifacts pages past the cap with ?offset', async () => 
   assert.equal(seen.size, 206, 'the two pages cover every row, with no overlap');
 });
 
-test('GET /api/runs/:id/artifacts rejects a junk offset rather than 500ing', async () => {
-  const res = await fetch(`${base}/api/runs/${id}/artifacts?offset=-5`);
-  assert.equal(res.status, 200, 'a bad offset is clamped, not fatal');
-  const body = await res.json();
-  assert.ok(body.artifacts.find((a) => a.relPath === 'plan.md'), 'and still lists from the start');
-});
-
-// Number.isInteger(1e20) is TRUE, but node:sqlite refuses to bind a non-safe
-// integer — so the offset sailed past the route's `Number.isFinite && > 0` guard
-// and through listRunArtifacts' `Number.isInteger` check into the statement,
-// where it threw `datatype mismatch` and the route's catch turned it into a 500.
-// The ask-tool twin is safe because clampInt caps at MAX_SAFE_INTEGER; this route
-// had no cap.
-test('GET /api/runs/:id/artifacts survives an absurd offset instead of 500ing', async () => {
-  for (const bad of ['1e20', '9007199254740992', '99999999999999999999']) {
-    const res = await fetch(`${base}/api/runs/${id}/artifacts?offset=${bad}`);
-    assert.equal(res.status, 200, `offset=${bad} must not be a server error`);
-    const body = await res.json();
-    assert.deepEqual(body.artifacts, [], 'an offset past the end is simply an empty page');
-  }
+test('GET /api/runs/:id/artifacts clamps a junk or absurd offset instead of 500ing', async () => {
+  await checkRows([
+    { name: 'GET /api/runs/:id/artifacts rejects a junk offset rather than 500ing', run: async () => {
+      const res = await fetch(`${base}/api/runs/${id}/artifacts?offset=-5`);
+      assert.equal(res.status, 200, 'a bad offset is clamped, not fatal');
+      const body = await res.json();
+      assert.ok(body.artifacts.find((a) => a.relPath === 'plan.md'), 'and still lists from the start');
+    } },
+    { name: 'GET /api/runs/:id/artifacts survives an absurd offset instead of 500ing', run: async () => {
+      // Number.isInteger(1e20) is TRUE, but node:sqlite refuses to bind a non-safe
+      // integer — so the offset sailed past the route's `Number.isFinite && > 0` guard
+      // and through listRunArtifacts' `Number.isInteger` check into the statement,
+      // where it threw `datatype mismatch` and the route's catch turned it into a 500.
+      // The ask-tool twin is safe because clampInt caps at MAX_SAFE_INTEGER; this route
+      // had no cap.
+      for (const bad of ['1e20', '9007199254740992', '99999999999999999999']) {
+        const res = await fetch(`${base}/api/runs/${id}/artifacts?offset=${bad}`);
+        assert.equal(res.status, 200, `offset=${bad} must not be a server error`);
+        const body = await res.json();
+        assert.deepEqual(body.artifacts, [], 'an offset past the end is simply an empty page');
+      }
+    } },
+  ]);
 });

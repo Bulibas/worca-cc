@@ -58,6 +58,10 @@ const fmtUsd = (n) => `$${Number(n).toFixed(2)}`;
 // Built-in guardrail ids render as their display names everywhere (`secure` shows as "Strict",
 // the guardrail-store.mjs BUILTIN_META rule); a policy set reads "gp:<id>".
 const GUARDRAIL_NAMES = { permissive: 'Permissive', normal: 'Normal', secure: 'Strict' };
+// One `mcp.required` entry: "github (stdio: npx -y …)", "dd (http: https://…/{site})", "sentry (acme-tools)".
+const mcpPart = (p) => (typeof p === 'string' ? p : `${p.prefix || ''}{${p.field}}${p.suffix || ''}`);
+const mcpLine = (e) => (e.plugin ? `${e.server} (${e.plugin})`
+  : `${e.name} (${e.type}: ${e.type === 'stdio' ? [e.command, ...(e.args || []).map(mcpPart)].join(' ') : [].concat(e.url).map(mcpPart).join('')})`);
 /** A field value as the page shows it ("$25.00", "Strict", "on", "a, b"). */
 export function fmtValue(meta, v) {
   if (v == null) return '—';
@@ -67,7 +71,9 @@ export function fmtValue(meta, v) {
     case 'bool': return v ? 'on' : 'off';
     case 'string[]': return v.length ? v.join(', ') : '(none)';
     case 'plugins': return v.length ? v.map((p) => `${p.name}${p.minVersion ? ` ≥ ${p.minVersion}` : ''}`).join(', ') : '(none)';
+    case 'mcpServers': return v.length ? v.map(mcpLine).join(', ') : '(none)';
     case 'steps': return Object.entries(v).map(([r, s]) => `${r} ${s.model || '·'}${s.effort ? ` / ${s.effort}` : ''}`).join(' · ') || '(none)';
+    case 'criteria': return Object.entries(v).map(([k, w]) => `${k} ${w}`).join(' · ') || '(defaults)';
     default: return String(v);
   }
 }
@@ -103,6 +109,7 @@ export function effectiveRows({ doc = null, workspaceRun = false, local = {} } =
       // An expectation: the run proceeds either way, deviations warn and are recorded.
       effective = { value: t.value, display: fmtValue(meta, t.value), source: 'team' };
       if (meta.key === 'metrics.record' && l && l.set && l.value === false && t.value === true) note = 'your "Include my runs" is off; the team expects recording';
+      if (meta.key === 'mcp.required' && l && t.value.length > l.value.length) note = `${t.value.length - l.value.length} missing`;
     } else {
       const r = effectiveDefault({ local: l, team: t });
       effective = { value: r.value, display: fmtValue(meta, r.value), source: r.source };
@@ -170,6 +177,32 @@ export function deviationsFor(fields, ctx = {}) {
   const rec = fields['metrics.record'];
   if (rec && rec.value === true && ctx.metricsRecord === false) {
     out.push({ code: 'metrics-off', level: 'info', text: 'Your "Include my runs" is off; the team expects runs to be recorded.' });
+  }
+  return out;
+}
+
+/**
+ * MCP registry off-policy findings (MCP registry design §11.4): one per `mcp.required` entry
+ * that does not start in this run, read off its membership of the Team set in `resolved` (the
+ * resolver result for the run's target). `describe(skip)` words a problem skip's reason (the
+ * caller passes the resolver's skipReasonText). Pure; never blocking.
+ * @returns {Array<{code:string, level:'warn', text:string}>}
+ */
+export function mcpDeviations(fields, resolved, describe = (s) => s.reason) {
+  const required = Array.isArray(fields?.['mcp.required']?.value) ? fields['mcp.required'].value : [];
+  const team = (resolved?.sets || []).find((s) => s.group === 'team');
+  const out = [];
+  for (const e of required) {
+    const label = e.plugin ? `${e.plugin}/${e.server}` : e.name;
+    const hit = (m) => !!team && m.setId === team.id
+      && (e.plugin ? m.serverId === `plugin:${e.plugin}/${e.server}` : m.serverId.startsWith('policy:') && m.serverId.endsWith(`/${e.name}`));
+    if ((resolved?.copies || []).some(hit)) continue;
+    const skip = (resolved?.skipped || []).find(hit);
+    const d = (code, text) => out.push({ code: `${code}:${label}`, level: 'warn', text });
+    if (!skip) d('mcp-missing', `Required MCP server ${label} is not installed.`);
+    else if (skip.reason === 'off' || skip.reason === 'needs-consent') d('mcp-off', `Required MCP server ${label} is off.`);
+    else if (skip.reason === 'opted-out') d('mcp-opted-out', `Required MCP server ${label} is opted out of this run.`);
+    else d('mcp-skipped', `Required MCP server ${label} is skipped in this run (${describe(skip)}).`);
   }
   return out;
 }

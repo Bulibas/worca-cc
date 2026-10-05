@@ -5,28 +5,32 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { speakableText, createSpeechChunker, encodeWav, cleanTranscript } from '../src/shared/speech.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
-test('speakableText strips code, tables, urls, images and markdown syntax', () => {
-  const md = [
-    '# Result',
-    'The run **passed** — see [the log](https://x.example/log) or https://x.example/raw.',
-    '',
-    '```js',
-    'const x = 1.5; // not spoken.',
-    '```',
-    '| a | b |',
-    '|---|---|',
-    '| 1 | 2 |',
-    '- first item',
-    '- second `plan.md` item',
-    '![shot](https://x.example/a.png)',
-    'Done.',
-  ].join('\n');
-  assert.equal(speakableText(md), 'Result. The run passed — see the log or. first item. second plan.md item. Done.');
-});
-
-test('long inline code is dropped, short inline code is kept', () => {
-  assert.equal(speakableText('Edit `a.mjs` then run `node --test --test-timeout=300000 test/*.mjs` now.'), 'Edit a.mjs then run now.');
+test('speakableText: strips code/tables/urls/images/markdown; long inline code dropped, short kept', async () => {
+  await checkRows([
+    { name: 'speakableText strips code, tables, urls, images and markdown syntax', run: () => {
+      const md = [
+        '# Result',
+        'The run **passed** — see [the log](https://x.example/log) or https://x.example/raw.',
+        '',
+        '```js',
+        'const x = 1.5; // not spoken.',
+        '```',
+        '| a | b |',
+        '|---|---|',
+        '| 1 | 2 |',
+        '- first item',
+        '- second `plan.md` item',
+        '![shot](https://x.example/a.png)',
+        'Done.',
+      ].join('\n');
+      assert.equal(speakableText(md), 'Result. The run passed — see the log or. first item. second plan.md item. Done.');
+    } },
+    { name: 'long inline code is dropped, short inline code is kept', run: () => {
+      assert.equal(speakableText('Edit `a.mjs` then run `node --test --test-timeout=300000 test/*.mjs` now.'), 'Edit a.mjs then run now.');
+    } },
+  ]);
 });
 
 test('chunker emits complete sentences as text streams in, never inside a fence', () => {
@@ -48,12 +52,20 @@ test('chunker waits for a partial line that could open a fence or a table', () =
   assert.deepEqual(c.push('Intro.\n``` \ncode. more.\n```\n| a. | b. |\nAfter it. '), ['After it.']);
 });
 
-test('chunker: abbreviations and decimals do not split; long runs split at a comma', () => {
-  const c = createSpeechChunker({ maxChars: 40 });
-  assert.deepEqual(c.push('Use e.g. version 3.5 today. '), ['Use e.g. version 3.5 today.']);
-  const long = createSpeechChunker({ maxChars: 40 });
-  const out = long.push('alpha beta gamma delta, epsilon zeta eta theta iota kappa', true);
-  assert.ok(out.length >= 2 && out.every((s) => s.length <= 40), JSON.stringify(out));
+test('chunker: abbreviations/decimals never split, long runs split at a comma, headings and list items end a sentence', async () => {
+  await checkRows([
+    { name: 'chunker: abbreviations and decimals do not split; long runs split at a comma', run: () => {
+      const c = createSpeechChunker({ maxChars: 40 });
+      assert.deepEqual(c.push('Use e.g. version 3.5 today. '), ['Use e.g. version 3.5 today.']);
+      const long = createSpeechChunker({ maxChars: 40 });
+      const out = long.push('alpha beta gamma delta, epsilon zeta eta theta iota kappa', true);
+      assert.ok(out.length >= 2 && out.every((s) => s.length <= 40), JSON.stringify(out));
+    } },
+    { name: 'headings and list items end their own sentence even without punctuation', run: () => {
+      const c = createSpeechChunker();
+      assert.deepEqual(c.push('## Summary\n- one\n- two\n'), ['Summary.', 'one.', 'two.']);
+    } },
+  ]);
 });
 
 test('chunker: a replay rewind waits, a divergence skips ahead, nothing is spoken twice', () => {
@@ -64,11 +76,6 @@ test('chunker: a replay rewind waits, a divergence skips ahead, nothing is spoke
   assert.deepEqual(c.push('One. Two. Three. '), ['Three.']);
   assert.deepEqual(c.push('Different text entirely. '), []); // diverged: realign, do not re-speak
   assert.deepEqual(c.push('Different text entirely. Next. '), ['Next.']);
-});
-
-test('headings and list items end their own sentence even without punctuation', () => {
-  const c = createSpeechChunker();
-  assert.deepEqual(c.push('## Summary\n- one\n- two\n'), ['Summary.', 'one.', 'two.']);
 });
 
 test('encodeWav writes a 16-bit mono PCM RIFF header and clamps samples', () => {

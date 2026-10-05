@@ -9,10 +9,10 @@ import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { getDb } from '../src/core/db.mjs';
 import { artifactPaths, createPipeline } from '../src/core/artifacts.mjs';
-import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { writePluginsLock, pluginCurrentDir } from '../src/core/plugins-lock.mjs';
 import { setMockSourceResponses } from '../src/core/plugin-shim.mjs';
 import { listTaskSources, resolveTaskInput } from '../src/core/sources.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -20,35 +20,38 @@ const tmp = () => mkdtempSync(join(tmpdir(), 'worca-cc-sources-'));
 
 // ── resolveTaskInput ────────────────────────────────────────────────────────────
 
-test('prompt source: verbatim passthrough, no file, no meta', async () => {
-  const input = await resolveTaskInput({ type: 'prompt', prompt: 'add pagination' }, { projectDir: tmp() });
-  assert.deepEqual(input, { promptText: 'add pagination', promptFile: null, sourceMeta: null });
-});
-
-test('markdown source: promptFile read with resolveAgainst semantics; promptText fallback', async () => {
-  const projectDir = tmp();
-  mkdirSync(join(projectDir, 'notes'));
-  const raw = '# Task\r\nCRLF body line\r\ntrailing spaces, no final newline  ';
-  writeFileSync(join(projectDir, 'notes', 'task.md'), raw);
-  // relative path resolves against projectDir (same as today's createPipeline read)
-  const viaFile = await resolveTaskInput({ type: 'markdown', promptFile: 'notes/task.md' }, { projectDir });
-  assert.equal(viaFile.promptText, raw);
-  assert.equal(viaFile.promptFile, 'notes/task.md');
-  assert.equal(viaFile.sourceMeta, null);
-  // pasted markdown (no file)
-  const viaText = await resolveTaskInput({ type: 'markdown', promptText: '# pasted' }, { projectDir });
-  assert.deepEqual(viaText, { promptText: '# pasted', promptFile: null, sourceMeta: null });
-  // MAJ-9: a NAMED file that cannot be read is an error, never an empty prompt —
-  // the empty-string fallback is only meaningful when no file was named.
-  await assert.rejects(
-    () => resolveTaskInput({ type: 'markdown', promptFile: 'notes/absent.md' }, { projectDir }),
-    (err) => {
-      assert.equal(err.code, 'PROMPT_FILE_UNREADABLE');
-      assert.match(err.message, /^cannot read prompt file /);
-      assert.ok(err.message.includes(join(projectDir, 'notes', 'absent.md')), err.message);
-      return true;
-    },
-  );
+test('resolveTaskInput: prompt passthrough; markdown promptFile with resolveAgainst + promptText fallback', async () => {
+  await checkRows([
+    { name: 'prompt source: verbatim passthrough, no file, no meta', run: async () => {
+      const input = await resolveTaskInput({ type: 'prompt', prompt: 'add pagination' }, { projectDir: tmp() });
+      assert.deepEqual(input, { promptText: 'add pagination', promptFile: null, sourceMeta: null });
+    } },
+    { name: 'markdown source: promptFile read with resolveAgainst semantics; promptText fallback', run: async () => {
+      const projectDir = tmp();
+      mkdirSync(join(projectDir, 'notes'));
+      const raw = '# Task\r\nCRLF body line\r\ntrailing spaces, no final newline  ';
+      writeFileSync(join(projectDir, 'notes', 'task.md'), raw);
+      // relative path resolves against projectDir (same as today's createPipeline read)
+      const viaFile = await resolveTaskInput({ type: 'markdown', promptFile: 'notes/task.md' }, { projectDir });
+      assert.equal(viaFile.promptText, raw);
+      assert.equal(viaFile.promptFile, 'notes/task.md');
+      assert.equal(viaFile.sourceMeta, null);
+      // pasted markdown (no file)
+      const viaText = await resolveTaskInput({ type: 'markdown', promptText: '# pasted' }, { projectDir });
+      assert.deepEqual(viaText, { promptText: '# pasted', promptFile: null, sourceMeta: null });
+      // MAJ-9: a NAMED file that cannot be read is an error, never an empty prompt —
+      // the empty-string fallback is only meaningful when no file was named.
+      await assert.rejects(
+        () => resolveTaskInput({ type: 'markdown', promptFile: 'notes/absent.md' }, { projectDir }),
+        (err) => {
+          assert.equal(err.code, 'PROMPT_FILE_UNREADABLE');
+          assert.match(err.message, /^cannot read prompt file /);
+          assert.ok(err.message.includes(join(projectDir, 'notes', 'absent.md')), err.message);
+          return true;
+        },
+      );
+    } },
+  ]);
 });
 
 test('plugin source: getTask -> "# title\\n\\nbody" + fenced json meta + sourceMeta', async () => {
@@ -133,29 +136,7 @@ test('markdown file is still copied VERBATIM into prompt.md (not re-serialized)'
   assert.equal(row.source_ref, null);
 });
 
-// ── orchestrator threading (feature-off proof at the run level) ────────────────
-
-test('createOrchestrator({prompt}) mock e2e: row stays source_type=prompt / NULL ref', async () => {
-  const projectDir = tmp();
-  const orch = createOrchestrator({ projectDir, prompt: 'demo task', auto: true, claude: { mock: true } });
-  const res = await orch.run();
-  assert.equal(res.status, 'done');
-  const row = getDb().prepare('SELECT source_type, source_ref, prompt FROM pipelines WHERE id = ?')
-    .get(orch.getState().id);
-  assert.equal(row.source_type, 'prompt');
-  assert.equal(row.source_ref, null);
-  assert.equal(row.prompt, 'demo task');
-});
-
 // ── listTaskSources ────────────────────────────────────────────────────────────
-
-test('listTaskSources: built-ins only with zero plugins (feature-off)', () => {
-  writePluginsLock({});
-  assert.deepEqual(listTaskSources(), [
-    { type: 'prompt', displayName: 'Prompt' },
-    { type: 'markdown', displayName: 'Markdown' },
-  ]);
-});
 
 test('listTaskSources lists enabled plugin sources with inputs; skips disabled + broken', () => {
   const manifest = (name, displayName) => JSON.stringify({

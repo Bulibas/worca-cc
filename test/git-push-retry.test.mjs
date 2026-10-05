@@ -9,6 +9,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pushBranch, isRemotePackFailure, _testing } from '../src/core/git-info.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const WORCA01 = 'remote: error: inflate: data stream error (invalid block type)\nremote: fatal: pack has bad object at offset 7126: inflate returned -3\nerror: remote unpack failed: index-pack failed\nTo https://github.com/SinishaDjukic/worca-cc.git\n ! [remote rejected] worca-cc/show-mock-mode-in-the-ui-4fae3c66 -> worca-cc/show-mock-mode-in-the-ui-4fae3c66 (failed)\nerror: failed to push some refs to \'https://github.com/SinishaDjukic/worca-cc.git\'';
 
@@ -24,49 +25,55 @@ function runner(script, calls, gitDir) {
   };
 }
 
-test('the signature: what the remote says when it cannot read the pack', () => {
-  assert.equal(isRemotePackFailure(WORCA01), true);
-  assert.equal(isRemotePackFailure('error: remote unpack failed: unpacker error'), true);
-  assert.equal(isRemotePackFailure('fatal: protocol error: bad pack header'), true);
-  assert.equal(isRemotePackFailure(' ! [rejected] feat -> feat (non-fast-forward)'), false);
-  assert.equal(isRemotePackFailure('remote: Permission to o/r.git denied'), false);
-  assert.equal(isRemotePackFailure(''), false);
+test('only the unreadable-pack signature is retried: classifier table + a non-fast-forward push is pushed once', async () => {
+  await checkRows([
+    { name: 'the signature: what the remote says when it cannot read the pack', run: () => {
+      assert.equal(isRemotePackFailure(WORCA01), true);
+      assert.equal(isRemotePackFailure('error: remote unpack failed: unpacker error'), true);
+      assert.equal(isRemotePackFailure('fatal: protocol error: bad pack header'), true);
+      assert.equal(isRemotePackFailure(' ! [rejected] feat -> feat (non-fast-forward)'), false);
+      assert.equal(isRemotePackFailure('remote: Permission to o/r.git denied'), false);
+      assert.equal(isRemotePackFailure(''), false);
+    } },
+    { name: 'any other push failure is not retried', run: async () => {
+      const calls = [];
+      _testing.setRunner(runner([{ ok: false, stdout: '', stderr: ' ! [rejected] feat -> feat (non-fast-forward)' }], calls, '/nonexistent'));
+      const r = await pushBranch('/tmp', 'feat', 'origin');
+      assert.equal(r.ok, false);
+      assert.equal(r.retried, undefined);
+      assert.equal(calls.filter((c) => c.startsWith('push')).length, 1);
+      assert.match(r.stderr, /non-fast-forward/);
+    } },
+  ]);
 });
 
-test('a pack the remote could not read is pushed once more, self-contained', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-push-'));
-  try {
-    const calls = [];
-    _testing.setRunner(runner([{ ok: false, stdout: '', stderr: WORCA01 }, { ok: true, stdout: '', stderr: 'To github.com:o/r\n * [new branch] feat -> feat' }], calls, dir));
-    const r = await pushBranch(dir, 'feat', 'origin');
-    assert.equal(r.ok, true);
-    assert.equal(r.retried, true);
-    const pushes = calls.filter((c) => c.startsWith('push'));
-    assert.deepEqual(pushes, ['push -u origin feat', 'push --no-thin -u origin feat']);
-  } finally { await rm(dir, { recursive: true, force: true }); }
-});
-
-test('any other push failure is not retried', async () => {
-  const calls = [];
-  _testing.setRunner(runner([{ ok: false, stdout: '', stderr: ' ! [rejected] feat -> feat (non-fast-forward)' }], calls, '/nonexistent'));
-  const r = await pushBranch('/tmp', 'feat', 'origin');
-  assert.equal(r.ok, false);
-  assert.equal(r.retried, undefined);
-  assert.equal(calls.filter((c) => c.startsWith('push')).length, 1);
-  assert.match(r.stderr, /non-fast-forward/);
-});
-
-test('twice unreadable: the error says what was tried and what to check', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-push-'));
-  try {
-    _testing.setRunner(runner([{ ok: false, stdout: '', stderr: WORCA01 }, { ok: false, stdout: '', stderr: WORCA01 }], [], dir));
-    const r = await pushBranch(dir, 'feat', 'origin');
-    assert.equal(r.ok, false);
-    assert.equal(r.retried, true);
-    assert.match(r.stderr, /pack has bad object/);
-    assert.match(r.stderr, /the remote could not read the pack git sent, twice/);
-    assert.match(r.stderr, /git fsck --full/);
-  } finally { await rm(dir, { recursive: true, force: true }); }
+test('an unreadable pack is pushed once more with --no-thin; twice unreadable reports what was tried and what to check', async () => {
+  await checkRows([
+    { name: 'a pack the remote could not read is pushed once more, self-contained', run: async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'worca-push-'));
+      try {
+        const calls = [];
+        _testing.setRunner(runner([{ ok: false, stdout: '', stderr: WORCA01 }, { ok: true, stdout: '', stderr: 'To github.com:o/r\n * [new branch] feat -> feat' }], calls, dir));
+        const r = await pushBranch(dir, 'feat', 'origin');
+        assert.equal(r.ok, true);
+        assert.equal(r.retried, true);
+        const pushes = calls.filter((c) => c.startsWith('push'));
+        assert.deepEqual(pushes, ['push -u origin feat', 'push --no-thin -u origin feat']);
+      } finally { await rm(dir, { recursive: true, force: true }); }
+    } },
+    { name: 'twice unreadable: the error says what was tried and what to check', run: async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'worca-push-'));
+      try {
+        _testing.setRunner(runner([{ ok: false, stdout: '', stderr: WORCA01 }, { ok: false, stdout: '', stderr: WORCA01 }], [], dir));
+        const r = await pushBranch(dir, 'feat', 'origin');
+        assert.equal(r.ok, false);
+        assert.equal(r.retried, true);
+        assert.match(r.stderr, /pack has bad object/);
+        assert.match(r.stderr, /the remote could not read the pack git sent, twice/);
+        assert.match(r.stderr, /git fsck --full/);
+      } finally { await rm(dir, { recursive: true, force: true }); }
+    } },
+  ]);
 });
 
 test('the retry waits while a git gc runs in the repository, and not past the limit', async () => {

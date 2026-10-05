@@ -2,11 +2,16 @@
 // The per-project filter pills (and their remembered choice) are gone (D4): every
 // project is a collapsible group of #runs-list; only the Started-by pills stay in
 // #historyFilter, on shared deployments.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -21,7 +26,7 @@ const histResp = (pipelines, ghAvailable = false) =>
   Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines, ghAvailable }) });
 
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   // Store the socket's listeners so a test can deliver a frame (recv), as test/ui-runs-view.test.mjs does.
@@ -48,34 +53,7 @@ async function boot({ fetchHandler } = {}) {
   return { window, showRuns, recv };
 }
 
-test('the Runs list groups finished runs in one section per project (name + count); no project pills', async () => {
-  const { window, showRuns } = await boot({ fetchHandler: (url) => url.includes('/api/history') ? histResp(HISTORY) : null });
-  showRuns();
-  await new Promise((r) => setTimeout(r, 0));
-  const doc = window.document;
-
-  // The project pills are gone (D4); the pill row holds only Started-by pills, and only when shared.
-  assert.equal(doc.querySelectorAll('#historyFilter .hist-pill').length, 0, 'no project pills');
-  assert.equal(doc.getElementById('historyFilter').hidden, true, 'the pill row is hidden on a single-user deployment');
-
-  const groups = [...doc.querySelectorAll('#runs-list .runs-group')];
-  assert.equal(groups.length, 2, 'one section per project');
-  const name = (g) => g.querySelector('.runs-group-head .runs-group-name').textContent;
-  const count = (g) => g.querySelector('.runs-group-head .runs-count').textContent;
-  assert.equal(groups[0].dataset.groupKey, 'alpha-00000001');
-  assert.equal(name(groups[0]), 'Alpha', 'Alpha first (most recent activity)');
-  assert.equal(count(groups[0]), '2');
-  assert.equal(groups[1].dataset.groupKey, 'beta-00000002');
-  assert.equal(name(groups[1]), 'Beta');
-  assert.equal(count(groups[1]), '1');
-  assert.deepEqual([...groups[0].querySelectorAll('.runs-row-title')].map((n) => n.textContent), ['Alpha two', 'Alpha one'],
-    'rows keep the server order (newest first) inside their group');
-  assert.equal(doc.querySelectorAll('#runs-list .runs-row[data-kind="hist"]').length, 3);
-  // No <li> ever (regression guard kept from ui-history).
-  assert.equal(doc.querySelectorAll('#runs-list li').length, 0);
-});
-
-test('a pipelines-changed frame re-fetches /api/history and keeps the groups', async () => {
+test('the Runs list groups finished runs per project (name + count, server order inside), no project pills; a pipelines-changed frame refetches once and keeps the groups', async () => {
   let hits = 0;
   const { window, showRuns, recv } = await boot({
     // Count only the skeleton GET; the Phase-2 POST /api/history/pr is a separate
@@ -88,16 +66,41 @@ test('a pipelines-changed frame re-fetches /api/history and keeps the groups', a
   });
   showRuns();
   await new Promise((r) => setTimeout(r, 0));
-  // Don't assume exactly one hit here: setting location.hash can make jsdom fire a
-  // native hashchange in addition to our manual dispatch. Assert the reload adds one.
-  const before = hits;
-  assert.ok(before >= 1, 'history fetched when the view is shown');
-  // The Refresh button is gone (D14): the app reloads on this frame while on #runs (app.js:1076).
-  recv({ type: 'pipelines-changed' });
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(hits, before + 1, 'the frame refetches exactly once');
   const doc = window.document;
-  assert.deepEqual([...doc.querySelectorAll('#runs-list .runs-group')].map((g) => g.dataset.groupKey),
-    ['alpha-00000001', 'beta-00000002']);
-  assert.equal(doc.querySelectorAll('#runs-list .runs-row[data-kind="hist"]').length, 3);
+  await checkRows([
+    { name: 'the Runs list groups finished runs in one section per project (name + count); no project pills', run: async () => {
+      // The project pills are gone (D4); the pill row holds only Started-by pills, and only when shared.
+      assert.equal(doc.querySelectorAll('#historyFilter .hist-pill').length, 0, 'no project pills');
+      assert.equal(doc.getElementById('historyFilter').hidden, true, 'the pill row is hidden on a single-user deployment');
+
+      const groups = [...doc.querySelectorAll('#runs-list .runs-group')];
+      assert.equal(groups.length, 2, 'one section per project');
+      const name = (g) => g.querySelector('.runs-group-head .runs-group-name').textContent;
+      const count = (g) => g.querySelector('.runs-group-head .runs-count').textContent;
+      assert.equal(groups[0].dataset.groupKey, 'alpha-00000001');
+      assert.equal(name(groups[0]), 'Alpha', 'Alpha first (most recent activity)');
+      assert.equal(count(groups[0]), '2');
+      assert.equal(groups[1].dataset.groupKey, 'beta-00000002');
+      assert.equal(name(groups[1]), 'Beta');
+      assert.equal(count(groups[1]), '1');
+      assert.deepEqual([...groups[0].querySelectorAll('.runs-row-title')].map((n) => n.textContent), ['Alpha two', 'Alpha one'],
+        'rows keep the server order (newest first) inside their group');
+      assert.equal(doc.querySelectorAll('#runs-list .runs-row[data-kind="hist"]').length, 3);
+      // No <li> ever (regression guard kept from ui-history).
+      assert.equal(doc.querySelectorAll('#runs-list li').length, 0);
+    } },
+    { name: 'a pipelines-changed frame re-fetches /api/history and keeps the groups', run: async () => {
+      // Don't assume exactly one hit here: setting location.hash can make jsdom fire a
+      // native hashchange in addition to our manual dispatch. Assert the reload adds one.
+      const before = hits;
+      assert.ok(before >= 1, 'history fetched when the view is shown');
+      // The Refresh button is gone (D14): the app reloads on this frame while on #runs (app.js:1076).
+      recv({ type: 'pipelines-changed' });
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(hits, before + 1, 'the frame refetches exactly once');
+      assert.deepEqual([...doc.querySelectorAll('#runs-list .runs-group')].map((g) => g.dataset.groupKey),
+        ['alpha-00000001', 'beta-00000002']);
+      assert.equal(doc.querySelectorAll('#runs-list .runs-row[data-kind="hist"]').length, 3);
+    } },
+  ]);
 });

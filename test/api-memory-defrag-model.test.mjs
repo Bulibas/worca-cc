@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { gitDir } from './helpers/git-dir.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { memoryRoot, projectScope, writeMemory, readScopeState } from '../src/core/memory-store.mjs';
 import { GRAPH_MEMORY_DEFRAG_WORKFLOW } from '../src/core/graph/builtin-workflows.mjs';
 
@@ -84,9 +85,9 @@ test('POST /api/settings memoryDefrag: round trip through GET and settings.json;
     assert.deepEqual(j.memoryDefrag, { model: 'claude-opus-5-5', effort: 'high' });
     // Refusals change nothing on disk.
     for (const [bad, re] of [
-      [{ model: 'gone-model' }, /unknown model "gone-model"/],
+      [{ model: 'gone-model' }, /The model “gone-model” is not in the catalog/],
       [{ model: 'claude-haiku-4-5', effort: 'max' }, /does not offer effort "max"/],
-      [{ model: '', effort: 'high' }, /effort needs a model/],
+      [{ model: '', effort: 'high' }, /“Effort” needs a model/],
       ['claude-opus-5-5', /must be \{ model, effort \}/],
     ]) {
       r = await post('/api/settings', { memoryDefrag: bad });
@@ -104,31 +105,34 @@ test('POST /api/settings memoryDefrag: round trip through GET and settings.json;
   }
 });
 
-test('GET /api/workflows/wf_memory_defrag pins the setting for New pipeline and an Ask card; a stale setting pins nothing', async () => {
-  await post('/api/settings', { memoryDefrag: { model: 'claude-opus-5-5', effort: 'high' } });
-  try {
-    let wf = await (await get('/api/workflows/wf_memory_defrag')).json();
-    assert.deepEqual(wf.pinnedAgentModel, { model: 'claude-opus-5-5', effort: 'high', source: 'settings' });
-    assert.deepEqual(wf.nodes, JSON.parse(JSON.stringify(GRAPH_MEMORY_DEFRAG_WORKFLOW.nodes)), 'the topology is the built-in\'s own');
-    assert.equal('pinnedAgentModel' in (await (await get('/api/workflows/wf_default')).json()), false, 'only the defragment built-in');
-    // A model removed from the catalog since it was saved: nothing to pin (the run degrades too).
-    await mkdir(join(sandboxHome, '.worca-cc'), { recursive: true });
-    await writeFile(settingsFile(), JSON.stringify({ memory: { defrag: { model: 'gone-model' } } }));
-    wf = await (await get('/api/workflows/wf_memory_defrag')).json();
-    assert.equal('pinnedAgentModel' in wf, false);
-  } finally { await post('/api/settings', { memoryDefrag: null }); }
-  assert.equal('pinnedAgentModel' in (await (await get('/api/workflows/wf_memory_defrag')).json()), false, 'unset: nothing pinned');
-});
-
-test('the memory report carries the defragment model for the health card (label, effort, stale)', async () => {
-  assert.equal((await (await get('/api/memory/global')).json()).defragModel, null, 'unset');
-  await post('/api/settings', { memoryDefrag: { model: 'claude-opus-5-5', effort: 'high' } });
-  try {
-    assert.deepEqual((await (await get('/api/memory/global')).json()).defragModel, { model: 'claude-opus-5-5', effort: 'high', label: 'Opus 5.5', stale: false });
-    assert.deepEqual((await (await get(`/api/memory/projects/${project.key}`)).json()).defragModel.model, 'claude-opus-5-5');
-    await writeFile(settingsFile(), JSON.stringify({ memory: { defrag: { model: 'gone-model' } } }));
-    assert.deepEqual((await (await get('/api/memory/global')).json()).defragModel, { model: 'gone-model', effort: null, label: 'gone-model', stale: true });
-  } finally { await post('/api/settings', { memoryDefrag: null }); }
+test('the defragment setting surfaces as the workflow pin and in the memory report (label, effort, stale); a stale setting pins nothing', async () => {
+  await checkRows([
+    { name: 'GET /api/workflows/wf_memory_defrag pins the setting for New pipeline and an Ask card; a stale setting pins nothing', run: async () => {
+      await post('/api/settings', { memoryDefrag: { model: 'claude-opus-5-5', effort: 'high' } });
+      try {
+        let wf = await (await get('/api/workflows/wf_memory_defrag')).json();
+        assert.deepEqual(wf.pinnedAgentModel, { model: 'claude-opus-5-5', effort: 'high', source: 'settings' });
+        assert.deepEqual(wf.nodes, JSON.parse(JSON.stringify(GRAPH_MEMORY_DEFRAG_WORKFLOW.nodes)), 'the topology is the built-in\'s own');
+        assert.equal('pinnedAgentModel' in (await (await get('/api/workflows/wf_default')).json()), false, 'only the defragment built-in');
+        // A model removed from the catalog since it was saved: nothing to pin (the run degrades too).
+        await mkdir(join(sandboxHome, '.worca-cc'), { recursive: true });
+        await writeFile(settingsFile(), JSON.stringify({ memory: { defrag: { model: 'gone-model' } } }));
+        wf = await (await get('/api/workflows/wf_memory_defrag')).json();
+        assert.equal('pinnedAgentModel' in wf, false);
+      } finally { await post('/api/settings', { memoryDefrag: null }); }
+      assert.equal('pinnedAgentModel' in (await (await get('/api/workflows/wf_memory_defrag')).json()), false, 'unset: nothing pinned');
+    } },
+    { name: 'the memory report carries the defragment model for the health card (label, effort, stale)', run: async () => {
+      assert.equal((await (await get('/api/memory/global')).json()).defragModel, null, 'unset');
+      await post('/api/settings', { memoryDefrag: { model: 'claude-opus-5-5', effort: 'high' } });
+      try {
+        assert.deepEqual((await (await get('/api/memory/global')).json()).defragModel, { model: 'claude-opus-5-5', effort: 'high', label: 'Opus 5.5', stale: false });
+        assert.deepEqual((await (await get(`/api/memory/projects/${project.key}`)).json()).defragModel.model, 'claude-opus-5-5');
+        await writeFile(settingsFile(), JSON.stringify({ memory: { defrag: { model: 'gone-model' } } }));
+        assert.deepEqual((await (await get('/api/memory/global')).json()).defragModel, { model: 'gone-model', effort: null, label: 'gone-model', stale: true });
+      } finally { await post('/api/settings', { memoryDefrag: null }); }
+    } },
+  ]);
 });
 
 test('the Memory view\'s Defragment button starts a run on the Settings › Memory pair', { timeout: 120000 }, async () => {

@@ -14,6 +14,7 @@ import {
 import { listModels, catalogHasModel, PREDEFINED_MODELS } from '../src/core/config.mjs';
 import { createAskModels } from '../src/core/ask/models.mjs';
 import { _resetForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let home, whome;
 const prevEnv = {
@@ -40,28 +41,30 @@ after(async () => {
   await Promise.all([home, whome].map((d) => rm(d, { recursive: true, force: true })));
 });
 
-test('both keys are registered in SETTINGS_POST_KEYS (the route\'s clear-root exemption)', () => {
-  assert.ok(SETTINGS_POST_KEYS.includes('titleModel'));
-  assert.ok(SETTINGS_POST_KEYS.includes('hideBuiltinModels'));
-});
-
-test('titleModel: null by default; set/clear round-trips; whitespace trimmed; invalid stored value warns to null', async () => {
-  assert.equal(titleModel(), null);
-  assert.deepEqual(await setTitleModel('  my-model '), { titleModel: 'my-model' });
-  assert.equal(JSON.parse(await readFile(settingsFile(), 'utf8')).titleModel, 'my-model');
-  assert.deepEqual(await setTitleModel(''), { titleModel: null });
-  assert.equal('titleModel' in JSON.parse(await readFile(settingsFile(), 'utf8')), false, 'clear deletes the key');
-  await writeFile(settingsFile(), JSON.stringify({ titleModel: 42 }), 'utf8');
-  const warn = console.warn; const lines = [];
-  console.warn = (...a) => lines.push(a.join(' '));
-  try { assert.equal(titleModel(), null); } finally { console.warn = warn; }
-  assert.equal(lines.length, 1);
-  assert.match(lines[0], /invalid titleModel/);
-});
-
-test('assertTitleModelInput: empty/null clear; non-string, blank, or over-long rejected', () => {
-  assertTitleModelInput(''); assertTitleModelInput(null); assertTitleModelInput(undefined); assertTitleModelInput('x');
-  for (const bad of [42, true, '   ', 'y'.repeat(201), {}]) assert.throws(() => assertTitleModelInput(bad), /titleModel must be a model id/);
+test('titleModel: registered POST key, default null, set/clear round-trip, invalid stored warns; input validation', async () => {
+  await checkRows([
+    { name: 'both keys are registered in SETTINGS_POST_KEYS (the route\'s clear-root exemption)', run: () => {
+      assert.ok(SETTINGS_POST_KEYS.includes('titleModel'));
+      assert.ok(SETTINGS_POST_KEYS.includes('hideBuiltinModels'));
+    } },
+    { name: 'titleModel: null by default; set/clear round-trips; whitespace trimmed; invalid stored value warns to null', run: async () => {
+      assert.equal(titleModel(), null);
+      assert.deepEqual(await setTitleModel('  my-model '), { titleModel: 'my-model' });
+      assert.equal(JSON.parse(await readFile(settingsFile(), 'utf8')).titleModel, 'my-model');
+      assert.deepEqual(await setTitleModel(''), { titleModel: null });
+      assert.equal('titleModel' in JSON.parse(await readFile(settingsFile(), 'utf8')), false, 'clear deletes the key');
+      await writeFile(settingsFile(), JSON.stringify({ titleModel: 42 }), 'utf8');
+      const warn = console.warn; const lines = [];
+      console.warn = (...a) => lines.push(a.join(' '));
+      try { assert.equal(titleModel(), null); } finally { console.warn = warn; }
+      assert.equal(lines.length, 1);
+      assert.match(lines[0], /invalid titleModel/);
+    } },
+    { name: 'assertTitleModelInput: empty/null clear; non-string, blank, or over-long rejected', run: () => {
+      assertTitleModelInput(''); assertTitleModelInput(null); assertTitleModelInput(undefined); assertTitleModelInput('x');
+      for (const bad of [42, true, '   ', 'y'.repeat(201), {}]) assert.throws(() => assertTitleModelInput(bad), /titleModel must be a model id/);
+    } },
+  ]);
 });
 
 test('hideBuiltinModels: false by default; true persists; false deletes the key; only booleans accepted', async () => {

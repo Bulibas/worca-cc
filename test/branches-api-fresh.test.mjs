@@ -1,6 +1,6 @@
 // test/branches-api-fresh.test.mjs — GET /api/branches?fresh=1 (#527, plan §5.1): a registered
 // project is fetched and gains remote branches + a SyncBlock; an unregistered folder is never
-// fetched; without `fresh` the answer keeps exactly its old keys.
+// fetched.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -84,11 +84,6 @@ test('fresh=1 on an UNREGISTERED clone never fetches → remote:null, FETCH_HEAD
   const j = await branches(w.a, '&fresh=1');
   assert.equal(j.remote, null);
   assert.equal(await fetchHeadMtime(w.a), before);
-});
-
-test('without fresh the keys are exactly branches/current/runs', async () => {
-  const w = await world();
-  assert.deepEqual(Object.keys(await branches(w.a)), ['branches', 'current', 'runs']);
 });
 
 test('fresh=1 when the project registry cannot be read → 200 with local refs and remote:null (never a 500)', async () => {

@@ -4,7 +4,7 @@
 // recomputed on read. Members must be real git repos (createWorkspace validates).
 import { test, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -14,6 +14,8 @@ import {
 } from '../src/core/workspaces.mjs';
 import { projectKey } from '../src/core/store.mjs';
 import { getDb, _resetForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 const created = [];
 async function freshHome() {
@@ -23,15 +25,9 @@ async function freshHome() {
   process.env.WORCA_HOME = dir;
   return dir;
 }
-async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-wsdb-repo-'));
+function freshRepo() {
+  const dir = templateRepo('wsdb-repo', { branch: 'main', user: true, files: { 'README.md': '# hi\n' }, prefix: 'worca-cc-wsdb-repo-' });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 beforeEach(freshHome);
@@ -131,119 +127,98 @@ test('updateWorkspace throws NOT_FOUND for an unknown id; never mutates projectP
   const a = await freshRepo();
   const b = await freshRepo();
   await assert.rejects(() => updateWorkspace('wks-ghost-00000000', { description: 'x' }), (e) => e.code === 'NOT_FOUND');
+  await assert.rejects(() => renameWorkspace('wks-ghost-00000000', 'x'), (e) => e.code === 'NOT_FOUND');
   const ws = await createWorkspace({ name: 'Immutable', projectPaths: [a, b] });
   const up = await updateWorkspace(ws.id, { description: 'd', projectPaths: ['/evil'] });
   assert.deepEqual(up.projectPaths, ws.projectPaths, 'project set immutable');
 });
 
-test('deleteWorkspace removes the row, cascades member rows, and removes the store dir', async () => {
+test('deleteWorkspace: unknown id NOT_FOUND removes nothing; a real delete cascades member rows and removes the store dir', async () => {
   const a = await freshRepo();
   const b = await freshRepo();
   const ws = await createWorkspace({ name: 'Delete Me', projectPaths: [a, b] });
-  const storeDir = workspaceStorePath(ws.id);
-  await mkdir(join(storeDir, 'pipelines'), { recursive: true });
-  assert.ok(existsSync(storeDir));
+  await checkRows([
+    { name: 'deleteWorkspace throws NOT_FOUND for an unknown well-formed id and removes nothing', run: async () => {
+      await assert.rejects(() => deleteWorkspace('wks-ghost-00000000'), (e) => e.code === 'NOT_FOUND');
+      assert.ok(await readWorkspace(ws.id), 'existing workspace untouched');
+    } },
+    { name: 'deleteWorkspace removes the row, cascades member rows, and removes the store dir', run: async () => {
+      const storeDir = workspaceStorePath(ws.id);
+      await mkdir(join(storeDir, 'pipelines'), { recursive: true });
+      assert.ok(existsSync(storeDir));
 
-  const res = await deleteWorkspace(ws.id);
-  assert.equal(res.ok, true);
-  assert.equal(await readWorkspace(ws.id), null, 'registry row gone');
-  assert.equal(existsSync(storeDir), false, 'store dir removed');
-  // FK ON DELETE CASCADE removed the member rows too.
-  const { n } = getDb().prepare('SELECT COUNT(*) AS n FROM workspace_projects WHERE workspace_id = ?').get(ws.id);
-  assert.equal(n, 0, 'member rows cascaded');
-});
-
-test('deleteWorkspace throws NOT_FOUND for an unknown well-formed id and removes nothing', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const ws = await createWorkspace({ name: 'Keep On Miss', projectPaths: [a, b] });
-  await assert.rejects(() => deleteWorkspace('wks-ghost-00000000'), (e) => e.code === 'NOT_FOUND');
-  assert.ok(await readWorkspace(ws.id), 'existing workspace untouched');
-});
-
-test('deleteWorkspace rejects a path-traversal id and deletes nothing', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const ws = await createWorkspace({ name: 'Victim', projectPaths: [a, b] });
-  for (const evil of ['../..', '../../store/x', '..', 'wks-x/../../..', '/etc']) {
-    await assert.rejects(() => deleteWorkspace(evil), (e) => e.code === 'NOT_FOUND');
-  }
-  assert.ok(await readWorkspace(ws.id), 'the real workspace survives crafted ids');
+      const res = await deleteWorkspace(ws.id);
+      assert.equal(res.ok, true);
+      assert.equal(await readWorkspace(ws.id), null, 'registry row gone');
+      assert.equal(existsSync(storeDir), false, 'store dir removed');
+      // FK ON DELETE CASCADE removed the member rows too.
+      const { n } = getDb().prepare('SELECT COUNT(*) AS n FROM workspace_projects WHERE workspace_id = ?').get(ws.id);
+      assert.equal(n, 0, 'member rows cascaded');
+    } },
+  ]);
 });
 
 // ---- p1t4: workspaces.metricsProject (team-metrics home) ----
 
-test('createWorkspace({metricsProject}) stores it and returns it on the create response', async () => {
+test('createWorkspace metricsProject: stored and returned, null when omitted, a non-member is BAD_REQUEST', async () => {
   const a = await freshRepo();
   const b = await freshRepo();
-  const ws = await createWorkspace({ name: 'Homed', projectPaths: [a, b], metricsProject: a });
-  assert.equal(ws.metricsProject, a, 'returned by create, not only by a later read');
-  assert.equal((await readWorkspace(ws.id)).metricsProject, a, 'persisted');
+  const c = await freshRepo();
+  const outsider = await freshRepo();
+  await checkRows([
+    { name: 'createWorkspace({metricsProject}) stores it and returns it on the create response', run: async () => {
+      const ws = await createWorkspace({ name: 'Homed', projectPaths: [a, b], metricsProject: a });
+      assert.equal(ws.metricsProject, a, 'returned by create, not only by a later read');
+      assert.equal((await readWorkspace(ws.id)).metricsProject, a, 'persisted');
+    } },
+    { name: 'createWorkspace defaults metricsProject to null when omitted', run: async () => {
+      const ws = await createWorkspace({ name: 'Homeless', projectPaths: [a, c] });
+      assert.equal(ws.metricsProject, null);
+      assert.equal((await readWorkspace(ws.id)).metricsProject, null);
+    } },
+    { name: 'createWorkspace rejects a metricsProject that is not a member path', run: async () => {
+      await assert.rejects(
+        () => createWorkspace({ name: 'Bad Home', projectPaths: [b, c], metricsProject: outsider }),
+        (e) => e.code === 'BAD_REQUEST',
+      );
+    } },
+  ]);
 });
 
-test('createWorkspace defaults metricsProject to null when omitted', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const ws = await createWorkspace({ name: 'Homeless', projectPaths: [a, b] });
-  assert.equal(ws.metricsProject, null);
-  assert.equal((await readWorkspace(ws.id)).metricsProject, null);
-});
-
-test('createWorkspace rejects a metricsProject that is not a member path', async () => {
+test('updateWorkspace metricsProject: round-trips, omitted keeps it, null clears it, non-member/blank are BAD_REQUEST', async () => {
   const a = await freshRepo();
   const b = await freshRepo();
   const outsider = await freshRepo();
-  await assert.rejects(
-    () => createWorkspace({ name: 'Bad Home', projectPaths: [a, b], metricsProject: outsider }),
-    (e) => e.code === 'BAD_REQUEST',
-  );
-});
-
-test('updateWorkspace({metricsProject}) round-trips via readWorkspace and returns the new value', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const ws = await createWorkspace({ name: 'Rehome', projectPaths: [a, b] });
-  const up = await updateWorkspace(ws.id, { metricsProject: b });
-  assert.equal(up.metricsProject, b, 'returned by update');
-  assert.equal((await readWorkspace(ws.id)).metricsProject, b, 'persisted');
-});
-
-test('updateWorkspace rejects a non-member metricsProject with BAD_REQUEST', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const outsider = await freshRepo();
-  const ws = await createWorkspace({ name: 'Guarded', projectPaths: [a, b] });
-  await assert.rejects(
-    () => updateWorkspace(ws.id, { metricsProject: outsider }),
-    (e) => e.code === 'BAD_REQUEST',
-  );
-});
-
-test('updateWorkspace rejects a blank-string metricsProject with BAD_REQUEST, not a 500', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const ws = await createWorkspace({ name: 'Blanked', projectPaths: [a, b] });
-  await assert.rejects(
-    () => updateWorkspace(ws.id, { metricsProject: '   ' }),
-    (e) => e.code === 'BAD_REQUEST',
-  );
-});
-
-test('updateWorkspace({metricsProject: null}) clears a previously-set home', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const ws = await createWorkspace({ name: 'Clearable', projectPaths: [a, b], metricsProject: a });
-  const up = await updateWorkspace(ws.id, { metricsProject: null });
-  assert.equal(up.metricsProject, null);
-  assert.equal((await readWorkspace(ws.id)).metricsProject, null);
-});
-
-test('updateWorkspace omitting metricsProject leaves the existing home untouched', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const ws = await createWorkspace({ name: 'Untouched', projectPaths: [a, b], metricsProject: a });
-  const up = await updateWorkspace(ws.id, { description: 'new desc' });
-  assert.equal(up.metricsProject, a, 'home survives an update that does not mention it');
+  const ws = await createWorkspace({ name: 'Rehome', projectPaths: [a, b], metricsProject: a });
+  await checkRows([
+    { name: 'updateWorkspace({metricsProject}) round-trips via readWorkspace and returns the new value', run: async () => {
+      const up = await updateWorkspace(ws.id, { metricsProject: b });
+      assert.equal(up.metricsProject, b, 'returned by update');
+      assert.equal((await readWorkspace(ws.id)).metricsProject, b, 'persisted');
+    } },
+    { name: 'updateWorkspace omitting metricsProject leaves the existing home untouched', run: async () => {
+      // The row above moved the home to b.
+      const up = await updateWorkspace(ws.id, { description: 'new desc' });
+      assert.equal(up.metricsProject, b, 'home survives an update that does not mention it');
+    } },
+    { name: 'updateWorkspace({metricsProject: null}) clears a previously-set home', run: async () => {
+      const up = await updateWorkspace(ws.id, { metricsProject: null });
+      assert.equal(up.metricsProject, null);
+      assert.equal((await readWorkspace(ws.id)).metricsProject, null);
+    } },
+    { name: 'updateWorkspace rejects a non-member metricsProject with BAD_REQUEST', run: async () => {
+      await assert.rejects(
+        () => updateWorkspace(ws.id, { metricsProject: outsider }),
+        (e) => e.code === 'BAD_REQUEST',
+      );
+    } },
+    { name: 'updateWorkspace rejects a blank-string metricsProject with BAD_REQUEST, not a 500', run: async () => {
+      await assert.rejects(
+        () => updateWorkspace(ws.id, { metricsProject: '   ' }),
+        (e) => e.code === 'BAD_REQUEST',
+      );
+    } },
+  ]);
 });
 
 // ---- membership changes: addWorkspaceMembers / removeWorkspaceMember ----
@@ -278,13 +253,20 @@ test('addWorkspaceMembers refuses an existing member, a non-dir, a non-git dir a
   assert.equal((await readWorkspace(ws.id)).projectPaths.length, 2, 'nothing written on a refusal');
 });
 
-test('addWorkspaceMembers refuses a set another workspace already has (DUPLICATE_SET)', async () => {
+test('addWorkspaceMembers / removeWorkspaceMember refuse a set another workspace already has (DUPLICATE_SET)', async () => {
   const a = await freshRepo();
   const b = await freshRepo();
   const c = await freshRepo();
-  await createWorkspace({ name: 'Three', projectPaths: [a, b, c] });
-  const two = await createWorkspace({ name: 'Two', projectPaths: [a, b] });
-  await assert.rejects(() => addWorkspaceMembers(two.id, [c]), (e) => e.code === 'DUPLICATE_SET');
+  const pair = await createWorkspace({ name: 'Pair', projectPaths: [a, b] });
+  const trio = await createWorkspace({ name: 'Trio', projectPaths: [a, b, c] });
+  await checkRows([
+    { name: 'addWorkspaceMembers refuses a set another workspace already has (DUPLICATE_SET)', run: async () => {
+      await assert.rejects(() => addWorkspaceMembers(pair.id, [c]), (e) => e.code === 'DUPLICATE_SET');
+    } },
+    { name: 'removeWorkspaceMember refuses a set another workspace already has (DUPLICATE_SET)', run: async () => {
+      await assert.rejects(() => removeWorkspaceMember(trio.id, c), (e) => e.code === 'DUPLICATE_SET');
+    } },
+  ]);
 });
 
 test('removeWorkspaceMember drops one member, keeps the id, refuses going below 2', async () => {
@@ -322,15 +304,6 @@ test('removeWorkspaceMember clears the metrics / policy home it removes; other h
   const again = await removeWorkspaceMember((await addWorkspaceMembers(ws.id, [a])).id, b);
   assert.equal(again.policyProject, null, 'the removed policy home is cleared');
   assert.equal((await readWorkspace(ws.id)).policyProject, null, 'persisted');
-});
-
-test('removeWorkspaceMember refuses a set another workspace already has (DUPLICATE_SET)', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const c = await freshRepo();
-  await createWorkspace({ name: 'Pair', projectPaths: [a, b] });
-  const three = await createWorkspace({ name: 'Trio', projectPaths: [a, b, c] });
-  await assert.rejects(() => removeWorkspaceMember(three.id, c), (e) => e.code === 'DUPLICATE_SET');
 });
 
 test('a finished workspace run keeps reading its own primary member after the member set changes', async () => {

@@ -3,11 +3,16 @@
 // from a versioned localStorage cache, version-bust safety, and never persisting
 // live `pr`. Boots the REAL app.js against the REAL index.html under jsdom (harness
 // copied from test/ui-history.test.mjs), pre-seeding window.localStorage before showRuns().
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -15,7 +20,7 @@ const PROJECT = '/tmp/proj';
 const CACHE_KEY = 'worca-cc.history.cache.v1';
 
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   const wsBox = { ws: null };
@@ -121,37 +126,32 @@ test('corrupt/old cache version is busted (no stale paint, key removed) then net
   await ctx.settle();
 });
 
-test('writeHistoryCache strips the live `pr` field before persisting', async () => {
+test('writeHistoryCache strips the live pr and retainedWork fields before persisting', async () => {
   const ctx = await boot({
     fetchHandler: (url) => (url.endsWith('/api/history')
       ? skeleton([{ id: 'p1', projectKey: 'k1', projectName: 'K1', title: 'Feat', status: 'done',
-                    startedAt: '2026-01-02T00:00:00Z', pr: { state: 'OPEN', url: 'https://gh/x/pull/1', number: 1 } }])
+                    startedAt: '2026-01-02T00:00:00Z', pr: { state: 'OPEN', url: 'https://gh/x/pull/1', number: 1 } },
+                  { id: 'r1', projectKey: 'k1', title: 'R', status: 'done', startedAt: '2026-01-01T00:00:00Z',
+                    retainedWork: { reason: 'commit_failed', members: [{ worktreeDir: '/tmp/x' }] } }])
       : null),
   });
   ctx.showRuns();
   await ctx.tick();
 
   const raw = ctx.window.localStorage.getItem(CACHE_KEY);
-  assert.ok(raw, 'a cache was written from the fresh skeleton');
-  const parsed = JSON.parse(raw);
-  assert.equal(parsed.v, 1);
-  assert.ok(parsed.pipelines.length >= 1);
-  assert.ok(parsed.pipelines.every((row) => !('pr' in row)), 'no persisted row carries a live pr');
+  await checkRows([
+    { name: 'writeHistoryCache strips the live `pr` field before persisting', run: () => {
+      assert.ok(raw, 'a cache was written from the fresh skeleton');
+      const parsed = JSON.parse(raw);
+      assert.equal(parsed.v, 1);
+      assert.ok(parsed.pipelines.length >= 1);
+      assert.ok(parsed.pipelines.every((row) => !('pr' in row)), 'no persisted row carries a live pr');
+    } },
+    { name: 'writeHistoryCache strips the live retainedWork field before persisting', run: () => {
+      const parsed = JSON.parse(raw);
+      assert.ok(parsed.pipelines.every((row) => !('retainedWork' in row)),
+        'retainedWork is a live existsSync-derived fact; caching it paints stale banners');
+    } },
+  ]);
   await ctx.settle();
-});
-
-test('writeHistoryCache strips the live retainedWork field before persisting', async () => {
-  const ctx = await boot({
-    fetchHandler: (url) => (url.endsWith('/api/history')
-      ? Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines: [
-          { id: 'r1', projectKey: 'k1', title: 'R', status: 'done', startedAt: '2026-01-01T00:00:00Z',
-            retainedWork: { reason: 'commit_failed', members: [{ worktreeDir: '/tmp/x' }] } },
-        ], ghAvailable: false }) })
-      : null),
-  });
-  ctx.showRuns();
-  await ctx.settle();
-  const parsed = JSON.parse(ctx.window.localStorage.getItem(CACHE_KEY));
-  assert.ok(parsed.pipelines.every((row) => !('retainedWork' in row)),
-    'retainedWork is a live existsSync-derived fact; caching it paints stale banners');
 });

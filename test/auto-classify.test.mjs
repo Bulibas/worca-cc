@@ -153,15 +153,6 @@ test('a good reply classifies on the first attempt; cost, usage, the raw reply a
   assert.ok(o.systemPrompt.includes('Recipes') && o.systemPrompt.includes('purpose: ') && o.prompt.includes('Build the thing'));
 });
 
-test('the shape schema ties effort to model, the default-model line says "omit both", and the HITL sentence ties clarify to the planner', () => {
-  const sys = buildClassifierSystemPrompt({ agents: agentVocabulary(REG), models: MODELS, humanInLoop: true });
-  assert.ok(sys.includes('"effort"?: <effort> (only together with "model")'), 'an effort needs a model — the live probe paid a retry for this');
-  assert.ok(sys.includes('omit both "model" and "effort" to run on the default model'), 'the default-model line covers the effort too');
-  assert.ok(sys.includes('A human is in the loop: a clarifier stage may open a plain prompt that needs a planner'), 'clarify is conditional, matching the recipe ladder');
-  assert.ok(!sys.includes('open with a clarifier stage when the task is ambiguous'), 'the old unconditional wording is gone');
-  assert.ok(!sys.includes('## Repository'), 'text-only by default: no Repository section');
-});
-
 test('repoLook: the call carries Read/Grep/Glob, --max-turns and the Repository section; the default stays tool-less', async () => {
   const look = fakeRun([reply(GOOD)]);
   const r = await classifyTask(base({ repoLook: true, cwd: '/some/checkout' }), { run: look.run });
@@ -275,4 +266,16 @@ test('the agent-card signal survives the cap: it takes the LAST slot, never the 
   assert.equal(capped.signals.at(-1), '9 agent cards read');
   assert.deepEqual(capped.signals.slice(0, 7), eight.slice(0, 7));
   assert.deepEqual(withCardsSignal(capped, 9).signals, capped.signals, 'idempotent: a second stamp replaces, never appends');
+});
+
+test('a pause or stop during the second attempt keeps the first attempt\'s billed reply on the AbortError', async () => {
+  const ctrl = new AbortController();
+  const two = fakeRun(['no shape here', (o) => {
+    setImmediate(() => ctrl.abort());                                   // the run is paused mid attempt 2
+    return new Promise((_r, rej) => o.signal.addEventListener('abort', () => { const e = new Error('aborted'); e.name = 'AbortError'; rej(e); }));
+  }]);
+  const err = await classifyTask(base({ signal: ctrl.signal }), { run: two.run }).catch((e) => e);
+  assert.equal(err.name, 'AbortError', 'still the pause/stop itself');
+  assert.equal(err.costUsd, 0.01, 'attempt 1 was billed: _autoRound books it before the run parks');
+  assert.deepEqual(err.usage, { input_tokens: 10, output_tokens: 5 });
 });

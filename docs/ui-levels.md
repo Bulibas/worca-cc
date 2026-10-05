@@ -153,14 +153,18 @@ be skipped by forgetting it.
 | "Scheduled" group (runs due within 24 h) | S — it only exists when something is scheduled |
 | Needs-input pill and banner; clarify questions; Auto proposal ("Review the workflow": preview that opens a pan/zoom popup, Accept) — all answered on the run page | S |
 | Recovery prompt, cycle gate, cost-pause banner, retained-work banner | all |
-| Run page glance: the run's name as the page title, the status line (state, then the step), time · cost · changes, the Live view switch and its fogged graph of the running step(s), parallel steps (Now), one row per tab, a waiting question below its own heading, the result actions | S |
+| Run page glance: the run's name as the page title, the status line (state, then the step), time · cost (with its Away mode share) · changes, the Live view switch and its fogged graph of the running step(s), parallel steps (Now), one row per tab, a waiting question below its own heading, the result actions | S |
 | Workflow graph with status colours, gate pip, End result; Workflow, Overview and Q&A tabs | S |
+| Run header cost and its breakdown (agents, Away mode, Auto workflow, run title; stopped reviews and stopped agent turns apart); the Overview cost card's Away mode share | S |
+| "Answered for you": one group per ask (kind · time · model · cost of its review, or "review stopped" and its lower bound), the answers, Check; the heading's answer count and what the Away mode reviews cost | S |
 | Diff tab (live worktree while running, the final patch after) | A |
 | Live log pane (run page › Logs), log search / copy / auto-scroll | A |
 | Branch chip, progress n/m · step on the card, model · effort pill, graph zoom cluster | A |
 | Auto proposal Revise; Artifacts tab | A |
+| Actions tab, Overview actions strip, Ship It 'Try it first' strip | A |
+| Running-action pill in the header, sidebar Running actions card | all — shown only while a service runs |
 | Log filters (source, level, node, cycle) | E |
-| Graph node totals, fan and execution strips, loop badges | E |
+| Graph node totals, fan and execution strips, Away mode chips and bands, loop badges | E |
 | Agents tab, worktree row, Auto proposal tunables table | E |
 
 ### History
@@ -168,8 +172,12 @@ be skipped by forgetting it.
 | Element | Level |
 |---|---|
 | List, project filter, Refresh; Overview (verdict, findings, duration, cost, task); Clarify tab; Resume | S |
+| Header cost and its breakdown (agents, Away mode, Auto workflow, run title; stopped reviews and stopped agent turns apart); the glance and Overview cost's Away mode share | S |
+| "Answered for you", as on the run page | S |
 | "Files changed" list on the Overview | S — the stand-in for the Diff tab |
-| Diff tab, diff pill, inline comments; Create PR / View PR; branch line; ⋯ menu (Archive, Report); Artifacts tab | A |
+| Diff tab, diff pill, inline comments; Create PR / View PR; branch line; ⋯ menu (Archive, Restore, Report); Artifacts tab; Archived toggle in the Runs header (with Restore) | A |
+| Actions tab, Overview actions strip, Ship It 'Try it first' strip | A |
+| Running-action pill in the header, sidebar Running actions card | all — shown only while a service runs |
 | Mergeability pill; Logs tab; Agents tab; team-metrics status; MEMORY CHANGES; worktree row | E |
 
 ### Workflow Composer (page: A)
@@ -201,8 +209,10 @@ Everything on the page: the list, the runtime step, the workspace and the bench 
 |---|---|
 | Projects list, add, project page Overview, remove | S |
 | Project Memory tab (view and edit files) | A |
+| Project page Actions tab | A |
 | Workspaces list, create wizard, workspace page Overview (projects, description, re-scan, delete) | A |
 | Workspace page Map tab (coverage, graph, edges, confirm / reject / clear, add / delete manual edges, Regenerate description) | A |
+| Workspace page Actions tab | A |
 | Memory health, Defragment, snapshot restore | E — the health card stays visible when overdue or failing |
 | Projects-row team chips; project page Team tab and its TEAM METRICS / TEAM POLICY cards; KEY card | E |
 | Workspace page Team tab (members table, metrics home, policy home) and its METRICS HOME / POLICY HOME cards | E |
@@ -214,6 +224,7 @@ Everything on the page: the list, the runtime step, the workspace and the bench 
 | General: Appearance, Interface mode, Getting started, About | S |
 | Runs tab: Budget & cost limits | S |
 | General: root folders; Runs tab: Scheduled runs defaults, Workspaces (scan models), chat notifications; Ask Worca tab (limits, tools, web access, chat history) | A |
+| Runs tab: Actions (keep policy, port range, editor/terminal, cap) | A |
 | Guardrails tab (list, details); Plugins tab (installed, available, install); Memory tab (files) | A |
 | General: spawn diagnostics; Models tab: Title generation, Auto workflow model, PR description model; Memory tab: Defragment model | E — the Defragment model card stays visible while a model is set |
 | Guardrails create / delete; Models tab; Providers tab; marketplaces, Doctor, leftover data | E |
@@ -237,6 +248,7 @@ Everything on the page: the list, the runtime step, the workspace and the bench 
 | Ask: a classified failure's human notice (what happened and where the remedy lives) | all — recovery instructions are never hidden (rule 1); Simple gets no Models-view navigation, the copy names the mode instead |
 | Ask: a classified failure's raw-detail expander ("Details") | E |
 | Ask: proposal cards themselves | all (rule 4) |
-| Ask: model picker, scope, ctx and cost meter, tool rows, branches, guardrails, "Open in New Pipeline" | A |
-| Ask: per-agent lane, worktrees, agents popover, sub-agent logs | E |
+| Ask: the context ring and its popover's window fill and topics | S |
+| Ask: model picker, scope, cost meter, tool rows, branches, guardrails, "Open in New Pipeline" | A |
+| Ask: per-agent lane, the context popover's Agents and Worktrees sections, sub-agent logs | E |
 | Getting started: all nine tiles show at every level, ordered Simple → Advanced → Expert; steps 6 and 7 wear "Advanced", steps 8 and 9 "Expert" | S |

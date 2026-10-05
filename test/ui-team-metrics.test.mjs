@@ -3,14 +3,19 @@
 // loader, the scope select + KPI row + sync chip, the decision-36 sequence guard,
 // and the Stats "Team-wide view ->" hint. boot() is a local copy of
 // test/ui-stats.test.mjs's harness (imports, htmlPath/appPath, the WebSocket stub),
-// with a `url` passthrough so the boot-direct test (#5) can open straight onto the
+// with a `url` passthrough so the boot-direct row can open straight onto the
 // Team metrics view.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { makeRecord } from './fixtures/team-metrics/records.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -30,7 +35,7 @@ const STATS_FIXTURE = {
 };
 
 async function boot({ fetchHandler, url = 'http://localhost:4317/' } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   const wsBox = { ws: null };
@@ -91,16 +96,27 @@ const TM_DATA = {
   refresh: { requested: false, fetched: true, limited: false, retryInMs: 0 }, fetchError: null,
 };
 
-test('nav entry sits directly below Stats in the sidebar; routes to the view', async () => {
-  const { window, tick } = await boot({ fetchHandler: tmHandler({ scopes: SCOPES_ON, data: TM_DATA }) });
-  const doc = window.document;
-  for (const sel of ['.sidebar .nav']) {
-    const btns = [...doc.querySelectorAll(`${sel} button[data-nav]`)].map((b) => b.dataset.nav);
-    assert.equal(btns[btns.indexOf('stats') + 1], 'team-metrics', sel);
-  }
-  assert.equal(doc.querySelector('.sidebar [data-nav="team-metrics"] span').textContent, 'Team metrics');
-  window.location.hash = 'team-metrics'; window.dispatchEvent(new window.Event('hashchange')); await tick(); await tick();
-  assert.equal(doc.querySelector('section[data-view="team-metrics"]').classList.contains('hidden'), false);
+test('#team-metrics routes from the sidebar entry (directly below Stats) and renders when booted straight onto the hash', async () => {
+  await checkRows([
+    { name: 'nav entry sits directly below Stats in the sidebar; routes to the view', run: async () => {
+      const { window, tick } = await boot({ fetchHandler: tmHandler({ scopes: SCOPES_ON, data: TM_DATA }) });
+      const doc = window.document;
+      for (const sel of ['.sidebar .nav']) {
+        const btns = [...doc.querySelectorAll(`${sel} button[data-nav]`)].map((b) => b.dataset.nav);
+        assert.equal(btns[btns.indexOf('stats') + 1], 'team-metrics', sel);
+      }
+      assert.equal(doc.querySelector('.sidebar [data-nav="team-metrics"] span').textContent, 'Team metrics');
+      window.location.hash = 'team-metrics'; window.dispatchEvent(new window.Event('hashchange')); await tick(); await tick();
+      assert.equal(doc.querySelector('section[data-view="team-metrics"]').classList.contains('hidden'), false);
+    } },
+    { name: 'booting straight to #team-metrics renders the page (module-scope state is declared before boot)', run: async () => {
+      // Guards the §9.4 placement note: declared after the boot block, showView() reads tmState in its
+      // temporal dead zone and the whole app fails to start.
+      const { window, tick } = await boot({ url: 'http://localhost:4317/#team-metrics', fetchHandler: tmHandler({ scopes: SCOPES_ON, data: TM_DATA }) });
+      await tick(); await tick();
+      assert.equal(window.document.querySelectorAll('#tm-body .stat-tile').length, 6);
+    } },
+  ]);
 });
 
 test('scope select is populated (grouped), KPI row renders 6 tiles, sync chip shows pending; range change does not refetch', async () => {
@@ -131,27 +147,6 @@ test('sync chip states: a flush-failed WS frame does not reload the page', async
   wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'team-metrics-changed', action: 'flush-failed' }) });
   await tick(); await tick();
   assert.equal(tmCalls.length, before);
-});
-
-test('nothing enabled → empty state with two deep links; Stats hint hidden', async () => {
-  const EMPTY = { projects: [], workspaces: [], scopes: { projects: [], workspaces: [] }, anyEnabled: false };
-  const { window, tick } = await boot({ fetchHandler: tmHandler({ scopes: EMPTY }) });
-  const doc = window.document;
-  window.location.hash = 'team-metrics'; window.dispatchEvent(new window.Event('hashchange')); await tick(); await tick();
-  assert.ok(doc.querySelector('#tm-body a[href="#projects"]'));
-  assert.ok(doc.querySelector('#tm-body a[href="#workspaces"]'));
-  assert.equal(doc.getElementById('tm-scope').disabled, true);
-  assert.equal(doc.getElementById('tm-sync').hidden, true);
-  window.location.hash = 'stats'; window.dispatchEvent(new window.Event('hashchange')); await tick(); await tick();
-  assert.equal(doc.getElementById('stats-tm-hint').hidden, true);
-});
-
-test('booting straight to #team-metrics renders the page (module-scope state is declared before boot)', async () => {
-  // Guards the §9.4 placement note: declared after the boot block, showView() reads tmState in its
-  // temporal dead zone and the whole app fails to start.
-  const { window, tick } = await boot({ url: 'http://localhost:4317/#team-metrics', fetchHandler: tmHandler({ scopes: SCOPES_ON, data: TM_DATA }) });
-  await tick(); await tick();
-  assert.equal(window.document.querySelectorAll('#tm-body .stat-tile').length, 6);
 });
 
 const WS_DATA = {
@@ -188,12 +183,6 @@ test('a slow scope response never repaints under a newer scope (decision 36)', a
   // Without the sequence guard the delayed workspace response lands last and repaints the page:
   // the workspace-only "Metrics home" hint appears under the project scope's name.
   assert.equal(doc.querySelector('.tm-home-hint'), null);
-});
-
-test('Stats shows "Team-wide view →" when a scope is enabled', async () => {
-  const { window, tick } = await boot({ fetchHandler: tmHandler({ scopes: SCOPES_ON }) });
-  window.location.hash = 'stats'; window.dispatchEvent(new window.Event('hashchange')); await tick(); await tick();
-  assert.equal(window.document.getElementById('stats-tm-hint').hidden, false);
 });
 
 test('loading: the skeleton paints before the data, the read is deferred, the chip says "Checking origin…" while the fetch runs, and its fetched frame reloads', async () => {

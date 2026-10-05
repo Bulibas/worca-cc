@@ -63,6 +63,111 @@ export function syncPillModel(sync, { autoSync = true } = {}) {
   }
 }
 
+const nCommits = (k, adj, shallow) => `${count(k, shallow)} ${adj} commit${k === 1 ? '' : 's'}`;
+
+/** One row of the New pipeline Branches table: what the run will get, in words, for one project
+ *  or many (design v3). `origin` = "Use branches from Origin · latest" (sync before run).
+ *  → { icon, tone, text, note, retry, blocked }. icon ∈ ok|behind|dirty|diverged|offline|blocked|local|none. */
+export function runOutcomeModel(sync, { origin = true, base = '' } = {}) {
+  const o = { icon: 'ok', tone: 'ok', text: 'Up to date', note: '', retry: false, blocked: false };
+  if (sync === undefined) return { ...o, icon: 'none', tone: 'muted', text: 'Checking…' };
+  if (!sync || !sync.remote) return { ...o, icon: 'local', tone: 'muted', text: 'No remote · uses your local copy' };
+  const b = sync.base || base;
+  const dirty = !!(sync.dirty && sync.checkedOutHere);
+  if (sync.stale || sync.fetchError) {
+    return origin
+      ? { ...o, icon: 'offline', tone: 'ink', text: `Can’t reach ${sync.remote} · uses the last fetch, ${fetchedAgo(sync)}`, retry: true }
+      : { ...o, icon: 'local', tone: 'muted', text: `Uses your local ${b}` };
+  }
+  switch (sync.state) {
+    case 'behind':
+      Object.assign(o, origin
+        ? { icon: 'behind', tone: 'blue', text: `Gets ${nCommits(sync.behind, 'new', sync.shallow)} from ${sync.remote} first` }
+        : { icon: 'behind', tone: 'amber', text: `Misses ${nCommits(sync.behind, 'newer', sync.shallow)} on ${sync.remote}` });
+      break;
+    case 'diverged': {
+      const ahead = nCommits(sync.ahead || 0, 'unpushed');
+      if (!origin) Object.assign(o, { icon: 'diverged', tone: 'amber', text: `Includes your ${ahead}`, note: `Misses ${nCommits(sync.behind || 0, 'newer', sync.shallow)} on ${sync.remote}` });
+      else if (sync.settings && sync.settings.onDiverged === 'fail') Object.assign(o, { icon: 'blocked', tone: 'red', text: `Can’t start from ${sync.remote}`, note: `Its ${ahead} would be left out, and this project is set to stop. Push them, or use Local copy.`, blocked: true });
+      else Object.assign(o, { icon: 'diverged', tone: 'amber', text: `Your ${ahead} ${(sync.ahead || 0) === 1 ? 'is' : 'are'} left out`, note: 'Want them in? Use Local copy.' });
+      break;
+    }
+    case 'remote-only': Object.assign(o, { icon: 'ok', tone: 'muted', text: `Only on ${sync.remote} · starts from ${sync.remote}/${b}` }); break;
+    case 'no-upstream': case 'missing': Object.assign(o, { icon: 'local', tone: 'ink', text: `Not on ${sync.remote} yet · uses your local copy` }); break;
+    case 'up-to-date': case 'ahead': break;
+    default: return { ...o, icon: 'none', tone: 'muted', text: 'Status unknown' };
+  }
+  // Dirty no longer hides behind: a row can state two facts joined by ·.
+  if (dirty) {
+    if (o.icon === 'ok') Object.assign(o, { icon: 'dirty', tone: 'ink', text: 'Uncommitted changes not included' });
+    else o.note = o.note ? `${o.note} · Uncommitted changes not included` : 'Uncommitted changes not included';
+  }
+  return o;
+}
+
+/** One row of the Workspaces list's project table (design board 1): what the repo is, and the one
+ *  thing Worca can do about it. action ∈ sync|details|retry|null — Worca never merges or resets.
+ *  `dirty` no longer hides `behind`: a dirty repo that is behind says both. */
+export function listRowModel(b) {
+  if (!b || !b.remote) return { icon: 'local', tone: 'muted', label: 'No remote', hint: '', action: null, state: 'none' };
+  if (b.state === 'unknown') return { icon: 'none', tone: 'muted', label: 'Status unknown', hint: '', action: null, state: 'none' };
+  const dirty = !!(b.dirty && b.checkedOutHere);
+  const autoSync = !(b.settings && b.settings.beforeRun === false);
+  if (b.stale) return { icon: 'offline', tone: 'ink', label: `Can’t reach ${b.remote}`, hint: `Last fetched ${fetchedAgo(b)}`, action: 'retry', state: 'offline' };
+  if (b.state === 'diverged') {
+    const next = b.settings && b.settings.onDiverged === 'fail' ? 'runs won’t start until it’s pushed'
+      : b.settings && b.settings.onDiverged === 'origin' ? `runs start from ${b.remote}` : 'next run will ask';
+    return { icon: 'diverged', tone: 'amber', label: 'Diverged', hint: `${b.ahead || 0} ahead, ${count(b.behind || 0, b.shallow)} behind · ${next}`, action: 'details', state: 'diverged' };
+  }
+  if (b.state === 'behind') {
+    const n = `${count(b.behind, b.shallow)} commit${b.behind === 1 ? '' : 's'} behind`;
+    if (dirty) return { icon: 'behind', tone: 'blue', label: n, hint: 'Uncommitted changes, so Sync can’t move it · runs use committed code', action: null, state: 'behind', dirty: true };
+    return { icon: 'behind', tone: 'blue', label: n, hint: autoSync ? 'Runs sync it first anyway' : 'Runs start from your local copy', action: 'sync', state: 'behind' };
+  }
+  if (b.state === 'no-upstream' || b.state === 'missing') return { icon: 'local', tone: 'ink', label: `Not on ${b.remote} yet`, hint: dirty ? 'Uncommitted changes · runs use committed code' : '', action: null, state: 'local', dirty };
+  if (dirty) return { icon: 'dirty', tone: 'ink', label: 'Uncommitted changes', hint: 'Runs use committed code only', action: null, state: 'dirty', dirty: true };
+  return { icon: 'ok', tone: 'ok', label: 'Up to date', hint: '', action: null, state: 'ok' };
+}
+
+const BAR_TONE = { ok: 'ok', behind: 'blue', diverged: 'amber', dirty: 'peach' };
+const BAR_ACTION = { sync: 'Sync', details: 'Review…', retry: 'Retry' };
+const BAR_GROUP = { ok: 'ok', behind: 'behind', diverged: 'diverged', dirty: 'dirty', offline: 'offline', local: 'local' };
+/** The Projects list's sync bar (branch | origin status | action, design 2026-10-01): listRowModel's
+ *  facts in the list's own words. `tone` tints the pill and the bar (none = dashed, no remote);
+ *  `vs` is the ref the branch is compared with — refs/remotes/<remote>/<base>, not the configured
+ *  upstream — so it is left out where the branch is not on the remote; `group` is the header filter
+ *  the row counts toward. `b === undefined` = no answer yet. */
+export function projectBarModel(b) {
+  const base = { hint: '', action: null, actionLabel: '', vs: '' };
+  if (b === undefined) return { ...base, icon: 'spin', tone: 'grey', label: 'Checking…', state: 'checking', group: null };
+  if (!b || !b.remote) return { ...base, icon: 'noRemote', tone: 'none', label: 'No git remote', hint: 'Local folder · nothing to sync', state: 'none', group: 'local' };
+  const m = listRowModel(b);
+  const bar = { ...m, tone: BAR_TONE[m.state] || 'grey', actionLabel: BAR_ACTION[m.action] || '',
+    vs: b.base && m.state !== 'local' ? `${b.remote}/${b.base}` : '', group: BAR_GROUP[m.state] || null };
+  if (m.action === 'sync') bar.hint = b.settings && b.settings.beforeRun === false ? 'Auto-sync is off · runs start from your local copy' : 'Next run syncs it first';
+  if (m.state === 'local' && !m.hint) bar.hint = 'Runs use your local copy';
+  return bar;
+}
+
+/** The collapsed workspace header: one sentence with the counts, its tone, and who Sync all moves. */
+export function wsRollupModel(rows) {
+  const n = (s) => rows.filter((r) => r.state === s).length;
+  const diverged = n('diverged'); const offline = n('offline'); const behind = n('behind');
+  const dirty = rows.filter((r) => r.dirty || r.state === 'dirty').length;
+  const ok = n('ok');
+  const parts = [];
+  if (diverged) parts.push(`${diverged} diverged`);
+  if (offline) parts.push(`${offline} can’t reach origin`);
+  if (behind) parts.push(`${behind} behind`);
+  if (dirty) parts.push(`${dirty} with uncommitted changes`);
+  const known = rows.filter((r) => r.state !== 'none').length;
+  if (!parts.length) {
+    return { text: known ? (known === rows.length ? `All ${rows.length} up to date` : `${ok} up to date`) : 'Checking…', tone: known ? 'ok' : 'muted' };
+  }
+  if (ok) parts.push(`${ok} up to date`);
+  return { text: parts.join(' · '), tone: diverged ? 'amber' : behind ? 'blue' : 'muted' };
+}
+
 /** Projects/Workspaces chip — must match src/core/project-sync.mjs#chipState. */
 export function chipState(b) {
   if (!b || !b.remote || b.state === 'unknown') return null;

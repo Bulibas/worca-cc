@@ -1,24 +1,40 @@
 // test/run-harness-metrics.test.mjs
-import { test, after, afterEach } from 'node:test';
+import { test, before, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
+import { writeGraphWorkflow } from '../src/core/workflows.mjs';
 import { readPipelineForResume } from '../src/core/artifacts.mjs';
 import { getDb } from '../src/core/db.mjs';
 import { _testing as recordTesting, snapshotFromHarness } from '../src/core/metrics/record.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 afterEach(() => recordTesting.reset());
 
+/** One agent (task → implementer → end): every test here counts recorder calls per RUN, so the
+ *  default workflow's five agents only cost time. Resumes take the workflow from the resume point. */
+const WF = 'wf_metrics-one';
+before(() => writeGraphWorkflow({
+  id: WF, name: 'Metrics one agent',
+  nodes: [
+    { id: 'n_task', kind: 'task', x: 0, y: 0, config: {} },
+    { id: 'n_impl', kind: 'agent', key: 'implementer', x: 240, y: 0, config: {} },
+    { id: 'n_end', kind: 'end', x: 480, y: 0, config: {} },
+  ],
+  wires: [
+    { id: 'w1', from: { node: 'n_task', port: 'task' }, to: { node: 'n_impl', port: 'plan' } },
+    { id: 'w2', from: { node: 'n_impl', port: 'done' }, to: { node: 'n_end', port: 'result' } },
+  ],
+}));
+
+const repos = [];
+after(() => { for (const d of repos) rmSync(d, { recursive: true, force: true, maxRetries: 10 }); });
 function repo() {
-  const dir = mkdtempSync(join(tmpdir(), 'worca-rh-metrics-'));
-  const g = (...a) => spawnSync('git', a, { cwd: dir });
-  g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@t'); g('config', 'user.name', 't');
-  writeFileSync(join(dir, 'README.md'), '# hi\n'); g('add', '-A'); g('commit', '-qm', 'init');
+  const dir = templateRepo('rh-metrics', { branch: 'main', user: true, files: { 'README.md': '# hi\n' } });
+  repos.push(dir);
   return dir;
 }
 
@@ -37,7 +53,7 @@ const runners = () => ({
 
 test('run() done → recordRunMetrics exactly once with status done', async () => {
   const calls = spy();
-  const orch = createOrchestrator({ projectDir: repo(), prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' } });
+  const orch = createOrchestrator({ projectDir: repo(), prompt: 'x', workflowId: WF, auto: true, claude: { mock: true }, branch: { source: 'main' } });
   const res = await orch.run();
   assert.equal(res.status, 'done');
   assert.deepEqual(calls.map((c) => c.status), ['done']);
@@ -46,7 +62,7 @@ test('run() done → recordRunMetrics exactly once with status done', async () =
 
 test('run() stopped → exactly once with status stopped', async () => {
   const calls = spy();
-  const orch = createOrchestrator({ projectDir: repo(), prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' } });
+  const orch = createOrchestrator({ projectDir: repo(), prompt: 'x', workflowId: WF, auto: true, claude: { mock: true }, branch: { source: 'main' } });
   orch.on('state', (s) => { if (s.branch && s.branch.feature) orch.stop(); });
   const res = await orch.run();
   assert.equal(res.status, 'stopped');
@@ -55,7 +71,7 @@ test('run() stopped → exactly once with status stopped', async () => {
 
 test('run() error with a row → exactly once with status error and the error', async () => {
   const calls = spy();
-  const orch = createOrchestrator({ projectDir: repo(), prompt: 'x', auto: true, claude: { mock: true }, runners: runners() });
+  const orch = createOrchestrator({ projectDir: repo(), prompt: 'x', workflowId: WF, auto: true, claude: { mock: true }, runners: runners() });
   orch._buildWorktreeGraph = async () => { throw new Error('graphify exploded'); };
   orch._pauseForFailure = async () => null;              // policy says "error" instead of pause
   const res = await orch.run();
@@ -67,99 +83,91 @@ test('run() error with a row → exactly once with status error and the error', 
 
 test('run() launch/preflight error (no row) → called once, harness has no pipeline', async () => {
   const calls = spy();
-  const orch = createOrchestrator({ projectDir: repo(), prompt: 'x', auto: true, claude: { mock: true }, runners: runners() });
+  const orch = createOrchestrator({ projectDir: repo(), prompt: 'x', workflowId: WF, auto: true, claude: { mock: true }, runners: runners() });
   orch._preflightAgentKeys = () => { throw new Error('agent "ghost" is not installed'); };
   const res = await orch.run();
   assert.equal(res.status, 'error'); assert.equal(res.pipelineDir, null);
   assert.deepEqual(calls.map((c) => [c.status, c.hasPipeline]), [['error', false]]);
 });
 
-test('pause then resume() done → once on resume, interventions carry pauses/resumes', async () => {
+test('pause then resume() done → recorded once on resume; interventions carry pauses/resumes, lastPauseReason stamped then forgotten, and every persisted resume point keeps the counters', async () => {
   const dir = repo();
   const calls = spy();
-  const orch1 = createOrchestrator({ projectDir: dir, prompt: 'x', auto: true, claude: { mock: true }, runners: runners() });
-  const realBuild = orch1._buildWorktreeGraph.bind(orch1);
+  const orch1 = createOrchestrator({ projectDir: dir, prompt: 'x', workflowId: WF, auto: true, claude: { mock: true }, runners: runners() });
   orch1._buildWorktreeGraph = async () => { throw new Error('graphify exploded'); };
   const r1 = await orch1.run();
-  assert.equal(r1.status, 'paused');
-  assert.equal(calls.length, 0, 'a pause is not terminal');
+  const callsAfterPause = calls.length;
+  const pausedPoint = orch1.state.resumePoint;
   const saved = readPipelineForResume(orch1.state.id);
   const orch2 = createOrchestrator({ projectDir: dir, auto: true, claude: { mock: true }, runners: runners(), resume: saved });
-  const r2 = await orch2.resume();
-  assert.equal(r2.status, 'done');
-  assert.deepEqual(calls.map((c) => c.status), ['done']);
-  assert.equal(calls[0].iv.pauses, 1); assert.equal(calls[0].iv.resumes, 1);
-  void realBuild;
-});
-
-test('resume() error (worktree removed) → once with status error', async () => {
-  const dir = repo();
-  const calls = spy();
-  const orch1 = createOrchestrator({ projectDir: dir, prompt: 'x', auto: true, claude: { mock: true }, runners: runners() });
-  orch1._buildWorktreeGraph = async () => { throw new Error('graphify exploded'); };
-  await orch1.run();
-  rmSync(orch1.state.branch.worktreeDir, { recursive: true, force: true });
-  const orch2 = createOrchestrator({ projectDir: dir, auto: true, claude: { mock: true }, runners: runners(), resume: readPipelineForResume(orch1.state.id) });
-  const r2 = await orch2.resume();
-  assert.equal(r2.status, 'error');
-  assert.deepEqual(calls.map((c) => c.status), ['error']);
-});
-
-test('resume() stopped → once with status stopped', async () => {
-  const dir = repo();
-  const calls = spy();
-  const orch1 = createOrchestrator({ projectDir: dir, prompt: 'x', auto: true, claude: { mock: true }, runners: runners() });
-  orch1._buildWorktreeGraph = async () => { throw new Error('graphify exploded'); };
-  await orch1.run();
-  const orch2 = createOrchestrator({ projectDir: dir, auto: true, claude: { mock: true }, runners: runners(), resume: readPipelineForResume(orch1.state.id) });
-  orch2.on('state', (s) => { if (s.status === 'running') orch2.stop(); });
-  const r2 = await orch2.resume();
-  assert.equal(r2.status, 'stopped');
-  assert.deepEqual(calls.map((c) => c.status), ['stopped']);
-});
-
-test('a throwing recorder never breaks the run', async () => {
-  recordTesting.setRecorder(async () => { throw new Error('metrics boom'); });
-  const orch = createOrchestrator({ projectDir: repo(), prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' } });
-  const logs = [];
-  orch.on('log', (l) => logs.push(l));
-  const res = await orch.run();
-  assert.equal(res.status, 'done');
-  assert.ok(logs.some((l) => l.source === 'metrics' && /metrics boom/.test(l.text)));
-});
-
-test('a pause stamps lastPauseReason into the resume point; resume counts one resume and no extra pause', async () => {
-  const dir = repo();
-  const calls = spy();
-  const orch1 = createOrchestrator({ projectDir: dir, prompt: 'x', auto: true, claude: { mock: true }, runners: runners() });
-  orch1._buildWorktreeGraph = async () => { throw new Error('graphify exploded'); };
-  await orch1.run();
-  assert.equal(orch1.state.resumePoint.interventions.pauses, 1);
-  assert.equal(orch1.state.resumePoint.interventions.lastPauseReason, 'error');
-  const orch2 = createOrchestrator({ projectDir: dir, auto: true, claude: { mock: true }, runners: runners(), resume: readPipelineForResume(orch1.state.id) });
-  await orch2.resume();
-  // Counters survive; the last pause is forgotten once resume rehydrated (decision 2), so a
-  // later unrelated failure/stop is never mislabelled with the old pause reason.
-  assert.deepEqual([calls[0].iv.pauses, calls[0].iv.resumes, calls[0].iv.lastPauseReason], [1, 1, null]);
-});
-
-test('every persisted resume point carries the counters (a crash-resume keeps them)', async () => {
-  const dir = repo();
-  spy();
-  const orch1 = createOrchestrator({ projectDir: dir, prompt: 'x', auto: true, claude: { mock: true }, runners: runners() });
-  orch1._buildWorktreeGraph = async () => { throw new Error('graphify exploded'); };
-  await orch1.run();
-  const orch2 = createOrchestrator({ projectDir: dir, auto: true, claude: { mock: true }, runners: runners(), resume: readPipelineForResume(orch1.state.id) });
   const seen = [];
   orch2.on('state', (s) => {
     if (s.status !== 'running') return;
     const rp = readPipelineForResume(orch1.state.id).resumePoint;   // the PERSISTED point a crash would resume from
     if (rp) seen.push(rp.interventions ?? null);
   });
-  await orch2.resume();
-  // The first sample is still the pause's own point, written before resume()'s first _persist().
-  assert.ok(seen.length > 1, JSON.stringify(seen));
-  assert.ok(seen.slice(1).every((iv) => iv && iv.pauses === 1 && iv.resumes === 1), JSON.stringify(seen));
+  const r2 = await orch2.resume();
+  await checkRows([
+    { name: 'pause then resume() done → once on resume, interventions carry pauses/resumes', run: () => {
+      assert.equal(r1.status, 'paused');
+      assert.equal(callsAfterPause, 0, 'a pause is not terminal');
+      assert.equal(r2.status, 'done');
+      assert.deepEqual(calls.map((c) => c.status), ['done']);
+      assert.equal(calls[0].iv.pauses, 1); assert.equal(calls[0].iv.resumes, 1);
+    } },
+    { name: 'a pause stamps lastPauseReason into the resume point; resume counts one resume and no extra pause', run: () => {
+      assert.equal(pausedPoint.interventions.pauses, 1);
+      assert.equal(pausedPoint.interventions.lastPauseReason, 'error');
+      // Counters survive; the last pause is forgotten once resume rehydrated (decision 2), so a
+      // later unrelated failure/stop is never mislabelled with the old pause reason.
+      assert.deepEqual([calls[0].iv.pauses, calls[0].iv.resumes, calls[0].iv.lastPauseReason], [1, 1, null]);
+    } },
+    { name: 'every persisted resume point carries the counters (a crash-resume keeps them)', run: () => {
+      // The first sample is still the pause's own point, written before resume()'s first _persist().
+      assert.ok(seen.length > 1, JSON.stringify(seen));
+      assert.ok(seen.slice(1).every((iv) => iv && iv.pauses === 1 && iv.resumes === 1), JSON.stringify(seen));
+    } },
+  ]);
+});
+
+test('resume() terminal paths record once: error (worktree removed) and stopped', async () => {
+  await checkRows([
+    { name: 'resume() error (worktree removed) → once with status error', run: async () => {
+      const dir = repo();
+      const calls = spy();
+      const orch1 = createOrchestrator({ projectDir: dir, prompt: 'x', workflowId: WF, auto: true, claude: { mock: true }, runners: runners() });
+      orch1._buildWorktreeGraph = async () => { throw new Error('graphify exploded'); };
+      await orch1.run();
+      rmSync(orch1.state.branch.worktreeDir, { recursive: true, force: true });
+      const orch2 = createOrchestrator({ projectDir: dir, auto: true, claude: { mock: true }, runners: runners(), resume: readPipelineForResume(orch1.state.id) });
+      const r2 = await orch2.resume();
+      assert.equal(r2.status, 'error');
+      assert.deepEqual(calls.map((c) => c.status), ['error']);
+    } },
+    { name: 'resume() stopped → once with status stopped', run: async () => {
+      recordTesting.reset();   // the file's afterEach, once per former test
+      const dir = repo();
+      const calls = spy();
+      const orch1 = createOrchestrator({ projectDir: dir, prompt: 'x', workflowId: WF, auto: true, claude: { mock: true }, runners: runners() });
+      orch1._buildWorktreeGraph = async () => { throw new Error('graphify exploded'); };
+      await orch1.run();
+      const orch2 = createOrchestrator({ projectDir: dir, auto: true, claude: { mock: true }, runners: runners(), resume: readPipelineForResume(orch1.state.id) });
+      orch2.on('state', (s) => { if (s.status === 'running') orch2.stop(); });
+      const r2 = await orch2.resume();
+      assert.equal(r2.status, 'stopped');
+      assert.deepEqual(calls.map((c) => c.status), ['stopped']);
+    } },
+  ]);
+});
+
+test('a throwing recorder never breaks the run', async () => {
+  recordTesting.setRecorder(async () => { throw new Error('metrics boom'); });
+  const orch = createOrchestrator({ projectDir: repo(), prompt: 'x', workflowId: WF, auto: true, claude: { mock: true }, branch: { source: 'main' } });
+  const logs = [];
+  orch.on('log', (l) => logs.push(l));
+  const res = await orch.run();
+  assert.equal(res.status, 'done');
+  assert.ok(logs.some((l) => l.source === 'metrics' && /metrics boom/.test(l.text)));
 });
 
 test('the live-pause fallback in snapshotFromHarness reports failure kind budget when stop() races a cost-cap pause', async () => {
@@ -170,7 +178,7 @@ test('the live-pause fallback in snapshotFromHarness reports failure kind budget
   // is skipped entirely and _completePaused() — which stamps _metricsIv — never
   // runs. harness.pauseReason is the only place the cost-cap reason survives.
   const dir = repo();
-  const orch = createOrchestrator({ projectDir: dir, prompt: 'x', auto: true, claude: { mock: true }, runners: runners() });
+  const orch = createOrchestrator({ projectDir: dir, prompt: 'x', workflowId: WF, auto: true, claude: { mock: true }, runners: runners() });
   orch.on('state', (s) => { if (s.status === 'pausing') orch.stop(); });
   orch._buildWorktreeGraph = async () => { orch._capReached('cost_total', 'total cost limit reached (test)'); };
   let recorded = null;
@@ -192,43 +200,47 @@ test('the live-pause fallback in snapshotFromHarness reports failure kind budget
 
 /** Pause a fresh run at setup; returns its id. */
 async function pausedRun(dir) {
-  const orch1 = createOrchestrator({ projectDir: dir, prompt: 'x', auto: true, claude: { mock: true }, runners: runners() });
+  const orch1 = createOrchestrator({ projectDir: dir, prompt: 'x', workflowId: WF, auto: true, claude: { mock: true }, runners: runners() });
   orch1._buildWorktreeGraph = async () => { throw new Error('graphify exploded'); };
   const r = await orch1.run();
   assert.equal(r.status, 'paused');
   return orch1.state.id;
 }
 
-test('resume() of a paused run adds the parked time (pausedAt → now) to pausedMs and consumes the stamp', async () => {
-  const dir = repo();
-  const calls = spy();
-  const id = await pausedRun(dir);
-  const rp = readPipelineForResume(id).resumePoint;
-  assert.match(rp.interventions.pausedAt, /^\d{4}-\d{2}-\d{2}T/, 'a pause stamps when it parked the run');
-  assert.equal(rp.interventions.pausedMs, 0);
-  // Backdate the stamp ten minutes: the parked time is measured, never slept through.
-  rp.interventions.pausedAt = new Date(Date.now() - 600_000).toISOString();
-  getDb().prepare('UPDATE pipelines SET resume_point = ? WHERE id = ?').run(JSON.stringify(rp), id);
-  const orch2 = createOrchestrator({ projectDir: dir, auto: true, claude: { mock: true }, runners: runners(), resume: readPipelineForResume(id) });
-  await orch2.resume();
-  const iv = calls[0].iv;
-  assert.ok(iv.pausedMs >= 600_000 && iv.pausedMs < 660_000, `pausedMs ${iv.pausedMs}`);
-  assert.equal(iv.pausedAt, null, 'the stamp is consumed by the resume');
-  const snap = await snapshotFromHarness(orch2, { status: 'done' });
-  assert.equal(snap.pausedMs, iv.pausedMs, 'the record snapshot carries it');
-});
-
-test('a paused row whose point predates the stamp falls back to the row updated_at', async () => {
-  const dir = repo();
-  const calls = spy();
-  const id = await pausedRun(dir);
-  const rp = readPipelineForResume(id).resumePoint;
-  delete rp.interventions.pausedAt;
-  getDb().prepare('UPDATE pipelines SET resume_point = ?, updated_at = ? WHERE id = ?')
-    .run(JSON.stringify(rp), new Date(Date.now() - 420_000).toISOString(), id);
-  const orch2 = createOrchestrator({ projectDir: dir, auto: true, claude: { mock: true }, runners: runners(), resume: readPipelineForResume(id) });
-  await orch2.resume();
-  assert.ok(calls[0].iv.pausedMs >= 420_000 && calls[0].iv.pausedMs < 480_000, `pausedMs ${calls[0].iv.pausedMs}`);
+test('resume() adds parked time from the pausedAt stamp, falling back to the row updated_at for an older point', async () => {
+  await checkRows([
+    { name: 'resume() of a paused run adds the parked time (pausedAt → now) to pausedMs and consumes the stamp', run: async () => {
+      const dir = repo();
+      const calls = spy();
+      const id = await pausedRun(dir);
+      const rp = readPipelineForResume(id).resumePoint;
+      assert.match(rp.interventions.pausedAt, /^\d{4}-\d{2}-\d{2}T/, 'a pause stamps when it parked the run');
+      assert.equal(rp.interventions.pausedMs, 0);
+      // Backdate the stamp ten minutes: the parked time is measured, never slept through.
+      rp.interventions.pausedAt = new Date(Date.now() - 600_000).toISOString();
+      getDb().prepare('UPDATE pipelines SET resume_point = ? WHERE id = ?').run(JSON.stringify(rp), id);
+      const orch2 = createOrchestrator({ projectDir: dir, auto: true, claude: { mock: true }, runners: runners(), resume: readPipelineForResume(id) });
+      await orch2.resume();
+      const iv = calls[0].iv;
+      assert.ok(iv.pausedMs >= 600_000 && iv.pausedMs < 660_000, `pausedMs ${iv.pausedMs}`);
+      assert.equal(iv.pausedAt, null, 'the stamp is consumed by the resume');
+      const snap = await snapshotFromHarness(orch2, { status: 'done' });
+      assert.equal(snap.pausedMs, iv.pausedMs, 'the record snapshot carries it');
+    } },
+    { name: 'a paused row whose point predates the stamp falls back to the row updated_at', run: async () => {
+      recordTesting.reset();   // the file's afterEach, once per former test
+      const dir = repo();
+      const calls = spy();
+      const id = await pausedRun(dir);
+      const rp = readPipelineForResume(id).resumePoint;
+      delete rp.interventions.pausedAt;
+      getDb().prepare('UPDATE pipelines SET resume_point = ?, updated_at = ? WHERE id = ?')
+        .run(JSON.stringify(rp), new Date(Date.now() - 420_000).toISOString(), id);
+      const orch2 = createOrchestrator({ projectDir: dir, auto: true, claude: { mock: true }, runners: runners(), resume: readPipelineForResume(id) });
+      await orch2.resume();
+      assert.ok(calls[0].iv.pausedMs >= 420_000 && calls[0].iv.pausedMs < 480_000, `pausedMs ${calls[0].iv.pausedMs}`);
+    } },
+  ]);
 });
 
 test('resume() of an interrupted run counts the gap from the last heartbeat and folds the pre-crash tail into the running step', async () => {

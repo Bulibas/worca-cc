@@ -13,6 +13,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { _runOptsForTests as runOpts, fanOutSpawnEnv } from '../src/core/phases.mjs';
 import { runClaude } from '../src/core/claude-runner.mjs';
 import { LIMITS } from '../src/shared/workspace-map/limits.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 // The host guard adds WORCA_HOST_PID and a --settings hook to every real spawn; pin it off so the
@@ -30,23 +31,26 @@ const tmp = async () => { const d = await mkdtemp(join(tmpdir(), 'worca-cc-fanou
 const CALL = { role: 'r', prompt: 'p', systemPrompt: 's', allowedTools: ['Read'] };
 const CAP = { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: '8' };
 
-test('the cap is LIMITS.INVESTIGATOR_CONCURRENCY — 8', () => {
-  assert.equal(LIMITS.INVESTIGATOR_CONCURRENCY, 8);
-  assert.deepEqual(fanOutSpawnEnv({ node: { fanOut: true } }, {}), CAP);
-  assert.equal(fanOutSpawnEnv(null, {}), undefined);
-});
-
-test('the cap never exceeds 8 but keeps an operator\'s lower ambient value (min(8, ambient))', () => {
-  const fan = { node: { fanOut: true } };
-  const capWith = (v) => fanOutSpawnEnv(fan, { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: v });
-  assert.deepEqual(capWith('4'), { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: '4' });
-  assert.deepEqual(capWith(' 3 '), { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: '3' });
-  assert.deepEqual(capWith('8'), CAP);
-  assert.deepEqual(capWith('20'), CAP, 'a higher ambient value never raises the cap');
-  for (const bad of ['garbage', '0', '-3', '2.5', '1e3', '', '   ']) assert.deepEqual(capWith(bad), CAP, JSON.stringify(bad));
-  assert.deepEqual(fanOutSpawnEnv(fan, {}), CAP, 'no ambient value');
-  assert.equal(fanOutSpawnEnv({ node: { fanOut: false } }, { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: '4' }), undefined,
-    'a plain node never gets the variable');
+test('fanOutSpawnEnv: the cap is LIMITS.INVESTIGATOR_CONCURRENCY (8), min(8, ambient), garbage -> 8, plain node none', async () => {
+  await checkRows([
+    { name: 'the cap is LIMITS.INVESTIGATOR_CONCURRENCY — 8', run: async () => {
+      assert.equal(LIMITS.INVESTIGATOR_CONCURRENCY, 8);
+      assert.deepEqual(fanOutSpawnEnv({ node: { fanOut: true } }, {}), CAP);
+      assert.equal(fanOutSpawnEnv(null, {}), undefined);
+    } },
+    { name: 'the cap never exceeds 8 but keeps an operator\'s lower ambient value (min(8, ambient))', run: async () => {
+      const fan = { node: { fanOut: true } };
+      const capWith = (v) => fanOutSpawnEnv(fan, { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: v });
+      assert.deepEqual(capWith('4'), { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: '4' });
+      assert.deepEqual(capWith(' 3 '), { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: '3' });
+      assert.deepEqual(capWith('8'), CAP);
+      assert.deepEqual(capWith('20'), CAP, 'a higher ambient value never raises the cap');
+      for (const bad of ['garbage', '0', '-3', '2.5', '1e3', '', '   ']) assert.deepEqual(capWith(bad), CAP, JSON.stringify(bad));
+      assert.deepEqual(fanOutSpawnEnv(fan, {}), CAP, 'no ambient value');
+      assert.equal(fanOutSpawnEnv({ node: { fanOut: false } }, { CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: '4' }), undefined,
+        'a plain node never gets the variable');
+    } },
+  ]);
 });
 
 test('runOpts: spawnEnv exactly for fan-out nodes; modelEnv never carries the cap', async () => {
@@ -84,13 +88,16 @@ async function childEnvOf(node, ambient) {
   return (await readFile(out, 'utf8')).split(/\r?\n/).filter((l) => l.startsWith('CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=')).join('\n');
 }
 
-test('end to end: a fan-out node\'s child runs with the cap, a plain node\'s child without it', POSIX_SHIM, async () => {
-  assert.equal(await childEnvOf({ fanOut: true }), 'CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=8');
-  assert.equal(await childEnvOf({ fanOut: false }), '', 'a plain node\'s child never gets the variable');
-});
-
-test('end to end: an operator\'s lower ambient cap reaches the child, a higher or garbage one becomes 8', POSIX_SHIM, async () => {
-  assert.equal(await childEnvOf({ fanOut: true }, '4'), 'CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=4');
-  assert.equal(await childEnvOf({ fanOut: true }, '20'), 'CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=8');
-  assert.equal(await childEnvOf({ fanOut: true }, 'lots'), 'CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=8');
+test('end to end: the cap reaches a fan-out child (8, or a lower ambient 4) and never a plain child', POSIX_SHIM, async () => {
+  await checkRows([
+    { name: 'end to end: a fan-out node\'s child runs with the cap, a plain node\'s child without it', run: async () => {
+      assert.equal(await childEnvOf({ fanOut: true }), 'CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=8');
+      assert.equal(await childEnvOf({ fanOut: false }), '', 'a plain node\'s child never gets the variable');
+    } },
+    // The higher (20) and garbage ambient values are fanOutSpawnEnv unit rows above; only the lower
+    // ambient value needs a real child spawn.
+    { name: 'end to end: an operator\'s lower ambient cap reaches the child', run: async () => {
+      assert.equal(await childEnvOf({ fanOut: true }, '4'), 'CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=4');
+    } },
+  ]);
 });

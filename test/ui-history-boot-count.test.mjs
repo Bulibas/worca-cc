@@ -3,18 +3,23 @@
 // boot lands on the default New-pipeline view (Runs never opened). The finished runs
 // never number the Runs menu item: it counts live runs and Needs you only (D11).
 // Boots the REAL app.js under jsdom.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 const PROJECT = '/tmp/proj';
 
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   const wsBox = { ws: null };
@@ -52,10 +57,10 @@ const ROW = (over = {}) => ({
   projectName: 'Proj', projectKey: 'proj-0000abcd', projectDir: '/x/proj', ...over,
 });
 
-test('first connect background-loads history without opening Runs or numbering its menu item', async () => {
+test('first connect background-loads history (Runs stays hidden, no Needs-you count for finished runs) and requests PR enrichment', async () => {
   const ctx = await boot({
     fetchHandler: (url) => (url.endsWith('/api/history')
-      ? skeleton([ROW(), ROW({ id: 'p2' }), ROW({ id: 'p3' })]) : null),
+      ? skeleton([ROW(), ROW({ id: 'p2' }), ROW({ id: 'p3' })], true) : null),
   });
   const historyFetches = () => ctx.calls.filter((c) => c.url.endsWith('/api/history')).length;
   const before = historyFetches();
@@ -63,28 +68,26 @@ test('first connect background-loads history without opening Runs or numbering i
   ctx.hello();                 // server greets the socket -> background history load
   await ctx.tick();            // let /api/history resolve + paint
 
-  assert.ok(historyFetches() > before, 'history was loaded even though Runs was never opened');
-  const doc = ctx.window.document;
-  assert.ok(doc.querySelector('[data-view="runs"]').classList.contains('hidden'),
-    'the Runs view stays hidden');
-  // The Runs button's textContent holds both badges (the hidden Needs-you one reads "0"),
-  // so read each: three stopped rows need nobody and are not live.
-  assert.equal(doc.querySelector('#nav-needs-count').hidden, true, 'no Needs-you count for finished runs');
-  assert.equal(doc.querySelector('#nav-running-count').textContent, '0', 'the live count, not the 3 finished runs');
-});
-
-test('the background load also triggers Phase-2 PR enrichment so PR states are ready', async () => {
-  const ctx = await boot({
-    fetchHandler: (url) => (url.endsWith('/api/history') ? skeleton([ROW()], true) : null),
-  });
-  ctx.hello();
-  await ctx.tick();
-  const post = ctx.calls.find((c) => c.url.endsWith('/api/history/pr') && c.opts.body);
-  assert.ok(post, 'enrichment was requested on boot');
-  // settle the watchdog so the test process exits clean
-  const token = JSON.parse(post.opts.body).token;
-  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'history-pr', token, done: true, items: [] }) });
-  await ctx.tick();
+  await checkRows([
+    { name: 'first connect background-loads history without opening Runs or numbering its menu item', run: () => {
+      assert.ok(historyFetches() > before, 'history was loaded even though Runs was never opened');
+      const doc = ctx.window.document;
+      assert.ok(doc.querySelector('[data-view="runs"]').classList.contains('hidden'),
+        'the Runs view stays hidden');
+      // The Runs button's textContent holds both badges (the hidden Needs-you one reads "0"),
+      // so read each: three stopped rows need nobody and are not live.
+      assert.equal(doc.querySelector('#nav-needs-count').hidden, true, 'no Needs-you count for finished runs');
+      assert.equal(doc.querySelector('#nav-running-count').textContent, '0', 'the live count, not the 3 finished runs');
+    } },
+    { name: 'the background load also triggers Phase-2 PR enrichment so PR states are ready', run: async () => {
+      const post = ctx.calls.find((c) => c.url.endsWith('/api/history/pr') && c.opts.body);
+      assert.ok(post, 'enrichment was requested on boot');
+      // settle the watchdog so the test process exits clean
+      const token = JSON.parse(post.opts.body).token;
+      ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'history-pr', token, done: true, items: [] }) });
+      await ctx.tick();
+    } },
+  ]);
 });
 
 test('reconnect (second hello) does not re-load when already booted', async () => {

@@ -3,6 +3,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { createAgentGen } from '../src/core/agent-gen.mjs';
 
 useTempHome(after);
@@ -15,7 +16,7 @@ const collect = (gen) => {
   return events;
 };
 
-test('Mode A (no userMarkdown): mock drafts BOTH meta + markdown; draft is normalized, NOT saved', async () => {
+test('Mode A (no userMarkdown): mock drafts a normalized v2 meta + ## Ports markdown, one terminal event, NOT saved', async () => {
   const gen = createAgentGen({
     name: 'Docs Writer', purpose: 'write docs', details: 'long details',
     expectedBefore: [{ key: 'planner', displayName: 'Plan', produces: ['plan'], consumes: ['userPrompt'] }],
@@ -24,15 +25,32 @@ test('Mode A (no userMarkdown): mock drafts BOTH meta + markdown; draft is norma
   });
   const events = collect(gen);
   const out = await gen.run();
-  assert.equal(out.status, 'done');
-  assert.equal(out.draft.meta.key, 'docsWriter');
-  assert.ok(['producer', 'verifier', 'clarifier'].includes(out.draft.meta.runnerType));
-  assert.ok(Number.isFinite(out.draft.meta.order), 'normalizeMeta ran (finite order)');
-  assert.match(out.draft.markdown, /Docs Writer/);
-  const done = events.filter((e) => e.type === 'agentgen-done');
-  assert.equal(done.length, 1, 'exactly one terminal event');
-  assert.equal(done[0].genId, gen.getState().genId, 'tagged with genId');
-  assert.ok(events.some((e) => e.type === 'agentgen-progress'), 'progress emitted');
+  await checkRows([
+    { name: 'Mode A (no userMarkdown): mock drafts BOTH meta + markdown; draft is normalized, NOT saved', run: () => {
+      assert.equal(out.status, 'done');
+      assert.equal(out.draft.meta.key, 'docsWriter');
+      assert.ok(['producer', 'verifier', 'clarifier'].includes(out.draft.meta.runnerType));
+      assert.ok(Number.isFinite(out.draft.meta.order), 'normalizeMeta ran (finite order)');
+      assert.match(out.draft.markdown, /Docs Writer/);
+      const done = events.filter((e) => e.type === 'agentgen-done');
+      assert.equal(done.length, 1, 'exactly one terminal event');
+      assert.equal(done[0].genId, gen.getState().genId, 'tagged with genId');
+      assert.ok(events.some((e) => e.type === 'agentgen-progress'), 'progress emitted');
+    } },
+    { name: 'the mock generator writes a v2 sidecar with a ## Ports body', run: () => {
+      assert.equal(out.status, 'done');
+      assert.equal(out.draft.meta.metaVersion, 2);
+      assert.deepEqual(out.draft.meta.inputs.map((p) => p.id), ['plan']);
+      assert.deepEqual(out.draft.meta.outputs.map((p) => p.id), ['review']);
+      assert.equal(out.draft.meta.outputs[0].filename, 'review-{cycle}.md');
+      // normalizeMeta returns a FIXED key set that KEEPS the v1 channel fields for
+      // the duration of coexistence (P8 deletes them), so `consumes` is present on
+      // EVERY normalized meta, v1 or v2 — asserting it is undefined can never pass.
+      // What proves the mock went v2 is the port surface.
+      assert.equal(out.draft.meta.portSummary, 'Reads plan; produces review.');
+      assert.match(out.draft.markdown, /## Ports/);
+    } },
+  ]);
 });
 
 test('Mode B (userMarkdown given): the pasted body is returned VERBATIM; only meta is drafted', async () => {
@@ -58,38 +76,33 @@ test('stop() yields a terminal agentgen-error{message:"stopped"} and status stop
   assert.equal(events.at(-1).message, 'stopped');
 });
 
-test('meta schema prompt teaches the palette-blurb description contract', () => {
-  const gen = createAgentGen({ name: 'X', purpose: 'p', claude: { mock: true } });
-  const block = gen._metaSchemaBlock();
-  assert.match(block, /palette blurb/i, 'names the surface');
-  assert.match(block, /160/, 'carries the total length budget');
-  assert.match(block, /75/, 'carries the first-sentence budget');
-});
-
-test('the meta schema block teaches meta v2 ports, not channels', () => {
-  const gen = createAgentGen({ name: 'X', purpose: 'p', claude: { mock: true } });
-  const block = gen._metaSchemaBlock();
-  assert.match(block, /"metaVersion": 2/);
-  assert.match(block, /at most 8 ports per side/);
-  assert.match(block, /The id "await" is RESERVED/);
-  assert.match(block, /"verifier" MUST declare "verdict"/);
-  assert.match(block, /"clarifier" MUST declare/);
-  assert.doesNotMatch(block, /consumes|optionalConsumes|connectsTo|loopSource/,
-    'the channel vocabulary is gone from the generator prompt');
-});
-
-test('neighbors are rendered as typed ports, and the body is told to document them', () => {
-  const gen = createAgentGen({
-    name: 'X', purpose: 'p', claude: { mock: true },
-    expectedBefore: [{ key: 'planner', displayName: 'Plan', inputs: [{ id: 'task', type: 'md' }], outputs: [{ id: 'plan', type: 'md' }] }],
-    expectedAfter: [],
-  });
-  const block = gen._neighborBlock();
-  assert.match(block, /"outputs": \[\s*\{\s*"id": "plan",\s*"type": "md",\s*"when": "always"/);
-  assert.doesNotMatch(block, /Channel vocabulary/);
-  assert.match(block, /port ids are yours to choose/i);
-  assert.match(gen._fullPrompt(), /## Ports/);
-  assert.match(gen._fullPrompt(), /never hardcode filenames/);
+test('generator prompt: v2 meta schema (no channel vocabulary) and typed-port neighbor block', async () => {
+  await checkRows([
+    { name: 'the meta schema block teaches meta v2 ports, not channels', run: () => {
+      const gen = createAgentGen({ name: 'X', purpose: 'p', claude: { mock: true } });
+      const block = gen._metaSchemaBlock();
+      assert.match(block, /"metaVersion": 2/);
+      assert.match(block, /at most 8 ports per side/);
+      assert.match(block, /The id "await" is RESERVED/);
+      assert.match(block, /"verifier" MUST declare "verdict"/);
+      assert.match(block, /"clarifier" MUST declare/);
+      assert.doesNotMatch(block, /consumes|optionalConsumes|connectsTo|loopSource/,
+        'the channel vocabulary is gone from the generator prompt');
+    } },
+    { name: 'neighbors are rendered as typed ports, and the body is told to document them', run: () => {
+      const gen = createAgentGen({
+        name: 'X', purpose: 'p', claude: { mock: true },
+        expectedBefore: [{ key: 'planner', displayName: 'Plan', inputs: [{ id: 'task', type: 'md' }], outputs: [{ id: 'plan', type: 'md' }] }],
+        expectedAfter: [],
+      });
+      const block = gen._neighborBlock();
+      assert.match(block, /"outputs": \[\s*\{\s*"id": "plan",\s*"type": "md",\s*"when": "always"/);
+      assert.doesNotMatch(block, /Channel vocabulary/);
+      assert.match(block, /port ids are yours to choose/i);
+      assert.match(gen._fullPrompt(), /## Ports/);
+      assert.match(gen._fullPrompt(), /never hardcode filenames/);
+    } },
+  ]);
 });
 
 test('a generated meta that breaks a v2 rule fails with the rules named', async () => {
@@ -114,20 +127,4 @@ test('a generated meta that breaks a v2 rule fails with the rules named', async 
   assert.match(out.message, /runnerType "verifier" requires verdict: \{ filename \}/);
   assert.equal(events.filter((e) => e.type === 'agentgen-error').length, 1, 'exactly one terminal event');
   assert.equal(events.filter((e) => e.type === 'agentgen-done').length, 0);
-});
-
-test('the mock generator writes a v2 sidecar with a ## Ports body', async () => {
-  const gen = createAgentGen({ name: 'Docs Writer', purpose: 'write docs', claude: { mock: true } });
-  const out = await gen.run();
-  assert.equal(out.status, 'done');
-  assert.equal(out.draft.meta.metaVersion, 2);
-  assert.deepEqual(out.draft.meta.inputs.map((p) => p.id), ['plan']);
-  assert.deepEqual(out.draft.meta.outputs.map((p) => p.id), ['review']);
-  assert.equal(out.draft.meta.outputs[0].filename, 'review-{cycle}.md');
-  // normalizeMeta returns a FIXED key set that KEEPS the v1 channel fields for
-  // the duration of coexistence (P8 deletes them), so `consumes` is present on
-  // EVERY normalized meta, v1 or v2 — asserting it is undefined can never pass.
-  // What proves the mock went v2 is the port surface.
-  assert.equal(out.draft.meta.portSummary, 'Reads plan; produces review.');
-  assert.match(out.draft.markdown, /## Ports/);
 });

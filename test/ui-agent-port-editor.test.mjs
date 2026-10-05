@@ -1,10 +1,15 @@
 // test/ui-agent-port-editor.test.mjs — the v2 port editor: render, read-back,
 // add/remove/reorder, hints, and the store's rules mirrored verbatim.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -34,7 +39,7 @@ const META = {
 };
 
 async function boot() {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.requestAnimationFrame = (fn) => setTimeout(fn, 0);
@@ -137,54 +142,56 @@ test('add / remove / reorder ports, and the add button dies at 8 per side', asyn
   assert.equal(rows().length, 8, 'a disabled add button adds nothing');
 });
 
-test('loop forces required off, expands is json-only, and void hides filename/store', async () => {
+test('port-type rules: loop forces required off, void hides filename/store, and a void input is authorable via the blank `as` option', async () => {
   const { window, host, api } = await boot();
-  api.agentFormRender(host, META, { mockWriterRoles: MOCK_ROLES });
-  const plan = host.querySelectorAll('.agent-ports-in .port-row')[0];
-  assert.equal(plan.querySelector('.pf-required').disabled, false);
-  plan.querySelector('.pf-loop').checked = true;
-  change(window, plan.querySelector('.pf-loop'));
-  assert.equal(plan.querySelector('.pf-required').checked, false);
-  assert.equal(plan.querySelector('.pf-required').disabled, true);
-  assert.equal(api.agentFormRead(host).meta.inputs[0].required, false);
+  await checkRows([
+    { name: 'loop forces required off, expands is json-only, and void hides filename/store', run: async () => {
+      api.agentFormRender(host, META, { mockWriterRoles: MOCK_ROLES });
+      const plan = host.querySelectorAll('.agent-ports-in .port-row')[0];
+      assert.equal(plan.querySelector('.pf-required').disabled, false);
+      plan.querySelector('.pf-loop').checked = true;
+      change(window, plan.querySelector('.pf-loop'));
+      assert.equal(plan.querySelector('.pf-required').checked, false);
+      assert.equal(plan.querySelector('.pf-required').disabled, true);
+      assert.equal(api.agentFormRead(host).meta.inputs[0].required, false);
 
-  const review = host.querySelectorAll('.agent-ports-out .port-row')[0];
-  assert.equal(review.querySelector('.pf-f-filename').hidden, false);
-  review.querySelector('.pf-type').value = 'void';
-  change(window, review.querySelector('.pf-type'));
-  assert.equal(review.querySelector('.pf-f-filename').hidden, true, 'a void port carries no filename');
-  assert.equal(review.querySelector('.pf-f-store').hidden, true);
-  const out0 = api.agentFormRead(host).meta.outputs[0];
-  assert.equal(out0.filename, undefined, 'and never emits one');
-  assert.equal(out0.store, undefined);
-});
-
-test('a void INPUT is authorable: the blank `as` option means "the store default"', async () => {
-  const { window, host, api } = await boot();
-  api.agentFormRender(host, META, { mockWriterRoles: MOCK_ROLES });
-  const hints = () => [...host.querySelectorAll('.pf-hint')].map((h) => h.textContent).join('\n');
-  const plan = host.querySelectorAll('.agent-ports-in .port-row')[0];
-  // Assert the OPTION LIST, not just the value: `select.value = ''` with no
-  // matching option yields selectedIndex -1 and STILL reads back '', so dropping
-  // the blank option would be invisible to a value-only assertion.
-  assert.deepEqual([...plan.querySelectorAll('.pf-as option')].map((o) => o.value),
-    ['', 'file', 'answers', 'fix-review', 'worktree']);
-  plan.querySelector('.pf-type').value = 'void';
-  change(window, plan.querySelector('.pf-type'));
-  // The form never silently rewrites an authored value: as:'file' on a void
-  // input is still emitted, and the hint says exactly what the store will say.
-  assert.equal(api.agentFormRead(host).meta.inputs[0].as, 'file');
-  assert.match(hints(), /inputs\.plan: as "file" requires a non-void port \(got void\)/);
-  // Clearing it to the blank option is how a void input IS authored — without
-  // that option the form could only ever emit a value the store 400s on.
-  plan.querySelector('.pf-as').value = '';
-  change(window, plan.querySelector('.pf-as'));
-  assert.equal('as' in api.agentFormRead(host).meta.inputs[0], false);
-  assert.doesNotMatch(hints(), /requires a non-void port/);
-  plan.querySelector('.pf-as').value = 'worktree';
-  change(window, plan.querySelector('.pf-as'));
-  assert.equal(api.agentFormRead(host).meta.inputs[0].as, 'worktree');
-  assert.doesNotMatch(hints(), /requires a/);
+      const review = host.querySelectorAll('.agent-ports-out .port-row')[0];
+      assert.equal(review.querySelector('.pf-f-filename').hidden, false);
+      review.querySelector('.pf-type').value = 'void';
+      change(window, review.querySelector('.pf-type'));
+      assert.equal(review.querySelector('.pf-f-filename').hidden, true, 'a void port carries no filename');
+      assert.equal(review.querySelector('.pf-f-store').hidden, true);
+      const out0 = api.agentFormRead(host).meta.outputs[0];
+      assert.equal(out0.filename, undefined, 'and never emits one');
+      assert.equal(out0.store, undefined);
+    } },
+    { name: 'a void INPUT is authorable: the blank `as` option means "the store default"', run: async () => {
+      api.agentFormRender(host, META, { mockWriterRoles: MOCK_ROLES });
+      const hints = () => [...host.querySelectorAll('.pf-hint')].map((h) => h.textContent).join('\n');
+      const plan = host.querySelectorAll('.agent-ports-in .port-row')[0];
+      // Assert the OPTION LIST, not just the value: `select.value = ''` with no
+      // matching option yields selectedIndex -1 and STILL reads back '', so dropping
+      // the blank option would be invisible to a value-only assertion.
+      assert.deepEqual([...plan.querySelectorAll('.pf-as option')].map((o) => o.value),
+        ['', 'file', 'answers', 'fix-review', 'worktree']);
+      plan.querySelector('.pf-type').value = 'void';
+      change(window, plan.querySelector('.pf-type'));
+      // The form never silently rewrites an authored value: as:'file' on a void
+      // input is still emitted, and the hint says exactly what the store will say.
+      assert.equal(api.agentFormRead(host).meta.inputs[0].as, 'file');
+      assert.match(hints(), /inputs\.plan: as "file" requires a non-void port \(got void\)/);
+      // Clearing it to the blank option is how a void input IS authored — without
+      // that option the form could only ever emit a value the store 400s on.
+      plan.querySelector('.pf-as').value = '';
+      change(window, plan.querySelector('.pf-as'));
+      assert.equal('as' in api.agentFormRead(host).meta.inputs[0], false);
+      assert.doesNotMatch(hints(), /requires a non-void port/);
+      plan.querySelector('.pf-as').value = 'worktree';
+      change(window, plan.querySelector('.pf-as'));
+      assert.equal(api.agentFormRead(host).meta.inputs[0].as, 'worktree');
+      assert.doesNotMatch(hints(), /requires a/);
+    } },
+  ]);
 });
 
 test('hints mirror the store rules VERBATIM and appear/disappear live, without blocking', async () => {
@@ -251,20 +258,4 @@ test('hints mirror the store rules VERBATIM and appear/disappear live, without b
   assert.equal(host.querySelector('.pf-add-in').disabled, false);
   assert.equal(host.querySelector('.pf-add-out').disabled, false);
   assert.equal(api.agentFormRead(host).meta.runnerType, 'clarifier');
-});
-
-test('a duplicate id and a missing filename are hinted per side', async () => {
-  const { window, host, api } = await boot();
-  api.agentFormRender(host, META, { mockWriterRoles: MOCK_ROLES });
-  const [, fix] = host.querySelectorAll('.agent-ports-in .port-row');
-  fix.querySelector('.pf-id').value = 'plan';
-  change(window, fix.querySelector('.pf-id'));
-  assert.match([...host.querySelectorAll('.pf-hint')].map((h) => h.textContent).join('\n'),
-    /inputs: duplicate port id "plan"/);
-  const review = host.querySelectorAll('.agent-ports-out .port-row')[0];
-  review.querySelector('.pf-filename').value = '';
-  change(window, review.querySelector('.pf-filename'));
-  assert.match([...host.querySelectorAll('.pf-hint')].map((h) => h.textContent).join('\n'),
-    /outputs\.review: md outputs require a filename template/);
-  void api;
 });

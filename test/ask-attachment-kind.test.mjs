@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import {
   TEXT_EXTENSIONS, BINARY_EXTENSIONS, classifyExtension, sniffMime, extensionForAttachment,
 } from '../src/core/ask/attachment-kind.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0]);
@@ -23,26 +24,29 @@ test('the two allowlists carry the spec extensions and stay disjoint', () => {
   for (const e of TEXT_EXTENSIONS) assert.ok(!BINARY_EXTENSIONS.includes(e), `${e} in one list only`);
 });
 
-test('classifyExtension: text kinds, image kinds, pdf as binary, case-insensitive, unknown -> null', () => {
-  assert.deepEqual(classifyExtension('.md'), { kind: 'text', mime: 'text/markdown' });
-  assert.deepEqual(classifyExtension('.json'), { kind: 'text', mime: 'application/json' });
-  assert.deepEqual(classifyExtension('.png'), { kind: 'image', mime: 'image/png' });
-  assert.deepEqual(classifyExtension('.jpg'), { kind: 'image', mime: 'image/jpeg' });
-  assert.deepEqual(classifyExtension('.jpeg'), { kind: 'image', mime: 'image/jpeg' });
-  assert.deepEqual(classifyExtension('.webp'), { kind: 'image', mime: 'image/webp' });
-  assert.deepEqual(classifyExtension('.PDF'), { kind: 'binary', mime: 'application/pdf' });
-  assert.equal(classifyExtension('.svg'), null, 'scriptable markup is deliberately not allowed');
-  assert.equal(classifyExtension('.exe'), null);
-  assert.equal(classifyExtension(''), null);
-  assert.equal(classifyExtension(undefined), null);
-});
-
-test('classifyExtension: HTML is a TEXT kind (stored as .txt, served as text/plain), case-insensitive', () => {
-  assert.deepEqual(classifyExtension('.html'), { kind: 'text', mime: 'text/html' });
-  assert.deepEqual(classifyExtension('.htm'), { kind: 'text', mime: 'text/html' });
-  assert.deepEqual(classifyExtension('.HTML'), { kind: 'text', mime: 'text/html' });
-  assert.equal(extensionForAttachment('text', 'text/html'), '.txt', 'the body lands as <id>.txt like every text kind');
-  assert.equal(classifyExtension('.xhtml'), null, 'only .html and .htm');
+test('classifyExtension: text kinds (HTML as text), image kinds, pdf as binary, case-insensitive, unknown → null', async () => {
+  await checkRows([
+    { name: 'classifyExtension: text kinds, image kinds, pdf as binary, case-insensitive, unknown -> null', run: () => {
+      assert.deepEqual(classifyExtension('.md'), { kind: 'text', mime: 'text/markdown' });
+      assert.deepEqual(classifyExtension('.json'), { kind: 'text', mime: 'application/json' });
+      assert.deepEqual(classifyExtension('.png'), { kind: 'image', mime: 'image/png' });
+      assert.deepEqual(classifyExtension('.jpg'), { kind: 'image', mime: 'image/jpeg' });
+      assert.deepEqual(classifyExtension('.jpeg'), { kind: 'image', mime: 'image/jpeg' });
+      assert.deepEqual(classifyExtension('.webp'), { kind: 'image', mime: 'image/webp' });
+      assert.deepEqual(classifyExtension('.PDF'), { kind: 'binary', mime: 'application/pdf' });
+      assert.equal(classifyExtension('.svg'), null, 'scriptable markup is deliberately not allowed');
+      assert.equal(classifyExtension('.exe'), null);
+      assert.equal(classifyExtension(''), null);
+      assert.equal(classifyExtension(undefined), null);
+    } },
+    { name: 'classifyExtension: HTML is a TEXT kind (stored as .txt, served as text/plain), case-insensitive', run: () => {
+      assert.deepEqual(classifyExtension('.html'), { kind: 'text', mime: 'text/html' });
+      assert.deepEqual(classifyExtension('.htm'), { kind: 'text', mime: 'text/html' });
+      assert.deepEqual(classifyExtension('.HTML'), { kind: 'text', mime: 'text/html' });
+      assert.equal(extensionForAttachment('text', 'text/html'), '.txt', 'the body lands as <id>.txt like every text kind');
+      assert.equal(classifyExtension('.xhtml'), null, 'only .html and .htm');
+    } },
+  ]);
 });
 
 test('sniffMime: recognises each accepted magic number and nothing else', () => {
@@ -58,21 +62,24 @@ test('sniffMime: recognises each accepted magic number and nothing else', () => 
   assert.equal(sniffMime('not a buffer'), null);
 });
 
-test('sniffMime: a JPEG needs SOI plus a real first marker, not a bare FF D8 FF stub', () => {
-  assert.equal(sniffMime(Buffer.from([0xff, 0xd8, 0xff])), null, '3-byte stub');
-  assert.equal(sniffMime(Buffer.from([0xff, 0xd8, 0xff, 0x00])), null, 'FF00 is a stuffed byte, not a marker');
-  assert.equal(sniffMime(Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0, 0x43])), 'image/jpeg', 'DQT-first (no APPn) JPEG');
-  assert.equal(sniffMime(Buffer.from([0xff, 0xd8, 0xff, 0xe1, 0, 0])), 'image/jpeg', 'EXIF JPEG');
-});
-
-test('sniffMime: the PDF header may follow a BOM or up to 1024 bytes of preamble (ISO 32000-1 7.5.2)', () => {
-  const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), PDF]);
-  assert.equal(sniffMime(bom), 'application/pdf', 'UTF-8 BOM before the header');
-  const junk = Buffer.concat([Buffer.alloc(1024, 0x20), PDF]);
-  assert.equal(sniffMime(junk), 'application/pdf', 'exactly 1024 bytes of preamble is still a PDF');
-  const tooFar = Buffer.concat([Buffer.alloc(1025, 0x20), PDF]);
-  assert.equal(sniffMime(tooFar), null, 'past the window it is not a PDF');
-  assert.equal(sniffMime(Buffer.from('%PDF')), null, 'the version dash is part of the header');
+test('sniffMime edge cases: a JPEG needs SOI plus a real marker; a PDF header may follow a BOM or ≤1024 bytes of preamble', async () => {
+  await checkRows([
+    { name: 'sniffMime: a JPEG needs SOI plus a real first marker, not a bare FF D8 FF stub', run: () => {
+      assert.equal(sniffMime(Buffer.from([0xff, 0xd8, 0xff])), null, '3-byte stub');
+      assert.equal(sniffMime(Buffer.from([0xff, 0xd8, 0xff, 0x00])), null, 'FF00 is a stuffed byte, not a marker');
+      assert.equal(sniffMime(Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0, 0x43])), 'image/jpeg', 'DQT-first (no APPn) JPEG');
+      assert.equal(sniffMime(Buffer.from([0xff, 0xd8, 0xff, 0xe1, 0, 0])), 'image/jpeg', 'EXIF JPEG');
+    } },
+    { name: 'sniffMime: the PDF header may follow a BOM or up to 1024 bytes of preamble (ISO 32000-1 7.5.2)', run: () => {
+      const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), PDF]);
+      assert.equal(sniffMime(bom), 'application/pdf', 'UTF-8 BOM before the header');
+      const junk = Buffer.concat([Buffer.alloc(1024, 0x20), PDF]);
+      assert.equal(sniffMime(junk), 'application/pdf', 'exactly 1024 bytes of preamble is still a PDF');
+      const tooFar = Buffer.concat([Buffer.alloc(1025, 0x20), PDF]);
+      assert.equal(sniffMime(tooFar), null, 'past the window it is not a PDF');
+      assert.equal(sniffMime(Buffer.from('%PDF')), null, 'the version dash is part of the header');
+    } },
+  ]);
 });
 
 test('extensionForAttachment: text -> .txt, sniffed mime -> its extension, unknown binary -> .bin', () => {

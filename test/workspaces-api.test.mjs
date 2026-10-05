@@ -25,12 +25,14 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { seedWorkspacePipeline } from './helpers/db-seed.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 import { writeStoreMeta, recordArtifact } from '../src/core/artifacts.mjs';
 import { _resetForTests } from '../src/core/db.mjs';
 
 // ── Robust temp-repo teardown (fixes a full-suite-only ENOTEMPTY flake) ──────
-// The two run-returns-200 workspace tests POST a workspace run; the route fires
+// The run-returns-200 workspace test POSTs a workspace run; the route fires
 // orch.run() fire-and-forget. A workspace run creates a per-member worktree under
 // <member>/.git/worktrees/<id>, and run()'s finally tears it down with
 // `git worktree remove` that runs with ignoreAbort:true (orchestrator._commitWork
@@ -95,7 +97,7 @@ async function rmWithRetry(dir, { attempts = 12, stepMs = 25 } = {}) {
 // WORCA_HOME) plus the worcaHome() test-runner guard, not from ordering.
 useTempHome(after);
 
-// CONTAINMENT (test-leak guard). The two run-returns-200 workspace tests POST a
+// CONTAINMENT (test-leak guard). The run-returns-200 workspace test POSTs a
 // workspace run that fires orch.run() in the background. The orchestrator now
 // consumes the workspace and creates one worktree PER MEMBER under each member's
 // own <member>/.git/worktrees/<id> (mock mode short-circuits the graph build +
@@ -168,16 +170,9 @@ after(async () => {
 });
 
 /** A real git repo so the server's per-member isGitRepo resolution passes. */
-async function freshRepo(prefix = 'worca-cc-wsapi-repo-') {
-  const dir = await mkdtemp(join(tmpdir(), prefix));
+function freshRepo(prefix = 'worca-cc-wsapi-repo-') {
+  const dir = templateRepo('wsapi-repo', { branch: 'main', user: true, files: { 'README.md': '# hi\n' }, prefix });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']);
-  g(['commit', '-qm', 'init']);
   return dir;
 }
 
@@ -197,12 +192,6 @@ const del = (p) => fetch(`${base}${p}`, { method: 'DELETE' });
 // Workspace CRUD
 // ───────────────────────────────────────────────────────────────────────────
 
-test('GET /api/workspaces lists empty initially', async () => {
-  const r = await get('/api/workspaces');
-  assert.equal(r.status, 200);
-  assert.deepEqual((await r.json()).workspaces, []);
-});
-
 test('POST /api/workspaces creates -> 201 with the annotated workspace; then it lists', async () => {
   const a = await freshRepo();
   const b = await freshRepo();
@@ -220,56 +209,56 @@ test('POST /api/workspaces creates -> 201 with the annotated workspace; then it 
   assert.ok(list.workspaces.some((w) => w.id === workspace.id));
 });
 
-test('POST /api/workspaces with <2 paths -> 400', async () => {
-  const a = await freshRepo();
-  const r = await post('/api/workspaces', { name: 'Too Few', projectPaths: [a] });
-  assert.equal(r.status, 400);
-  assert.ok((await r.json()).error);
-});
-
-test('POST /api/workspaces with a non-git member -> 400', async () => {
-  const a = await freshRepo();
-  const plain = await freshDir();
-  const r = await post('/api/workspaces', { name: 'Not Git', projectPaths: [a, plain] });
-  assert.equal(r.status, 400);
-});
-
-test('POST /api/workspaces duplicate name (case-insensitive) -> 409', async () => {
+test('POST /api/workspaces refusals: 400 for <2 paths / a non-git member, 409 for a duplicate name (NOCASE) or project set (D1)', async () => {
   const a = await freshRepo();
   const b = await freshRepo();
   const c = await freshRepo();
-  assert.equal((await post('/api/workspaces', { name: 'DupName', projectPaths: [a, b] })).status, 201);
-  const r = await post('/api/workspaces', { name: 'dupname', projectPaths: [a, c] });
-  assert.equal(r.status, 409);
+  await checkRows([
+    { name: 'POST /api/workspaces with <2 paths -> 400', run: async () => {
+      const r = await post('/api/workspaces', { name: 'Too Few', projectPaths: [a] });
+      assert.equal(r.status, 400);
+      assert.ok((await r.json()).error);
+    } },
+    { name: 'POST /api/workspaces with a non-git member -> 400', run: async () => {
+      const plain = await freshDir();
+      const r = await post('/api/workspaces', { name: 'Not Git', projectPaths: [a, plain] });
+      assert.equal(r.status, 400);
+    } },
+    { name: 'POST /api/workspaces duplicate name (case-insensitive) -> 409', run: async () => {
+      assert.equal((await post('/api/workspaces', { name: 'DupName', projectPaths: [a, b] })).status, 201);
+      const r = await post('/api/workspaces', { name: 'dupname', projectPaths: [a, c] });
+      assert.equal(r.status, 409);
+    } },
+    { name: 'POST /api/workspaces duplicate project set (D1) -> 409', run: async () => {
+      assert.equal((await post('/api/workspaces', { name: 'SetOne', projectPaths: [b, c] })).status, 201);
+      // Different name, same set -> DUPLICATE_SET -> 409.
+      const r = await post('/api/workspaces', { name: 'SetTwo', projectPaths: [c, b] });
+      assert.equal(r.status, 409);
+    } },
+  ]);
 });
 
-test('POST /api/workspaces duplicate project set (D1) -> 409', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  assert.equal((await post('/api/workspaces', { name: 'SetOne', projectPaths: [a, b] })).status, 201);
-  // Different name, same set -> DUPLICATE_SET -> 409.
-  const r = await post('/api/workspaces', { name: 'SetTwo', projectPaths: [b, a] });
-  assert.equal(r.status, 409);
-});
+test('GET /api/workspaces/:id returns detail; unknown, malformed and traversing ids -> 404', async () => {
+  await checkRows([
+    { name: 'GET /api/workspaces/:id returns detail; bad/unknown id -> 404', run: async () => {
+      const a = await freshRepo();
+      const b = await freshRepo();
+      const { workspace } = await (await post('/api/workspaces', { name: 'Detail WS', projectPaths: [a, b] })).json();
+      const r = await get(`/api/workspaces/${workspace.id}`);
+      assert.equal(r.status, 200);
+      assert.equal((await r.json()).workspace.name, 'Detail WS');
 
-test('GET /api/workspaces/:id returns detail; bad/unknown id -> 404', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const { workspace } = await (await post('/api/workspaces', { name: 'Detail WS', projectPaths: [a, b] })).json();
-  const r = await get(`/api/workspaces/${workspace.id}`);
-  assert.equal(r.status, 200);
-  assert.equal((await r.json()).workspace.name, 'Detail WS');
-
-  // Unknown but well-formed id -> 404.
-  assert.equal((await get('/api/workspaces/wks-nope-00000000')).status, 404);
-  // Malformed id (fails WORKSPACE_ID_RE) -> 404 (stale bookmark reads as not-found).
-  assert.equal((await get('/api/workspaces/not-a-ws-id')).status, 404);
-});
-
-test('GET /api/workspaces/:id rejects a traversing/malformed id -> 404', async () => {
-  for (const bad of ['..%2f..%2fevil', 'alpha-00000001', 'wks-BAD-UPPER-00000000']) {
-    assert.equal((await get(`/api/workspaces/${bad}`)).status, 404, `id ${bad} must be rejected`);
-  }
+      // Unknown but well-formed id -> 404.
+      assert.equal((await get('/api/workspaces/wks-nope-00000000')).status, 404);
+      // Malformed id (fails WORKSPACE_ID_RE) -> 404 (stale bookmark reads as not-found).
+      assert.equal((await get('/api/workspaces/not-a-ws-id')).status, 404);
+    } },
+    { name: 'GET /api/workspaces/:id rejects a traversing/malformed id -> 404', run: async () => {
+      for (const bad of ['..%2f..%2fevil', 'alpha-00000001', 'wks-BAD-UPPER-00000000']) {
+        assert.equal((await get(`/api/workspaces/${bad}`)).status, 404, `id ${bad} must be rejected`);
+      }
+    } },
+  ]);
 });
 
 test('PATCH /api/workspaces/:id updates description and name; id is STABLE across rename', async () => {
@@ -293,112 +282,115 @@ test('PATCH /api/workspaces/:id updates description and name; id is STABLE acros
   assert.equal((await get(`/api/workspaces/${origId}`)).status, 200);
 });
 
-test('PATCH /api/workspaces/:id rejects projectPaths in the body -> 400 (immutability)', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const c = await freshRepo();
-  const { workspace } = await (await post('/api/workspaces', { name: 'Immutable', projectPaths: [a, b] })).json();
-
-  let r = await patch(`/api/workspaces/${workspace.id}`, { projectPaths: [a, b, c] });
-  assert.equal(r.status, 400, 'projectPaths in PATCH body is rejected');
-  // projectKeys is likewise a derived field and must be rejected.
-  r = await patch(`/api/workspaces/${workspace.id}`, { projectKeys: ['x', 'y'] });
-  assert.equal(r.status, 400);
-
-  // The set is unchanged on disk.
-  const got = (await (await get(`/api/workspaces/${workspace.id}`)).json()).workspace;
-  assert.equal(got.projectPaths.length, 2);
-});
-
-test('PATCH /api/workspaces/:id rename to a clashing name -> 409; unknown id -> 404', async () => {
+test('PATCH /api/workspaces/:id refusals: projectPaths/projectKeys 400, clashing name 409, unknown id 404', async () => {
   const a = await freshRepo();
   const b = await freshRepo();
   const c = await freshRepo();
   const d = await freshRepo();
-  await post('/api/workspaces', { name: 'Taken', projectPaths: [a, b] });
-  const { workspace } = await (await post('/api/workspaces', { name: 'Mover', projectPaths: [c, d] })).json();
+  await post('/api/workspaces', { name: 'Taken', projectPaths: [c, d] });
+  const { workspace } = await (await post('/api/workspaces', { name: 'Immutable', projectPaths: [a, b] })).json();
+  await checkRows([
+    { name: 'PATCH /api/workspaces/:id rejects projectPaths in the body -> 400 (immutability)', run: async () => {
+      let r = await patch(`/api/workspaces/${workspace.id}`, { projectPaths: [a, b, c] });
+      assert.equal(r.status, 400, 'projectPaths in PATCH body is rejected');
+      // projectKeys is likewise a derived field and must be rejected.
+      r = await patch(`/api/workspaces/${workspace.id}`, { projectKeys: ['x', 'y'] });
+      assert.equal(r.status, 400);
 
-  const r = await patch(`/api/workspaces/${workspace.id}`, { name: 'taken' });
-  assert.equal(r.status, 409);
+      // The set is unchanged on disk.
+      const got = (await (await get(`/api/workspaces/${workspace.id}`)).json()).workspace;
+      assert.equal(got.projectPaths.length, 2);
+    } },
+    { name: 'PATCH /api/workspaces/:id rename to a clashing name -> 409; unknown id -> 404', run: async () => {
+      const r = await patch(`/api/workspaces/${workspace.id}`, { name: 'taken' });
+      assert.equal(r.status, 409);
 
-  assert.equal((await patch('/api/workspaces/wks-nope-00000000', { description: 'x' })).status, 404);
-  assert.equal((await patch('/api/workspaces/not-a-ws-id', { description: 'x' })).status, 404);
+      assert.equal((await patch('/api/workspaces/wks-nope-00000000', { description: 'x' })).status, 404);
+      assert.equal((await patch('/api/workspaces/not-a-ws-id', { description: 'x' })).status, 404);
+    } },
+  ]);
 });
 
-test('DELETE /api/workspaces/:id removes it -> {ok:true}; bad/unknown id -> 404', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const { workspace } = await (await post('/api/workspaces', { name: 'Deletable', projectPaths: [a, b] })).json();
+test('DELETE /api/workspaces/:id: 409 while a live run/scan owns it, then {ok:true}; bad/unknown id -> 404', async () => {
+  await checkRows([
+    { name: 'DELETE /api/workspaces/:id removes it -> {ok:true}; bad/unknown id -> 404', run: async () => {
+      const a = await freshRepo();
+      const b = await freshRepo();
+      const { workspace } = await (await post('/api/workspaces', { name: 'Deletable', projectPaths: [a, b] })).json();
 
-  const r = await del(`/api/workspaces/${workspace.id}`);
-  assert.equal(r.status, 200);
-  const body = await r.json();
-  assert.equal(body.ok, true);
-  assert.ok(Array.isArray(body.warnings));
-  assert.equal((await get(`/api/workspaces/${workspace.id}`)).status, 404, 'gone after delete');
+      const r = await del(`/api/workspaces/${workspace.id}`);
+      assert.equal(r.status, 200);
+      const body = await r.json();
+      assert.equal(body.ok, true);
+      assert.ok(Array.isArray(body.warnings));
+      assert.equal((await get(`/api/workspaces/${workspace.id}`)).status, 404, 'gone after delete');
 
-  // Unknown / malformed id -> 404.
-  assert.equal((await del('/api/workspaces/wks-nope-00000000')).status, 404);
-  assert.equal((await del('/api/workspaces/not-a-ws-id')).status, 404);
+      // Unknown / malformed id -> 404.
+      assert.equal((await del('/api/workspaces/wks-nope-00000000')).status, 404);
+      assert.equal((await del('/api/workspaces/not-a-ws-id')).status, 404);
+    } },
+    { name: 'DELETE /api/workspaces/:id is 409 while a live run/scan for it exists', run: async () => {
+      const a = await freshRepo();
+      const b = await freshRepo();
+      const { workspace } = await (await post('/api/workspaces', { name: 'Busy', projectPaths: [a, b] })).json();
+
+      // Simulate a live workspace run/scan for this id in the runs Map. 'pausing'
+      // (mid-graceful-pause, orchestrator still persisting into the store) is live too.
+      for (const status of ['running', 'pausing']) {
+        runs.set('live-ws-1', { id: 'live-ws-1', workspaceId: workspace.id, status });
+        const r = await del(`/api/workspaces/${workspace.id}`);
+        assert.equal(r.status, 409, `status=${status} blocks deletion`);
+      }
+      runs.delete('live-ws-1');
+
+      // After the live entry clears, deletion proceeds.
+      assert.equal((await del(`/api/workspaces/${workspace.id}`)).status, 200);
+    } },
+  ]);
 });
 
-test('DELETE /api/workspaces/:id is 409 while a live run/scan for it exists', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const { workspace } = await (await post('/api/workspaces', { name: 'Busy', projectPaths: [a, b] })).json();
+test('POST /api/workspaces/:id/members adds and removes members (id frozen, homes cleared) and maps refusals 400/409/404', async () => {
+  await checkRows([
+    { name: 'POST /api/workspaces/:id/members adds and removes members; the id stays frozen', run: async () => {
+      const a = await freshRepo();
+      const b = await freshRepo();
+      const c = await freshRepo();
+      const { workspace } = await (await post('/api/workspaces', { name: 'Members', projectPaths: [a, b], metricsProject: a })).json();
 
-  // Simulate a live workspace run/scan for this id in the runs Map. 'pausing'
-  // (mid-graceful-pause, orchestrator still persisting into the store) is live too.
-  for (const status of ['running', 'pausing']) {
-    runs.set('live-ws-1', { id: 'live-ws-1', workspaceId: workspace.id, status });
-    const r = await del(`/api/workspaces/${workspace.id}`);
-    assert.equal(r.status, 409, `status=${status} blocks deletion`);
-  }
-  runs.delete('live-ws-1');
+      let r = await post(`/api/workspaces/${workspace.id}/members`, { add: [c] });
+      assert.equal(r.status, 200, await r.clone().text());
+      let body = await r.json();
+      assert.equal(body.workspace.id, workspace.id);
+      assert.equal(body.workspace.projectPaths.length, 3);
+      assert.deepEqual(body.clearedHomes, []);
 
-  // After the live entry clears, deletion proceeds.
-  assert.equal((await del(`/api/workspaces/${workspace.id}`)).status, 200);
-});
-
-test('POST /api/workspaces/:id/members adds and removes members; the id stays frozen', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const c = await freshRepo();
-  const { workspace } = await (await post('/api/workspaces', { name: 'Members', projectPaths: [a, b], metricsProject: a })).json();
-
-  let r = await post(`/api/workspaces/${workspace.id}/members`, { add: [c] });
-  assert.equal(r.status, 200, await r.clone().text());
-  let body = await r.json();
-  assert.equal(body.workspace.id, workspace.id);
-  assert.equal(body.workspace.projectPaths.length, 3);
-  assert.deepEqual(body.clearedHomes, []);
-
-  r = await post(`/api/workspaces/${workspace.id}/members`, { remove: a });
-  assert.equal(r.status, 200, await r.clone().text());
-  body = await r.json();
-  assert.equal(body.workspace.id, workspace.id);
-  assert.equal(body.workspace.projectPaths.includes(a), false);
-  assert.equal(body.workspace.metricsProject, null, 'the removed metrics home is cleared');
-  assert.deepEqual(body.clearedHomes, ['metrics']);
-  const got = (await (await get(`/api/workspaces/${workspace.id}`)).json()).workspace;
-  assert.equal(got.projectPaths.length, 2);
-});
-
-test('POST /api/workspaces/:id/members maps refusals: 400 bad body / non-git / below 2, 409 duplicate set, 404 unknown', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const c = await freshRepo();
-  const plain = await freshDir();
-  await post('/api/workspaces', { name: 'Trio Taken', projectPaths: [a, b, c] });
-  const { workspace } = await (await post('/api/workspaces', { name: 'Duo', projectPaths: [a, b] })).json();
-  const url = `/api/workspaces/${workspace.id}/members`;
-  assert.equal((await post(url, {})).status, 400, 'neither add nor remove');
-  assert.equal((await post(url, { add: [c], remove: a })).status, 400, 'both');
-  assert.equal((await post(url, { add: [plain] })).status, 400, 'non-git member');
-  assert.equal((await post(url, { remove: a })).status, 400, 'below 2 members');
-  assert.equal((await post(url, { add: [c] })).status, 409, 'another workspace spans that set');
-  assert.equal((await post('/api/workspaces/wks-nope-00000000/members', { add: [c] })).status, 404);
-  assert.equal((await post('/api/workspaces/not-a-ws-id/members', { add: [c] })).status, 404);
+      r = await post(`/api/workspaces/${workspace.id}/members`, { remove: a });
+      assert.equal(r.status, 200, await r.clone().text());
+      body = await r.json();
+      assert.equal(body.workspace.id, workspace.id);
+      assert.equal(body.workspace.projectPaths.includes(a), false);
+      assert.equal(body.workspace.metricsProject, null, 'the removed metrics home is cleared');
+      assert.deepEqual(body.clearedHomes, ['metrics']);
+      const got = (await (await get(`/api/workspaces/${workspace.id}`)).json()).workspace;
+      assert.equal(got.projectPaths.length, 2);
+    } },
+    { name: 'POST /api/workspaces/:id/members maps refusals: 400 bad body / non-git / below 2, 409 duplicate set, 404 unknown', run: async () => {
+      const a = await freshRepo();
+      const b = await freshRepo();
+      const c = await freshRepo();
+      const plain = await freshDir();
+      await post('/api/workspaces', { name: 'Trio Taken', projectPaths: [a, b, c] });
+      const { workspace } = await (await post('/api/workspaces', { name: 'Duo', projectPaths: [a, b] })).json();
+      const url = `/api/workspaces/${workspace.id}/members`;
+      assert.equal((await post(url, {})).status, 400, 'neither add nor remove');
+      assert.equal((await post(url, { add: [c], remove: a })).status, 400, 'both');
+      assert.equal((await post(url, { add: [plain] })).status, 400, 'non-git member');
+      assert.equal((await post(url, { remove: a })).status, 400, 'below 2 members');
+      assert.equal((await post(url, { add: [c] })).status, 409, 'another workspace spans that set');
+      assert.equal((await post('/api/workspaces/wks-nope-00000000/members', { add: [c] })).status, 404);
+      assert.equal((await post('/api/workspaces/not-a-ws-id/members', { add: [c] })).status, 404);
+    } },
+  ]);
 });
 
 test('POST /api/workspaces/:id/members is 409 while a run owns the workspace (a paused Workspace scan included)', async () => {
@@ -572,62 +564,54 @@ test('a chained run that starts from the previous run\'s branches still fires af
 // POST /api/run — workspace target (§2.6)
 // ───────────────────────────────────────────────────────────────────────────
 
-test('POST /api/run with BOTH workspaceId and projectDir -> 400', async () => {
+test('POST /api/run workspace target validation: both/neither/no prompt -> 400, malformed/unknown workspaceId -> 404', async () => {
   const a = await freshRepo();
   const b = await freshRepo();
   const { workspace } = await (await post('/api/workspaces', { name: 'BothTarget', projectPaths: [a, b] })).json();
-  const r = await post('/api/run', { workspaceId: workspace.id, projectDir: a, prompt: 'x', mock: true });
-  assert.equal(r.status, 400);
-  assert.match((await r.json()).error, /not both|workspaceId|projectDir/i);
+  const cases = [
+    { name: 'POST /api/run with BOTH workspaceId and projectDir -> 400',
+      body: { workspaceId: workspace.id, projectDir: a, prompt: 'x', mock: true }, status: 400, errorRe: /not both|workspaceId|projectDir/i },
+    { name: 'POST /api/run with NEITHER workspaceId nor projectDir -> 400',
+      body: { prompt: 'x', mock: true }, status: 400, errorRe: /workspaceId or projectDir/i },
+    { name: 'POST /api/run with a malformed workspaceId -> 404',
+      body: { workspaceId: 'not-a-ws-id', prompt: 'x', mock: true }, status: 404 },
+    { name: 'POST /api/run with an unknown (well-formed) workspaceId -> 404',
+      body: { workspaceId: 'wks-nope-00000000', prompt: 'x', mock: true }, status: 404 },
+    { name: 'POST /api/run on a workspace requires a prompt -> 400',
+      body: { workspaceId: workspace.id, mock: true }, status: 400, errorRe: /prompt/i },
+  ];
+  await checkRows(cases.map(({ name, body, status, errorRe }) => ({ name, run: async () => {
+    const r = await post('/api/run', body);
+    assert.equal(r.status, status);
+    if (errorRe) assert.match((await r.json()).error, errorRe);
+  } })));
 });
 
-test('POST /api/run with NEITHER workspaceId nor projectDir -> 400', async () => {
-  const r = await post('/api/run', { prompt: 'x', mock: true });
-  assert.equal(r.status, 400);
-  assert.match((await r.json()).error, /workspaceId or projectDir/i);
-});
-
-test('POST /api/run with a malformed workspaceId -> 404', async () => {
-  const r = await post('/api/run', { workspaceId: 'not-a-ws-id', prompt: 'x', mock: true });
-  assert.equal(r.status, 404);
-});
-
-test('POST /api/run with an unknown (well-formed) workspaceId -> 404', async () => {
-  const r = await post('/api/run', { workspaceId: 'wks-nope-00000000', prompt: 'x', mock: true });
-  assert.equal(r.status, 404);
-});
-
-test('POST /api/run on a workspace requires a prompt -> 400', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const { workspace } = await (await post('/api/workspaces', { name: 'NoPrompt', projectPaths: [a, b] })).json();
-  const r = await post('/api/run', { workspaceId: workspace.id, mock: true });
-  assert.equal(r.status, 400);
-  assert.match((await r.json()).error, /prompt/i);
-});
-
-test('POST /api/run on a workspace with a vanished member -> 400 "workspace member path is missing"', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const { workspace } = await (await post('/api/workspaces', { name: 'Vanish Run', projectPaths: [a, b] })).json();
-  // Remove a member after creation; the run target requires the full set.
-  await rm(b, { recursive: true, force: true });
-  const r = await post('/api/run', { workspaceId: workspace.id, prompt: 'x', mock: true });
-  assert.equal(r.status, 400);
-  assert.match((await r.json()).error, /workspace member path is missing/i);
-});
-
-test('POST /api/run on a workspace whose member exists but is no longer a git repo -> 400', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const { workspace } = await (await post('/api/workspaces', { name: 'DeGit Run', projectPaths: [a, b] })).json();
-  // The member dir still exists, but its .git is gone (createWorkspace enforced
-  // isGitRepo; this only bites a member that BECAME a non-repo). The run target
-  // must reject it with a clean 400, not a mid-run worktree error event.
-  await rm(join(b, '.git'), { recursive: true, force: true });
-  const r = await post('/api/run', { workspaceId: workspace.id, prompt: 'x', mock: true });
-  assert.equal(r.status, 400);
-  assert.match((await r.json()).error, /not a git repository|member path is missing/i);
+test('POST /api/run on a workspace with a vanished or de-gitted member -> 400', async () => {
+  await checkRows([
+    { name: 'POST /api/run on a workspace with a vanished member -> 400 "workspace member path is missing"', run: async () => {
+      const a = await freshRepo();
+      const b = await freshRepo();
+      const { workspace } = await (await post('/api/workspaces', { name: 'Vanish Run', projectPaths: [a, b] })).json();
+      // Remove a member after creation; the run target requires the full set.
+      await rm(b, { recursive: true, force: true });
+      const r = await post('/api/run', { workspaceId: workspace.id, prompt: 'x', mock: true });
+      assert.equal(r.status, 400);
+      assert.match((await r.json()).error, /workspace member path is missing/i);
+    } },
+    { name: 'POST /api/run on a workspace whose member exists but is no longer a git repo -> 400', run: async () => {
+      const a = await freshRepo();
+      const b = await freshRepo();
+      const { workspace } = await (await post('/api/workspaces', { name: 'DeGit Run', projectPaths: [a, b] })).json();
+      // The member dir still exists, but its .git is gone (createWorkspace enforced
+      // isGitRepo; this only bites a member that BECAME a non-repo). The run target
+      // must reject it with a clean 400, not a mid-run worktree error event.
+      await rm(join(b, '.git'), { recursive: true, force: true });
+      const r = await post('/api/run', { workspaceId: workspace.id, prompt: 'x', mock: true });
+      assert.equal(r.status, 400);
+      assert.match((await r.json()).error, /not a git repository|member path is missing/i);
+    } },
+  ]);
 });
 
 test('POST /api/run on a workspace rejects an option-injection sourceBranch (leading dash) -> 400', async () => {
@@ -639,34 +623,32 @@ test('POST /api/run on a workspace rejects an option-injection sourceBranch (lea
   assert.match((await r.json()).error, /sourceBranch/i);
 });
 
-test('POST /api/run on a workspace does NOT pre-validate sourceBranch existence (D2 divergence)', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const { workspace } = await (await post('/api/workspaces', { name: 'D2 WS', projectPaths: [a, b] })).json();
-  // A source ref that does not exist in any member is NOT rejected (the
-  // orchestrator resolves each member's default branch at run time). This is the
-  // single intentional divergence from the single-project line-320 guard.
-  const r = await post('/api/run', { workspaceId: workspace.id, prompt: 'x', mock: true, sourceBranch: 'no-such-branch' });
-  assert.equal(r.status, 200, 'a non-existent sourceBranch is accepted for a workspace run (D2)');
-  const { runId } = await r.json();
-  assert.ok(runId);
-});
-
-test('POST /api/run on a valid workspace returns {runId} and registers a kind:"workspace-run" entry', async () => {
+test('POST /api/run on a valid workspace returns {runId}, registers a workspace-run entry, and accepts an unknown sourceBranch (D2)', async () => {
   const a = await freshRepo();
   const b = await freshRepo();
   const { workspace } = await (await post('/api/workspaces', { name: 'Valid Run', projectPaths: [a, b] })).json();
-  const r = await post('/api/run', { workspaceId: workspace.id, prompt: 'demo task', mock: true });
-  assert.equal(r.status, 200);
+  // A source ref that does not exist in any member is NOT rejected (the
+  // orchestrator resolves each member's default branch at run time). This is the
+  // single intentional divergence from the single-project line-320 guard.
+  const r = await post('/api/run', { workspaceId: workspace.id, prompt: 'demo task', mock: true, sourceBranch: 'no-such-branch' });
   const { runId } = await r.json();
-  assert.match(runId, /[0-9a-f-]{8,}/);
+  await checkRows([
+    { name: 'POST /api/run on a workspace does NOT pre-validate sourceBranch existence (D2 divergence)', run: () => {
+      assert.equal(r.status, 200, 'a non-existent sourceBranch is accepted for a workspace run (D2)');
+      assert.ok(runId);
+    } },
+    { name: 'POST /api/run on a valid workspace returns {runId} and registers a kind:"workspace-run" entry', run: () => {
+      assert.equal(r.status, 200);
+      assert.match(runId, /[0-9a-f-]{8,}/);
 
-  // The route registered a workspace-run entry tagged with the workspace id and a
-  // primary projectDir = projects[0].projectDir (lowest projectKey).
-  const entry = runs.get(runId);
-  assert.ok(entry, 'run is registered in the runs Map');
-  assert.equal(entry.workspaceId, workspace.id);
-  assert.ok(workspace.projectPaths.includes(entry.projectDir), 'projectDir is a member (the primary)');
+      // The route registered a workspace-run entry tagged with the workspace id and a
+      // primary projectDir = projects[0].projectDir (lowest projectKey).
+      const entry = runs.get(runId);
+      assert.ok(entry, 'run is registered in the runs Map');
+      assert.equal(entry.workspaceId, workspace.id);
+      assert.ok(workspace.projectPaths.includes(entry.projectDir), 'projectDir is a member (the primary)');
+    } },
+  ]);
 });
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -740,33 +722,35 @@ async function seedWorkspaceWithPipeline(name) {
   return { workspace, wsRoot, runId, pdir };
 }
 
-test('GET /api/runs?workspaceId= lists workspace-store pipelines; bad/unknown id -> 404', async () => {
+test('GET /api/runs?workspaceId= lists stored and live workspace pipelines (other workspaces filtered); bad/unknown id -> 404', async () => {
   const { workspace, runId } = await seedWorkspaceWithPipeline('List WS Runs');
-  const r = await get(`/api/runs?workspaceId=${encodeURIComponent(workspace.id)}`);
-  assert.equal(r.status, 200);
-  const j = await r.json();
-  assert.ok(Array.isArray(j.pipelines));
-  assert.ok(j.pipelines.some((p) => p.id === runId), 'lists the seeded workspace pipeline');
+  await checkRows([
+    { name: 'GET /api/runs?workspaceId= lists workspace-store pipelines; bad/unknown id -> 404', run: async () => {
+      const r = await get(`/api/runs?workspaceId=${encodeURIComponent(workspace.id)}`);
+      assert.equal(r.status, 200);
+      const j = await r.json();
+      assert.ok(Array.isArray(j.pipelines));
+      assert.ok(j.pipelines.some((p) => p.id === runId), 'lists the seeded workspace pipeline');
 
-  // Malformed / unknown workspaceId -> 404.
-  assert.equal((await get('/api/runs?workspaceId=not-a-ws-id')).status, 404);
-  assert.equal((await get('/api/runs?workspaceId=wks-nope-00000000')).status, 404);
-});
+      // Malformed / unknown workspaceId -> 404.
+      assert.equal((await get('/api/runs?workspaceId=not-a-ws-id')).status, 404);
+      assert.equal((await get('/api/runs?workspaceId=wks-nope-00000000')).status, 404);
+    } },
+    { name: 'GET /api/runs?workspaceId= includes live workspace runs filtered by workspaceId', run: async () => {
+      runs.set('live-ws-2', {
+        id: 'live-ws-2', pipelineId: null, projectDir: workspace.projectPaths[0],
+        title: 'live', status: 'running', workspaceId: workspace.id, kind: 'workspace-run',
+      });
+      // A live run for ANOTHER workspace must not leak in.
+      runs.set('live-other', { id: 'live-other', title: 'other', status: 'running', workspaceId: 'wks-other-00000000', kind: 'workspace-run' });
 
-test('GET /api/runs?workspaceId= includes live workspace runs filtered by workspaceId', async () => {
-  const { workspace } = await seedWorkspaceWithPipeline('Live WS Runs');
-  runs.set('live-ws-2', {
-    id: 'live-ws-2', pipelineId: null, projectDir: workspace.projectPaths[0],
-    title: 'live', status: 'running', workspaceId: workspace.id, kind: 'workspace-run',
-  });
-  // A live run for ANOTHER workspace must not leak in.
-  runs.set('live-other', { id: 'live-other', title: 'other', status: 'running', workspaceId: 'wks-other-00000000', kind: 'workspace-run' });
-
-  const j = await (await get(`/api/runs?workspaceId=${encodeURIComponent(workspace.id)}`)).json();
-  assert.ok(Array.isArray(j.live));
-  assert.ok(j.live.some((r) => r.runId === 'live-ws-2'), 'live workspace run surfaced');
-  assert.ok(!j.live.some((r) => r.runId === 'live-other'), 'other workspace live run filtered out');
-  runs.clear();
+      const j = await (await get(`/api/runs?workspaceId=${encodeURIComponent(workspace.id)}`)).json();
+      assert.ok(Array.isArray(j.live));
+      assert.ok(j.live.some((r) => r.runId === 'live-ws-2'), 'live workspace run surfaced');
+      assert.ok(!j.live.some((r) => r.runId === 'live-other'), 'other workspace live run filtered out');
+      runs.clear();
+    } },
+  ]);
 });
 
 test('GET /api/workspaces/:id/runs/:runId returns detail; unknown -> 404; bad key -> 404', async () => {
@@ -782,18 +766,21 @@ test('GET /api/workspaces/:id/runs/:runId returns detail; unknown -> 404; bad ke
   assert.equal((await get(`/api/workspaces/wks-nope-00000000/runs/${runId}`)).status, 404);
 });
 
-test('DELETE /api/runs/:id?workspaceId= removes the workspace pipeline dir + shared files', async () => {
-  const { workspace, wsRoot, runId, pdir } = await seedWorkspaceWithPipeline('Delete WS Run');
-  const r = await del(`/api/runs/${runId}?workspaceId=${encodeURIComponent(workspace.id)}`);
-  assert.equal(r.status, 200);
-  assert.equal(existsSync(pdir), false, 'pipeline dir removed');
-  assert.equal(existsSync(join(wsRoot, 'plans', '04-06-26-ws-feature.md')), false, 'shared plan removed');
-  assert.equal(existsSync(join(wsRoot, 'reviews', '04-06-26-ws-feature-impl-review.md')), false, 'shared review removed');
-});
-
-test('DELETE /api/runs/:id?workspaceId= with a malformed workspaceId -> 404', async () => {
-  const r = await del('/api/runs/ww?workspaceId=not-a-ws-id');
-  assert.equal(r.status, 404);
+test('DELETE /api/runs/:id?workspaceId= removes the pipeline dir + shared files; malformed workspaceId -> 404', async () => {
+  await checkRows([
+    { name: 'DELETE /api/runs/:id?workspaceId= removes the workspace pipeline dir + shared files', run: async () => {
+      const { workspace, wsRoot, runId, pdir } = await seedWorkspaceWithPipeline('Delete WS Run');
+      const r = await del(`/api/runs/${runId}?workspaceId=${encodeURIComponent(workspace.id)}`);
+      assert.equal(r.status, 200);
+      assert.equal(existsSync(pdir), false, 'pipeline dir removed');
+      assert.equal(existsSync(join(wsRoot, 'plans', '04-06-26-ws-feature.md')), false, 'shared plan removed');
+      assert.equal(existsSync(join(wsRoot, 'reviews', '04-06-26-ws-feature-impl-review.md')), false, 'shared review removed');
+    } },
+    { name: 'DELETE /api/runs/:id?workspaceId= with a malformed workspaceId -> 404', run: async () => {
+      const r = await del('/api/runs/ww?workspaceId=not-a-ws-id');
+      assert.equal(r.status, 404);
+    } },
+  ]);
 });
 
 test('DELETE /api/runs/:id?workspaceId= is 409 while the workspace pipeline is live', async () => {
@@ -808,30 +795,15 @@ test('DELETE /api/runs/:id?workspaceId= is 409 while the workspace pipeline is l
 // Single-project regression (byte-identical behavior when no workspaceId)
 // ───────────────────────────────────────────────────────────────────────────
 
-test('regression: single-project POST /api/run still returns {runId} (no workspaceId)', async () => {
-  const repo = await freshRepo();
-  const r = await post('/api/run', { projectDir: repo, prompt: 'demo task', mock: true });
-  assert.equal(r.status, 200);
-  const { runId } = await r.json();
-  assert.match(runId, /[0-9a-f-]{8,}/);
-  const entry = runs.get(runId);
-  assert.ok(entry);
-  assert.equal(entry.workspaceId, undefined, 'single-project entries carry no workspaceId');
-});
-
-test('regression: single-project POST /api/run still rejects an unknown sourceBranch -> 400', async () => {
-  const repo = await freshRepo();
-  const r = await post('/api/run', { projectDir: repo, prompt: 'x', mock: true, sourceBranch: 'no-such-branch' });
-  assert.equal(r.status, 400, 'single-project path keeps the isValidSourceRef guard');
-  assert.match((await r.json()).error, /sourceBranch/i);
-});
-
-test('regression: GET /api/runs?projectDir= still 400s without projectDir/workspaceId', async () => {
-  const r = await get('/api/runs');
-  assert.equal(r.status, 400);
-});
-
-test('regression: DELETE /api/runs/:id still 400s without any key', async () => {
-  const r = await del('/api/runs/whatever');
-  assert.equal(r.status, 400);
+test('GET /api/runs and DELETE /api/runs/:id 400 without projectDir/workspaceId', async () => {
+  await checkRows([
+    { name: 'regression: GET /api/runs?projectDir= still 400s without projectDir/workspaceId', run: async () => {
+      const r = await get('/api/runs');
+      assert.equal(r.status, 400);
+    } },
+    { name: 'regression: DELETE /api/runs/:id still 400s without any key', run: async () => {
+      const r = await del('/api/runs/whatever');
+      assert.equal(r.status, 400);
+    } },
+  ]);
 });

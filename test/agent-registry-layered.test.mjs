@@ -3,6 +3,7 @@
 // Built-ins are immutable: a user key colliding with a built-in is skipped + warned.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,17 +27,35 @@ function writeAgent(dir, key, extra = {}) {
   }, null, 2));
 }
 
-test('user agents merge into the registry with computed origin + layer-correct agentPath', () => {
-  const builtin = tmp('worca-cc-builtin-');
-  const user = tmp('worca-cc-user-');
-  writeAgent(builtin, 'alpha', { order: 1 });
-  writeAgent(user, 'beta', { order: 2 });
-  const reg = loadAgentRegistry(builtin, { userAgentsDir: user });
-  assert.deepEqual(Object.keys(reg), ['alpha', 'beta']);
-  assert.equal(reg.alpha.origin, 'builtin');
-  assert.equal(reg.beta.origin, 'user');
-  assert.equal(reg.alpha.agentPath, join(builtin, 'alpha.md'));
-  assert.equal(reg.beta.agentPath, join(user, 'beta.md'));
+test('user layer: merges with origin + agentPath, sorts across layers by .order, disabled by userAgentsDir:null', async () => {
+  await checkRows([
+    { name: 'user agents merge into the registry with computed origin + layer-correct agentPath', run: () => {
+      const builtin = tmp('worca-cc-builtin-');
+      const user = tmp('worca-cc-user-');
+      writeAgent(builtin, 'alpha', { order: 1 });
+      writeAgent(user, 'beta', { order: 2 });
+      const reg = loadAgentRegistry(builtin, { userAgentsDir: user });
+      assert.deepEqual(Object.keys(reg), ['alpha', 'beta']);
+      assert.equal(reg.alpha.origin, 'builtin');
+      assert.equal(reg.beta.origin, 'user');
+      assert.equal(reg.alpha.agentPath, join(builtin, 'alpha.md'));
+      assert.equal(reg.beta.agentPath, join(user, 'beta.md'));
+    } },
+    { name: 'opts.userAgentsDir: null disables the user layer entirely', run: () => {
+      const builtin = tmp('worca-cc-builtin-');
+      writeAgent(builtin, 'alpha', { order: 1 });
+      const reg = loadAgentRegistry(builtin, { userAgentsDir: null });
+      assert.deepEqual(Object.keys(reg), ['alpha']);
+    } },
+    { name: 'combined layers sort by .order across layers', run: () => {
+      const builtin = tmp('worca-cc-builtin-');
+      const user = tmp('worca-cc-user-');
+      writeAgent(builtin, 'zlast', { order: 10 });
+      writeAgent(user, 'afirst', { order: 0.5 });
+      const reg = loadAgentRegistry(builtin, { userAgentsDir: user });
+      assert.deepEqual(Object.keys(reg), ['afirst', 'zlast']);
+    } },
+  ]);
 });
 
 test('a user key colliding with a built-in is SKIPPED with a warning (built-ins immutable)', () => {
@@ -55,13 +74,6 @@ test('a user key colliding with a built-in is SKIPPED with a warning (built-ins 
   } finally { console.warn = orig; }
 });
 
-test('opts.userAgentsDir: null disables the user layer entirely', () => {
-  const builtin = tmp('worca-cc-builtin-');
-  writeAgent(builtin, 'alpha', { order: 1 });
-  const reg = loadAgentRegistry(builtin, { userAgentsDir: null });
-  assert.deepEqual(Object.keys(reg), ['alpha']);
-});
-
 test('the default user layer is <worcaHome()>/agents and merges automatically', () => {
   const builtin = tmp('worca-cc-builtin-');
   writeAgent(builtin, 'alpha', { order: 1 });
@@ -71,13 +83,4 @@ test('the default user layer is <worcaHome()>/agents and merges automatically', 
   const reg = loadAgentRegistry(builtin); // no opts: user layer resolved from worcaHome()
   assert.deepEqual(Object.keys(reg), ['alpha', 'gamma']);
   assert.equal(reg.gamma.origin, 'user');
-});
-
-test('combined layers sort by .order across layers', () => {
-  const builtin = tmp('worca-cc-builtin-');
-  const user = tmp('worca-cc-user-');
-  writeAgent(builtin, 'zlast', { order: 10 });
-  writeAgent(user, 'afirst', { order: 0.5 });
-  const reg = loadAgentRegistry(builtin, { userAgentsDir: user });
-  assert.deepEqual(Object.keys(reg), ['afirst', 'zlast']);
 });

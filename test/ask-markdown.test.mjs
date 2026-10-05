@@ -1,5 +1,5 @@
 // test/ask-markdown.test.mjs — the sandboxed markdown pipeline (spec §10.7)
-// against the REAL pinned marked@18.0.10 + dompurify@3.4.14 under jsdom.
+// against the REAL pinned marked@18.0.10 + dompurify@3.4.16 under jsdom.
 // npm ci is a prerequisite — without it both imports fail for reasons
 // unrelated to this module.
 import { test, before } from 'node:test';
@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
 import { createMarkdownRenderer } from '../ui/public/ask-markdown.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let dom;
 before(() => { dom = new JSDOM('<!doctype html><body></body>', { url: 'http://localhost:4317/' }); });
@@ -94,45 +95,60 @@ test('ask-markdown: task-list checkboxes are inert; non-checkbox inputs are remo
   }
 });
 
-test('ask-markdown: over 200 000 chars renders plain', async () => {
-  const r = await makeReady();
-  assert.deepEqual(r.render('a'.repeat(200_001)), { kind: 'plain' });
-  assert.equal(r.render('a'.repeat(1000)).kind, 'md');
+test('ask-markdown plain fallbacks: over 200 000 chars, not ready yet, and a failing load latched after 3 attempts', async () => {
+  await checkRows([
+    { name: 'ask-markdown: over 200 000 chars renders plain', run: async () => {
+      const r = await makeReady();
+      assert.deepEqual(r.render('a'.repeat(200_001)), { kind: 'plain' });
+      assert.equal(r.render('a'.repeat(1000)).kind, 'md');
+    } },
+    { name: 'ask-markdown: not ready → plain; ready flips to md', run: async () => {
+      const r = createMarkdownRenderer({ doc: dom.window.document, load: realLoad, hljsLoader: { forLanguage: async () => null } });
+      assert.deepEqual(r.render('**bold**'), { kind: 'plain' });
+      assert.equal(r.isReady(), false);
+      await r.ensure();
+      assert.equal(r.isReady(), true);
+      assert.equal(r.render('**bold**').kind, 'md');
+    } },
+    { name: 'ask-markdown: a failing load latches to plain after 3 attempts, never retries endlessly', run: async () => {
+      let calls = 0;
+      const r = createMarkdownRenderer({ doc: dom.window.document, load: async () => { calls += 1; throw new Error('offline'); }, hljsLoader: null });
+      assert.equal(await r.ensure(), false);
+      assert.equal(await r.ensure(), false);
+      assert.equal(await r.ensure(), false);
+      assert.equal(r.isFailed(), true);
+      assert.equal(await r.ensure(), false);
+      assert.equal(calls, 3, 'exactly three attempts, then the permanent latch');
+      assert.deepEqual(r.render('# x'), { kind: 'plain' });
+    } },
+  ]);
 });
 
-test('ask-markdown: not ready → plain; ready flips to md', async () => {
-  const r = createMarkdownRenderer({ doc: dom.window.document, load: realLoad, hljsLoader: { forLanguage: async () => null } });
-  assert.deepEqual(r.render('**bold**'), { kind: 'plain' });
-  assert.equal(r.isReady(), false);
-  await r.ensure();
-  assert.equal(r.isReady(), true);
-  assert.equal(r.render('**bold**').kind, 'md');
-});
-
-test('ask-markdown: a failing load latches to plain after 3 attempts, never retries endlessly', async () => {
-  let calls = 0;
-  const r = createMarkdownRenderer({ doc: dom.window.document, load: async () => { calls += 1; throw new Error('offline'); }, hljsLoader: null });
-  assert.equal(await r.ensure(), false);
-  assert.equal(await r.ensure(), false);
-  assert.equal(await r.ensure(), false);
-  assert.equal(r.isFailed(), true);
-  assert.equal(await r.ensure(), false);
-  assert.equal(calls, 3, 'exactly three attempts, then the permanent latch');
-  assert.deepEqual(r.render('# x'), { kind: 'plain' });
-});
-
-test('ask-markdown: highlight() applies span-only hljs markup on ask-done', async () => {
-  const hljsLoader = {
-    forLanguage: async (lang) => (lang === 'javascript'
-      ? { lang, highlight: (text) => text.replace('const', '<span class="hljs-keyword">const</span>') }
-      : null),
-  };
-  const r = await makeReady({ hljsLoader });
-  const host = dom.window.document.createElement('div');
-  host.appendChild(r.render('```js\nconst a = 1;\n```').frag);
-  await r.highlight(host);
-  assert.ok(host.querySelector('code .hljs-keyword'));
-  assert.equal(host.querySelector('code').textContent, 'const a = 1;\n');
+test('ask-markdown: highlight() applies span-only hljs markup on ask-done; unknown fence languages and aliases map', async () => {
+  await checkRows([
+    { name: 'ask-markdown: highlight() applies span-only hljs markup on ask-done', run: async () => {
+      const hljsLoader = {
+        forLanguage: async (lang) => (lang === 'javascript'
+          ? { lang, highlight: (text) => text.replace('const', '<span class="hljs-keyword">const</span>') }
+          : null),
+      };
+      const r = await makeReady({ hljsLoader });
+      const host = dom.window.document.createElement('div');
+      host.appendChild(r.render('```js\nconst a = 1;\n```').frag);
+      await r.highlight(host);
+      assert.ok(host.querySelector('code .hljs-keyword'));
+      assert.equal(host.querySelector('code').textContent, 'const a = 1;\n');
+    } },
+    { name: 'ask-markdown: unknown fence languages and alias mapping', run: async () => {
+      const seen = [];
+      const hljsLoader = { forLanguage: async (lang) => { seen.push(lang); return null; } };
+      const r = await makeReady({ hljsLoader });
+      const host = dom.window.document.createElement('div');
+      host.appendChild(r.render('```ts\nlet x\n```\n\n```made-up-lang\nzzz\n```').frag);
+      await r.highlight(host);
+      assert.deepEqual(seen, ['typescript'], 'ts aliases to typescript; unknown languages never reach the loader');
+    } },
+  ]);
 });
 
 test('ask-markdown: hostile hljs output is rejected — code stays plain', async () => {
@@ -146,16 +162,6 @@ test('ask-markdown: hostile hljs output is rejected — code stays plain', async
   assert.equal(host.querySelector('img'), null);
   assert.equal(host.querySelector('.hljs-keyword'), null, 'the whole block is rejected, not partially applied');
   assert.equal(host.querySelector('code').textContent, 'const a = 1;\n');
-});
-
-test('ask-markdown: unknown fence languages and alias mapping', async () => {
-  const seen = [];
-  const hljsLoader = { forLanguage: async (lang) => { seen.push(lang); return null; } };
-  const r = await makeReady({ hljsLoader });
-  const host = dom.window.document.createElement('div');
-  host.appendChild(r.render('```ts\nlet x\n```\n\n```made-up-lang\nzzz\n```').frag);
-  await r.highlight(host);
-  assert.deepEqual(seen, ['typescript'], 'ts aliases to typescript; unknown languages never reach the loader');
 });
 
 test('ask-markdown: render() never throws on garbage', async () => {

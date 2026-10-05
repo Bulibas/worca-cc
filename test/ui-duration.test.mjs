@@ -1,9 +1,14 @@
 // test/ui-duration.test.mjs
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -11,7 +16,7 @@ const PROJECT = '/tmp/proj';
 
 // Identical boot harness to test/ui-cost.test.mjs (jsdom + stubbed WS/fetch).
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class {
@@ -46,7 +51,7 @@ const factTiles = (window) => Object.fromEntries(
   [...window.document.querySelectorAll('#hist-detail .rd-facts .rd-stats > div')]
     .map((t) => [t.querySelector('span').textContent, t.querySelector('b').textContent]));
 
-test('the saved run shows the total pipeline duration in its glance facts', async () => {
+test('duration: the saved run\'s glance shows the total active time; durByNode buckets per nodeId', async () => {
   const KEY = 'proj-a1b2c3d4';
   const row = { id: 'p1', projectKey: KEY, title: 'Run', status: 'done', startedAt: '2026-01-01T00:00:00Z', totalActiveMs: 83_000 };
   const detail = { state: { id: 'p1', title: 'Run', status: 'done', startedAt: row.startedAt, steps: [], totalActiveMs: 83_000 } };
@@ -55,18 +60,18 @@ test('the saved run shows the total pipeline duration in its glance facts', asyn
     fetchHandler: (url) => (url.endsWith(`/api/history/${KEY}/p1`) ? ok(detail)
       : url.endsWith('/api/history') ? runsList([row]) : null),
   });
-  ctx.showDetail(KEY, 'p1');
-  await ctx.settle(5);
-  assert.equal(factTiles(ctx.window).time, '1m 23s');
+  await checkRows([
+    { name: 'the saved run shows the total pipeline duration in its glance facts', run: async () => {
+      ctx.showDetail(KEY, 'p1');
+      await ctx.settle(5);
+      assert.equal(factTiles(ctx.window).time, '1m 23s');
+    } },
+    { name: 'durByNode buckets per nodeId; a row with no nodeId has nothing to bucket onto', run: () => {
+      const fn = ctx.window.__np.durByNode;
+      const a = fn([{ nodeId: 's1_0', phase: 'refiner', activeMs: 1500, runningSince: null }], 0, false);
+      assert.equal(a['s1_0'], 1500);
+      // The v1 phase->node fallback died with the v1 manifest.
+      assert.deepEqual(fn([{ phase: 'refine', activeMs: 800, runningSince: null }], 0, false), {});
+    } },
+  ]);
 });
-
-test('durByNode buckets per nodeId; a row with no nodeId has nothing to bucket onto', async () => {
-  const { window } = await boot();
-  const fn = window.__np.durByNode;
-  const a = fn([{ nodeId: 's1_0', phase: 'refiner', activeMs: 1500, runningSince: null }], 0, false);
-  assert.equal(a['s1_0'], 1500);
-  // The v1 phase->node fallback died with the v1 manifest.
-  assert.deepEqual(fn([{ phase: 'refine', activeMs: 800, runningSince: null }], 0, false), {});
-});
-
-

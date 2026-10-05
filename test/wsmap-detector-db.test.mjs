@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeWorkspace, runDetector, assertEvidence } from './helpers/wsmap-fixtures.mjs';
 import detector from '../src/core/workspace-map/detectors/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const BILLING = {
   // CRLF (Windows checkout): same keys, lines and evidence
@@ -107,22 +108,22 @@ after(() => ws.cleanup());
 const member = (k) => ws.members.find((m) => m.key === k);
 const rows = (r, file) => r.facts.filter((f) => !file || f.file === file).map((f) => `${f.dir === 'provides' ? 'P' : 'C'} ${f.key}`).sort();
 
-test('db (.sql / Flyway): CREATE TABLE provides (schema kept, quotes stripped, temp tables and comments skipped); INSERT consumes', async () => {
+test('db (member billing): Flyway DDL provides, migration owner provides ORM tables, SQL literals consume', async () => {
   const r = await runDetector(detector, member('billing'), ws.members);
-  assert.deepEqual(rows(r, 'src/main/resources/db/migration/V1__init.sql'), ['C table:billing.invoices', 'P table:Line_Items', 'P table:billing.invoices']);
-  assert.equal(r.facts.find((f) => f.key === 'table:Line_Items').norm, 'table:line_items');
-  assertEvidence(member('billing'), r);
-});
-
-test('db: a member owning migrations PROVIDES its ORM tables and datasource database', async () => {
-  const r = await runDetector(detector, member('billing'), ws.members);
-  assert.deepEqual(rows(r, 'src/main/java/Invoice.java'), ['P table:billing.invoices']);
-  assert.deepEqual(rows(r, 'src/main/resources/application.yml'), ['P db:billing']);
-});
-
-test('db: SQL literals consume FROM/JOIN/INTO/UPDATE tables; EXTRACT(… FROM x), CTE names, string values and keywords (DO UPDATE SET) skipped', async () => {
-  const r = await runDetector(detector, member('billing'), ws.members);
-  assert.deepEqual(rows(r, 'src/main/java/Repo.java'), ['C table:audit_log', 'C table:billing.invoices', 'C table:customers', 'C table:payments']);
+  await checkRows([
+    { name: 'db (.sql / Flyway): CREATE TABLE provides (schema kept, quotes stripped, temp tables and comments skipped); INSERT consumes', run: () => {
+      assert.deepEqual(rows(r, 'src/main/resources/db/migration/V1__init.sql'), ['C table:billing.invoices', 'P table:Line_Items', 'P table:billing.invoices']);
+      assert.equal(r.facts.find((f) => f.key === 'table:Line_Items').norm, 'table:line_items');
+      assertEvidence(member('billing'), r);
+    } },
+    { name: 'db: a member owning migrations PROVIDES its ORM tables and datasource database', run: () => {
+      assert.deepEqual(rows(r, 'src/main/java/Invoice.java'), ['P table:billing.invoices']);
+      assert.deepEqual(rows(r, 'src/main/resources/application.yml'), ['P db:billing']);
+    } },
+    { name: 'db: SQL literals consume FROM/JOIN/INTO/UPDATE tables; EXTRACT(… FROM x), CTE names, string values and keywords (DO UPDATE SET) skipped', run: () => {
+      assert.deepEqual(rows(r, 'src/main/java/Repo.java'), ['C table:audit_log', 'C table:billing.invoices', 'C table:customers', 'C table:payments']);
+    } },
+  ]);
 });
 
 test('db: without migrations of its own, ORM mappings and SQL are consumes; the datasource is left to config-env', async () => {

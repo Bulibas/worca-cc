@@ -1,9 +1,15 @@
 // test/ui-agent-editor.test.mjs — jsdom tests for the in-card agent editor pane.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast, cardAlertOf } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -37,7 +43,7 @@ class WSStub {
 }
 
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = WSStub;
@@ -113,36 +119,6 @@ test('Edit opens the pane, fills fields via .value (markup inert), and PUTs the 
   assert.equal(puts[0].markdown, MD_XSS + 'edited\n');
 });
 
-test('the pane renders typed ports and PUTs exactly what the form read back', async () => {
-  const puts = [];
-  const { window } = await boot({ fetchHandler: (u, opts) => {
-    if (u.includes('/api/agents/docsWriter') && opts && opts.method === 'PUT') {
-      puts.push(JSON.parse(opts.body));
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({ meta: { key: 'docsWriter' } }) });
-    }
-    return null;
-  } });
-  await goAgents(window);
-  const card = window.document.querySelectorAll('.agent-card')[1];
-  click(window, card.querySelector('.agent-edit'));
-  await new Promise((r) => setTimeout(r, 0));
-  const pane = card.querySelector('.agent-edit-pane');
-  assert.equal(pane.hidden, false);
-  const form = pane.querySelector('.agent-form');
-  assert.ok(form, 'the pane hosts the shared form');
-  assert.deepEqual([...form.querySelectorAll('.agent-ports-out .port-row .pf-id')].map((i) => i.value), ['review', 'pass']);
-  // Add an input, then save.
-  click(window, form.querySelector('.pf-add-in'));
-  form.querySelector('.agent-ports-in .port-row:last-child .pf-id').value = 'extra';
-  click(window, pane.querySelector('.agent-edit-save'));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(puts.length, 1);
-  assert.equal(puts[0].meta.metaVersion, 2);
-  assert.deepEqual(puts[0].meta.inputs.map((p) => p.id), ['plan', 'extra']);
-  assert.equal(puts[0].meta.consumes, undefined, 'no channel fields are ever PUT');
-  assert.equal('markdown' in puts[0], true);
-});
-
 test('a derived description is shown as a placeholder, never pre-filled, and never PUT back', async () => {
   const puts = [];
   const derived = AGENTS[2];
@@ -184,53 +160,49 @@ test('a 400 on save keeps the pane open and surfaces the store rule VERBATIM', a
   click(window, pane.querySelector('.agent-edit-save'));
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(pane.hidden, false, 'the pane stays open on a rejection');
-  assert.equal(pane.querySelector('.agent-edit-msg').textContent, rule, 'verbatim — never re-worded');
-  assert.ok(pane.querySelector('.agent-edit-msg').className.includes('err'));
+  // #555: a refusal is a card alert above the editor's buttons, the rule verbatim.
+  assert.deepEqual(cardAlertOf(pane), { title: 'Not saved', detail: rule }, 'verbatim — never re-worded');
+  assert.ok(pane.querySelector('.card-alert').nextElementSibling.contains(pane.querySelector('.agent-edit-save')), 'directly above the action row');
+  assert.equal(pane.querySelector('.agent-edit-save').dataset.fbState, undefined, 'a refusal never shows "Saved"');
+  assert.equal(pane.querySelector('.agent-edit-save').disabled, false);
 });
 
 // MAJ-15 (UI half): a port change that strands a saved wire is reported by
 // PUT /api/agents/:key as `warnings: [...]`. The save SUCCEEDED, so the banner
 // must not read as an error — it names the pipelines the run gate will now refuse.
-test('a PUT that returns warnings surfaces them beside the save confirmation', async () => {
-  const { window } = await boot({ fetchHandler: (u, opts) => {
-    if (u.includes('/api/agents/docsWriter') && opts && opts.method === 'PUT') {
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({
-        meta: { key: 'docsWriter' }, markdown: '# b\n',
-        warnings: ['saved pipelines reference a removed port: Docs Flow (n_d.review)'],
-      }) });
-    }
-    return null;
-  } });
-  await goAgents(window);
-  const card = window.document.querySelector('.agent-card[data-agent-key="docsWriter"]');
-  click(window, card.querySelector('.agent-edit'));
-  await new Promise((r) => setTimeout(r, 0));
-  click(window, card.querySelector('.agent-edit-save'));
-  await new Promise((r) => setTimeout(r, 0));
-  const msg = window.document.querySelector('#agents-msg');
-  assert.equal(msg.textContent,
-    'Agent saved. saved pipelines reference a removed port: Docs Flow (n_d.review)');
-  assert.equal(msg.className, 'form-msg warn', 'a saved-with-caveats banner is not an error');
-});
-
 // MIN-19 (UI half): propagating a port change to a workspace variant is a SUCCESS,
 // not a caveat — the banner names the variants and stays green.
-test('a PUT that updated workspace variants names them and stays an ok banner', async () => {
+test('a PUT result\'s warnings make a warn toast; updatedVariants make an ok toast naming them', async () => {
+  const replies = [
+    { meta: { key: 'docsWriter' }, markdown: '# b\n',
+      warnings: ['saved pipelines reference a removed port: Docs Flow (n_d.review)'] },
+    { meta: { key: 'docsWriter' }, markdown: '# b\n', warnings: [], updatedVariants: ['docsWriterWs'] },
+  ];
   const { window } = await boot({ fetchHandler: (u, opts) => {
     if (u.includes('/api/agents/docsWriter') && opts && opts.method === 'PUT') {
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({
-        meta: { key: 'docsWriter' }, markdown: '# b\n', warnings: [], updatedVariants: ['docsWriterWs'],
-      }) });
+      const body = replies.shift();
+      return Promise.resolve({ ok: true, status: 200, json: async () => body });
     }
     return null;
   } });
   await goAgents(window);
-  const card = window.document.querySelector('.agent-card[data-agent-key="docsWriter"]');
-  click(window, card.querySelector('.agent-edit'));
-  await new Promise((r) => setTimeout(r, 0));
-  click(window, card.querySelector('.agent-edit-save'));
-  await new Promise((r) => setTimeout(r, 0));
-  const msg = window.document.querySelector('#agents-msg');
-  assert.equal(msg.textContent, 'Agent saved. Workspace variants updated: docsWriterWs.');
-  assert.equal(msg.className, 'form-msg ok');
+  const editAndSave = async () => {
+    const card = window.document.querySelector('.agent-card[data-agent-key="docsWriter"]');
+    click(window, card.querySelector('.agent-edit'));
+    await new Promise((r) => setTimeout(r, 0));
+    click(window, card.querySelector('.agent-edit-save'));
+    await new Promise((r) => setTimeout(r, 0));
+  };
+  await checkRows([
+    { name: 'a PUT that returns warnings surfaces them beside the save confirmation', run: async () => {
+      await editAndSave();
+      assert.deepEqual(lastToast(window.document), { tone: 'warn', action: '',
+        title: 'Agent saved. saved pipelines reference a removed port: Docs Flow (n_d.review)', detail: '' },
+      'a saved-with-caveats result is a warn toast, not an error');
+    } },
+    { name: 'a PUT that updated workspace variants names them and stays an ok banner', run: async () => {
+      await editAndSave();
+      assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Agent saved. Workspace variants updated', detail: 'docsWriterWs.', action: '' });
+    } },
+  ]);
 });

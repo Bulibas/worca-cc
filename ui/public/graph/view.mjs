@@ -27,6 +27,7 @@ import { classifyLoops } from '../../../src/shared/graph/loops.mjs';
 import { thumbnailSvg } from '../../../src/shared/graph/thumbnail.mjs';
 import { sanitizeIcon } from '../../../src/shared/graph/manifest.mjs';
 import { KEYED_KINDS } from '../../../src/shared/graph/constants.mjs';
+import { AWAY_GLYPH } from '../away-glyph.mjs';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -317,6 +318,16 @@ export function createGraphView(host, {
       row.append(h('i', 'led'), h('span', 'xl', band.label || ''), h('span', 'xr', band.right || ''));
       return row;
     }
+    if (band.kind === 'away') {
+      // Away mode spend under the execution it answered: glyph · label · cost. Not clickable.
+      const row = h('div', `xaway is-${band.variant === 'stopped' ? 'stopped' : 'booked'}`);
+      row.dataset.executionId = band.executionId || '';
+      row.title = band.title || '';
+      const ico = h('span', 'xaway-ico');
+      ico.innerHTML = AWAY_GLYPH;                  // a repo-shipped literal, never run data
+      row.append(ico, h('span', 'xl', band.label || ''), h('span', 'xr', band.right || ''));
+      return row;
+    }
     if (band.kind === 'live') {
       const l = h('div', 'xlive mono');
       l.textContent = band.text || '';
@@ -334,9 +345,11 @@ export function createGraphView(host, {
   }
 
   /** The identity of a band ACROSS repaints. `exec` is keyed by its execution,
-   *  the three singletons by their kind — so the strip's <button> survives every
-   *  decor generation (MAJ-20). */
-  const bandKey = (band) => (band.kind === 'exec' ? `exec|${band.executionId || ''}` : band.kind);
+   *  `away` by its execution AND variant (one execution can carry a booked and a
+   *  stopped band), the singletons by their kind — so the strip's <button>
+   *  survives every decor generation (MAJ-20). */
+  const bandKey = (band) => (band.kind === 'exec' ? `exec|${band.executionId || ''}`
+    : band.kind === 'away' ? `away|${band.executionId || ''}|${band.variant === 'stopped' ? 'stopped' : 'booked'}` : band.kind);
 
   /** `.stack` = dur · cost on its own line, `.l2` = two clamped label lines —
    *  the layout the band's own `units` billed (run-decor execBandLayout). */
@@ -377,6 +390,18 @@ export function createGraphView(host, {
       return true;
     }
     if (band.kind === 'live') { if (el.textContent !== band.text) { el.textContent = band.text || ''; el.title = band.text || ''; } return true; }
+    if (band.kind === 'away') {
+      // Before the `result` arm, which would blank an away band.
+      const l = el.querySelector(':scope > .xl');
+      const r = el.querySelector(':scope > .xr');
+      if (!l || !r) return false;
+      const lt = band.label || '';
+      const rt = band.right || '';
+      if (l.textContent !== lt) l.textContent = lt;
+      if (r.textContent !== rt) r.textContent = rt;
+      if (el.title !== (band.title || '')) el.title = band.title || '';
+      return true;
+    }
     if (band.kind === 'exec') {
       const cls = execRowClass(band);
       if (el.className !== cls) el.className = cls;
@@ -753,7 +778,8 @@ export function createGraphView(host, {
       el.style.height = `${sizeOf(node).h}px`;
       if ((footers.get(nodeId) || 0) !== prevLines) rerouteAll();     // a changed obstacle box re-routes (D16)
     },
-    /** Per-card ornaments: agent colour, gate pip, header duration · cost. */
+    /** Per-card ornaments: agent colour, gate pip, header duration · cost (and the
+     *  Away mode chip when `totals.away.text` is set — the share is inside `cost`). */
     setNodeChrome(nodeId, { color = '', gate = null, totals = null } = {}) {
       const el = nodeEls.get(nodeId);
       if (!el) return;
@@ -773,6 +799,12 @@ export function createGraphView(host, {
       if (!run) { run = h('div', 'nrun'); run.append(h('span', 'dur'), h('span', 'cost')); el.appendChild(run); }
       run.querySelector('.dur').textContent = totals.dur || '';
       run.querySelector('.cost').textContent = totals.cost || '';
+      const awayText = (totals.away && totals.away.text) || '';
+      let away = run.querySelector(':scope > .away');
+      if (!awayText) { if (away) away.remove(); return; }
+      if (!away) { away = h('span', 'away'); run.appendChild(away); }
+      if (away.textContent !== awayText) away.textContent = awayText;
+      away.title = totals.away.title || 'Away mode';
     },
     /** The amber `N×` delivery badge on a loop wire's bow (no-op on a plain wire). */
     setWireBadge(wireId, badge) {

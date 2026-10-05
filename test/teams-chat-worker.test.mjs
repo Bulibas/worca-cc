@@ -9,6 +9,7 @@ import { generateKeyPairSync, createSign } from 'node:crypto';
 import { createJwtValidator, decodeJwt } from '../plugins/teams-chat/channel/jwt.mjs';
 import { createTokenProvider } from '../plugins/teams-chat/channel/token.mjs';
 import { createTeamsWorker, validateConfig, renderCard, stripMentions } from '../plugins/teams-chat/channel/worker.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const APP_ID = 'app-1234';
 const SERVICE_URL = 'https://smba.trafficmanager.net/emea/';
@@ -39,42 +40,44 @@ const jwksFetch = async (url) => {
   throw new Error(`unexpected ${url}`);
 };
 
-test('JWT matrix: valid accepted; iss/aud/exp/sig/serviceUrl/kid rejected', async () => {
-  const v = createJwtValidator({ appId: APP_ID, fetchFn: jwksFetch });
-  assert.equal((await v.validate(`Bearer ${mint()}`, SERVICE_URL)).ok, true);
-  const cases = [
-    [`Bearer ${mint({ iss: 'https://evil.example' })}`, SERVICE_URL, /bad issuer/],
-    [`Bearer ${mint({ aud: 'other-app' })}`, SERVICE_URL, /bad audience/],
-    [`Bearer ${mint({ exp: Math.floor(Date.now() / 1000) - 1000 })}`, SERVICE_URL, /expired/],
-    [`Bearer ${mint({ nbf: Math.floor(Date.now() / 1000) + 1000 })}`, SERVICE_URL, /not yet valid/],
-    [`Bearer ${mint({ key: rogueKey })}`, SERVICE_URL, /bad signature/],
-    [`Bearer ${mint()}`, 'https://spoofed.example/', /serviceUrl mismatch/],
-    [`Bearer ${mint({ kid: 'kid-unknown' })}`, SERVICE_URL, /unknown signing key/],
-    [`Bearer ${mint({ alg: 'none' })}`, SERVICE_URL, /unexpected alg|bad signature|malformed/],
-    ['', SERVICE_URL, /missing bearer/],
-    ['Bearer not.a.jwt', SERVICE_URL, /malformed/],
-  ];
-  for (const [header, svc, re] of cases) {
-    const out = await v.validate(header, svc);
-    assert.equal(out.ok, false, String(re));
-    assert.match(out.reason, re);
-  }
-  assert.ok(decodeJwt(mint()));
-});
-
-test('a signed token WITHOUT exp is rejected (fail closed)', async () => {
-  const token = mint({ exp: undefined }); // JSON.stringify drops the key entirely
-  assert.equal(decodeJwt(token).payload.exp, undefined, 'fixture guard: token really has no exp');
-  const v = createJwtValidator({ appId: APP_ID, fetchFn: jwksFetch });
-  const r = await v.validate(`Bearer ${token}`, SERVICE_URL);
-  assert.equal(r.ok, false);
-  assert.match(r.reason, /exp/);
-});
-
-test('a string exp is rejected', async () => {
-  const v = createJwtValidator({ appId: APP_ID, fetchFn: jwksFetch });
-  const r = await v.validate(`Bearer ${mint({ exp: 'never' })}`, SERVICE_URL);
-  assert.equal(r.ok, false);
+test('JWT matrix: valid accepted; iss/aud/exp/sig/serviceUrl/kid, missing exp and string exp all rejected (fail closed)', async () => {
+  await checkRows([
+    { name: 'JWT matrix: valid accepted; iss/aud/exp/sig/serviceUrl/kid rejected', run: async () => {
+      const v = createJwtValidator({ appId: APP_ID, fetchFn: jwksFetch });
+      assert.equal((await v.validate(`Bearer ${mint()}`, SERVICE_URL)).ok, true);
+      const cases = [
+        [`Bearer ${mint({ iss: 'https://evil.example' })}`, SERVICE_URL, /bad issuer/],
+        [`Bearer ${mint({ aud: 'other-app' })}`, SERVICE_URL, /bad audience/],
+        [`Bearer ${mint({ exp: Math.floor(Date.now() / 1000) - 1000 })}`, SERVICE_URL, /expired/],
+        [`Bearer ${mint({ nbf: Math.floor(Date.now() / 1000) + 1000 })}`, SERVICE_URL, /not yet valid/],
+        [`Bearer ${mint({ key: rogueKey })}`, SERVICE_URL, /bad signature/],
+        [`Bearer ${mint()}`, 'https://spoofed.example/', /serviceUrl mismatch/],
+        [`Bearer ${mint({ kid: 'kid-unknown' })}`, SERVICE_URL, /unknown signing key/],
+        [`Bearer ${mint({ alg: 'none' })}`, SERVICE_URL, /unexpected alg|bad signature|malformed/],
+        ['', SERVICE_URL, /missing bearer/],
+        ['Bearer not.a.jwt', SERVICE_URL, /malformed/],
+      ];
+      for (const [header, svc, re] of cases) {
+        const out = await v.validate(header, svc);
+        assert.equal(out.ok, false, String(re));
+        assert.match(out.reason, re);
+      }
+      assert.ok(decodeJwt(mint()));
+    } },
+    { name: 'a signed token WITHOUT exp is rejected (fail closed)', run: async () => {
+      const token = mint({ exp: undefined }); // JSON.stringify drops the key entirely
+      assert.equal(decodeJwt(token).payload.exp, undefined, 'fixture guard: token really has no exp');
+      const v = createJwtValidator({ appId: APP_ID, fetchFn: jwksFetch });
+      const r = await v.validate(`Bearer ${token}`, SERVICE_URL);
+      assert.equal(r.ok, false);
+      assert.match(r.reason, /exp/);
+    } },
+    { name: 'a string exp is rejected', run: async () => {
+      const v = createJwtValidator({ appId: APP_ID, fetchFn: jwksFetch });
+      const r = await v.validate(`Bearer ${mint({ exp: 'never' })}`, SERVICE_URL);
+      assert.equal(r.ok, false);
+    } },
+  ]);
 });
 
 test('a JWKS outage with no cache yields ok:false (→401), not an escaped throw', async () => {

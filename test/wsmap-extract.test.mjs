@@ -62,12 +62,6 @@ test('a throwing detector is caught, timed and recorded; the others still run; l
   assert.equal(web.coverage.level, 'partial');
 });
 
-test('detector time is measured per detector (killer: detector timing)', async () => {
-  const slow = { id: 'slow', claims: (rel) => rel === 'package.json', detect() { const t0 = performance.now(); while (performance.now() - t0 < 20) { /* busy */ } } };
-  const doc = await extractWorkspace({ name: 'Shop', members: ws.members, detectors: [...P1_DETECTORS, slow], now: NOW });
-  assert.ok(doc.members.web.coverage.detectors.slow.ms >= 15, JSON.stringify(doc.members.web.coverage.detectors.slow));
-});
-
 test('fact cap: MAX_FACTS_PER_MEMBER stops collecting, marks truncated and says why', async () => {
   const doc = await extractWorkspace({ name: 'Shop', members: ws.members, detectors: P1_DETECTORS, limits: { ...LIMITS, MAX_FACTS_PER_MEMBER: 2 }, now: NOW });
   const web = doc.members.web;

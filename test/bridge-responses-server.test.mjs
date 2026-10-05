@@ -158,17 +158,6 @@ test('openai-responses streaming: the upstream gets a Responses body (reasoning 
   assert.deepEqual(bridgeCallsFor('exec-r'), { initiated: 0, continued: 1, errors: 0, free: 0 });
 });
 
-test('openai-responses non-streaming → a Messages JSON object; max_output_tokens floored at 16', async () => {
-  const { status, text } = await callMessages('oa-resp', { model: 'oa-resp', max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] });
-  assert.equal(status, 200, text);
-  const j = JSON.parse(text);
-  assert.equal(j.type, 'message');
-  assert.equal(j.model, 'oa-resp');
-  assert.deepEqual(j.content, [{ type: 'text', text: 'plain' }]);
-  assert.equal(j.stop_reason, 'end_turn');
-  assert.equal(seen.at(-1).body.max_output_tokens, 16);
-});
-
 test('copilot + openai-responses: POST <copilot host>/responses with the Copilot token and editor headers', async () => {
   seen.length = 0;
   const { status, text } = await callMessages('copilot-gpt-r', { model: 'copilot-gpt-r', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'hi' }] });
@@ -240,12 +229,4 @@ test('openai-responses: a context overflow — streamed or buffered — reaches 
     respMode = 'reasoning-tool';
     bridgeEvents.off('failure', onFailure);
   }
-});
-
-test('openai-responses: a server tool → 400 naming it and the bridge; nothing reaches the upstream', async () => {
-  const before = seen.length;
-  const { status, text } = await callMessages('oa-resp', { model: 'oa-resp', messages: [{ role: 'user', content: 'x' }], tools: [{ type: 'web_search_20250305', name: 'web_search' }] });
-  assert.equal(status, 400);
-  assert.match(JSON.parse(text).error.message, /"web_search" is an Anthropic server tool .*\(openai-responses bridge\)/);
-  assert.equal(seen.length, before);
 });

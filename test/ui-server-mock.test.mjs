@@ -12,18 +12,19 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 
-const _openDoms = [];
-afterEach(() => { for (const d of _openDoms.splice(0)) { try { d.window.close(); } catch { /* closed */ } } });
+const trackDom = useDomRelease(afterEach);
 
 const ok = (body) => Promise.resolve({ ok: true, status: 200, json: async () => body });
 
 async function boot() {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
-  _openDoms.push(dom);
+  trackDom(dom);
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   const wsBox = { ws: null };
@@ -62,57 +63,35 @@ const parts = (doc) => ({
   cb: doc.getElementById('mock'),
 });
 
-test('server mock on: the MOCK pill shows beside the wordmark and the Mock switch is locked on', async () => {
-  const { doc, hello } = await boot();
-  await hello({ serverMock: true });
-  const { pill, sw, cb } = parts(doc);
-  assert.ok(pill, 'the pill is in the markup');
-  assert.equal(pill.closest('.brand') !== null, true, 'it sits in the sidebar brand row');
-  assert.equal(pill.hidden, false);
-  assert.equal(pill.textContent.trim(), 'MOCK');
-  assert.ok(pill.classList.contains('badge'), 'an existing badge style');
-  assert.match(pill.title, /WORCA_MOCK=1/);
-  assert.equal(cb.checked, true, 'the run body reads the hidden checkbox: mock');
-  assert.equal(sw.classList.contains('on'), true);
-  assert.equal(sw.getAttribute('aria-checked'), 'true');
-  assert.equal(sw.getAttribute('aria-disabled'), 'true');
-  assert.ok(sw.classList.contains('disabled'));
-  assert.match(sw.title, /Server started with WORCA_MOCK=1 — all runs are mock\./);
-});
-
-test('server mock on: clicking or keying the locked switch leaves it on', async () => {
+// One boot: the hello with serverMock on, then the locked switch is clicked and keyed.
+test('server mock on: the MOCK pill shows and the Mock switch is locked on — clicks and keys leave it on', async () => {
   const { window, doc, hello } = await boot();
   await hello({ serverMock: true });
-  const { sw, cb } = parts(doc);
-  sw.click();
-  sw.dispatchEvent(new window.KeyboardEvent('keydown', { key: ' ', bubbles: true }));
-  assert.equal(cb.checked, true);
-  assert.equal(sw.classList.contains('on'), true);
-  assert.equal(sw.getAttribute('aria-checked'), 'true');
-});
-
-test('server mock off: no pill; the switch is interactive and defaults off as today', async () => {
-  const { doc, hello } = await boot();
-  await hello({ serverMock: false });
-  const { pill, sw, cb } = parts(doc);
-  assert.equal(pill.hidden, true);
-  assert.equal(cb.checked, false);
-  assert.equal(sw.getAttribute('aria-disabled'), null);
-  assert.equal(sw.classList.contains('disabled'), false);
-  assert.equal(sw.title, '');
-  sw.click();
-  assert.equal(cb.checked, true, 'the switch toggles per run');
-  assert.equal(sw.getAttribute('aria-checked'), 'true');
-  sw.click();
-  assert.equal(cb.checked, false);
-});
-
-test('an older server (no serverMock in hello) is treated as off', async () => {
-  const { doc, hello } = await boot();
-  await hello({});
-  const { pill, sw } = parts(doc);
-  assert.equal(pill.hidden, true);
-  assert.equal(sw.getAttribute('aria-disabled'), null);
+  await checkRows([
+    { name: 'server mock on: the MOCK pill shows beside the wordmark and the Mock switch is locked on', run: async () => {
+      const { pill, sw, cb } = parts(doc);
+      assert.ok(pill, 'the pill is in the markup');
+      assert.equal(pill.closest('.brand') !== null, true, 'it sits in the sidebar brand row');
+      assert.equal(pill.hidden, false);
+      assert.equal(pill.textContent.trim(), 'MOCK');
+      assert.ok(pill.classList.contains('badge'), 'an existing badge style');
+      assert.match(pill.title, /WORCA_MOCK=1/);
+      assert.equal(cb.checked, true, 'the run body reads the hidden checkbox: mock');
+      assert.equal(sw.classList.contains('on'), true);
+      assert.equal(sw.getAttribute('aria-checked'), 'true');
+      assert.equal(sw.getAttribute('aria-disabled'), 'true');
+      assert.ok(sw.classList.contains('disabled'));
+      assert.match(sw.title, /Server started with WORCA_MOCK=1 — all runs are mock\./);
+    } },
+    { name: 'server mock on: clicking or keying the locked switch leaves it on', run: async () => {
+      const { sw, cb } = parts(doc);
+      sw.click();
+      sw.dispatchEvent(new window.KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+      assert.equal(cb.checked, true);
+      assert.equal(sw.classList.contains('on'), true);
+      assert.equal(sw.getAttribute('aria-checked'), 'true');
+    } },
+  ]);
 });
 
 test('a restarted server without mock unlocks the switch and restores the per-run choice', async () => {

@@ -56,7 +56,7 @@ test('removeProject still removes the metrics worktree when the clone directory 
   assert.equal(existsSync(wt), false, 'the metrics worktree directory is removed by gitdir match, even though the clone is gone');
 });
 
-test('removeProject returns within ~10s under a held slug lock, and the prune completes once it is released', { skip, timeout: 20_000 }, async () => {
+test('removeProject returns after its prune wait under a held slug lock, and the prune completes once it is released', { skip, timeout: 20_000 }, async () => {
   const bare = makeOrigin(root, 'gateway');
   const clone = cloneAs(root, 'machineC', bare, 'gateway');
   await addProject({ name: 'gateway', path: clone });
@@ -67,9 +67,9 @@ test('removeProject returns within ~10s under a held slug lock, and the prune co
   const release = await acquireLock(join(outboxDir('gateway'), '.lock'));
   try {
     const startedAt = Date.now();
-    await removeProject('gateway');
+    await removeProject('gateway', { pruneWaitMs: 200 });
     const elapsedMs = Date.now() - startedAt;
-    assert.ok(elapsedMs < 10_500, `removeProject should return within ~10s of a held lock, took ${elapsedMs}ms`);
+    assert.ok(elapsedMs >= 190 && elapsedMs < 5000, `removeProject should return after its 200 ms prune wait under a held lock, took ${elapsedMs}ms`);
     // The lock was held the whole time: the prune could not have run yet.
     assert.ok(existsSync(wt), 'the worktree is untouched while the slug lock is held');
   } finally {

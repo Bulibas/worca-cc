@@ -58,7 +58,7 @@ const OPEN_BACKOFF_MS = 15;
 /** Latest schema version. Bump + append a new migration step when the DDL grows.
  *  Exported so migration tests assert "reached the module's current version"
  *  instead of hardcoding the number — a schema bump then touches no test file. */
-export const SCHEMA_VERSION = 45;
+export const SCHEMA_VERSION = 51;
 
 /** Absolute path to the database file: <worcaHome>/worca-cc.db. */
 export function dbPath() {
@@ -855,13 +855,16 @@ const INCREMENTAL_COLUMNS = {
   project_config:         { human_in_loop: 'INTEGER NOT NULL DEFAULT 1' },   // v28: the Auto entry's human-in-the-loop switch
   diff_comments:          { parent_id: 'TEXT REFERENCES diff_comments(id) ON DELETE CASCADE',  // v29: reply threads; NULL = thread root
                             author_name: 'TEXT' },   // v37: who wrote it (identity.mjs actor); NULL = before attribution / Ask
-  ask_threads:            { created_by: 'TEXT' },    // v37: the thread's owner (identity.mjs actor); NULL = ownerless (legacy)
+  ask_threads:            { created_by: 'TEXT',      // v37: the thread's owner (identity.mjs actor); NULL = ownerless (legacy)
+                            mcp_off: 'TEXT',         // v45: JSON {sets, members} the chat's MCP picker switched off; NULL = none
+                            contexts: 'TEXT' },      // v46: JSON [{kind,id,label,home?,pinned?,source?}] the chat was asked in / talked about, origin first; NULL = before v46 (no indicator)
   pipeline_events:        { actor: 'TEXT' },         // v38: who did it (identity.mjs actor); NULL = the run itself / before attribution
   workspaces:             { metrics_project: 'TEXT',    // v30: team-metrics home (member absolute path); NULL = no home
                             policy_project: 'TEXT',     // v32: team-policy home (member absolute path); NULL = no home
                             map_json: 'TEXT',           // v40: the last scan's { map, synthesis } (workspace map); NULL = none yet
                             map_overrides_json: 'TEXT', // v40: confirm / reject / manual edge overrides; NULL = none
-                            description_origin: 'TEXT' },   // v40: 'generated' | 'edited'; NULL = before v40
+                            description_origin: 'TEXT',     // v40: 'generated' | 'edited'; NULL = before v40
+                            actions_json: 'TEXT' },         // v47: stack actions { stacks:[…] } (issue #529); NULL = none
   schedules:              { ask_thread_id: 'TEXT', ask_card_id: 'TEXT',   // v31: the Ask Worca card a series came from
                             created_by: 'TEXT', updated_by: 'TEXT' },   // v39: who made / last changed it (identity.mjs actor)
   scheduled_runs:         { after_kind: 'TEXT', after_id: 'TEXT', after_policy: "TEXT NOT NULL DEFAULT 'done'",
@@ -904,7 +907,80 @@ CREATE TABLE IF NOT EXISTS notification_reads (
 );
 `;
 
-/** v44: the per-member PRs of a WORKSPACE run (one PR per affected member repo).
+/** night_decisions (v48): one row per ask Away mode answered (src/core/night/*).
+ *  `record` is the JSON decision record {choice, strategy, confidence, scores, rationale,
+ *  reversible, flagged, questions?, guardrail?, meta?}. Pipelines are soft-deleted, so the
+ *  cascade only matters for test DBs. */
+const NIGHT_DECISIONS_DDL = `
+CREATE TABLE IF NOT EXISTS night_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pipeline_id TEXT NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+  question_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  record TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_night_decisions_pipeline ON night_decisions(pipeline_id, id);
+`;
+
+/**
+ * v49: run-control commands (#513) — a transient mailbox any client (the CLI today;
+ * chat / the UI for runs they do not own, later) writes and the run's OWNING process
+ * claims and executes through its own orchestrator. The scheduled_runs transport
+ * pattern for a second kind of intent. Deliberately a separate table: a ticket is a
+ * run-CREATION intent whose row then lives on as the run's provenance record (fired →
+ * pipeline_id, outcome, retries, run chains), while a command is transient, targets an
+ * EXISTING run, and wants to die once consumed — disjoint state machines and retention;
+ * what they share (the guarded-UPDATE claim, scheduler.mjs#claimTicket's shape) is a
+ * pattern to reuse, not a table to merge. No FK to pipelines: pipeline rows are never
+ * deleted (archived at most), so orphaned commands are reaped (pipeline-commands.mjs),
+ * not cascaded.
+ */
+const PIPELINE_COMMANDS_DDL = `
+CREATE TABLE IF NOT EXISTS pipeline_commands (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,  -- FIFO arrival order; commands are anonymous (a ticket's id becomes its run's id, a command's does not)
+  pipeline_id  TEXT NOT NULL,                -- the 8-hex History id, prefix-resolved client-side before insert
+  action       TEXT NOT NULL,                -- 'stop' | 'pause' (payload-bearing actions, e.g. answer, ride the same table later)
+  payload      TEXT,                         -- JSON, reserved for those future actions
+  by           TEXT,                         -- who issued it (identity.mjs actor; 'local' from the CLI)
+  created_at   TEXT NOT NULL,
+  consumed_at  TEXT,                         -- NULL until claimed: the claim marker AND the CLI's "executed vs enqueued" signal
+  consumed_by  TEXT                          -- who claimed it (pid@host), for audit
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_commands_pending ON pipeline_commands (pipeline_id, consumed_at);
+`;
+
+// v50 (issue #573): the built-in terminal. Sessions (scope: run, project = the project's own folder, or
+// branch), one row per recorded command (a block), an audit log (who opened, ran, stopped, closed) and
+// the worca-owned worktrees opened for a project branch.
+// No FK to pipelines: blocks and audit rows are kept even after a run is deleted.
+const TERMINAL_DDL = `
+CREATE TABLE IF NOT EXISTS terminal_sessions (
+  id TEXT PRIMARY KEY, scope TEXT NOT NULL, label TEXT, run_id TEXT, member TEXT, project_key TEXT, branch TEXT,
+  cwd TEXT NOT NULL, shell TEXT NOT NULL, shell_kind TEXT NOT NULL, mode TEXT NOT NULL,
+  integration INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, exit_code INTEGER, pid INTEGER, owner_pid INTEGER,
+  created_by TEXT, created_at TEXT NOT NULL, ended_at TEXT, closed_by TEXT );
+CREATE INDEX IF NOT EXISTS idx_terminal_sessions_run ON terminal_sessions (run_id);
+CREATE INDEX IF NOT EXISTS idx_terminal_sessions_status ON terminal_sessions (status);
+CREATE TABLE IF NOT EXISTS terminal_blocks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, seq INTEGER NOT NULL,
+  source TEXT NOT NULL DEFAULT 'person', run_id TEXT, member TEXT, command TEXT NOT NULL, cwd TEXT,
+  status TEXT NOT NULL, exit_code INTEGER, started_at TEXT NOT NULL, ended_at TEXT, duration_ms INTEGER,
+  output TEXT NOT NULL DEFAULT '', output_bytes INTEGER NOT NULL DEFAULT 0, output_truncated INTEGER NOT NULL DEFAULT 0,
+  run_by TEXT, stopped_by TEXT, UNIQUE (session_id, seq) );
+CREATE INDEX IF NOT EXISTS idx_terminal_blocks_run ON terminal_blocks (run_id, started_at);
+CREATE TABLE IF NOT EXISTS terminal_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, session_id TEXT NOT NULL, block_seq INTEGER,
+  run_id TEXT, actor TEXT, action TEXT NOT NULL, detail TEXT );
+CREATE INDEX IF NOT EXISTS idx_terminal_audit_session ON terminal_audit (session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_terminal_audit_run ON terminal_audit (run_id, ts);
+CREATE TABLE IF NOT EXISTS terminal_worktrees (
+  dir TEXT PRIMARY KEY, project_key TEXT NOT NULL, branch TEXT NOT NULL, detached INTEGER NOT NULL DEFAULT 0,
+  created_by TEXT, created_at TEXT NOT NULL, last_used_at TEXT NOT NULL );
+CREATE INDEX IF NOT EXISTS idx_terminal_worktrees_branch ON terminal_worktrees (project_key, branch);
+`;
+
+/** v51: the per-member PRs of a WORKSPACE run (one PR per affected member repo).
  *  The pipelines row's pr_* columns keep a rollup of these (stats count a run once).
  *  NOT in workspace_meta: that JSON is re-serialized from in-memory state on every
  *  persist, so a PR recorded post-hoc would vanish at the next resume. IF NOT EXISTS
@@ -940,8 +1016,14 @@ const INCREMENTAL_TABLES = {
   schedules:         SCHEDULED_RUNS_DDL,
   scheduled_runs:    SCHEDULED_RUNS_DDL,
   notifications:     SCHEDULED_RUNS_DDL,
+  pipeline_commands: PIPELINE_COMMANDS_DDL,
   notification_reads: NOTIFICATION_READS_DDL,
   pipeline_member_prs: PIPELINE_MEMBER_PRS_DDL,
+  night_decisions:   NIGHT_DECISIONS_DDL,
+  terminal_sessions:  TERMINAL_DDL,
+  terminal_blocks:    TERMINAL_DDL,
+  terminal_audit:     TERMINAL_DDL,
+  terminal_worktrees: TERMINAL_DDL,
 };
 
 /**
@@ -1515,8 +1597,24 @@ function applySchemaV44(db) {
   repairSchemaGaps(db, schemaGaps(db));
 }
 
-/** v45 (workspace PRs): create pipeline_member_prs (via the gap repair) and backfill
- *  the single PR the pre-v45 path could have recorded on a workspace row. The old
+/** v45 (MCP registry §9.4): ask_threads.mcp_off — the per-chat MCP picker's switched-off sets and
+ *  memberships (JSON), a plain additive column declared in INCREMENTAL_COLUMNS, applySchemaV30's
+ *  shape. NULL on every existing row = nothing switched off. Same body as v44: a DB stamped 44 by
+ *  either side (scheduled resume on dev, this column on the MCP branch) gets the other column here. */
+function applySchemaV45(db) {
+  repairSchemaGaps(db, schemaGaps(db));
+}
+
+/** v48 (Away mode): night_decisions (INCREMENTAL_TABLES), one row per ask Away mode answered.
+ *  v46 is the Ask context chips' column, v47 the workspace actions'. A DB stamped 44, 46 or 47 by an
+ *  earlier build of the Away mode branch (night_decisions at v44, v46, then v47) already has the
+ *  table (IF NOT EXISTS) and gets the columns it skipped from the gap repair above. */
+function applySchemaV48(db) {
+  db.exec(NIGHT_DECISIONS_DDL);
+}
+
+/** v51 (workspace PRs): create pipeline_member_prs (via the gap repair) and backfill
+ *  the single PR the pre-v51 path could have recorded on a workspace row. The old
  *  POST /api/pr resolved a workspace run only through its primary member's project
  *  key and pushed the PRIMARY member's branch, so that PR belongs to project_key.
  *  INSERT OR IGNORE: re-entering the step never duplicates or overwrites.
@@ -1525,7 +1623,7 @@ function applySchemaV44(db) {
  *  the base columns project_key/target — an ungated SELECT throws `no such column`
  *  and rolls the whole ladder back. Also fenced (V33/V39 shape): a backfill is never
  *  worth failing the migration over. */
-function applySchemaV45(db) {
+function applySchemaV51(db) {
   repairSchemaGaps(db, schemaGaps(db));
   if (!memberPrBackfillable(db)) return;
   try {
@@ -1538,7 +1636,7 @@ function applySchemaV45(db) {
   } catch { /* never fail the migration on the backfill */ }
 }
 
-/** applySchemaV45's column guard (the presentationSeedable precedent). */
+/** applySchemaV51's column guard (the presentationSeedable precedent). */
 function memberPrBackfillable(db) {
   if (!hasSqliteTable(db, 'pipelines') || !hasSqliteTable(db, 'pipeline_member_prs')) return false;
   const cols = new Set(db.prepare('PRAGMA table_info(pipelines)').all().map((c) => c.name));
@@ -1969,7 +2067,14 @@ export function migrate(db) {
     if (current < SCHEMA_VERSION) refreshPresentationSeed(db);
     if (current < 42) applySchemaV42(db);            // deck subresources -> the unlisted deck-asset kind
     if (current < 44) applySchemaV44(db);            // scheduled resume: scheduled_runs.resume_pipeline_id
-    if (current < 45) applySchemaV45(db);            // workspace PRs: pipeline_member_prs + gated backfill
+    if (current < 45) applySchemaV45(db);            // MCP registry: ask_threads.mcp_off (per-chat picker)
+    // v46 (Ask context chips): ask_threads.contexts, an INCREMENTAL_COLUMNS entry the hoisted
+    // repairSchemaGaps above adds — no step of its own. NULL on every existing thread = no indicator.
+    // (v47: workspaces.actions_json arrives through the same repair — additive column only, issue #529.)
+    if (current < 48) applySchemaV48(db);            // Away mode: one row per answered ask
+    if (current < 49) db.exec(PIPELINE_COMMANDS_DDL); // run-control mailbox (#513) — IF NOT EXISTS, reconcile-safe
+    if (current < 50) db.exec(TERMINAL_DDL);         // built-in terminal (#573) — IF NOT EXISTS, reconcile-safe
+    if (current < 51) applySchemaV51(db);            // workspace PRs: pipeline_member_prs + gated backfill
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (err) {

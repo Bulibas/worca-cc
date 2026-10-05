@@ -10,10 +10,11 @@ import http from 'node:http';
 import { WebSocket } from 'ws';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { holdMockTurn, isAssistant, isTextDelta } from './helpers/ask-hold.mjs';
 
 useTempHome(after);
 
-let homeDir, srv, base, wsBase, mod, prevHome;
+let homeDir, srv, base, wsBase, mod, prevHome, prevOsHome, prevProfile;
 const JSONH = { 'Content-Type': 'application/json' };
 const MODEL = { model: 'claude-opus-5-5', effort: 'high' };
 
@@ -21,6 +22,10 @@ before(async () => {
   homeDir = await mkdtemp(join(tmpdir(), 'worca-cc-askmsg-'));
   prevHome = process.env.WORCA_HOME;
   process.env.WORCA_HOME = homeDir;
+  // settings.json lives under HOME, not WORCA_HOME: the budget tests' cost-limit
+  // setters must never write the developer's real ~/.worca-cc/settings.json.
+  prevOsHome = process.env.HOME; prevProfile = process.env.USERPROFILE;
+  process.env.HOME = homeDir; process.env.USERPROFILE = homeDir;
   process.env.WORCA_MOCK = '1';
   mod = await import('../ui/server.mjs');
   srv = mod.server;
@@ -42,6 +47,8 @@ after(async () => {
     ]);
   }
   if (prevHome === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prevHome;
+  if (prevOsHome === undefined) delete process.env.HOME; else process.env.HOME = prevOsHome;
+  if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
   delete process.env.WORCA_MOCK;
   await rm(homeDir, { recursive: true, force: true });
 });
@@ -140,13 +147,17 @@ test('a full mock turn: 202, stamped frames to ask-done, persistence, session, t
   ws.close();
 });
 
-test('409 while in flight; the 30 s grace entry never blocks the next turn', async () => {
+test('409 while in flight; the 30 s grace entry never blocks the next turn', async (tc) => {
+  const release = holdMockTurn(tc);
   const t = await newThread();
   const { ws, msgs, opened } = openWs(`?threadId=${t.id}`);
   await opened;
   assert.equal((await post(`/api/ask/threads/${t.id}/messages`, { text: 'MOCK_SLOW one', ...MODEL })).status, 202);
   await waitFor(() => framesFor(msgs, t.id).some((f) => f.type === 'ask-start'));
   assert.equal((await post(`/api/ask/threads/${t.id}/messages`, { text: 'second', ...MODEL })).status, 409);
+  await waitFor(() => release.reached() >= 1);
+  assert.ok(!framesFor(msgs, t.id).some((f) => f.type === 'ask-done'), 'the held turn is still in flight');
+  release();
   await waitFor(() => framesFor(msgs, t.id).some((f) => f.type === 'ask-done'));
   const again = await post(`/api/ask/threads/${t.id}/messages`, { text: 'third', ...MODEL });
   assert.equal(again.status, 202, 'a done grace entry never 409s');
@@ -154,11 +165,14 @@ test('409 while in flight; the 30 s grace entry never blocks the next turn', asy
   ws.close();
 });
 
-test('mid-turn reconnect: ?threadId= replay and {type:subscribe,threadId} both deliver the stamped prefix', async () => {
+test('mid-turn reconnect: ?threadId= replay and {type:subscribe,threadId} both deliver the stamped prefix', async (tc) => {
+  const release = holdMockTurn(tc, isAssistant);
   const t = await newThread();
   const a = openWs(`?threadId=${t.id}`);
   await a.opened;
   await post(`/api/ask/threads/${t.id}/messages`, { text: 'MOCK_SLOW replay me', ...MODEL });
+  await waitFor(() => release.reached() >= 1);
+  assert.ok(!framesFor(a.msgs, t.id).some((f) => f.type === 'ask-done'), 'the held turn is still in flight');
   await waitFor(() => framesFor(a.msgs, t.id).length >= 3);
   const b = openWs(`?threadId=${t.id}`);
   await b.opened;
@@ -178,30 +192,41 @@ test('mid-turn reconnect: ?threadId= replay and {type:subscribe,threadId} both d
   await waitFor(() => framesFor(c.msgs, t.id).some((f) => f.seq === 1));
   const cSeqs = [...new Set(framesFor(c.msgs, t.id).map((f) => f.seq))].sort((x, y) => x - y);
   assert.deepEqual(cSeqs.slice(0, 3), [1, 2, 3], 'in-band subscribe replays from the start');
+  release();
   await waitFor(() => framesFor(a.msgs, t.id).some((f) => f.type === 'ask-done'));
   a.ws.close(); b.ws.close(); c.ws.close();
 });
 
-test('429 at three global running turns', async () => {
+test('429 at three global running turns', async (tc) => {
+  const release = holdMockTurn(tc);
   const ts = [await newThread(), await newThread(), await newThread()];
   const w = openWs();
   await w.opened;
-  for (const t of ts) {
-    assert.equal((await post(`/api/ask/threads/${t.id}/messages`, { text: 'MOCK_SLOW hold', ...MODEL })).status, 202);
+  try {
+    for (const t of ts) {
+      assert.equal((await post(`/api/ask/threads/${t.id}/messages`, { text: 'MOCK_SLOW hold', ...MODEL })).status, 202);
+    }
+    await waitFor(() => release.reached() >= ts.length);
+    assert.ok(!ts.some((t) => framesFor(w.msgs, t.id).some((f) => f.type === 'ask-done')), 'the three held turns are still running');
+    const extra = await newThread();
+    assert.equal((await post(`/api/ask/threads/${extra.id}/messages`, { text: 'x', ...MODEL })).status, 429);
+    for (const t of ts) await post(`/api/ask/threads/${t.id}/stop`, {});
+    await waitFor(() => ts.every((t) => framesFor(w.msgs, t.id).some((f) => f.type === 'ask-done')));
+  } finally {
+    release();
   }
-  const extra = await newThread();
-  assert.equal((await post(`/api/ask/threads/${extra.id}/messages`, { text: 'x', ...MODEL })).status, 429);
-  for (const t of ts) await post(`/api/ask/threads/${t.id}/stop`, {});
-  await waitFor(() => ts.every((t) => framesFor(w.msgs, t.id).some((f) => f.type === 'ask-done')));
   w.ws.close();
 });
 
-test('stop: ask-done stopped/user with costUsd null; idempotent; bad shape 400', async () => {
+test('stop: ask-done stopped/user with costUsd null; idempotent; bad shape 400', async (tc) => {
+  const release = holdMockTurn(tc, isTextDelta);
   const t = await newThread();
   const { ws, msgs, opened } = openWs(`?threadId=${t.id}`);
   await opened;
   await post(`/api/ask/threads/${t.id}/messages`, { text: 'MOCK_SLOW stopping', ...MODEL });
   await waitFor(() => framesFor(msgs, t.id).some((f) => f.type === 'ask-delta'));
+  await waitFor(() => release.reached() >= 1);
+  assert.ok(!framesFor(msgs, t.id).some((f) => f.type === 'ask-done'), 'the held turn is still streaming');
   assert.deepEqual(await (await post(`/api/ask/threads/${t.id}/stop`, {})).json(), { ok: true });
   const done = await waitFor(() => framesFor(msgs, t.id).find((f) => f.type === 'ask-done'));
   assert.equal(done.status, 'stopped');

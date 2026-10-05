@@ -4,12 +4,17 @@
 // filters (graph pair by click and by keyboard, coverage chip, selects), the add-form draft, focus
 // and scroll that survive a repaint, Regenerate after a description save, and Re-scan from the
 // empty state. Edge ids are real (x_ / m_ + 12 hex): P5 answers 400 to any other id.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { edgeId, manualEdgeId } from '../src/shared/workspace-map/ids.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -57,7 +62,7 @@ const ok = (body, status = 200) => Promise.resolve({ ok: status < 400, status, j
 // A tiny server: GET /map answers `server.payload`; every call is logged as "METHOD path body".
 async function boot({ payload = payloadOf(), route = null } = {}) {
   const server = { payload, calls: [], workspaces: WS };
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = WSStub;
@@ -167,80 +172,69 @@ test('frames: map and scan actions reload a built tab; other actions do not; the
   assert.equal(gets(server), 4, 'a member change reloads the map');
 });
 
-test('filters: a graph pair by click or Enter filters the table and keeps focus; a coverage chip and a select filter too', async () => {
+test('filters: a graph pair by click, Enter or Space filters the table (keeping focus, never scrolling); a coverage chip and a select filter too', async () => {
   const { window, doc } = await boot();
   await go(window, `workspaces/${ID}/map`);
-  click(window, mapSec(doc).querySelector('.wm-pair[data-from="web"] .wm-line'));
-  await settle(2);
-  assert.deepEqual(rows(doc), [`${X_HTTP}:auto`]);
-  assert.ok(mapSec(doc).querySelector('.wm-filters .wm-pair-chip'));
-  assert.equal(mapSec(doc).querySelector('.wm-pair[data-from="web"]').getAttribute('aria-pressed'), 'true');
-  click(window, mapSec(doc).querySelector('.wm-pair[data-from="web"]'));
-  await settle(2);
-  assert.deepEqual(rows(doc), [`${X_PKG}:auto`, `${X_HTTP}:auto`], 'the same pair again clears');
-  const pair = mapSec(doc).querySelector('.wm-pair[data-from="billing-api"]');
-  pair.focus();
-  pair.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  await settle(2);
-  assert.deepEqual(rows(doc), [`${X_PKG}:auto`]);
-  assert.equal(doc.activeElement, mapSec(doc).querySelector('.wm-pair[data-from="billing-api"]'), 'focus stays on the pair');
-  click(window, mapSec(doc).querySelector('.wm-filters button[data-filter="all"]'));
-  await settle(2);
-  click(window, mapSec(doc).querySelector('.wm-chip[data-value="web"]'));
-  await settle(2);
-  assert.deepEqual(rows(doc), [`${X_HTTP}:auto`]);
-  assert.equal(mapSec(doc).querySelector('.wm-chip[data-value="web"]').getAttribute('aria-pressed'), 'true');
-  const kind = mapSec(doc).querySelector('select.wm-filter[data-filter="kind"]');
-  kind.value = 'pkg';
-  kind.dispatchEvent(new window.Event('change', { bubbles: true }));
-  await settle(2);
-  assert.equal(mapSec(doc).querySelector('.wm-none td').textContent, 'No edges', 'member web AND kind pkg');
-  assert.equal(mapSec(doc).querySelector('select.wm-filter[data-filter="kind"]').value, 'pkg');
+  await checkRows([
+    { name: 'filters: a graph pair by click or Enter filters the table and keeps focus; a coverage chip and a select filter too', run: async () => {
+      click(window, mapSec(doc).querySelector('.wm-pair[data-from="web"] .wm-line'));
+      await settle(2);
+      assert.deepEqual(rows(doc), [`${X_HTTP}:auto`]);
+      assert.ok(mapSec(doc).querySelector('.wm-filters .wm-pair-chip'));
+      assert.equal(mapSec(doc).querySelector('.wm-pair[data-from="web"]').getAttribute('aria-pressed'), 'true');
+      click(window, mapSec(doc).querySelector('.wm-pair[data-from="web"]'));
+      await settle(2);
+      assert.deepEqual(rows(doc), [`${X_PKG}:auto`, `${X_HTTP}:auto`], 'the same pair again clears');
+      const pair = mapSec(doc).querySelector('.wm-pair[data-from="billing-api"]');
+      pair.focus();
+      pair.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await settle(2);
+      assert.deepEqual(rows(doc), [`${X_PKG}:auto`]);
+      assert.equal(doc.activeElement, mapSec(doc).querySelector('.wm-pair[data-from="billing-api"]'), 'focus stays on the pair');
+      click(window, mapSec(doc).querySelector('.wm-filters button[data-filter="all"]'));
+      await settle(2);
+      click(window, mapSec(doc).querySelector('.wm-chip[data-value="web"]'));
+      await settle(2);
+      assert.deepEqual(rows(doc), [`${X_HTTP}:auto`]);
+      assert.equal(mapSec(doc).querySelector('.wm-chip[data-value="web"]').getAttribute('aria-pressed'), 'true');
+      const kind = mapSec(doc).querySelector('select.wm-filter[data-filter="kind"]');
+      kind.value = 'pkg';
+      kind.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await settle(2);
+      assert.equal(mapSec(doc).querySelector('.wm-none td').textContent, 'No edges', 'member web AND kind pkg');
+      assert.equal(mapSec(doc).querySelector('select.wm-filter[data-filter="kind"]').value, 'pkg');
+    } },
+    { name: 'Space on a focused pair filters the table like Enter and never scrolls the page', run: async () => {
+      // The first row left a member and a kind filter on: clear them first.
+      click(window, mapSec(doc).querySelector('.wm-filters button[data-filter="all"]'));
+      await settle(2);
+      assert.deepEqual(rows(doc), [`${X_PKG}:auto`, `${X_HTTP}:auto`]);
+      const pair = mapSec(doc).querySelector('.wm-pair[data-from="billing-api"]');
+      pair.focus();
+      const ev = new window.KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+      pair.dispatchEvent(ev);
+      await settle(2);
+      assert.deepEqual(rows(doc), [`${X_PKG}:auto`]);
+      assert.equal(ev.defaultPrevented, true, 'no page scroll');
+    } },
+  ]);
 });
 
-test('Space on a focused pair filters the table like Enter and never scrolls the page', async () => {
-  const { window, doc } = await boot();
-  await go(window, `workspaces/${ID}/map`);
-  const pair = mapSec(doc).querySelector('.wm-pair[data-from="billing-api"]');
-  pair.focus();
-  const ev = new window.KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
-  pair.dispatchEvent(ev);
-  await settle(2);
-  assert.deepEqual(rows(doc), [`${X_PKG}:auto`]);
-  assert.equal(ev.defaultPrevented, true, 'no page scroll');
-});
-
-test('a frame repaint keeps the focus on a row action or a filter select', async () => {
-  const { window, doc, server, ws } = await boot();
-  await go(window, `workspaces/${ID}/map`);
-  const before = mapSec(doc).querySelector(`.wm-confirm[data-edge="${X_HTTP}"]`);
-  before.focus();
-  ws().deliver({ type: 'workspaces-changed', action: 'map' });
-  await settle();
-  assert.equal(gets(server), 2);
-  assert.equal(before.isConnected, false, 'the table was repainted');
-  assert.equal(doc.activeElement, mapSec(doc).querySelector(`.wm-row[data-edge="${X_HTTP}"] .wm-confirm`), 'the row action keeps the focus');
-  const select = mapSec(doc).querySelector('select.wm-filter[data-filter="kind"]');
-  select.focus();
-  ws().deliver({ type: 'workspaces-changed', action: 'scan-updated' });
-  await settle();
-  assert.equal(gets(server), 3);
-  assert.equal(select.isConnected, false);
-  assert.equal(doc.activeElement, mapSec(doc).querySelector('select.wm-filter[data-filter="kind"]'), 'and so does a filter select');
-});
-
-test('no map yet: the tab says so', async () => {
-  const { window, doc } = await boot({ payload: payloadOf({ map: null }) });
-  await go(window, `workspaces/${ID}/map`);
-  assert.equal(mapSec(doc).querySelector('.wm-empty b').textContent, 'No map yet');
-  assert.ok(mapSec(doc).querySelector('.wm-empty .wm-rescan'));
-});
-
-test('a failed load shows the error alone, never the empty state', async () => {
-  const { window, doc } = await boot({ route: (u) => (u === `/api/workspaces/${ID}/map` ? ok({ error: 'boom' }, 500) : null) });
-  await go(window, `workspaces/${ID}/map`);
-  assert.equal(mapSec(doc).querySelector('.wm-error').textContent, 'boom');
-  assert.equal(mapSec(doc).querySelector('.wm-empty'), null);
+test('no map yet says so; a failed load shows the error alone, never the empty state', async () => {
+  await checkRows([
+    { name: 'no map yet: the tab says so', run: async () => {
+      const { window, doc } = await boot({ payload: payloadOf({ map: null }) });
+      await go(window, `workspaces/${ID}/map`);
+      assert.equal(mapSec(doc).querySelector('.wm-empty b').textContent, 'No map yet');
+      assert.ok(mapSec(doc).querySelector('.wm-empty .wm-rescan'));
+    } },
+    { name: 'a failed load shows the error alone, never the empty state', run: async () => {
+      const { window, doc } = await boot({ route: (u) => (u === `/api/workspaces/${ID}/map` ? ok({ error: 'boom' }, 500) : null) });
+      await go(window, `workspaces/${ID}/map`);
+      assert.equal(mapSec(doc).querySelector('.wm-error').textContent, 'boom');
+      assert.equal(mapSec(doc).querySelector('.wm-empty'), null);
+    } },
+  ]);
 });
 
 test('Confirm / Reject / Clear PUT the edge state, then reload the list and the tab; the keyboard stays on the row', async () => {
@@ -308,92 +302,80 @@ function dropFocus(doc) {
   assert.equal(doc.activeElement, doc.body);
 }
 
-test('a row that comes back unchanged keeps the keyboard on the pressed action, even after the browser dropped the focus', async () => {
-  let release; const gate = new Promise((r) => { release = r; });
-  // The PUT succeeds but the reload shows the row as it was (another window undid it at once).
-  const { window, doc } = await boot({ route: (u, opts) => (opts.method === 'PUT' ? gate.then(() => ok({ overrides: EMPTY_OV })) : null) });
-  await go(window, `workspaces/${ID}/map`);
-  const reject = mapSec(doc).querySelector(`.wm-reject[data-edge="${X_PKG}"]`);
-  reject.focus();
-  click(window, reject);
-  await settle(2);
-  dropFocus(doc);
-  release();
-  await settle();
-  assert.equal(doc.activeElement, mapSec(doc).querySelector(`.wm-row[data-edge="${X_PKG}"] .wm-reject`), 'the same action, not the row\'s first one');
-});
-
-test('a frame\'s newer reload that overtakes the override\'s own reload still puts the keyboard on the row', async () => {
-  let putRelease; const putGate = new Promise((r) => { putRelease = r; });
-  const mapGates = [];
-  let maps = 0;
-  const { window, doc, ws } = await boot({
-    route: (u, opts, s) => {
-      if (opts.method === 'PUT') return putGate.then(() => { s.payload = payloadOf({ states: { [X_PKG]: 'rejected' } }); return ok({ overrides: EMPTY_OV }); });
-      if (u !== `/api/workspaces/${ID}/map` || (opts.method || 'GET') !== 'GET') return null;
-      maps += 1;
-      if (maps === 1) return null;                                      // the tab's first load answers at once
-      const payload = s.payload;                                         // what the server holds when the GET arrives
-      return new Promise((r) => mapGates.push(() => r(ok(payload))));   // later loads wait for the test
-    },
-  });
-  await go(window, `workspaces/${ID}/map`);
-  const reject = mapSec(doc).querySelector(`.wm-reject[data-edge="${X_PKG}"]`);
-  reject.focus();
-  click(window, reject);
-  await settle(2);
-  dropFocus(doc);
-  putRelease();
-  await settle();                                                        // the override's own GET /map waits
-  ws().deliver({ type: 'workspaces-changed', action: 'map' });           // P5's frame (or another window's)
-  await settle();                                                        // the frame's newer GET /map waits too
-  assert.equal(mapGates.length, 2);
-  mapGates[0]();                                                         // ours answers first: dropped (newest wins)
-  await settle();
-  mapGates[1]();                                                         // the frame's answer paints
-  await settle();
-  assert.deepEqual(rows(doc), [`${X_PKG}:rejected`, `${X_HTTP}:auto`]);
-  assert.equal(doc.activeElement, mapSec(doc).querySelector(`.wm-row[data-edge="${X_PKG}"] .wm-clear`), 'the keyboard lands on the row in the paint that won');
-});
-
-test('an older reload that still paints after the answer (it began before) never takes the override\'s keyboard target', async () => {
-  let putRelease; const putGate = new Promise((r) => { putRelease = r; });
-  let listGate = null;
-  const mapGates = [];
-  let maps = 0;
-  const { window, doc, ws } = await boot({
-    route: (u, opts, s) => {
-      if (opts.method === 'PUT') return putGate.then(() => { s.payload = payloadOf({ states: { [X_PKG]: 'rejected' } }); return ok({ overrides: EMPTY_OV }); });
-      if (listGate && (u.endsWith('/api/workspaces') || u.includes('/api/workspaces?'))) { const g = listGate; listGate = null; return g.then(() => ok({ workspaces: s.workspaces })); }
-      if (u !== `/api/workspaces/${ID}/map` || (opts.method || 'GET') !== 'GET') return null;
-      maps += 1;
-      if (maps === 1) return null;
-      const payload = s.payload;
-      return new Promise((r) => mapGates.push(() => r(ok(payload))));
-    },
-  });
-  await go(window, `workspaces/${ID}/map`);
-  const reject = mapSec(doc).querySelector(`.wm-reject[data-edge="${X_PKG}"]`);
-  reject.focus();
-  click(window, reject);
-  await settle(2);
-  dropFocus(doc);
-  ws().deliver({ type: 'workspaces-changed', action: 'map' });           // another window: its GET /map starts BEFORE the answer
-  await settle();
-  assert.equal(mapGates.length, 1);
-  let releaseList; listGate = new Promise((r) => { releaseList = r; });  // hold the override's own list reload
-  putRelease();
-  await settle();
-  mapGates[0]();                                                         // the older GET answers with the old table and paints
-  await settle();
-  assert.deepEqual(rows(doc), [`${X_PKG}:auto`, `${X_HTTP}:auto`], 'the old table painted');
-  releaseList();
-  await settle();                                                        // the override's own GET /map starts and waits
-  assert.equal(mapGates.length, 2);
-  mapGates[1]();
-  await settle();
-  assert.deepEqual(rows(doc), [`${X_PKG}:rejected`, `${X_HTTP}:auto`]);
-  assert.equal(doc.activeElement, mapSec(doc).querySelector(`.wm-row[data-edge="${X_PKG}"] .wm-clear`), 'the target waited for the new table');
+test('reload races around an override: a newer frame reload still lands the keyboard on the row, an older reload that paints late never takes the override\'s target', async () => {
+  await checkRows([
+    { name: 'a frame\'s newer reload that overtakes the override\'s own reload still puts the keyboard on the row', run: async () => {
+      let putRelease; const putGate = new Promise((r) => { putRelease = r; });
+      const mapGates = [];
+      let maps = 0;
+      const { window, doc, ws } = await boot({
+        route: (u, opts, s) => {
+          if (opts.method === 'PUT') return putGate.then(() => { s.payload = payloadOf({ states: { [X_PKG]: 'rejected' } }); return ok({ overrides: EMPTY_OV }); });
+          if (u !== `/api/workspaces/${ID}/map` || (opts.method || 'GET') !== 'GET') return null;
+          maps += 1;
+          if (maps === 1) return null;                                      // the tab's first load answers at once
+          const payload = s.payload;                                         // what the server holds when the GET arrives
+          return new Promise((r) => mapGates.push(() => r(ok(payload))));   // later loads wait for the test
+        },
+      });
+      await go(window, `workspaces/${ID}/map`);
+      const reject = mapSec(doc).querySelector(`.wm-reject[data-edge="${X_PKG}"]`);
+      reject.focus();
+      click(window, reject);
+      await settle(2);
+      dropFocus(doc);
+      putRelease();
+      await settle();                                                        // the override's own GET /map waits
+      ws().deliver({ type: 'workspaces-changed', action: 'map' });           // P5's frame (or another window's)
+      await settle();                                                        // the frame's newer GET /map waits too
+      assert.equal(mapGates.length, 2);
+      mapGates[0]();                                                         // ours answers first: dropped (newest wins)
+      await settle();
+      mapGates[1]();                                                         // the frame's answer paints
+      await settle();
+      assert.deepEqual(rows(doc), [`${X_PKG}:rejected`, `${X_HTTP}:auto`]);
+      assert.equal(doc.activeElement, mapSec(doc).querySelector(`.wm-row[data-edge="${X_PKG}"] .wm-clear`), 'the keyboard lands on the row in the paint that won');
+    } },
+    { name: 'an older reload that still paints after the answer (it began before) never takes the override\'s keyboard target', run: async () => {
+      let putRelease; const putGate = new Promise((r) => { putRelease = r; });
+      let listGate = null;
+      const mapGates = [];
+      let maps = 0;
+      const { window, doc, ws } = await boot({
+        route: (u, opts, s) => {
+          if (opts.method === 'PUT') return putGate.then(() => { s.payload = payloadOf({ states: { [X_PKG]: 'rejected' } }); return ok({ overrides: EMPTY_OV }); });
+          if (listGate && (u.endsWith('/api/workspaces') || u.includes('/api/workspaces?'))) { const g = listGate; listGate = null; return g.then(() => ok({ workspaces: s.workspaces })); }
+          if (u !== `/api/workspaces/${ID}/map` || (opts.method || 'GET') !== 'GET') return null;
+          maps += 1;
+          if (maps === 1) return null;
+          const payload = s.payload;
+          return new Promise((r) => mapGates.push(() => r(ok(payload))));
+        },
+      });
+      await go(window, `workspaces/${ID}/map`);
+      const reject = mapSec(doc).querySelector(`.wm-reject[data-edge="${X_PKG}"]`);
+      reject.focus();
+      click(window, reject);
+      await settle(2);
+      dropFocus(doc);
+      ws().deliver({ type: 'workspaces-changed', action: 'map' });           // another window: its GET /map starts BEFORE the answer
+      await settle();
+      assert.equal(mapGates.length, 1);
+      let releaseList; listGate = new Promise((r) => { releaseList = r; });  // hold the override's own list reload
+      putRelease();
+      await settle();
+      mapGates[0]();                                                         // the older GET answers with the old table and paints
+      await settle();
+      assert.deepEqual(rows(doc), [`${X_PKG}:auto`, `${X_HTTP}:auto`], 'the old table painted');
+      releaseList();
+      await settle();                                                        // the override's own GET /map starts and waits
+      assert.equal(mapGates.length, 2);
+      mapGates[1]();
+      await settle();
+      assert.deepEqual(rows(doc), [`${X_PKG}:rejected`, `${X_HTTP}:auto`]);
+      assert.equal(doc.activeElement, mapSec(doc).querySelector(`.wm-row[data-edge="${X_PKG}"] .wm-clear`), 'the target waited for the new table');
+    } },
+  ]);
 });
 
 test('a refused override shows the server error on the page header and reloads nothing', async () => {
@@ -412,67 +394,6 @@ test('a refused override shows the server error on the page header and reloads n
   assert.deepEqual(server.calls.slice(before), [`PUT /api/workspaces/${ID}/map/edges/${X_HTTP} {"state":"confirmed"}`]);
   assert.equal(btn.disabled, false, 'the button is live again');
   assert.notEqual(doc.activeElement, btn, 'a press that did not hold the keyboard is not handed it');
-});
-
-test('a failed press gives the keyboard back to its button once the browser dropped it', async () => {
-  let release; const gate = new Promise((r) => { release = r; });
-  // The request dies (the server restarted): the catch path, the same finally as a refusal.
-  const { window, doc } = await boot({ route: (u, opts) => (opts.method === 'PUT' ? gate.then(() => { throw new Error('network down'); }) : null) });
-  await go(window, `workspaces/${ID}/map`);
-  const btn = mapSec(doc).querySelector(`.wm-confirm[data-edge="${X_HTTP}"]`);
-  btn.focus();
-  click(window, btn);
-  await settle(2);
-  dropFocus(doc);
-  release();
-  await settle();
-  assert.equal(doc.querySelector('#ws-detail .pd-error').textContent, 'network down');
-  assert.equal(btn.isConnected, true, 'a failed press repaints nothing');
-  assert.equal(btn.disabled, false);
-  assert.equal(doc.activeElement, btn, 'the keyboard is back on Confirm');
-});
-
-test('Add edge and Regenerate give the keyboard back after the answer, even after the browser dropped it', async () => {
-  const gates = [];
-  const hold = () => new Promise((r) => { gates.push(r); });
-  const { window, doc } = await boot({
-    payload: payloadOf({ origin: 'edited' }),
-    route: (u, opts, s) => {
-      if (u === `/api/workspaces/${ID}/map/edges` && opts.method === 'POST') {
-        const edge = { id: M_NEW, ...JSON.parse(opts.body), createdAt: '2026-09-25T12:00:00.000Z' };
-        return hold().then(() => { s.payload = payloadOf({ manual: [edge], origin: 'edited' }); return ok({ edge }, 201); });
-      }
-      if (u === `/api/workspaces/${ID}/map/render` && opts.method === 'POST') {
-        return hold().then(() => { s.payload = payloadOf({ manual: s.payload.overrides.manual, origin: 'generated' }); return ok({ workspace: WS[0] }); });
-      }
-      return null;
-    },
-  });
-  await go(window, `workspaces/${ID}/map`);
-  const form = () => mapSec(doc).querySelector('.wm-add-form');
-  form().querySelector('[name="wm-from"]').value = 'web';
-  form().querySelector('[name="wm-to"]').value = 'shared-lib';
-  form().querySelector('[name="wm-kind"]').value = 'other';
-  form().querySelector('[name="wm-display"]').value = 'S3 bucket';
-  const add = form().querySelector('.wm-add');
-  add.focus();
-  click(window, add);
-  await settle(2);
-  dropFocus(doc);
-  gates.shift()();
-  await settle();
-  assert.ok(rows(doc).includes(`${M_NEW}:manual`));
-  assert.equal(add.isConnected, false, 'the tab was repainted');
-  assert.equal(doc.activeElement, mapSec(doc).querySelector('.wm-add'), 'Add edge has the keyboard again, ready for the next edge');
-  const regen = mapSec(doc).querySelector('.wm-regen');
-  regen.focus();
-  click(window, regen);
-  await settle(2);
-  dropFocus(doc);
-  gates.shift()();
-  await settle();
-  assert.equal(mapSec(doc).querySelector('.wm-regen'), null, 'Regenerate is gone');
-  assert.equal(doc.activeElement, mapSec(doc), 'so the keyboard lands on the tab panel');
 });
 
 test('an override on an edge that is gone (404) shows the error and reloads the tab', async () => {

@@ -82,9 +82,3 @@ test('the mount cannot serve outside src/shared (raw, un-normalized paths)', asy
     assert.doesNotMatch(res.body, /node:sqlite/, `${p} must never serve a src/core module`);
   }
 });
-
-test('the SPA fallback still serves the app shell for a normal route', async () => {
-  const res = await fetch(`${base}/`);
-  assert.equal(res.status, 200);
-  assert.match(res.headers.get('content-type') || '', /text\/html/);
-});

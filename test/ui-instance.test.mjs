@@ -10,6 +10,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import {
   DEFAULT_UI_PORT, UI_HEALTH_NAME, uiInstanceFile, writeUiInstance, readUiInstance, removeUiInstance,
   probeUi, stopUi, uiUrl, urlHost, waitForUiState, newUiToken,
@@ -67,58 +68,60 @@ test('instance file: write is 0600 + atomic, read normalises, remove honours ifP
   removeUiInstance();
 });
 
-test('probeUi: free port -> free', async () => {
-  const port = await freePort();
-  assert.deepEqual(await probeUi({ port }), { state: 'free' });
-});
-
-test('probeUi: a Worca /api/health -> worca with its info', async () => {
-  const { port, close } = await serve((req, res) => {
-    if (req.url === '/api/health') return json(res, 200, { name: UI_HEALTH_NAME, version: '9.9.9', pid: 77 });
-    json(res, 404, { error: 'nope' });
-  });
-  try {
-    const r = await probeUi({ port });
-    assert.equal(r.state, 'worca');
-    assert.equal(r.info.pid, 77);
-    assert.equal(r.info.version, '9.9.9');
-  } finally { await close(); }
-});
-
-test('probeUi: a different program (HTML, other JSON name, 500) -> busy', async () => {
-  const cases = [
-    (_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html>hi</html>'); },
-    (_req, res) => json(res, 200, { name: 'something-else' }),
-    (_req, res) => json(res, 500, { error: 'boom' }),
-  ];
-  for (const handler of cases) {
-    const { port, close } = await serve(handler);
-    try { assert.deepEqual(await probeUi({ port }), { state: 'busy' }); } finally { await close(); }
-  }
-});
-
-test('probeUi: a hang is busy, not free (timeout)', async () => {
-  const { port, close, srv } = await serve(() => { /* never answers */ });
-  srv.on('connection', (s) => s.setTimeout(0));
-  try {
-    const r = await probeUi({ port, timeoutMs: 200 });
-    assert.equal(r.state, 'busy');
-  } finally { srv.closeAllConnections?.(); await close(); }
-});
-
-test('probeUi: an older Worca UI (no /api/health, but /api/settings) -> worca + legacy', async () => {
-  const { port, close } = await serve((req, res) => {
-    if (req.url === '/api/settings') return json(res, 200, { projectsRootDefault: '/home/x', askMaxTurns: 40, chat: {} });
-    json(res, 404, { error: 'not found' });
-  });
-  try {
-    const r = await probeUi({ port });
-    assert.equal(r.state, 'worca');
-    assert.equal(r.info.legacy, true);
-    const s = await stopUi({ port });
-    assert.equal(s.status, 'failed');
-    assert.match(s.reason, /older Worca UI/);
-  } finally { await close(); }
+// Each row owns its own tiny server and closes it in its own finally; checkRows runs
+// the rows one after another, so a failing row never leaves a server for the next.
+test('probeUi classifies a port: free, worca (with info), busy (other program / 500 / hang), legacy worca via /api/settings', async () => {
+  await checkRows([
+    { name: 'probeUi: free port -> free', run: async () => {
+      const port = await freePort();
+      assert.deepEqual(await probeUi({ port }), { state: 'free' });
+    } },
+    { name: 'probeUi: a Worca /api/health -> worca with its info', run: async () => {
+      const { port, close } = await serve((req, res) => {
+        if (req.url === '/api/health') return json(res, 200, { name: UI_HEALTH_NAME, version: '9.9.9', pid: 77 });
+        json(res, 404, { error: 'nope' });
+      });
+      try {
+        const r = await probeUi({ port });
+        assert.equal(r.state, 'worca');
+        assert.equal(r.info.pid, 77);
+        assert.equal(r.info.version, '9.9.9');
+      } finally { await close(); }
+    } },
+    { name: 'probeUi: a different program (HTML, other JSON name, 500) -> busy', run: async () => {
+      const cases = [
+        (_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html>hi</html>'); },
+        (_req, res) => json(res, 200, { name: 'something-else' }),
+        (_req, res) => json(res, 500, { error: 'boom' }),
+      ];
+      for (const handler of cases) {
+        const { port, close } = await serve(handler);
+        try { assert.deepEqual(await probeUi({ port }), { state: 'busy' }); } finally { await close(); }
+      }
+    } },
+    { name: 'probeUi: a hang is busy, not free (timeout)', run: async () => {
+      const { port, close, srv } = await serve(() => { /* never answers */ });
+      srv.on('connection', (s) => s.setTimeout(0));
+      try {
+        const r = await probeUi({ port, timeoutMs: 200 });
+        assert.equal(r.state, 'busy');
+      } finally { srv.closeAllConnections?.(); await close(); }
+    } },
+    { name: 'probeUi: an older Worca UI (no /api/health, but /api/settings) -> worca + legacy', run: async () => {
+      const { port, close } = await serve((req, res) => {
+        if (req.url === '/api/settings') return json(res, 200, { projectsRootDefault: '/home/x', askMaxTurns: 40, chat: {} });
+        json(res, 404, { error: 'not found' });
+      });
+      try {
+        const r = await probeUi({ port });
+        assert.equal(r.state, 'worca');
+        assert.equal(r.info.legacy, true);
+        const s = await stopUi({ port });
+        assert.equal(s.status, 'failed');
+        assert.match(s.reason, /older Worca UI/);
+      } finally { await close(); }
+    } },
+  ]);
 });
 
 test('stopUi: free port -> not-running (idempotent) and clears a stale instance file', async () => {
@@ -156,7 +159,7 @@ test('stopUi: request path — bearer token from the instance file, server close
   } finally { await close().catch(() => {}); }
 });
 
-test('stopUi: signal fallback — no token, shutdown refused, SIGTERM on the health pid', { skip: process.platform === 'win32' && 'signal semantics differ on Windows' }, async () => {
+test('stopUi: signal fallback — stale token refused, SIGTERM on the pid the instance file names', { skip: process.platform === 'win32' && 'signal semantics differ on Windows' }, async () => {
   const port = await freePort();
   // A child that serves /api/health with ITS pid and refuses /api/shutdown (401).
   const script = `
@@ -170,6 +173,7 @@ test('stopUi: signal fallback — no token, shutdown refused, SIGTERM on the hea
   const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
   await new Promise((r) => child.stdout.on('data', (d) => { if (String(d).includes('up')) r(); }));
   const exited = new Promise((r) => child.on('exit', (code, signal) => r({ code, signal })));
+  await writeUiInstance({ pid: child.pid, host: '127.0.0.1', port, token: newUiToken(), version: '0', startedAt: 't' });
   try {
     const r = await stopUi({ port, timeoutMs: 5000 });
     assert.equal(r.status, 'stopped');
@@ -180,6 +184,46 @@ test('stopUi: signal fallback — no token, shutdown refused, SIGTERM on the hea
     assert.deepEqual(await probeUi({ port }), { state: 'free' });
   } finally { try { child.kill('SIGKILL'); } catch { /* gone */ } }
 });
+
+/** A process the test owns, standing in for someone else's UI server: it must survive. */
+function spawnBystander() {
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  let signal = null;
+  child.on('exit', (_c, sig) => { signal = sig || 'exited'; });
+  return { pid: child.pid, signalled: () => signal, kill: () => { try { child.kill('SIGKILL'); } catch { /* gone */ } } };
+}
+
+// Incident 2026-10-02: a `worca ui stop` from a test's WORCA_HOME fell back to the
+// default port, found the user's real UI there, had no token and SIGTERMed the pid
+// /api/health reported. A Worca UI this worcaHome's instance file does not name
+// (same port AND same pid) must never be signalled — or sent this home's token.
+for (const [label, fileFor] of [
+  ['no instance file', () => null],
+  ['instance file names another pid', (port, pid) => ({ pid: pid + 100000, port })],
+  ['instance file names another port', (port, pid) => ({ pid, port: port + 1 })],
+]) {
+  test(`stopUi: ${label} -> failed, the health pid is never signalled`, async () => {
+    const bystander = spawnBystander();
+    let shutdownAuth = null;
+    const { port, close } = await serve((req, res) => {
+      if (req.url === '/api/health') return json(res, 200, { name: UI_HEALTH_NAME, pid: bystander.pid });
+      if (req.url === '/api/shutdown') { shutdownAuth = req.headers.authorization || 'none'; return json(res, 401, {}); }
+      json(res, 404, {});
+    });
+    removeUiInstance();
+    const f = fileFor(port, bystander.pid);
+    if (f) await writeUiInstance({ ...f, host: '127.0.0.1', token: newUiToken(), version: '0', startedAt: 't' });
+    try {
+      const r = await stopUi({ port, timeoutMs: 1000 });
+      assert.equal(r.status, 'failed');
+      assert.equal(r.pid, bystander.pid);
+      assert.match(r.reason, /does not name this server/);
+      assert.equal(shutdownAuth, null, 'no token is offered to a server the file does not name');
+      await new Promise((res) => setTimeout(res, 200));
+      assert.equal(bystander.signalled(), null, 'the bystander must not be signalled');
+    } finally { bystander.kill(); removeUiInstance(); await close(); }
+  });
+}
 
 test('waitForUiState: resolves when the state appears, null on deadline', async () => {
   const port = await freePort();

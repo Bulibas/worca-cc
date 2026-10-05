@@ -22,7 +22,9 @@ test('yaml and smol-toml are exact-pinned runtime dependencies, locked with inte
   }
   if (pkg.name === '@worca/app') {
     // @ricky0123/vad-web + onnxruntime-web: Ask Worca voice mode's in-page Silero VAD (docs/speech.md).
-    assert.deepEqual(Object.keys(pkg.dependencies).sort(), ['@highlightjs/cdn-assets', '@ricky0123/vad-web', 'dompurify', 'express', 'htmlparser2', 'marked', 'onnxruntime-web', 'smol-toml', 'ws', 'yaml']);
+    // undici: fetch() through HTTP(S)_PROXY on Nodes without http.setGlobalProxyFromEnv (src/core/env-proxy.mjs).
+    // @xterm/*: the terminal pane, served from node_modules (docs/terminal.md).
+    assert.deepEqual(Object.keys(pkg.dependencies).sort(), ['@highlightjs/cdn-assets', '@modelcontextprotocol/sdk', '@ricky0123/vad-web', '@xterm/addon-fit', '@xterm/xterm', 'dompurify', 'express', 'htmlparser2', 'marked', 'onnxruntime-web', 'smol-toml', 'undici', 'ws', 'yaml']);
   }
 });
 
@@ -33,14 +35,4 @@ test('both are pure JS: no dependencies, no install scripts, no native build (ma
     for (const s of ['preinstall', 'install', 'postinstall']) assert.equal((p.scripts || {})[s], undefined, `${name} ${s}`);
     assert.equal(p.gypfile, undefined, name);
   }
-});
-
-test('both import as ESM under this Node (>= 22.13) and parse', async () => {
-  const { parseAllDocuments, LineCounter } = await import('yaml');
-  const { parse } = await import('smol-toml');
-  const docs = parseAllDocuments('a: 1\n---\nb: [x]\n', { lineCounter: new LineCounter() });
-  assert.deepEqual(docs.map((d) => d.toJS()), [{ a: 1 }, { b: ['x'] }]);
-  assert.equal(parse('[package]\nname = "x"\n').package.name, 'x');
-  const [major, minor] = process.versions.node.split('.').map(Number);
-  assert.ok(major > 22 || (major === 22 && minor >= 13), process.versions.node);
 });

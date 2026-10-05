@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -135,14 +136,43 @@ test('emitAskWorktrees: the 6-key envelope for a live thread (same builder as th
   assert.equal((await fetch(`${base}/api/ask/threads/${thread.id}`, { method: 'DELETE' })).status, 200);   // git stays clean for the next test
 });
 
-test('thread DELETE removes remaining worktrees git-properly', async () => {
-  const { openAskWorktree } = await import('../src/core/ask/worktrees.mjs');
-  const w2 = await openAskWorktree({ threadId, projectKey, ref: 'main' });
-  const r = await fetch(`${base}/api/ask/threads/${threadId}`, { method: 'DELETE' });
-  assert.equal(r.status, 200);
-  assert.ok(!existsSync(w2.path));
-  const porcelain = String(spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: repoDir }).stdout);
-  assert.ok(!porcelain.includes('/wt/'), 'no stale registration in the source repo');
+test('thread DELETE and bulk DELETE remove remaining worktrees git-properly (and the bulk route counts them)', async () => {
+  await checkRows([
+    { name: 'thread DELETE removes remaining worktrees git-properly', run: async () => {
+      const { openAskWorktree } = await import('../src/core/ask/worktrees.mjs');
+      const w2 = await openAskWorktree({ threadId, projectKey, ref: 'main' });
+      const r = await fetch(`${base}/api/ask/threads/${threadId}`, { method: 'DELETE' });
+      assert.equal(r.status, 200);
+      assert.ok(!existsSync(w2.path));
+      const porcelain = String(spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: repoDir }).stdout);
+      assert.ok(!porcelain.includes('/wt/'), 'no stale registration in the source repo');
+    } },
+    { name: 'bulk DELETE /api/ask/threads removes every chat\'s worktrees git-properly and counts them', run: async () => {
+      const JSONH = { 'Content-Type': 'application/json' };
+      const { openAskWorktree } = await import('../src/core/ask/worktrees.mjs');
+      const store = await import('../src/core/ask/store.mjs');
+      const t1 = (await (await fetch(`${base}/api/ask/threads`, { method: 'POST', headers: JSONH, body: '{}' })).json()).thread;
+      const t2 = (await (await fetch(`${base}/api/ask/threads`, { method: 'POST', headers: JSONH, body: '{}' })).json()).thread;
+      const w1 = await openAskWorktree({ threadId: t1.id, projectKey, ref: 'main' });
+      const w2 = await openAskWorktree({ threadId: t2.id, projectKey, ref: 'main' });
+      const w3 = await openAskWorktree({ threadId: t2.id, projectKey, ref: 'main' });
+      const hist = await (await fetch(`${base}/api/ask/history`)).json();
+      assert.equal(hist.threads, store.countThreads());
+      assert.equal(hist.worktrees, 3);
+      const r = await fetch(`${base}/api/ask/threads`, { method: 'DELETE' });
+      assert.equal(r.status, 200);
+      const j = await r.json();
+      assert.equal(j.ok, true);
+      assert.equal(j.removed.threads, hist.threads);
+      assert.equal(j.removed.worktrees, 3);
+      assert.deepEqual(j.failed, []);
+      for (const w of [w1, w2, w3]) assert.ok(!existsSync(w.path), `${w.path} gone`);
+      const porcelain = String(spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: repoDir }).stdout);
+      assert.ok(!porcelain.includes('/wt/'), 'no stale registration in the source repo');
+      assert.equal(store.countThreads(), 0);
+      assert.equal(store.countWorktrees(), 0);
+    } },
+  ]);
 });
 
 // Review of PR #376: DELETE captured the job BEFORE `await askRemoveThreadWorktrees`
@@ -170,30 +200,4 @@ test('a message POST racing DELETE never starts a turn; nothing survives the del
   assert.equal(mod._testing.askJobs.has(thread.id), false, 'no live job survives the delete');
   assert.equal((await fetch(`${base}/api/ask/threads/${thread.id}`)).status, 404);
   assert.ok(!existsSync(join(homeDir, 'ask', thread.id)), 'thread dir gone');
-});
-
-test('bulk DELETE /api/ask/threads removes every chat\'s worktrees git-properly and counts them', async () => {
-  const JSONH = { 'Content-Type': 'application/json' };
-  const { openAskWorktree } = await import('../src/core/ask/worktrees.mjs');
-  const store = await import('../src/core/ask/store.mjs');
-  const t1 = (await (await fetch(`${base}/api/ask/threads`, { method: 'POST', headers: JSONH, body: '{}' })).json()).thread;
-  const t2 = (await (await fetch(`${base}/api/ask/threads`, { method: 'POST', headers: JSONH, body: '{}' })).json()).thread;
-  const w1 = await openAskWorktree({ threadId: t1.id, projectKey, ref: 'main' });
-  const w2 = await openAskWorktree({ threadId: t2.id, projectKey, ref: 'main' });
-  const w3 = await openAskWorktree({ threadId: t2.id, projectKey, ref: 'main' });
-  const hist = await (await fetch(`${base}/api/ask/history`)).json();
-  assert.equal(hist.threads, store.countThreads());
-  assert.equal(hist.worktrees, 3);
-  const r = await fetch(`${base}/api/ask/threads`, { method: 'DELETE' });
-  assert.equal(r.status, 200);
-  const j = await r.json();
-  assert.equal(j.ok, true);
-  assert.equal(j.removed.threads, hist.threads);
-  assert.equal(j.removed.worktrees, 3);
-  assert.deepEqual(j.failed, []);
-  for (const w of [w1, w2, w3]) assert.ok(!existsSync(w.path), `${w.path} gone`);
-  const porcelain = String(spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: repoDir }).stdout);
-  assert.ok(!porcelain.includes('/wt/'), 'no stale registration in the source repo');
-  assert.equal(store.countThreads(), 0);
-  assert.equal(store.countWorktrees(), 0);
 });

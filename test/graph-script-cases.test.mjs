@@ -6,6 +6,7 @@
 // project cwd rule (shipped cases are scratch-only) and the expectation reader.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import {
   normalizeCases, casePortSet, evaluateExpect,
   CASES_VERSION, MAX_CASES, MAX_CASE_NAME, MAX_CASE_INPUT_BYTES, CASE_ID_RE, EXPECT_VERDICTS,
@@ -182,60 +183,62 @@ test('evaluateExpect: null without an expectation, diffs name what differed', ()
     { pass: false, diffs: ['expected clean, got timeout'] });
 });
 
-test('lenient (the READ path): a case survives a sidecar edit — what the script no longer declares is skipped', () => {
-  const stale = file([{ id: 'c1', name: 'old', params: { command: 'npm test', gone: 1 },
-    inputs: { plan: { text: '# p' }, removed: { text: 'x' } }, expect: { verdict: 'blocking', fired: ['log', 'vanished'] } }]);
-  assert.equal(normalizeCases(stale, META).cases.length, 0, 'strict (the WRITE path) refuses it');
-  assert.equal(normalizeCases(stale, META).errors.length, 3);
-  const { cases, errors } = normalizeCases(stale, META, { lenient: true });
-  assert.deepEqual(errors, []);
-  assert.deepEqual(cases[0].params, { command: 'npm test' });
-  assert.deepEqual(cases[0].inputs, { plan: { text: '# p' } });
-  assert.deepEqual(cases[0].expect, { verdict: 'blocking', fired: ['log'] });
-  assert.deepEqual(stale.cases[0].expect.fired, ['log', 'vanished'], 'pure: the input is not mutated');
-  // Everything else is still an error, lenient or not.
-  assert.deepEqual(normalizeCases(file([{ id: 'c1', timeoutMs: 10 }]), META, { lenient: true }).errors,
-    ['case "c1": timeoutMs must be an integer >= 1000']);
-});
-
-test('lenient: a declaration that CHANGED under a stored value is skipped, not a dropped case', () => {
-  // The param and the ports are still declared — their SHAPE changed (an enum option
-  // dropped on the Overview tab, a port retyped). Dropping the whole case blanks the
-  // page's list, and its next case action (it writes the full list it was given)
-  // deletes the case for good — the very loss the lenient read exists to prevent.
-  const retyped = { ...META,
-    params: [{ id: 'mode', type: 'enum', required: false, options: ['b'] }],
-    inputs: [{ id: 'plan', type: 'void', required: false }, { id: 'facts', type: 'json', required: false }] };
-  const stale = file([{ id: 'c1', name: 'old', params: { mode: 'a' },
-    inputs: { plan: { text: '# p' }, facts: { text: 'not json' } } }]);
-  assert.equal(normalizeCases(stale, retyped).cases.length, 0, 'strict (the WRITE path) refuses it');
-  assert.equal(normalizeCases(stale, retyped).errors.length, 3);
-  const { cases, errors } = normalizeCases(stale, retyped, { lenient: true });
-  assert.deepEqual(errors, []);
-  assert.deepEqual(cases.map((c) => c.id), ['c1']);
-  assert.deepEqual(cases[0].params, {}, 'the value is skipped like an undeclared param');
-  assert.deepEqual(cases[0].inputs, {});
-  // The other direction: a void port that grew a type keeps nothing, never the { fired } spec.
-  const grew = { ...META, inputs: [{ id: 'done', type: 'md', required: false }] };
-  const fired = normalizeCases(file([{ id: 'c1', inputs: { done: { fired: true } } }]), grew, { lenient: true });
-  assert.deepEqual(fired.errors, []);
-  assert.deepEqual(fired.cases[0].inputs, {});
-});
-
-test('lenient: a case written for a ports:"config" script survives the sidecar losing that mode', () => {
-  const own = { inputs: [{ id: 'in', type: 'md', required: false }], outputs: [{ id: 'log', type: 'md', when: 'always', filename: 'shell-{cycle}.md' }] };
-  const kase = { id: 'c1', ports: own, inputs: { in: { text: '# hi' } } };
-  // The script swapped ports:"config" for declared ports: the stored set is now illegal.
-  const flat = { ...CONFIG_META, ports: undefined, defaultPorts: undefined, inputs: own.inputs, outputs: own.outputs };
-  assert.deepEqual(normalizeCases(file([kase]), flat).cases, [], 'strict (the WRITE path) still refuses it');
-  const lenient = normalizeCases(file([kase]), flat, { lenient: true });
-  assert.deepEqual(lenient.errors, []);
-  assert.equal(lenient.cases[0].ports, null, 'the stale set is dropped, the sidecar`s ports stand');
-  assert.deepEqual(lenient.cases[0].inputs, { in: { text: '# hi' } });
-  // And a stored set that no longer validates (the verdict went away, so a conditional output is illegal).
-  const conditional = { ...own, outputs: [...own.outputs, { id: 'fail', type: 'md', when: 'blocking', filename: 'shell-{cycle}.md' }] };
-  const noVerdict = { ...CONFIG_META, verdict: undefined };
-  const kept = normalizeCases(file([{ id: 'c1', ports: conditional, inputs: { in: { text: '# hi' } } }]), noVerdict, { lenient: true });
-  assert.deepEqual(kept.errors, []);
-  assert.deepEqual(kept.cases[0].ports.outputs.map((p) => p.id), ['log'], 'back to the sidecar`s defaultPorts');
+test('lenient READ path: a case survives a sidecar edit (undeclared skipped, changed declaration skipped, lost ports:"config" mode)', async () => {
+  await checkRows([
+    { name: 'lenient (the READ path): a case survives a sidecar edit — what the script no longer declares is skipped', run: () => {
+      const stale = file([{ id: 'c1', name: 'old', params: { command: 'npm test', gone: 1 },
+        inputs: { plan: { text: '# p' }, removed: { text: 'x' } }, expect: { verdict: 'blocking', fired: ['log', 'vanished'] } }]);
+      assert.equal(normalizeCases(stale, META).cases.length, 0, 'strict (the WRITE path) refuses it');
+      assert.equal(normalizeCases(stale, META).errors.length, 3);
+      const { cases, errors } = normalizeCases(stale, META, { lenient: true });
+      assert.deepEqual(errors, []);
+      assert.deepEqual(cases[0].params, { command: 'npm test' });
+      assert.deepEqual(cases[0].inputs, { plan: { text: '# p' } });
+      assert.deepEqual(cases[0].expect, { verdict: 'blocking', fired: ['log'] });
+      assert.deepEqual(stale.cases[0].expect.fired, ['log', 'vanished'], 'pure: the input is not mutated');
+      // Everything else is still an error, lenient or not.
+      assert.deepEqual(normalizeCases(file([{ id: 'c1', timeoutMs: 10 }]), META, { lenient: true }).errors,
+        ['case "c1": timeoutMs must be an integer >= 1000']);
+    } },
+    { name: 'lenient: a declaration that CHANGED under a stored value is skipped, not a dropped case', run: () => {
+      // The param and the ports are still declared — their SHAPE changed (an enum option
+      // dropped on the Overview tab, a port retyped). Dropping the whole case blanks the
+      // page's list, and its next case action (it writes the full list it was given)
+      // deletes the case for good — the very loss the lenient read exists to prevent.
+      const retyped = { ...META,
+        params: [{ id: 'mode', type: 'enum', required: false, options: ['b'] }],
+        inputs: [{ id: 'plan', type: 'void', required: false }, { id: 'facts', type: 'json', required: false }] };
+      const stale = file([{ id: 'c1', name: 'old', params: { mode: 'a' },
+        inputs: { plan: { text: '# p' }, facts: { text: 'not json' } } }]);
+      assert.equal(normalizeCases(stale, retyped).cases.length, 0, 'strict (the WRITE path) refuses it');
+      assert.equal(normalizeCases(stale, retyped).errors.length, 3);
+      const { cases, errors } = normalizeCases(stale, retyped, { lenient: true });
+      assert.deepEqual(errors, []);
+      assert.deepEqual(cases.map((c) => c.id), ['c1']);
+      assert.deepEqual(cases[0].params, {}, 'the value is skipped like an undeclared param');
+      assert.deepEqual(cases[0].inputs, {});
+      // The other direction: a void port that grew a type keeps nothing, never the { fired } spec.
+      const grew = { ...META, inputs: [{ id: 'done', type: 'md', required: false }] };
+      const fired = normalizeCases(file([{ id: 'c1', inputs: { done: { fired: true } } }]), grew, { lenient: true });
+      assert.deepEqual(fired.errors, []);
+      assert.deepEqual(fired.cases[0].inputs, {});
+    } },
+    { name: 'lenient: a case written for a ports:"config" script survives the sidecar losing that mode', run: () => {
+      const own = { inputs: [{ id: 'in', type: 'md', required: false }], outputs: [{ id: 'log', type: 'md', when: 'always', filename: 'shell-{cycle}.md' }] };
+      const kase = { id: 'c1', ports: own, inputs: { in: { text: '# hi' } } };
+      // The script swapped ports:"config" for declared ports: the stored set is now illegal.
+      const flat = { ...CONFIG_META, ports: undefined, defaultPorts: undefined, inputs: own.inputs, outputs: own.outputs };
+      assert.deepEqual(normalizeCases(file([kase]), flat).cases, [], 'strict (the WRITE path) still refuses it');
+      const lenient = normalizeCases(file([kase]), flat, { lenient: true });
+      assert.deepEqual(lenient.errors, []);
+      assert.equal(lenient.cases[0].ports, null, 'the stale set is dropped, the sidecar`s ports stand');
+      assert.deepEqual(lenient.cases[0].inputs, { in: { text: '# hi' } });
+      // And a stored set that no longer validates (the verdict went away, so a conditional output is illegal).
+      const conditional = { ...own, outputs: [...own.outputs, { id: 'fail', type: 'md', when: 'blocking', filename: 'shell-{cycle}.md' }] };
+      const noVerdict = { ...CONFIG_META, verdict: undefined };
+      const kept = normalizeCases(file([{ id: 'c1', ports: conditional, inputs: { in: { text: '# hi' } } }]), noVerdict, { lenient: true });
+      assert.deepEqual(kept.errors, []);
+      assert.deepEqual(kept.cases[0].ports.outputs.map((p) => p.id), ['log'], 'back to the sidecar`s defaultPorts');
+    } },
+  ]);
 });

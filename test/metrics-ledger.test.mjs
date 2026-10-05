@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync, mkdirSync, utimesSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { worcaHome } from '../src/core/projects.mjs';
 import {
   ledgerFile, writeRunLedger, readRunLedger, sweepRunLedger, LEDGER_RETENTION_MS,
@@ -11,15 +12,18 @@ import {
 
 useTempHome(after);
 
-test('ledgerFile resolves under worcaHome()/metrics/ledger/', () => {
-  const file = ledgerFile('run-123');
-  assert.equal(file, join(worcaHome(), 'metrics', 'ledger', 'run-123.json'));
-});
-
-test('ledgerFile throws RangeError for a runId failing the id pattern', () => {
-  assert.throws(() => ledgerFile('../escape'), RangeError);
-  assert.throws(() => ledgerFile(''), RangeError);
-  assert.throws(() => ledgerFile('a'.repeat(65)), RangeError);
+test('ledgerFile: resolves under worcaHome()/metrics/ledger and rejects ids failing the pattern (traversal, empty, 65 chars)', async () => {
+  await checkRows([
+    { name: 'ledgerFile resolves under worcaHome()/metrics/ledger/', run: () => {
+      const file = ledgerFile('run-123');
+      assert.equal(file, join(worcaHome(), 'metrics', 'ledger', 'run-123.json'));
+    } },
+    { name: 'ledgerFile throws RangeError for a runId failing the id pattern', run: () => {
+      assert.throws(() => ledgerFile('../escape'), RangeError);
+      assert.throws(() => ledgerFile(''), RangeError);
+      assert.throws(() => ledgerFile('a'.repeat(65)), RangeError);
+    } },
+  ]);
 });
 
 test('writeRunLedger then readRunLedger round-trips the entry and stamps at', () => {
@@ -31,19 +35,18 @@ test('writeRunLedger then readRunLedger round-trips the entry and stamps at', ()
   assert.ok(!Number.isNaN(Date.parse(entry.at)));
 });
 
-test('readRunLedger on an unknown id returns not-enabled', () => {
-  assert.deepEqual(readRunLedger('never-written'), { state: 'not-enabled' });
-});
-
-test('readRunLedger on a corrupt/unparseable file returns not-enabled rather than throwing', () => {
-  const file = ledgerFile('corrupt-run');
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, 'not json{{{', 'utf8');
-  assert.deepEqual(readRunLedger('corrupt-run'), { state: 'not-enabled' });
-});
-
-test('LEDGER_RETENTION_MS is 180 days', () => {
-  assert.equal(LEDGER_RETENTION_MS, 180 * 24 * 60 * 60_000);
+test('readRunLedger: unknown id and corrupt file both read as not-enabled', async () => {
+  await checkRows([
+    { name: 'readRunLedger on an unknown id returns not-enabled', run: () => {
+      assert.deepEqual(readRunLedger('never-written'), { state: 'not-enabled' });
+    } },
+    { name: 'readRunLedger on a corrupt/unparseable file returns not-enabled rather than throwing', run: () => {
+      const file = ledgerFile('corrupt-run');
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, 'not json{{{', 'utf8');
+      assert.deepEqual(readRunLedger('corrupt-run'), { state: 'not-enabled' });
+    } },
+  ]);
 });
 
 test('sweepRunLedger drops entries older than the cutoff and returns the count dropped', () => {

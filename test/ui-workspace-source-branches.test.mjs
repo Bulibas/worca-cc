@@ -1,10 +1,15 @@
 // test/ui-workspace-source-branches.test.mjs — per-project source-branch dropdowns
 // in the New-pipeline workspace mode (render + HEAD default + submit map).
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -21,7 +26,7 @@ const BRANCHES = {
 };
 
 async function boot({ posted } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
@@ -57,77 +62,65 @@ const selectWorkspace = async (window, id) => {
   await new Promise((r) => setTimeout(r, 0));
 };
 
-test('workspace mode hides the single source dropdown and shows one per member', async () => {
+test('per-member dropdowns are keyed by projectKey and default to each HEAD; switching back to project mode restores the single dropdown and clears the list', async () => {
   const window = await boot();
   const doc = window.document;
   await selectWorkspace(window, 'wks-alpha-00000001');
-  assert.equal(doc.querySelector('#sourceBranchWrap').classList.contains('hidden'), true, 'single dropdown hidden');
-  assert.equal(doc.querySelector('#ws-source-branches').classList.contains('hidden'), false, 'per-project list shown');
-  const selects = [...doc.querySelectorAll('#ws-source-branches select.ws-src-select')];
-  assert.equal(selects.length, 2, 'one dropdown per member');
-  const names = [...doc.querySelectorAll('#ws-source-branches .ws-src-name')].map((n) => n.textContent);
-  assert.deepEqual(names, ['svc-iam', 'svc-ui']);
+  await checkRows([
+    { name: 'each dropdown is keyed by projectKey and defaults to that project\'s current branch (HEAD)', run: async () => {
+      const selects = [...doc.querySelectorAll('#ws-source-branches select.ws-src-select')];
+      assert.equal(selects[0].dataset.projectKey, 'svc-iam-aaaa1111');
+      assert.equal(selects[1].dataset.projectKey, 'svc-ui-bbbb2222');
+      // HEAD pre-selected (svc-iam → develop, svc-ui → main).
+      assert.equal(selects[0].value, 'develop');
+      assert.equal(selects[1].value, 'main');
+      // The list also offers an explicit "auto" placeholder (empty value) first.
+      assert.equal(selects[0].options[0].value, '');
+    } },
+    { name: 'switching back to project mode restores the single dropdown and clears per-project list', run: async () => {
+      click(window, doc.querySelector('#target-seg button[data-target="project"]'));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(doc.querySelector('#sourceBranchWrap').classList.contains('hidden'), false);
+      assert.equal(doc.querySelector('#ws-source-branches').classList.contains('hidden'), true);
+      assert.equal(doc.querySelectorAll('#ws-source-branches select').length, 0);
+    } },
+  ]);
 });
 
-test('each dropdown is keyed by projectKey and defaults to that project\'s current branch (HEAD)', async () => {
-  const window = await boot();
-  const doc = window.document;
-  await selectWorkspace(window, 'wks-alpha-00000001');
-  const selects = [...doc.querySelectorAll('#ws-source-branches select.ws-src-select')];
-  assert.equal(selects[0].dataset.projectKey, 'svc-iam-aaaa1111');
-  assert.equal(selects[1].dataset.projectKey, 'svc-ui-bbbb2222');
-  // HEAD pre-selected (svc-iam → develop, svc-ui → main).
-  assert.equal(selects[0].value, 'develop');
-  assert.equal(selects[1].value, 'main');
-  // The list also offers an explicit "auto" placeholder (empty value) first.
-  assert.equal(selects[0].options[0].value, '');
-});
-
-test('switching back to project mode restores the single dropdown and clears per-project list', async () => {
-  const window = await boot();
-  const doc = window.document;
-  await selectWorkspace(window, 'wks-alpha-00000001');
-  click(window, doc.querySelector('#target-seg button[data-target="project"]'));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(doc.querySelector('#sourceBranchWrap').classList.contains('hidden'), false);
-  assert.equal(doc.querySelector('#ws-source-branches').classList.contains('hidden'), true);
-  assert.equal(doc.querySelectorAll('#ws-source-branches select').length, 0);
-});
-
-test('submit sends sourceBranchByKey keyed by projectKey; omits empties; no scalar sourceBranch', async () => {
+test('submit sends sourceBranchByKey keyed by projectKey (empties omitted, no scalar sourceBranch), and nothing when every dropdown is auto', async () => {
   const posted = [];
   const window = await boot({ posted });
   const doc = window.document;
   await selectWorkspace(window, 'wks-alpha-00000001');
+  await checkRows([
+    { name: 'submit sends sourceBranchByKey keyed by projectKey; omits empties; no scalar sourceBranch', run: async () => {
+      const selects = [...doc.querySelectorAll('#ws-source-branches select.ws-src-select')];
+      // svc-iam: choose an explicit branch; svc-ui: leave on the "auto" placeholder (value '').
+      selects[0].value = 'main'; selects[0].dispatchEvent(new window.Event('change', { bubbles: true }));
+      selects[1].value = ''; selects[1].dispatchEvent(new window.Event('change', { bubbles: true }));
 
-  const selects = [...doc.querySelectorAll('#ws-source-branches select.ws-src-select')];
-  // svc-iam: choose an explicit branch; svc-ui: leave on the "auto" placeholder (value '').
-  selects[0].value = 'main'; selects[0].dispatchEvent(new window.Event('change', { bubbles: true }));
-  selects[1].value = ''; selects[1].dispatchEvent(new window.Event('change', { bubbles: true }));
+      doc.querySelector('#prompt').value = 'do work';
+      doc.querySelector('#run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 0));
 
-  doc.querySelector('#prompt').value = 'do work';
-  doc.querySelector('#run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await new Promise((r) => setTimeout(r, 0));
-
-  assert.equal(posted.length, 1);
-  const body = posted[0];
-  assert.equal(body.workspaceId, 'wks-alpha-00000001');
-  assert.deepEqual(body.sourceBranchByKey, { 'svc-iam-aaaa1111': 'main' }, 'only the chosen, non-empty entry is sent');
-  assert.equal('sourceBranch' in body, false, 'no scalar sourceBranch in workspace mode');
-  assert.equal('projectDir' in body, false);
-});
-
-test('submit with all dropdowns on auto sends no sourceBranchByKey', async () => {
-  const posted = [];
-  const window = await boot({ posted });
-  const doc = window.document;
-  await selectWorkspace(window, 'wks-alpha-00000001');
-  // svc-iam defaults to HEAD 'develop', svc-ui to 'main' — reset both to the empty "auto".
-  for (const s of doc.querySelectorAll('#ws-source-branches select.ws-src-select')) {
-    s.value = ''; s.dispatchEvent(new window.Event('change', { bubbles: true }));
-  }
-  doc.querySelector('#prompt').value = 'do work';
-  doc.querySelector('#run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal('sourceBranchByKey' in posted[0], false, 'omit the map entirely when nothing chosen');
+      assert.equal(posted.length, 1);
+      const body = posted[0];
+      assert.equal(body.workspaceId, 'wks-alpha-00000001');
+      assert.deepEqual(body.sourceBranchByKey, { 'svc-iam-aaaa1111': 'main' }, 'only the chosen, non-empty entry is sent');
+      assert.equal('sourceBranch' in body, false, 'no scalar sourceBranch in workspace mode');
+      assert.equal('projectDir' in body, false);
+    } },
+    { name: 'submit with all dropdowns on auto sends no sourceBranchByKey', run: async () => {
+      const n = posted.length;
+      // svc-iam defaults to HEAD 'develop', svc-ui to 'main' — reset both to the empty "auto".
+      for (const s of doc.querySelectorAll('#ws-source-branches select.ws-src-select')) {
+        s.value = ''; s.dispatchEvent(new window.Event('change', { bubbles: true }));
+      }
+      doc.querySelector('#prompt').value = 'do work';
+      doc.querySelector('#run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(posted.length, n + 1, 'the second submit posted');
+      assert.equal('sourceBranchByKey' in posted[n], false, 'omit the map entirely when nothing chosen');
+    } },
+  ]);
 });

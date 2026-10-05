@@ -3,18 +3,23 @@
 // reshuffle; group-rank transitions (question, finish) still regroup. The live
 // rows are read inside their project group — `[data-slot="group"]`, because a
 // Needs-you run is repeated above the groups (rule 6).
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath  = fileURLToPath(new URL('../ui/public/app.js',   import.meta.url));
 const PROJECT = '/tmp/proj';
 
 async function boot() {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};   // jsdom has no layout
   let lastWs = null;
@@ -55,7 +60,8 @@ const liveRows = (window) =>
   [...window.document.querySelectorAll('#runs-list .runs-group .runs-row[data-slot="group"][data-kind="live"]')];
 const cardOrder = (window) => liveRows(window).map((c) => c.dataset.runId);
 
-test('log activity does not reorder the Runs list rows', async () => {
+// One boot: baseline, a log frame, then a question frame.
+test('log activity never reorders or rebuilds the Runs rows, while a question still regroups its row to the top', async () => {
   const { window, recv, selectProject, tick } = await boot();
   selectProject();
   window.location.hash = 'runs';
@@ -63,27 +69,23 @@ test('log activity does not reorder the Runs list rows', async () => {
   recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });   // older run
   recv({ type: 'phase', runId: 'p2', phase: 'plan', cycle: 0 });   // newer run
   await tick();
-  assert.deepEqual(cardOrder(window), ['p2', 'p1'], 'newest-first baseline');
+  await checkRows([
+    { name: 'log activity does not reorder the Runs list rows', run: async () => {
+      assert.deepEqual(cardOrder(window), ['p2', 'p1'], 'newest-first baseline');
 
-  const before = liveRows(window);
-  // Log to the run at the BOTTOM — recency-based ordering would bump it to the top.
-  recv({ type: 'log', runId: 'p1', source: 'planner', level: 'info', text: 'x', ts: 1 });
-  await tick();
-  assert.deepEqual(cardOrder(window), ['p2', 'p1'], 'order unchanged on log activity');
-  assert.ok(liveRows(window).every((c, i) => c === before[i]), 'same DOM nodes — a log frame never rebuilds #runs-list');
-});
-
-test('a question still regroups the row to the top (needs-attention rank)', async () => {
-  const { window, recv, selectProject, tick } = await boot();
-  selectProject();
-  window.location.hash = 'runs';
-  window.dispatchEvent(new window.Event('hashchange'));
-  recv({ type: 'phase', runId: 'p1', phase: 'plan', cycle: 0 });
-  recv({ type: 'phase', runId: 'p2', phase: 'plan', cycle: 0 });
-  await tick();
-  recv({ type: 'question', runId: 'p1', id: 'q1', kind: 'clarify', questions: [] });
-  await tick();
-  assert.deepEqual(cardOrder(window), ['p1', 'p2'], 'pendingQuestion outranks live');
+      const before = liveRows(window);
+      // Log to the run at the BOTTOM — recency-based ordering would bump it to the top.
+      recv({ type: 'log', runId: 'p1', source: 'planner', level: 'info', text: 'x', ts: 1 });
+      await tick();
+      assert.deepEqual(cardOrder(window), ['p2', 'p1'], 'order unchanged on log activity');
+      assert.ok(liveRows(window).every((c, i) => c === before[i]), 'same DOM nodes — a log frame never rebuilds #runs-list');
+    } },
+    { name: 'a question still regroups the row to the top (needs-attention rank)', run: async () => {
+      recv({ type: 'question', runId: 'p1', id: 'q1', kind: 'clarify', questions: [] });
+      await tick();
+      assert.deepEqual(cardOrder(window), ['p1', 'p2'], 'pendingQuestion outranks live');
+    } },
+  ]);
 });
 
 // Resume drops the superseded paused run from the runs map, but a trailing

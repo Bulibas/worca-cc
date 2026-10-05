@@ -122,7 +122,7 @@ await api('/api/onboarding', { method: 'POST', headers: { 'Content-Type': 'appli
 // ---- chrome + cdp ------------------------------------------------------------
 profile = await mkdtemp(path.join(tmpdir(), 'worca-theme-profile-'));
 chrome = spawn(CHROME, ['--headless=new', ...SANDBOX, `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`,
-  '--window-size=1440,900', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check', '--force-color-profile=srgb',
+  '--window-size=1440,900', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check', '--use-mock-keychain', '--force-color-profile=srgb',
   '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank'],
 { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...REAL_ENV } });
 const chromeErr = [];
@@ -390,7 +390,7 @@ async function focusSamples() {
 let runId = null; let pipelineId = null; let projectKey = null;
 const states = [
   ['new', async () => { await go('new'); await until(`document.querySelector('.agent-row-head')`, 'the agent rows (rendered after /api/agents)'); await clickSel('.agent-row-head'); await ev(`document.querySelector('details.advanced')?.setAttribute('open','');0`); await freeze('new'); }],
-  ['new-error', async () => { await ev(`document.getElementById('prompt').value='';0`); await clickSel('#start-btn'); await until(`document.querySelector('.form-msg.err')`, 'the empty-prompt error'); }],
+  ['new-error', async () => { await ev(`document.getElementById('prompt').value='';0`); await clickSel('#start-btn'); await until(`document.querySelector('#run-form .field-invalid')`, 'the submit-time field error'); }],
   // The Runs list (one list for live and finished runs). The audit id keeps its old name so
   // test/fixtures/contrast-baseline-light.json still matches.
   ['running-list', async () => { await go('runs'); await until(`document.querySelector('#runs-list .runs-row')`, 'a run row'); }],
@@ -482,6 +482,42 @@ const states = [
   ['modal-shipit', async () => { await unhide('#shipit-modal'); }, async () => { await rehide('#shipit-modal'); }],
   ['modal-viewer', async () => { await unhide('#viewer-card'); }, async () => { await rehide('#viewer-card'); }],
   ['kitchen', async () => { await go('new'); await injectKitchen(); }],
+  // Actions (Phase B: pipelineId/projectKey exist only once the mock run finished). The first state registers
+  // the run's folder as a project (its key is the run's projectKey) and seeds its action config, so the editor
+  // renders an action row; they sit last so the extra project changes no earlier state. The fixture has no
+  // workspace, and the workspace Actions tab reuses the project tab's classes, so there is no workspace state.
+  ['project-actions', async () => {
+    const reg = await api('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'themerun', path: proj }) });
+    if (!(reg.body.projects || []).some((x) => x.key === projectKey)) throw new Error(`could not register the run's project: ${JSON.stringify(reg.body)}`);
+    const r = await api(`/api/projects/${projectKey}/actions`, { method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ setup: 'true', actions: [{ id: 'test', label: 'Test', kind: 'task', cmd: 'node -e 0' }] }) });
+    if (r.status !== 200) throw new Error(`seeding the project actions answered ${r.status}`);
+    await go(`projects/${projectKey}/actions`); await until(`document.querySelector('.actions-config .ac-action')`, 'the actions editor'); }],
+  ['history-actions', async () => { await go(`history/${projectKey}/${pipelineId}/details/actions`); await until(`document.querySelector('.hd-details:not([hidden]) .act-card')`, 'the actions card'); }],
+  ['settings-runs-actions', async () => { await go('settings/runs'); await until(`document.querySelector('#actions-settings-card')`, 'the actions card'); }],
+  ['feedback-toasts', async () => {
+    await go('settings/runs');
+    await until(`document.querySelector('.settings-pane[data-tab="runs"]:not(.hidden) #actions-settings-card')`, 'runs pane');
+    await ev(`(async()=>{const m=await import('/feedback.mjs');
+      m.notify({tone:'ok',title:'Actions saved for acme-web',detail:'Applies to new checkouts.',timeout:0});
+      m.notify({tone:'ok',title:'Installed acme-lint',detail:'Its agents are in the Agents list.',action:{label:'Open',run(){}},timeout:0});
+      m.notify({tone:'err',title:'Push failed',detail:'The metrics home rejected the token (401).',action:{label:'Retry',run(){}}});
+      return 1;})()`);
+    await until(`document.querySelectorAll('#toasts > .toast').length===3`, 'three toasts');
+    await freeze('toast');
+  }, async () => { await ev(`(()=>{document.querySelectorAll('#toasts > .toast').forEach((t)=>t.remove());return 1;})()`); }],
+  ['feedback-card-alert', async () => {
+    await go('settings/runs');
+    await until(`document.querySelector('.settings-pane[data-tab="runs"]:not(.hidden) #actions-settings-card')`, 'runs pane');
+    await ev(`(async()=>{const m=await import('/feedback.mjs');const c=document.getElementById('actions-settings-card');
+      const lo=document.getElementById('act-port-low'),hi=document.getElementById('act-port-high');
+      lo.value='5000';hi.value='4000';lo.dispatchEvent(new Event('input',{bubbles:true}));
+      m.fieldError([lo,hi],'The low port can’t be higher than the high port.',{focus:false});
+      m.cardAlert(c,{title:'Not saved',detail:'Another Worca process is writing the settings file. Try again in a moment.'});
+      const s=document.getElementById('act-save');s.textContent='Saved';s.classList.add('is-done');s.dataset.fbState='done';s.disabled=false;
+      return 1;})()`);
+    await until(`document.querySelector('#actions-settings-card .card-alert')`, 'card alert');
+  }],
 ];
 
 // ---- collection ---------------------------------------------------------------

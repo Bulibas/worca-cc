@@ -5,18 +5,23 @@
 // dropped. Rows repaint through a coalesced microtask that REPLACES changed nodes, so
 // every assertion re-queries its row. Boots the REAL app.js under jsdom; WS frames are
 // delivered via wsBox.ws.dispatch('message', { data }) (harness per test/ui-question.test.mjs).
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 const PROJECT = '/tmp/proj';
 
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   const wsBox = { ws: null };
@@ -74,34 +79,34 @@ function wordOf(ctx, id = 'p1', key = 'proj-0000abcd') {
 }
 const busy = (ctx) => ctx.window.document.getElementById('runs-list').getAttribute('aria-busy');
 
-test('history-pr OPEN batch turns the row word into "In review", without a refetch', async () => {
+test('history-pr OPEN and MERGED batches turn the row word into In review / Merged without a refetch', async () => {
   const ctx = await boot({ fetchHandler: (url) => (url.endsWith('/api/history') ? skeleton([ROW()]) : null) });
   ctx.showRuns();
   await ctx.tick();
-  assert.equal(wordOf(ctx), 'Finished', 'pending: the headline while the PR lookup runs');
-
-  const gets = ctx.historyGets();
+  // The load token stays current after its final batch, so the MERGED batch below still applies.
   const token = ctx.prTokens().at(-1);
-  assert.ok(token != null, 'client POSTed a load token');
-  ctx.dispatchPr({ token, done: true, items: [{ projectKey: 'proj-0000abcd', id: 'p1', pr: { state: 'OPEN', url: 'https://gh/x/pull/8', number: 8 } }] });
-  await ctx.tick();
+  await checkRows([
+    { name: 'history-pr OPEN batch turns the row word into "In review", without a refetch', run: async () => {
+      assert.equal(wordOf(ctx), 'Finished', 'pending: the headline while the PR lookup runs');
 
-  assert.equal(wordOf(ctx), 'In review', 'the row reads the PR state');
-  // The patch repaints from the in-memory rows (scheduleRunsPaint), never by reloading
-  // History, and never navigates to the detail screen.
-  assert.equal(ctx.historyGets(), gets, 'no /api/history refetch');
-  assert.equal(ctx.window.location.hash.replace(/^#/, ''), 'runs', 'the patch never navigates');
-  assert.equal(busy(ctx), 'false', 'the final batch clears the busy state');
-});
+      const gets = ctx.historyGets();
+      assert.ok(token != null, 'client POSTed a load token');
+      ctx.dispatchPr({ token, done: true, items: [{ projectKey: 'proj-0000abcd', id: 'p1', pr: { state: 'OPEN', url: 'https://gh/x/pull/8', number: 8 } }] });
+      await ctx.tick();
 
-test('history-pr MERGED batch makes the row read "Merged"', async () => {
-  const ctx = await boot({ fetchHandler: (url) => (url.endsWith('/api/history') ? skeleton([ROW()]) : null) });
-  ctx.showRuns();
-  await ctx.tick();
-  const token = ctx.prTokens().at(-1);
-  ctx.dispatchPr({ token, items: [{ projectKey: 'proj-0000abcd', id: 'p1', pr: { state: 'MERGED', url: 'https://gh/x/pull/9', number: 9 } }] });
-  await ctx.tick();
-  assert.equal(wordOf(ctx), 'Merged');
+      assert.equal(wordOf(ctx), 'In review', 'the row reads the PR state');
+      // The patch repaints from the in-memory rows (scheduleRunsPaint), never by reloading
+      // History, and never navigates to the detail screen.
+      assert.equal(ctx.historyGets(), gets, 'no /api/history refetch');
+      assert.equal(ctx.window.location.hash.replace(/^#/, ''), 'runs', 'the patch never navigates');
+      assert.equal(busy(ctx), 'false', 'the final batch clears the busy state');
+    } },
+    { name: 'history-pr MERGED batch makes the row read "Merged"', run: async () => {
+      ctx.dispatchPr({ token, items: [{ projectKey: 'proj-0000abcd', id: 'p1', pr: { state: 'MERGED', url: 'https://gh/x/pull/9', number: 9 } }] });
+      await ctx.tick();
+      assert.equal(wordOf(ctx), 'Merged');
+    } },
+  ]);
 });
 
 test('id collision across projects: only the (id, projectKey)-matched row is patched', async () => {
@@ -156,57 +161,59 @@ test('race: a forced reload supersedes the prior load; the old token batch is dr
   assert.equal(wordOf(ctx), 'In review', 'current (tB) batch patches');
 });
 
-test('each row stays pending until its own entry resolves, then updates progressively', async () => {
-  const ctx = await boot({
-    fetchHandler: (url) => (url.endsWith('/api/history')
-      ? skeleton([ROW({ id: 'a', projectKey: 'k', ...READY }), ROW({ id: 'b', projectKey: 'k', ...READY })]) : null),
-  });
-  ctx.showRuns();
-  await ctx.tick();
-  // Eligible (gh + survived + branch + source) but UNRESOLVED -> pending, NOT "Ready to ship".
-  assert.equal(wordOf(ctx, 'a', 'k'), 'Finished', 'A pending');
-  assert.equal(wordOf(ctx, 'b', 'k'), 'Finished', 'B pending');
+test('pending rows resolve progressively per entry, on the final done batch when never sent, and via the watchdog when enrichment fails', async () => {
+  await checkRows([
+    { name: 'each row stays pending until its own entry resolves, then updates progressively', run: async () => {
+      const ctx = await boot({
+        fetchHandler: (url) => (url.endsWith('/api/history')
+          ? skeleton([ROW({ id: 'a', projectKey: 'k', ...READY }), ROW({ id: 'b', projectKey: 'k', ...READY })]) : null),
+      });
+      ctx.showRuns();
+      await ctx.tick();
+      // Eligible (gh + survived + branch + source) but UNRESOLVED -> pending, NOT "Ready to ship".
+      assert.equal(wordOf(ctx, 'a', 'k'), 'Finished', 'A pending');
+      assert.equal(wordOf(ctx, 'b', 'k'), 'Finished', 'B pending');
 
-  const token = ctx.prTokens().at(-1);
-  // Non-final batch resolves only A (no PR) -> A reads "Ready to ship", B stays pending.
-  ctx.dispatchPr({ token, done: false, items: [{ projectKey: 'k', id: 'a', pr: null }] });
-  await ctx.tick();
-  assert.equal(wordOf(ctx, 'a', 'k'), 'Ready to ship', 'A resolved after its result');
-  assert.equal(wordOf(ctx, 'b', 'k'), 'Finished', 'B still pending until its result');
-  assert.equal(busy(ctx), 'true', 'a non-final batch keeps the list busy');
+      const token = ctx.prTokens().at(-1);
+      // Non-final batch resolves only A (no PR) -> A reads "Ready to ship", B stays pending.
+      ctx.dispatchPr({ token, done: false, items: [{ projectKey: 'k', id: 'a', pr: null }] });
+      await ctx.tick();
+      assert.equal(wordOf(ctx, 'a', 'k'), 'Ready to ship', 'A resolved after its result');
+      assert.equal(wordOf(ctx, 'b', 'k'), 'Finished', 'B still pending until its result');
+      assert.equal(busy(ctx), 'true', 'a non-final batch keeps the list busy');
 
-  // Final batch resolves B (OPEN) -> B reads "In review".
-  ctx.dispatchPr({ token, done: true, items: [{ projectKey: 'k', id: 'b', pr: { state: 'OPEN', url: 'https://gh/x/pull/4', number: 4 } }] });
-  await ctx.tick();
-  assert.equal(wordOf(ctx, 'b', 'k'), 'In review');
-  assert.equal(wordOf(ctx, 'a', 'k'), 'Ready to ship', 'A keeps its result');
-});
-
-test('an eligible entry the server never sent a batch for is resolved on the final (done) batch', async () => {
-  const ctx = await boot({
-    fetchHandler: (url) => (url.endsWith('/api/history') ? skeleton([ROW({ id: 'a', projectKey: 'k', ...READY })]) : null),
-  });
-  ctx.showRuns();
-  await ctx.tick();
-  assert.equal(wordOf(ctx, 'a', 'k'), 'Finished', 'pending');
-  const token = ctx.prTokens().at(-1);
-  ctx.dispatchPr({ token, done: true, items: [] });   // final batch, no item for 'a'
-  await ctx.tick();
-  assert.equal(wordOf(ctx, 'a', 'k'), 'Ready to ship', 'resolved as "no PR" by finalize');
-});
-
-test('enrichment failure (no done batch) resolves pending rows via the watchdog catch', async () => {
-  const ctx = await boot({
-    fetchHandler: (url) => {
-      if (url.endsWith('/api/history/pr')) return Promise.resolve({ ok: false, status: 500, json: async () => ({}) });
-      if (url.endsWith('/api/history')) return skeleton([ROW({ id: 'a', projectKey: 'k', ...READY })]);
-      return null;
-    },
-  });
-  ctx.showRuns();
-  await ctx.tick();                                   // POST /api/history/pr rejects -> catch finalizes
-  assert.equal(wordOf(ctx, 'a', 'k'), 'Ready to ship', 'failed enrichment still settles the word');
-  assert.equal(busy(ctx), 'false', 'and clears the busy state');
+      // Final batch resolves B (OPEN) -> B reads "In review".
+      ctx.dispatchPr({ token, done: true, items: [{ projectKey: 'k', id: 'b', pr: { state: 'OPEN', url: 'https://gh/x/pull/4', number: 4 } }] });
+      await ctx.tick();
+      assert.equal(wordOf(ctx, 'b', 'k'), 'In review');
+      assert.equal(wordOf(ctx, 'a', 'k'), 'Ready to ship', 'A keeps its result');
+    } },
+    { name: 'an eligible entry the server never sent a batch for is resolved on the final (done) batch', run: async () => {
+      const ctx = await boot({
+        fetchHandler: (url) => (url.endsWith('/api/history') ? skeleton([ROW({ id: 'a', projectKey: 'k', ...READY })]) : null),
+      });
+      ctx.showRuns();
+      await ctx.tick();
+      assert.equal(wordOf(ctx, 'a', 'k'), 'Finished', 'pending');
+      const token = ctx.prTokens().at(-1);
+      ctx.dispatchPr({ token, done: true, items: [] });   // final batch, no item for 'a'
+      await ctx.tick();
+      assert.equal(wordOf(ctx, 'a', 'k'), 'Ready to ship', 'resolved as "no PR" by finalize');
+    } },
+    { name: 'enrichment failure (no done batch) resolves pending rows via the watchdog catch', run: async () => {
+      const ctx = await boot({
+        fetchHandler: (url) => {
+          if (url.endsWith('/api/history/pr')) return Promise.resolve({ ok: false, status: 500, json: async () => ({}) });
+          if (url.endsWith('/api/history')) return skeleton([ROW({ id: 'a', projectKey: 'k', ...READY })]);
+          return null;
+        },
+      });
+      ctx.showRuns();
+      await ctx.tick();                                   // POST /api/history/pr rejects -> catch finalizes
+      assert.equal(wordOf(ctx, 'a', 'k'), 'Ready to ship', 'failed enrichment still settles the word');
+      assert.equal(busy(ctx), 'false', 'and clears the busy state');
+    } },
+  ]);
 });
 
 // Maps 1:1 to the reported bug, now inverted by carryHistoryPr (D12): a reload's rows

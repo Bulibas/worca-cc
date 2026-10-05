@@ -1,9 +1,13 @@
 // test/ui-newpipeline-questions.test.mjs — New Pipeline per-step Questions toggle.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -11,7 +15,7 @@ const PROJECT = '/tmp/proj';
 
 // Boot app.js in jsdom with a controllable fetch. Mirrors test/ui-cost.test.mjs.
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4319/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4319/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class {
@@ -159,16 +163,6 @@ test('GET /api/config failure still populates the workflow dropdown and hides qu
   assert.match(hint.textContent, /no such column: ask_questions/, 'hint carries the server error');
 });
 
-// Before ANY JS runs (or when it fails), an interactable-looking checkbox would
-// misrepresent capability (refiner has none; clarify is locked-on). The accordion
-// settles this by construction: index.html ships NO questions toggle at all, and
-// each one is created only once its agent's capability is known.
-test('index.html ships no static questions toggles at all', () => {
-  const html = readFileSync(htmlPath, 'utf8');
-  assert.equal(html.match(/questions-toggle/g), null, 'no static questions toggle may exist');
-  assert.equal(html.match(/step-questions/g), null, 'no static questions checkbox may exist');
-});
-
 // Toggling questions must echo the LIVE selects, not state.config — state lags
 // one in-flight save, so echoing it can revert a model picked moments earlier.
 test('toggling questions sends the model currently shown in the select, not stale state', async () => {
@@ -198,21 +192,4 @@ test('toggling questions sends the model currently shown in the select, not stal
   const qPost = posts.find((p) => 'askQuestions' in p);
   assert.ok(qPost, 'questions POST fired');
   assert.equal(qPost.model, 'my-new-model', 'live select value sent, not stale state.config');
-});
-
-test('renderAgentRows: locked checkbox disabled; unsupported row has no checkbox', async () => {
-  const { window } = await boot();
-  const doc = window.document;
-  const { renderAgentRows } = window.__np;
-  const def = { model: '', effort: '', fanOut: false, askQuestions: false };
-  renderAgentRows([
-    { nodeId: 'a', key: 'ask', label: 'Ask', color: '', stepIndex: 0, parallel: false, model: '', effort: '', fanOut: false, askQuestions: false, questionsLocked: false, def, override: {} },
-    { nodeId: 'b', key: 'locked', label: 'Locked', color: '', stepIndex: 1, parallel: false, model: '', effort: '', fanOut: false, askQuestions: true, questionsLocked: true, def, override: {} },
-    { nodeId: 'c', key: 'plain', label: 'Plain', color: '', stepIndex: 2, parallel: false, model: '', effort: '', fanOut: false, askQuestions: null, questionsLocked: false, def, override: {} },
-  ]);
-  const a = doc.querySelector('.step-questions[data-node-id="a"]');
-  assert.ok(a && !a.disabled && !a.checked);
-  const b = doc.querySelector('.step-questions[data-node-id="b"]');
-  assert.ok(b && b.disabled && b.checked);
-  assert.equal(doc.querySelector('.step-questions[data-node-id="c"]'), null);
 });

@@ -1,9 +1,14 @@
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const here = dirname(fileURLToPath(import.meta.url));
 const htmlPath = join(here, '../ui/public/index.html');
@@ -11,7 +16,7 @@ const appPath = join(here, '../ui/public/app.js');
 
 // Mirror test/ui-hello-stepper-seed.test.mjs:11-29 (no shared helper exists).
 async function boot() {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; this._l = {}; } send() {} close() {} addEventListener(t, fn) { (this._l[t] ||= []).push(fn); } };
@@ -25,22 +30,24 @@ async function boot() {
   return { np: window.__np, window };
 }
 
-test('manifestSig changes when node ids change', async () => {
+test('onState swaps the stepper manifest exactly when manifestSig (node ids) changes', async () => {
   const { np } = await boot();
-  const a = { steps: [{ nodes: [{ id: 's2_0' }] }] };
-  const b = { steps: [{ nodes: [{ id: 's_impl_p1_t1' }, { id: 's_impl_p1_t2' }] }] };
-  assert.notEqual(np.manifestSig(a), np.manifestSig(b));
-  assert.equal(np.manifestSig(a), np.manifestSig({ steps: [{ nodes: [{ id: 's2_0' }] }] }));
-});
-
-test('onState swaps the manifest when the signature changes', async () => {
-  const { np } = await boot();
-  // makeRun({...}) takes an OPTIONS OBJECT and returns a COMPLETE run object. onState
-  // paints nothing itself (the frame hook repaints the Runs row and the open run page) and
-  // calls maybeResume, which no-ops unless an answer is in flight, so a bare run is safe here.
-  const r = np.makeRun({ runId: 'rid' });
-  r.stepper = { steps: [{ nodes: [{ id: 's2_0', key: 'implementer' }] }] };
-  r.el = null; // r.el is always null (the list card is gone); swap should still update r.stepper
-  np.onState(r, { stepper: { steps: [{ nodes: [{ id: 's_impl_p1_t1' }] }] }, status: 'running' });
-  assert.deepEqual(r.stepper.steps[0].nodes.map((n) => n.id), ['s_impl_p1_t1']);
+  await checkRows([
+    { name: 'manifestSig changes when node ids change', run: async () => {
+      const a = { steps: [{ nodes: [{ id: 's2_0' }] }] };
+      const b = { steps: [{ nodes: [{ id: 's_impl_p1_t1' }, { id: 's_impl_p1_t2' }] }] };
+      assert.notEqual(np.manifestSig(a), np.manifestSig(b));
+      assert.equal(np.manifestSig(a), np.manifestSig({ steps: [{ nodes: [{ id: 's2_0' }] }] }));
+    } },
+    { name: 'onState swaps the manifest when the signature changes', run: async () => {
+      // makeRun({...}) takes an OPTIONS OBJECT and returns a COMPLETE run object. onState
+      // paints nothing itself (the frame hook repaints the Runs row and the open run page) and
+      // calls maybeResume, which no-ops unless an answer is in flight, so a bare run is safe here.
+      const r = np.makeRun({ runId: 'rid' });
+      r.stepper = { steps: [{ nodes: [{ id: 's2_0', key: 'implementer' }] }] };
+      r.el = null; // r.el is always null (the list card is gone); swap should still update r.stepper
+      np.onState(r, { stepper: { steps: [{ nodes: [{ id: 's_impl_p1_t1' }] }] }, status: 'running' });
+      assert.deepEqual(r.stepper.steps[0].nodes.map((n) => n.id), ['s_impl_p1_t1']);
+    } },
+  ]);
 });

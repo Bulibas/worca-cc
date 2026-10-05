@@ -53,7 +53,10 @@ export async function ghFetch(gh, path, init = {}) {
   if (!res.ok) {
     let detail = '';
     try { detail = (await res.json())?.message || ''; } catch { /* body is optional */ }
-    throw err('plugin', `GitHub API ${res.status}${detail ? `: ${detail}` : ''} (${init.method || 'GET'} ${url})`);
+    throw Object.assign(
+      err('plugin', `GitHub API ${res.status}${detail ? `: ${detail}` : ''} (${init.method || 'GET'} ${url})`),
+      { status: res.status },
+    );
   }
   return { status: res.status, headers: res.headers, json: await res.json() };
 }

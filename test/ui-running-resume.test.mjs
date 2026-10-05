@@ -2,17 +2,22 @@
 // `#run-detail .rd-pause`, which reads Resume once the run is paused) for a run whose
 // whole lifetime is inside the current socket session (no page reload, so no
 // hello re-seed of pipelineId). Harness mirrors test/ui-pause-resume.test.mjs.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 
 async function bootLive({ resumeFails = false, baseMoved = false } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class {
@@ -54,33 +59,35 @@ async function bootLive({ resumeFails = false, baseMoved = false } = {}) {
   return { window, fetchCalls, go, settle };
 }
 
-test('onState mirrors the pipeline short id from state.id onto the run model', async () => {
-  const { window } = await bootLive();
-  const { upsertRun, onState } = window.__np;
-  const r = upsertRun({ runId: 'r1', title: 't', projectDir: '/tmp/proj', status: 'running' });
-  assert.equal(r.pipelineId, null);
-  onState(r, { status: 'running', id: 'p1' });
-  assert.equal(r.pipelineId, 'p1');
-  // An id-less snapshot (pre-createPipeline shape) must not clobber the captured id.
-  onState(r, { status: 'running', id: null });
-  assert.equal(r.pipelineId, 'p1');
-});
-
-test('resume works for a same-session run (no reload)', async () => {
+// One boot: the same-session run r1 captures its id, then pauses and resumes.
+test('onState mirrors the pipeline id (an id-less snapshot never clobbers it) and a same-session paused run resumes via POST /api/resume {pipelineId, baseCheck}', async () => {
   const { window, fetchCalls } = await bootLive();
   const { upsertRun, onState, resumeRunFromCard, getRun } = window.__np;
-  // Born in THIS session (beginRun/upsertRun path) → pipelineId starts null.
-  const r = upsertRun({ runId: 'r1', title: 't', projectDir: '/tmp/proj', status: 'running' });
-  onState(r, { status: 'running', id: 'p1' });   // live state snapshot carries the id
-  onState(r, { status: 'paused' });               // pause lands
-  await resumeRunFromCard('r1');
-  const call = fetchCalls.find((c) => c.url.includes('/api/resume'));
-  assert.ok(call, 'resume must reach POST /api/resume (was: client-side "run has no pipelineId" bail)');
-  assert.deepEqual(JSON.parse(call.opts.body), { pipelineId: 'p1', baseCheck: true });
-  // The old paused run is superseded by the resumed live run.
-  assert.equal(getRun('r1'), undefined);
-  assert.ok(getRun('r-new'));
-  assert.equal(getRun('r-new').pipelineId, 'p1');
+  await checkRows([
+    { name: 'onState mirrors the pipeline short id from state.id onto the run model', run: async () => {
+      const r = upsertRun({ runId: 'r1', title: 't', projectDir: '/tmp/proj', status: 'running' });
+      assert.equal(r.pipelineId, null);
+      onState(r, { status: 'running', id: 'p1' });
+      assert.equal(r.pipelineId, 'p1');
+      // An id-less snapshot (pre-createPipeline shape) must not clobber the captured id.
+      onState(r, { status: 'running', id: null });
+      assert.equal(r.pipelineId, 'p1');
+    } },
+    { name: 'resume works for a same-session run (no reload)', run: async () => {
+      // Born in THIS session (beginRun/upsertRun path) → pipelineId starts null.
+      const r = upsertRun({ runId: 'r1', title: 't', projectDir: '/tmp/proj', status: 'running' });
+      onState(r, { status: 'running', id: 'p1' });   // live state snapshot carries the id
+      onState(r, { status: 'paused' });               // pause lands
+      await resumeRunFromCard('r1');
+      const call = fetchCalls.find((c) => c.url.includes('/api/resume'));
+      assert.ok(call, 'resume must reach POST /api/resume (was: client-side "run has no pipelineId" bail)');
+      assert.deepEqual(JSON.parse(call.opts.body), { pipelineId: 'p1', baseCheck: true });
+      // The old paused run is superseded by the resumed live run.
+      assert.equal(getRun('r1'), undefined);
+      assert.ok(getRun('r-new'));
+      assert.equal(getRun('r-new').pipelineId, 'p1');
+    } },
+  ]);
 });
 
 test('a 409 base-moved asks, then resends with baseAck and every option of the call (#527)', async () => {

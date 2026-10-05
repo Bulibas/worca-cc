@@ -134,11 +134,11 @@ test('a slice parked on a recovery prompt is released when a phase-mate fails', 
   const recovery = questions.filter((q) => q.kind === 'recovery');
   assert.equal(recovery.length, 1, `exactly one recovery prompt opened: ${JSON.stringify(questions.map((q) => q.kind))}`);
   assert.match(recovery[0].id, /^recovery-auth-/, 'the prompt is keyed by its error class');
-  // The prompt carries the failure policy's row options next to the cause.
+  // The prompt carries the failure policy's row options next to the cause and the failed attempt.
   assert.deepEqual(recovery[0].recovery.options.map((o) => o.id), ['retry', 'pause']);
   const { options: _opts, ...recoveryCause } = recovery[0].recovery;
   assert.deepEqual(recoveryCause,
-    { cls: 'auth', message: 'claude exited with code 1: invalid authentication' });
+    { cls: 'auth', message: 'claude exited with code 1: invalid authentication', attempt: 1 });
 
   // 2. pause() released the parked prompt with the pause sentinel — nothing waits on a human.
   assert.equal(rejectedWith?.name, 'PauseError', 'the parked prompt was rejected by the pause');

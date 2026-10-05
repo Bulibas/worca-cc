@@ -13,10 +13,27 @@
 // block drops the server from the run's config and says so; warn only says so. Values are
 // never printed. Pure.
 
-const SECRET_NAME_RE = /(^|[_-])(TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTH|COOKIE|SESSION)([_-]|$)|authorization|api[-_]?key|x-api-key|bearer/i;
-const QUERY_SECRET_RE = /^(api[-_]?key|key|token|access[-_]?token|secret|password|auth|sig|signature)$/i;
+export const SECRET_NAME_RE = /(^|[_-])(TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTH|COOKIE|SESSION)([_-]|$)|authorization|api[-_]?key|x-api-key|bearer/i;
+export const QUERY_SECRET_RE = /^(api[-_]?key|key|token|access[-_]?token|secret|password|auth|sig|signature)$/i;
 const REF_RE = /^\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}$/;
-const TOKEN_SHAPE_RE = /\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.)/;
+export const TOKEN_SHAPE_RE = /\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.)/;
+// Exact counts: for .test() `{16}` answers as `{16,}` does, and a `{16,}` run of about 5.5M characters throws RangeError.
+const TOKEN_SHAPE_NO_JWT_RE = /\b(sk-[A-Za-z0-9_-]{16}|gh[pousr]_[A-Za-z0-9]{20}|github_pat_[A-Za-z0-9_]{20}|xox[abpr]-[A-Za-z0-9-]{10}|AKIA[0-9A-Z]{16})/;
+
+/**
+ * TOKEN_SHAPE_RE.test(s) in linear time. The regex's JWT arm rescans a `-`-joined run from every `-eyJ`
+ * in it (`'eyJ-'.repeat(10000)`: quadratic), and values, manifests and policy entries are untrusted text.
+ * The other arms end without a literal, so they never rescan. The JWT arm matches exactly when a run of
+ * [A-Za-z0-9_-] followed by `.` holds `\beyJ` + 10 run characters (the character before a run is never a
+ * word character, so `\b` reads the same in the run alone); a fixed-length pattern never rescans.
+ */
+export function hasTokenShape(s) {
+  if (TOKEN_SHAPE_NO_JWT_RE.test(s)) return true;
+  for (const m of s.matchAll(/[A-Za-z0-9_-]+/g)) {
+    if (s[m.index + m[0].length] === '.' && /\beyJ[A-Za-z0-9_-]{10}/.test(m[0])) return true;
+  }
+  return false;
+}
 
 export const MCP_SECRET_MODES = Object.freeze(['block', 'warn', 'off']);
 
@@ -36,10 +53,10 @@ export function mcpSecretFindings(def) {
   const out = [];
   if (!def || typeof def !== 'object') return out;
   for (const [k, v] of Object.entries(def.env || {})) {
-    if (literal(v) && (SECRET_NAME_RE.test(k) || TOKEN_SHAPE_RE.test(v))) out.push(`env ${k}`);
+    if (literal(v) && (SECRET_NAME_RE.test(k) || hasTokenShape(v))) out.push(`env ${k}`);
   }
   for (const [k, v] of Object.entries(def.headers || {})) {
-    if (literal(v) && !refOnly(v) && (SECRET_NAME_RE.test(k) || TOKEN_SHAPE_RE.test(v))) out.push(`header ${k}`);
+    if (literal(v) && !refOnly(v) && (SECRET_NAME_RE.test(k) || hasTokenShape(v))) out.push(`header ${k}`);
   }
   if (typeof def.url === 'string') {
     try {
@@ -49,7 +66,7 @@ export function mcpSecretFindings(def) {
     } catch { /* not a URL: nothing to find */ }
   }
   for (const a of Array.isArray(def.args) ? def.args : []) {
-    if (typeof a === 'string' && TOKEN_SHAPE_RE.test(a)) { out.push('a token in args'); break; }
+    if (typeof a === 'string' && hasTokenShape(a)) { out.push('a token in args'); break; }
   }
   return out;
 }

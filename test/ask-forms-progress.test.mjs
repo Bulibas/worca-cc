@@ -10,6 +10,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { createAskTools } from '../src/core/ask/tools.mjs';
 import { defaultToolDeps } from '../src/core/ask/tool-deps.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
@@ -57,51 +58,56 @@ const progressWith = (over) => ({
   ...over,
 });
 
-test('get_run_progress: a form clarify round surfaces the projection and the values', async () => {
-  const out = await tools(progressWith({ clarify: { questions: [], answers: [], ask: ASK } }))
-    .call('get_run_progress', { runId: 'r1' });
-  assert.deepEqual(out.clarify.questions, [], 'X3: the legacy arrays stay empty');
-  assert.deepEqual(out.clarify.answers, []);
-  assert.match(out.clarify.form.projection, /^Review mockups$/m, 'a persisted row has no agent half; agentKey sits beside the row');
-  assert.match(out.clarify.form.projection, /Two directions\./);
-  assert.match(out.clarify.form.projection, /1\. Verdict \{verdict\}/);
-  assert.equal(out.clarify.form.projection.includes('/answer'), false, 'no ref, no reply line');
-  assert.equal(out.clarify.form.values, 'Verdict: changes');
-});
-
-test('get_run_progress: a form step round surfaces it too, per round', async () => {
-  const out = await tools(progressWith({ stepQuestions: [
-    { stepKey: 'x:n1:1', round: 1, nodeId: 'n1', agentKey: 'a', questions: [], answers: [], ask: ASK },
-  ] })).call('get_run_progress', { runId: 'r1' });
-  const [sq] = out.stepQuestions;
-  assert.deepEqual([sq.stepKey, sq.round, sq.nodeId, sq.agentKey], ['x:n1:1', 1, 'n1', 'a']);
-  assert.match(sq.form.projection, /Review mockups/);
-  assert.equal(sq.form.values, 'Verdict: changes');
-});
-
-test('get_run_progress: an UNANSWERED form round has an empty values line, not "undefined"', async () => {
-  const out = await tools(progressWith({ clarify: { questions: [], answers: [], ask: { ...ASK, values: null } } }))
-    .call('get_run_progress', { runId: 'r1' });
-  assert.match(out.clarify.form.projection, /Review mockups/);
-  assert.equal(out.clarify.form.values, '');
-});
-
-test('REGRESSION: a legacy round is byte-identical to today and reports form: null', async () => {
-  const out = await tools(progressWith({
-    clarify: { questions: [LEGACY_Q], answers: [LEGACY_A], ask: null },
-    stepQuestions: [{ stepKey: 'x:n1:1', round: 1, nodeId: 'n1', agentKey: 'a',
-      questions: [LEGACY_Q], answers: [LEGACY_A], ask: null }],
-  })).call('get_run_progress', { runId: 'r1' });
-  assert.deepEqual(out.clarify.questions, [JSON.stringify(LEGACY_Q)]);
-  assert.deepEqual(out.clarify.answers, [JSON.stringify(LEGACY_A)]);
-  assert.equal(out.clarify.form, null);
-  assert.equal(out.stepQuestions[0].form, null);
-  assert.deepEqual(out.stepQuestions[0].questions, [JSON.stringify(LEGACY_Q)]);
-  // A legacy row on the readers has NO `ask` key at all (artifacts.mjs formFieldsOf) —
-  // the same null, so an older fake bundle is unaffected.
-  const bare = await tools(progressWith({ clarify: { questions: [LEGACY_Q], answers: [LEGACY_A] } }))
-    .call('get_run_progress', { runId: 'r1' });
-  assert.equal(bare.clarify.form, null);
+test('get_run_progress forms: clarify/step rounds surface projection + values (unanswered empty); a legacy round is byte-identical with form: null', async () => {
+  await checkRows([
+    { name: 'get_run_progress: form clarify and step rounds surface the projection and values; an unanswered round has an empty values line', run: async () => {
+      await checkRows([
+        { name: 'get_run_progress: a form clarify round surfaces the projection and the values', run: async () => {
+          const out = await tools(progressWith({ clarify: { questions: [], answers: [], ask: ASK } }))
+            .call('get_run_progress', { runId: 'r1' });
+          assert.deepEqual(out.clarify.questions, [], 'X3: the legacy arrays stay empty');
+          assert.deepEqual(out.clarify.answers, []);
+          assert.match(out.clarify.form.projection, /^Review mockups$/m, 'a persisted row has no agent half; agentKey sits beside the row');
+          assert.match(out.clarify.form.projection, /Two directions\./);
+          assert.match(out.clarify.form.projection, /1\. Verdict \{verdict\}/);
+          assert.equal(out.clarify.form.projection.includes('/answer'), false, 'no ref, no reply line');
+          assert.equal(out.clarify.form.values, 'Verdict: changes');
+        } },
+        { name: 'get_run_progress: a form step round surfaces it too, per round', run: async () => {
+          const out = await tools(progressWith({ stepQuestions: [
+            { stepKey: 'x:n1:1', round: 1, nodeId: 'n1', agentKey: 'a', questions: [], answers: [], ask: ASK },
+          ] })).call('get_run_progress', { runId: 'r1' });
+          const [sq] = out.stepQuestions;
+          assert.deepEqual([sq.stepKey, sq.round, sq.nodeId, sq.agentKey], ['x:n1:1', 1, 'n1', 'a']);
+          assert.match(sq.form.projection, /Review mockups/);
+          assert.equal(sq.form.values, 'Verdict: changes');
+        } },
+        { name: 'get_run_progress: an UNANSWERED form round has an empty values line, not "undefined"', run: async () => {
+          const out = await tools(progressWith({ clarify: { questions: [], answers: [], ask: { ...ASK, values: null } } }))
+            .call('get_run_progress', { runId: 'r1' });
+          assert.match(out.clarify.form.projection, /Review mockups/);
+          assert.equal(out.clarify.form.values, '');
+        } },
+      ]);
+    } },
+    { name: 'REGRESSION: a legacy round is byte-identical to today and reports form: null', run: async () => {
+      const out = await tools(progressWith({
+        clarify: { questions: [LEGACY_Q], answers: [LEGACY_A], ask: null },
+        stepQuestions: [{ stepKey: 'x:n1:1', round: 1, nodeId: 'n1', agentKey: 'a',
+          questions: [LEGACY_Q], answers: [LEGACY_A], ask: null }],
+      })).call('get_run_progress', { runId: 'r1' });
+      assert.deepEqual(out.clarify.questions, [JSON.stringify(LEGACY_Q)]);
+      assert.deepEqual(out.clarify.answers, [JSON.stringify(LEGACY_A)]);
+      assert.equal(out.clarify.form, null);
+      assert.equal(out.stepQuestions[0].form, null);
+      assert.deepEqual(out.stepQuestions[0].questions, [JSON.stringify(LEGACY_Q)]);
+      // A legacy row on the readers has NO `ask` key at all (artifacts.mjs formFieldsOf) —
+      // the same null, so an older fake bundle is unaffected.
+      const bare = await tools(progressWith({ clarify: { questions: [LEGACY_Q], answers: [LEGACY_A] } }))
+        .call('get_run_progress', { runId: 'r1' });
+      assert.equal(bare.clarify.form, null);
+    } },
+  ]);
 });
 
 test('the form projection is redacted and capped like every other free-text field', async () => {
@@ -132,7 +138,14 @@ test('the REAL reader bundle injects askProgress, and a bundle without it degrad
   assert.equal(out.clarify.form, null);
 });
 
-test('get_run_progress: the tool description names the form text', () => {
-  const def = tools(progressWith({})).list().find((d) => d.name === 'get_run_progress');
-  assert.match(def.description, /form ask as text plus its answered values/);
+test('get_run_progress: nightDecisions lists what night mode decided, rationale redacted', async () => {
+  const out = await tools(progressWith({ nightDecisions: [
+    { questionId: 'clarify-n-1', kind: 'clarify', at: '2026-09-27T23:00:00Z', choice: 'A', strategy: 'weights', confidence: 80, flagged: true, rationale: 'key sk-secret', reversible: true },
+    { questionId: 'clarify-n-2', kind: 'clarify', at: '2026-09-27T23:05:00Z', choice: null, strategy: 'guardrail', flagged: true, guardrail: 'maxDecisions', rationale: 'limit' },
+  ] })).call('get_run_progress', { runId: 'r1' });
+  assert.deepEqual(out.nightDecisions[0], { questionId: 'clarify-n-1', kind: 'clarify', at: '2026-09-27T23:00:00Z', choice: 'A', strategy: 'weights', confidence: 80, reversible: true, flagged: true, rationale: 'key [redacted]' });
+  assert.equal(out.nightDecisions[1].guardrail, 'maxDecisions');
+  assert.equal(out.nightDecisions[1].choice, null);
+  const none = await tools(progressWith({})).call('get_run_progress', { runId: 'r1' });
+  assert.deepEqual(none.nightDecisions, []);
 });

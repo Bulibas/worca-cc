@@ -32,6 +32,8 @@ const state = {
   subagentModels: ['sonnet', 'opus', 'fable', 'auto', 'inherit'],
   workflowId: 'wf_default', // currently selected workflow in New Pipeline
   guardrailsId: 'permissive', // the guardrail set the next run applies ('permissive' = unrestricted default)
+  mcpOptOut: [], // New Pipeline › MCP servers: the '<setId>|<serverId>' memberships the next run opts out of
+  mcpPreview: null, // POST /api/mcp/preview for the selected target, or null (control hidden)
   memoryScope: 'global', // Memory defragment only: the scope the next run restructures
   guardrailSets: [], // GET /api/guardrails cache for the picker + hint
   agents: {}, // registry { [key]: AgentMeta }, lazily loaded from /api/agents
@@ -41,6 +43,8 @@ const state = {
   scriptsList: [],   // GET /api/scripts cache; dropped on every scripts-changed frame
   mockWriterRoles: [], // closed mock-role list from /api/agents (drives the agent form)
   historyAll: [],    // full /api/history dataset; client-side filter cache
+  historyArchived: null, // GET /api/history?archived=1 rows, lazy per Archived-chip activation (null = never loaded)
+  historyArchivedError: '', // the last archived-feed load error, shown in the Runs list while it has no rows
   historyPerson: '', // active "Started by" filter (lower-cased name); '' === everyone. Shared deployments only.
   historyError: '',  // the last /api/history load error, shown in the Runs list while it has no rows
   ghAvailable: false,// gh CLI availability, from the last /api/history load
@@ -69,6 +73,7 @@ import { logLineVisible, logFacets, compileLogFilter } from './log-filter.mjs';
 import { alreadyApplied, noteBoot } from './ws-seq.mjs';
 import { decorFromState, applyDecor, isGraphManifest, ledgerRows } from './graph/run-decor.mjs';
 import { mountRunGraph } from './graph/run-hosts.mjs';
+import { AWAY_GLYPH } from './away-glyph.mjs';
 import { trailColumns, nowRows, glanceCopy, renderOrb, nodeLabel, preflightOpen, dotState } from './run-glance.mjs';
 import { buildRunsModel, countNeedsYou, isRowSelected, renderRunsList, RUNS_FILTERS, RUNS_GROUPINGS } from './runs-list.mjs';
 // Import list only — `statusChip`/`diffBadges`/`mergeFindings`/`reportResultControl`
@@ -82,12 +87,17 @@ import {
   renderMemoryHistory, MEMORY_NAME_HELP,
 } from './memory-view.mjs';
 import { createScriptsController } from './scripts-view.mjs';
+import { renderRunPill, renderOverviewStrip, renderShipItStrip, renderRunningActionsCard, historyActionBadges, createActionsController } from './actions-view.mjs';
+import { editorFieldEl, renderProjectActionsEditor, renderStackEditor } from './actions-config-view.mjs';
+import { createMcpView, mountProjectMcp, paintMcpResolution, paintAskMcpBlock, setMcpStripRenderer } from './mcp-view.mjs';
 import { createAskPanel } from './ask-panel.mjs';
+import { createTerminalPane } from './terminal-pane.mjs';
+import { notify, withButton, fieldError, clearFieldErrors, cardAlert, trackDirty, splitMessage, BUTTON_DONE_MS } from './feedback.mjs';
 import { createVoiceController } from './ask-voice.mjs';
 import { renderGettingStarted, renderGettingStartedPill, bindWelcome, doneCount, allStepsDone, GETTING_STARTED_STEPS } from './getting-started.mjs';
 import { createGuideSpot } from './guide-spot.mjs';
 import {
-  splitPatchSections, parseFileSection, patchIndex, sectionKey,
+  splitPatchSections, parseFileSection, patchIndex, sectionKey, MAX_FILE_SECTION_CODE_UNITS,
 } from './diff-view.mjs';
 import {
   langForPath, canHighlightParsed, highlightParsed,
@@ -160,8 +170,9 @@ import {
   renderProjectTpCell, renderProjectTpChip, projectTpSummary, renderPolicyEnableDialogBody, renderEffectiveTable, renderPolicyEditor, docFromEditor, editorDirty,
   renderPolicyEmptyState, renderPolicySyncChip, renderWsPolicyLine, renderTeamCapsReadout, renderTeamChip, renderPolicyNotesLine,
   renderRequiredStrip, renderSetupChecklist, relTime as tpRelTime,
-  renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel,
+  renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel, renderMcpStrip, renderMcpConsent,
 } from './team-policy-view.mjs';
+import { mcpRunsLabel, renderMcpRunsPop } from './mcp-run-picker.mjs';
 import { aggregate, toCsv } from '../../src/shared/team-metrics/aggregate.mjs';
 import { buildWorkItems, prLookupFor } from '../../src/shared/team-metrics/timeline.mjs';
 import { renderTimeline, renderTimelinePopover, timelineWindow, shiftAnchor, TL_MODES, TL_ZOOMS } from './team-metrics-timeline.mjs';
@@ -172,17 +183,30 @@ import { paintAboutInto } from './about-links.mjs';
 import { renderReasonOptions, renderOptIns, previewText, reportBlobParts, REPORT_PREVIEW_DEBOUNCE_MS } from './report-run.mjs';
 import { openScheduleSheet, closeScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
 import {
-  freshSyncState, syncPillModel, projectChipModel, worstChip, ffRefusalCopy, syncStageLabel, fetchedAgo, isSyncableBranchName,
-  mountSyncRow, paintSyncRow, openSyncDialog, chooseSyncRefusal,
+  freshSyncState, ago, listRowModel, projectBarModel, wsRollupModel, ffRefusalCopy, syncStageLabel, fetchedAgo, isSyncableBranchName,
+  runOutcomeModel, openSyncDialog, chooseSyncRefusal,
 } from './branch-sync.mjs';
 import { describeRule, formatInstant } from '../../src/shared/schedule/recurrence.mjs';
+import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindShort, awayAnswerRows, awayAnswerCounts, checksFirst, awayAnswersSummary, decidedByText, awayAskCaption } from '../../src/shared/away-mode/labels.mjs';
+import { parseWindow } from '../../src/shared/away-mode/activation.mjs';
+import { runCostBreakdown, floorText, auxLabelForSubagent } from '../../src/shared/cost/breakdown.mjs';
+import { costBreakdownEl, costSummaryText, awayTotalText } from './cost-breakdown.mjs';
+import { describeRun, describeNewRun, describeAwaySwitch } from '../../src/shared/away-mode/describe.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
 import { createLevelController, levelAtLeast, currentLevel, tagLevel, keepVisible, minLevelFor, LEVEL_INFO, UI_LEVELS } from './ui-level.mjs';
 import { registerAskRenderer, askRendererFor, askKindOf } from './ask/registry.mjs';
 import { renderAskForm } from './ask/form-renderer.mjs';
+import { renderNightForm, readNightForm, updateAwaySummary } from './night-mode-form.mjs';
 import { visibleFields as visibleAnswerFields } from '../../src/shared/forms/layout.mjs';
 
 const diffHljsLoader = window.__worcaTestHooks?.hljsLoader ?? createHljsLoader();
+
+// A test-only size knob, read once per app.js instance (tests set window.__worcaTestHooks before
+// their cache-busted import). Anything but a positive integer keeps the production value.
+function testHookInt(name, fallback) {
+  const v = window.__worcaTestHooks?.[name];
+  return Number.isInteger(v) && v > 0 ? v : fallback;
+}
 
 // One markdown pipeline for the whole page — Ask answers AND diff-comment bodies
 // (D15): marked + DOMPurify from the vendor routes, the test hook first. This is
@@ -217,6 +241,7 @@ function bindMarkdownReady() {
 const pageMarkdown = (text) => (hdMarkdown.isReady() ? hdMarkdown.render(text) : { kind: 'plain' });
 
 let askPanel = null;           // Ask Worca panel — assigned by the boot mount; every seam uses askPanel?.
+let terminalPane = null;       // terminal pane (#573) — assigned by the boot mount; every seam uses terminalPane?.
 let newPipelinePrefill = null; // one-shot card → New Pipeline handoff (§10.2 seam 7, consumed by Task 11)
 
 // ---------------------------------------------------------------------------
@@ -285,6 +310,7 @@ const el = {
   agentRows: $('#agents-rows'),
   hitlRow: $('#hitl-row'),
   humanInLoop: $('#humanInLoop'),
+  nightMode: $('#nightMode'),
   memoryScopeRow: $('#memory-scope-row'),
   memoryScopeSeg: $('#memory-scope-seg'),
   agentsWorkflow: $('#agentsWorkflow'),
@@ -309,6 +335,7 @@ const el = {
   runsSearchRow: $('#runs-search-row'),
   runsFilter: $('#runs-filter'),
   runsGroupBtn: $('#runs-group-btn'),
+  runsArchivedBtn: $('#runs-archived-btn'),
   runsGroupMenu: $('#runs-group-menu'),
 
   // Target selector (New Pipeline)
@@ -319,7 +346,9 @@ const el = {
   workspaceSelect: $('#workspaceSelect'),
   wsMembers: $('#ws-members'),
   sourceBranchWrap: $('#sourceBranchWrap'),
-  syncRow: $('#sync-row'), syncPill: $('#sync-pill'), syncBtn: $('#sync-btn'), syncAuto: $('#syncAuto'),
+  branchesCtx: $('#branches-ctx'), branchesModeWrap: $('#branches-mode-wrap'), branchesMode: $('#branches-mode'),
+  btProjectRow: $('#bt-project-row'), btProjectName: $('#bt-project-name'), btProjectOutcome: $('#bt-project-outcome'),
+  featureBranchHint: $('#featureBranchHint'), branchesBlocked: $('#branches-blocked'),
   wsSourceBranches: $('#ws-source-branches'),
   wsSourcePreviousRow: $('#ws-source-previous-row'), wsSourcePrevious: $('#ws-source-previous'),
 
@@ -352,7 +381,6 @@ const el = {
   settingsProjectsRootBrowse: $('#settingsProjectsRootBrowse'),
   settingsSave: $('#settingsSave'),
   settingsReset: $('#settingsReset'),
-  settingsMsg: $('#settingsMsg'),
 
   // Settings: budget & cost limits card
   budgetReadout: $('#budgetReadout'),
@@ -362,10 +390,12 @@ const el = {
   budgetHumanRate: $('#budgetHumanRate'),
   budgetSave: $('#budgetSave'),
   budgetReset: $('#budgetReset'),
-  budgetMsg: $('#budgetMsg'),
   // Team policy surfaces (team-policy design §11)
   teamCapsReadout: $('#teamCapsReadout'),
   policyLine: $('#policyLine'),
+  mcpRunsField: $('#mcpRunsField'),
+  mcpRunsLabel: $('#mcpRunsLabel'),
+  mcpRunsPop: $('#mcpRunsPop'),
   pluginsPolicy: $('#plugins-policy'),
   tpBody: $('#tp-body'),
   tpScope: $('#tp-scope'),
@@ -380,7 +410,9 @@ const el = {
 
   // Projects management view
   projectsList: $('#projects-list'),
-  projectsSyncAll: $('#projects-sync-all'),
+  // Sync all rides the list card's head (design 2026-10-01): one node every render re-homes, so a
+  // Sync all in flight keeps its busy state through a projects-changed repaint.
+  projectsSyncAll: Object.assign(document.createElement('button'), { type: 'button', id: 'projects-sync-all', className: 'btn btn-primary btn-mini', hidden: true, textContent: 'Sync all' }),
   projectsMsg: $('#projects-msg'),
   projectAddBtn: $('#project-add-btn'),
   projShell: $('#proj-shell'),
@@ -456,7 +488,6 @@ const el = {
   // Chat notifications (Settings card)
   chatSettingsHost: $('#chat-settings-host'),
   chatSettingsSave: $('#chatSettingsSave'),
-  chatSettingsMsg: $('#chatSettingsMsg'),
   settingsTabs: $('#settings-tabs'),
 
   // About (Settings card): read-only app identity, painted from /api/settings
@@ -511,6 +542,10 @@ const el = {
   reportFiled: $('#report-filed'),
 };
 
+// #555: one dirty tracker per Settings card, keyed by card id (settingsCardDirty). Declared up here,
+// not beside postSettingsCard: the Chat and Root cards create theirs at top level further up the file.
+const settingsDirty = new Map();
+
 // ---------------------------------------------------------------------------
 // WebSocket
 // ---------------------------------------------------------------------------
@@ -548,6 +583,7 @@ function connectWS() {
 
   ws.addEventListener('close', () => {
     state.wsReady = false;
+    if (terminalPane) terminalPane.onConnection(false);   // its keys are not sent until the next hello
     sessionGuard.check(); // behind an identity proxy, a dropped socket may be an expired sign-in
     scheduleReconnect();
   });
@@ -625,8 +661,8 @@ function applySidebarCollapsed() {
   }
   // The rail has no visible labels, so mirror each button's label into a native
   // tooltip while collapsed (the mock does this on all twelve). Written by JS,
-  // never as markup: a static title= on the CTA or on Settings reds
-  // ui-nav-sections:48 / :57, whose regexes pin those open-tags verbatim.
+  // never as markup: keep the CTA and Settings open-tags free of a static title=
+  // (the ui-nav-sections regexes that pinned them verbatim are no longer tested).
   // `data-rail-title` marks the ones WE wrote, so expanding removes only those.
   // Runs is excluded — updateNavCounts owns its title (the needs-you/live
   // counts). It has not run yet at the boot call below; showView does.
@@ -727,7 +763,7 @@ function setMobileNavOpen(open) {
   document.body.classList.toggle('nav-open', next);
   mbarMenu?.setAttribute('aria-expanded', String(next));
   if (navScrim) navScrim.hidden = !next;
-  for (const n of [$('.main'), $('#mbar'), $('body > .ask-dock')]) {
+  for (const n of [$('.main'), $('#mbar'), $('body > .ask-dock'), $('body > .term-pane')]) {
     if (n) n.toggleAttribute('inert', next);
   }
   if (next) $('#side-close')?.focus();
@@ -1041,6 +1077,8 @@ function handleServerMessage(msg) {
 
   if (msg.type === 'hello') {
     onHello(msg);
+    refreshRunningActions();
+    if (terminalPane) terminalPane.onHello(msg);
     return;
   }
 
@@ -1090,6 +1128,11 @@ function handleServerMessage(msg) {
     refreshAllCounts();
     refreshBudget();
     if (inRunsView()) loadHistoryView({ force: true });
+    // The Archived feed, once loaded, goes stale on the same change: refetch it while
+    // the Runs page is open, else drop it so the next Archived paint fetches afresh.
+    if (state.historyArchived !== null) {
+      if (inRunsView()) void loadHistoryArchived(); else state.historyArchived = null;
+    }
     if (currentView() === 'stats') loadStatsView();
     return;
   }
@@ -1121,9 +1164,11 @@ function handleServerMessage(msg) {
     if (memoryTabCtl) { void loadMemDefragModelCard(); void memoryTabCtl.load(memoryTabCtl.selectedName(), { keepDraft: true }); }
     delete state.workflowCache[MEMORY_DEFRAG_WORKFLOW_ID];
     if (currentView() === 'new' && state.workflowId === MEMORY_DEFRAG_WORKFLOW_ID) void renderWorkflowConfig(state.workflowId);
+    void refreshAwayBodies().catch(() => {});
     loadSettings();
     return;
   }
+  if (msg.type === 'away-hours') { onAwayHoursEdge(msg); return; }
   if (msg.type === 'onboarding-changed') {
     scheduleOnboardingRefresh();
     return;
@@ -1182,6 +1227,7 @@ function handleServerMessage(msg) {
     if (currentView() === 'team-policy' && !tpState.editing) loadTeamPolicyView();
     if (currentView() === 'settings' && currentSettingsTab === 'runs') paintTeamCapsReadout(true);
     if (currentView() === 'settings' && currentSettingsTab === 'plugins') paintPluginsPolicy(true);
+    if (currentView() === 'settings' && currentSettingsTab === 'mcp') refreshMcpSurfaces();   // the MCP strip and the Team set
     if (currentView() === 'new') schedulePolicyLine();
     return;
   }
@@ -1206,6 +1252,17 @@ function handleServerMessage(msg) {
     if (scriptsCtl) scriptsCtl.onFrame(msg);
     return;
   }
+  // Terminal frames are tagged by sessionId (#573); the pane keeps its own.
+  if (typeof msg.type === 'string' && msg.type.startsWith('term-')) {
+    if (terminalPane) terminalPane.onFrame(msg);
+    return;
+  }
+  // Action frames are tagged by instanceId (not runId); each controller keeps its own run's.
+  if (typeof msg.type === 'string' && msg.type.startsWith('action-')) {
+    for (const c of actionControllers) c.onFrame(msg);
+    return;
+  }
+  if (msg.type === 'actions-changed') { refreshRunningActions(); for (const c of actionControllers) c.refresh(); refreshActionsStrips(); return; }
   if (msg.type === 'memory-changed') {
     const scope = String(msg.scope || '');
     if (scope === 'global' && currentView() === 'settings' && currentSettingsTab === 'memory' && memoryTabCtl) pokeGlobalMemory();
@@ -1232,7 +1289,7 @@ function handleServerMessage(msg) {
     if (v === 'projects' || v === 'workspaces') void refreshSyncChips();
     // GET /api/sync (no network). Not while this form's own Sync POST is in flight (its answer is
     // authoritative), not in workspace mode, and '' (auto) is a valid base.
-    if (v === 'new' && state.runTarget !== 'workspace' && !state.sync.busy && el.syncRow && !el.syncRow.hidden && effectiveBase()) void refreshSyncStatusQuiet();
+    if (v === 'new' && state.runTarget !== 'workspace' && !state.sync.busy && syncApplies() && effectiveBase()) void refreshSyncStatusQuiet();
     return;
   }
 
@@ -1269,7 +1326,7 @@ function handleServerMessage(msg) {
   // MATERIALIZE a run: each only attaches to one this tab already knows. (A
   // resolution for an unknown run is meaningless, and auto-creating a card would
   // resurrect the phantom.)
-  if ((msg.type === 'subagent' || msg.type === 'stepskills' || msg.type === 'stepgraphify' || msg.type === 'question-resolved') && !runs.has(msg.runId)) return;
+  if ((msg.type === 'subagent' || msg.type === 'stepskills' || msg.type === 'stepgraphify' || msg.type === 'question-resolved' || msg.type === 'night-decision') && !runs.has(msg.runId)) return;
   const r = upsertRun({ runId: msg.runId });
   // A reconnect re-subscribes and the server replays the run's buffer: skip what this page
   // already applied, or every earlier log line shows twice (ws-seq.mjs).
@@ -1284,6 +1341,9 @@ function handleServerMessage(msg) {
       break;
     case 'question-resolved':
       onQuestionResolved(r, msg);
+      break;
+    case 'night-decision':
+      onNightDecision(r, msg);
       break;
     case 'artifact':
       onArtifact(r, msg);
@@ -1340,8 +1400,14 @@ function handleServerMessage(msg) {
 function onHello(msg) {
   const ws = state.ws;
   const list = Array.isArray(msg.runs) ? msg.runs : [];
+  const rebooted = !!(msg.bootId && state.serverBootId && state.serverBootId !== msg.bootId);
   noteBoot(state, msg.bootId, runs);   // a restarted server numbers run events from 1 again
   applyServerMock(msg.serverMock);     // every hello: a restarted server may have changed mode
+  // A restarted server lists only the runs IT started, and nothing below drops the old ones: mark
+  // every entry stale, and the upserts below clear the ones it lists. The saved run's bar skips a
+  // stale entry (hdPipelineRun), which would otherwise offer a Pause / Stop the server answers
+  // "unknown runId" to and hide the run's working Resume.
+  if (rebooted) for (const r of runs.values()) r.staleBoot = true;
 
   if (!helloSeeded) {
     helloSeeded = true;
@@ -1370,6 +1436,7 @@ function onHello(msg) {
       lastAction: r0.lastAction || undefined,
       workspaceId: r0.workspaceId || undefined,
       projectNames: Array.isArray(r0.projectNames) && r0.projectNames.length ? r0.projectNames : undefined,
+      night: r0.night || undefined,
     });
     // Seed the run's stepper from the hello summary so the live card resolves
     // sub-agents to their real nodes BEFORE any subagent delta paints — closing
@@ -1495,7 +1562,7 @@ function makeRun({
   runId, title, projectDir, status = 'running', startedAt, local = false,
   pendingQuestion = null, kind = 'run', pipelineId = null, pauseReason = null,
   pauseDetail = null, startedBy = null, lastAction = null,
-  workspaceId = undefined, workspaceName = undefined, projectNames = null,
+  workspaceId = undefined, workspaceName = undefined, projectNames = null, night = undefined,
 }) {
   return {
     runId,
@@ -1514,6 +1581,7 @@ function makeRun({
     lastAction,           // who last stopped / paused / resumed it: { kind, by, at } or null
     workspaceId,
     workspaceName,
+    night,                // Away mode on this run: {optIn, override, decisions, flagged, openedAt} (hello / state)
     // Stable ordering key: assigned once per runId, never bumped by activity
     // and never re-minted if the run is dropped and re-materialized.
     // hello seeds runs in server registration order, so this tracks true
@@ -1542,6 +1610,7 @@ function makeRun({
     active: [], endReached: undefined, result: null, warnings: [], wireDeliveries: {}, tokens: {}, gate: null,
     el: null,
     _finished: false,
+    staleBoot: false,  // a restarted server never re-listed it (onHello): the run died with the old process
   };
 }
 
@@ -1557,6 +1626,7 @@ function upsertRun(partial) {
     for (const k of Object.keys(partial)) {
       if (partial[k] !== undefined) r[k] = partial[k];
     }
+    r.staleBoot = false;   // every caller relays the current server: it knows this runId
   }
   return r;
 }
@@ -1966,6 +2036,23 @@ function cycleAwareLabel(stepper, subAgents, groupKeys, steps = []) {
   };
 }
 
+// Night mode decided (or hit a guardrail) on this run: append the record to the run-view list.
+// The pending card itself goes away through the server's question-resolved frame.
+function onNightDecision(r, msg) {
+  if (!msg || !msg.record || typeof msg.record !== 'object') return;
+  addNightDecisions(r, [msg.record]);
+  r._decorSeq = (r._decorSeq || 0) + 1;
+}
+
+/** Merge decision records into r.nightDecisions, once each (a history fetch and a live frame may carry the same one). */
+function addNightDecisions(r, list) {
+  const key = (d) => `${d.questionId}|${d.guardrail || ''}|${d.choice == null ? '' : d.choice}`;
+  const cur = Array.isArray(r.nightDecisions) ? r.nightDecisions : [];
+  const seen = new Set(cur.map(key));
+  for (const d of list) { if (d && !seen.has(key(d))) { seen.add(key(d)); cur.push(d); } }
+  r.nightDecisions = cur;
+}
+
 function onState(r, msg) {
   if (msg.status) r.status = msg.status;
   if (msg.startedAt) r.startedAt = msg.startedAt;
@@ -2011,6 +2098,8 @@ function onState(r, msg) {
   if (typeof msg.totalCostUsd === 'number') r.totalCostUsd = msg.totalCostUsd;
   // What the open preflight is doing (the glance's status line); null once it ends.
   if (msg.setupStage !== undefined) r.setupStage = msg.setupStage;
+  // Night mode switches + counters (run-harness _nightSnapshot): the run-view switch paints from them.
+  if (msg.night && typeof msg.night === 'object') r.night = msg.night;
   // Sub-agents: the state snapshot is authoritative (covers late-join/replay and
   // any missed `subagent` delta). Replace wholesale when present; a snapshot that
   // omits the field (older runs / partial snapshots) leaves the delta-built array.
@@ -2290,20 +2379,25 @@ const gvApi = {
   // delete this API can refuse (the built-in, a 404, a 409) says WHY there and
   // the user has to read it (MAJ-17).
   deleteWorkflow: async (id) => {
-    const res = await fetch(`/api/workflows/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (res.ok) return { ok: true };
-    const d = await safeJson(res);
-    return { ok: false, status: res.status, error: (d && d.error) || `delete failed (${res.status})` };
+    try {
+      const res = await fetch(`/api/workflows/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (res.ok) return { ok: true };
+      const d = await safeJson(res);
+      return { ok: false, status: res.status, error: (d && d.error) || `delete failed (${res.status})` };
+    } catch (e) { return { ok: false, status: 0, error: `Worca did not answer (${e.message}).` }; }
   },
   // Import a JSON export (#421). 422 carries the shared validator's issues plus
   // `summary` (the one-line "agents you do not have" fold) when that is the cause.
   // dryRun: validate + list the script commands, write nothing (D18). acceptScripts: the user SAW them and
   // agreed — the server refuses a command-carrying graph without the literal true (409 SCRIPTS_UNCONFIRMED).
   importWorkflow: async (workflow, { dryRun = false, acceptScripts = false } = {}) => {
-    const res = await fetch('/api/workflows/import-json', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workflow, ...(dryRun ? { dryRun: true } : {}), ...(acceptScripts ? { acceptScripts: true } : {}) }),
-    });
+    let res;
+    try {
+      res = await fetch('/api/workflows/import-json', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workflow, ...(dryRun ? { dryRun: true } : {}), ...(acceptScripts ? { acceptScripts: true } : {}) }),
+      });
+    } catch (e) { return { ok: false, status: 0, error: `Worca did not answer (${e.message}).` }; }
     const d = await safeJson(res);
     if (!res.ok) {
       return { ok: false, status: res.status, error: (d && d.error) || `import failed (${res.status})`, summary: d && d.summary, issues: d && d.errors };
@@ -2329,10 +2423,7 @@ function gvEls() {
 // The composer's saved-list message line — the same (text, kind) shape as
 // setAgentsMsg/setPluginsMsg/... elsewhere in this file.
 function setGvSavedMsg(text, kind) {
-  const n = gvEls().savedMsg;
-  if (!n) return;
-  n.textContent = text || '';
-  n.className = 'form-msg' + (kind ? ` ${kind}` : '');
+  reportStatus(gvEls().savedMsg, 'form-msg', text, kind);
 }
 
 async function gvLoadAgents() {
@@ -2376,6 +2467,7 @@ async function initComposer() {
     doc: document, api: gvApi, storage: (() => { try { return window.localStorage; } catch { return null; } })(),
     portsFn: (node) => gvPortsFn(node),
     highlight: scriptHighlight,   // a script card's command/code params get the real editor
+    notify: (o) => notify(o),
   });
   gvComposer.mount();
   gvComposer.newCanvas();
@@ -2562,7 +2654,7 @@ function gvRenderSaved() {
           if (!ok) return;
           const r = await gvApi.deleteWorkflow(wf.id);
           if (!r.ok) { setGvSavedMsg(r.error, 'err'); return; }   // the row stays; say why
-          setGvSavedMsg('');
+          setGvSavedMsg(`Pipeline deleted: ${wf.name || wf.id}`, 'ok');
           gvRefreshSaved();
         });
         row.appendChild(del);
@@ -3227,6 +3319,9 @@ async function renderWorkflowConfig(workflowId) {
   // Memory defragment (agent memory §7.3 / B11): the ONE run option that workflow needs. Every
   // path that changes the picker ends here, so this single line covers them all.
   if (el.memoryScopeRow) el.memoryScopeRow.hidden = workflowId !== MEMORY_DEFRAG_WORKFLOW_ID;
+  // MCP registry (§6.1): a memory-defrag run starts no registry servers, so the control hides at
+  // once; the policy-line repaint at the end refetches the preview for every other workflow.
+  if (el.mcpRunsField) renderMcpRuns();
   if (isAuto) {
     // Auto picks the agents per run (spec §7.2 / D20): no accordion, one switch, read from the project config.
     // The switch is per PROJECT like the accordion's rows, and saveHumanInLoop drops the
@@ -3819,8 +3914,8 @@ async function saveActiveWorkflow(workflowId) {
     const data = await safeJson(res);
     if (res.ok && data.config) state.config = data.config;
     scheduleOnboardingRefresh();   // a picked workflow ticks "Explore the built-in workflows"
-  } catch {
-    /* selection is best-effort; ignore transient errors */
+  } catch (e) {
+    notify({ tone: 'err', title: 'Could not select the workflow', detail: e.message, key: 'select-workflow' });
   }
 }
 
@@ -3833,7 +3928,10 @@ async function saveHumanInLoop(on) {
     const data = await safeJson(res);
     if (!res.ok) appendLog({ source: 'ui', level: 'error', text: `human in the loop: ${data.error || res.status}`, ts: Date.now() });
     else if (data.config) state.config = data.config;
-  } catch { /* best-effort, like saveActiveWorkflow */ }
+  } catch (e) {
+    if (el.humanInLoop) el.humanInLoop.checked = !on;   // the switch shows what is stored
+    notify({ tone: 'err', title: 'Could not change human-in-the-loop', detail: e.message, key: 'human-in-loop' });
+  }
 }
 if (el.humanInLoop) el.humanInLoop.addEventListener('change', () => saveHumanInLoop(el.humanInLoop.checked));
 
@@ -3998,7 +4096,7 @@ function effectiveDefaultsOf(row) {
 // ---------------------------------------------------------------------------
 // Log window
 // ---------------------------------------------------------------------------
-const MAX_LOG_LINES = 4000;
+const MAX_LOG_LINES = testHookInt('maxLogLines', 4000);
 
 // Build one .log-line node from a normalized log record. (Same DOM shape the
 // old global appendLog produced: ts/src/msg spans + lvl class.)
@@ -4771,6 +4869,25 @@ function renderClarifyBody(r, panel, pq) {
       free.placeholder = 'Or type your own answer… (e.g. "B but change the port")';
     }
 
+    // Night mode (Step 14): the agent's confidence per option (one bar each, keyed by
+    // option order) and its recommendation, which is preselected — the user can change it.
+    const conf = Array.isArray(q.confidence) && q.confidence.length === opts.length ? q.confidence : null;
+    const rec = conf && typeof q.recommended === 'string' && opts.includes(q.recommended) ? q.recommended : null;
+    const select = (btn, optText) => {
+      // Select this option, clear siblings + the free-text field (if present).
+      optsWrap.querySelectorAll('.qopt').forEach((b) => {
+        const on = b === btn;
+        b.classList.toggle('sel', on);
+        b.setAttribute('aria-pressed', String(on));
+        delete b.dataset.preset;           // a real pick: the "Answered" pill may show
+      });
+      if (free) {
+        free.value = '';
+        free.classList.remove('has');
+      }
+      slot.choice = optText;
+      recount();
+    };
     opts.forEach((optText, optIdx) => {
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -4778,24 +4895,32 @@ function renderClarifyBody(r, panel, pq) {
       btn.setAttribute('aria-pressed', 'false');
       // A/B/C/D key (MAX_CLARIFY_OPTIONS is 4) so a free-text answer can refer
       // back to an option by name, e.g. "B but change the port". The stylesheet
-      // draws it as the option's key square, so the text node is the option alone.
+      // draws it as the option's key square, so the label is the option alone.
       btn.dataset.key = String.fromCharCode(65 + optIdx);
-      btn.textContent = optText;
-      btn.addEventListener('click', () => {
-        // Select this option, clear siblings + the free-text field (if present).
-        optsWrap.querySelectorAll('.qopt').forEach((b) => {
-          const on = b === btn;
-          b.classList.toggle('sel', on);
-          b.setAttribute('aria-pressed', String(on));
-        });
-        if (free) {
-          free.value = '';
-          free.classList.remove('has');
-        }
-        slot.choice = optText;
-        recount();
-      });
+      const label = document.createElement('span');
+      label.className = 'qopt-txt';
+      label.textContent = optText;
+      btn.appendChild(label);
+      if (optText === rec) {
+        const badge = document.createElement('span');
+        badge.className = 'qrec';
+        badge.textContent = 'Recommended';
+        btn.appendChild(badge);
+      }
+      if (conf) {
+        const bar = document.createElement('span');
+        bar.className = 'qconf';
+        bar.setAttribute('aria-label', `${conf[optIdx]}% confidence`);
+        const fill = document.createElement('span');
+        fill.className = 'qconf-fill';
+        fill.style.width = `${conf[optIdx]}%`;
+        bar.appendChild(fill);
+        btn.appendChild(bar);
+      }
+      btn.addEventListener('click', () => select(btn, optText));
       optsWrap.appendChild(btn);
+      // Preselected, not answered: data-preset keeps the "Answered" pill off until a real click.
+      if (optText === rec) { select(btn, optText); btn.dataset.preset = '1'; }
     });
     if (opts.length) block.appendChild(optsWrap);
 
@@ -5451,6 +5576,7 @@ function clearQpanel(r) {
 function finishRun(r, status) {
   if (r._finished) return;
   r._finished = true;
+  r._finishedAs = status;   // onDone re-arms a run that finished as paused (it is stopped later)
   scheduleOnboardingRefresh();
   r._decorSeq = (r._decorSeq || 0) + 1;   // isLive(r) reads _finished/status/pendingQuestion
   r.status = status;
@@ -5507,6 +5633,10 @@ function onDone(r, msg) {
   // An 'error' pause also carries the cause it parked on; assigned unconditionally
   // for the same reason as the code above — a later reasonless done must clear it.
   r.pauseDetail = msg.detail || null;
+  // A paused run already finished once, as paused. Its stop (or a settle from elsewhere) sends a
+  // terminal done on the same runId: finish it again, for real. Never on an `error` frame: onError
+  // stays guarded, so a stray error after the pause cannot turn the parked run red.
+  if (r._finished && r._finishedAs === 'paused' && RD_TERMINAL.includes(msg.status)) r._finished = false;
   finishRun(r, msg.status || 'done');
   // Nothing else picks up the FINAL spend delta: a non-cost `done` broadcasts no
   // budget-changed, and startBudgetTick refetches only while runs are live. Without
@@ -5730,7 +5860,7 @@ async function mountPluginSourcePane(src) {
       onPick: async (profile) => {
         const r = await pluginApi('PUT', '/api/source-bindings',
           { ...resolved.ref, plugin: src.plugin, sourceId: src.sourceId, profile });
-        if (!r.ok) return setFormMsg(r.data.error || 'could not save the profile binding', 'err');
+        if (!r.ok) return notify({ tone: 'err', title: 'Could not save the profile binding', detail: r.data.error || '', key: 'profile-binding' });
         mountPluginSourcePane(src);
       },
     }));
@@ -5752,7 +5882,7 @@ async function mountPluginSourcePane(src) {
       if (!ref) return;
       const r = await pluginApi('PUT', '/api/source-bindings',
         { ...ref, plugin: src.plugin, sourceId: src.sourceId, profile });
-      if (!r.ok) return setFormMsg(r.data.error || 'could not save the profile binding', 'err');
+      if (!r.ok) return notify({ tone: 'err', title: 'Could not save the profile binding', detail: r.data.error || '', key: 'profile-binding' });
       mountPluginSourcePane(src);
     },
   }) : null;
@@ -6461,7 +6591,7 @@ function onProjectChanged() {
   // #527: a new project starts with no sync answer; the row stays hidden until branches-fresh.
   state.sync = freshSyncState(state.sync.gen + 1);
   syncHasRemote = null;
-  if (el.syncRow) el.syncRow.hidden = true;
+  paintBranches();
   // The source profile is bound to the PROJECT, so a different project may pull
   // from a different tracker: re-resolve rather than keep listing the old one's.
   if (state.activePluginSource && state.activePluginSource.multiProfile) {
@@ -6643,13 +6773,133 @@ function effectiveBase() {
 // false once the fresh list said this project has no such remote: a branch change then needs no status read.
 let syncHasRemote = null;
 
-function paintSyncRowNow() {
-  if (!el.syncRow) return;
-  if (state.runTarget === 'workspace') { paintWorkspaceSyncRow(); return; }
-  // "Branch off the run before it": that start is the previous run's branch, not HEAD's.
-  if (el.sourceBranch && el.sourceBranch.value === PREVIOUS_BRANCH) { el.syncRow.hidden = true; return; }
-  paintSyncRow(el.syncRow, state.sync.block, { autoSync: el.syncAuto.checked, busy: state.sync.busy });
+// ---- Branches table (design v3): one layout for a project (one row) or a workspace (a row each).
+
+/** "Use branches from": this run's choice once touched, else the project's (every member's) own beforeRun. */
+function shownAutoSync() {
+  if (state.sync.autoSync !== null) return state.sync.autoSync;
+  if (state.runTarget === 'workspace') return membersBeforeRun();
+  return state.sync.block?.settings?.beforeRun ?? true;
 }
+/** Is there a remote to start from anywhere in the table? Without one there is nothing to choose. */
+function syncApplies() {
+  if (state.runTarget === 'workspace') return Object.values(state.sync.members).some((b) => b && b.remote);
+  // "Branch off the run before it": that start is the previous run's branch, not HEAD's.
+  if (el.sourceBranch && el.sourceBranch.value === PREVIOUS_BRANCH) return false;
+  return !!(state.sync.block && state.sync.block.remote);
+}
+
+const OUTCOME_ICONS = {
+  ok: '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.7 2.6L16 9.6"/>',
+  behind: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v8.5M8.2 12.6L12 16.4l3.8-3.8"/>',
+  dirty: '<path d="M4.5 19.5h4l10-10-4-4-10 10v4z"/><path d="M12.8 7.2l4 4"/>',
+  diverged: '<circle cx="6.5" cy="5.5" r="2"/><circle cx="17.5" cy="5.5" r="2"/><circle cx="12" cy="18.5" r="2"/><path d="M6.5 7.5v1.5a3 3 0 0 0 3 3h5a3 3 0 0 0 3-3V7.5M12 12v4.5"/>',
+  offline: '<path d="M3.5 3.5l17 17"/><path d="M9 7.3A5.5 5.5 0 0 1 16.6 11h.4a3.5 3.5 0 0 1 2.6 5.8M15.5 18H7a4 4 0 0 1-1.2-7.8"/>',
+  blocked: '<circle cx="12" cy="12" r="9"/><path d="M5.7 5.7l12.6 12.6"/>',
+  local: '<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2.5 19.5h19"/>',
+  branch: '<circle cx="6" cy="5.5" r="2"/><circle cx="6" cy="18.5" r="2"/><circle cx="18" cy="7.5" r="2"/><path d="M6 7.5v9M18 9.5c0 4-3 5.6-7.5 6.3"/>',
+  chevDown: '<path d="M6 9l6 6 6-6"/>',
+  chevUp: '<path d="M6 15l6-6 6 6"/>',
+  // The Projects sync bar only (projectBarModel): listRowModel never names these.
+  noRemote: '<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/>',
+  spin: '<path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5"/>',
+};
+/** Paint one "What the run gets" cell from a runOutcomeModel. Text only ever via textContent. */
+function paintOutcomeCell(host, m, { onRetry = null, busy = false } = {}) {
+  if (!host) return;
+  host.className = `bt-outcome tone-${m.tone}`;
+  host.dataset.icon = m.icon;
+  const icon = document.createElement('span');
+  icon.className = 'bt-icon';
+  if (OUTCOME_ICONS[m.icon]) {
+    icon.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${OUTCOME_ICONS[m.icon]}</svg>`;
+  }
+  const words = document.createElement('span');
+  words.className = 'bt-words';
+  const text = document.createElement('span');
+  text.className = 'bt-text'; text.textContent = m.text;
+  words.appendChild(text);
+  if (m.note) {
+    const note = document.createElement('span');
+    note.className = 'bt-note'; note.textContent = m.note;
+    words.appendChild(note);
+  }
+  host.replaceChildren(icon, words);
+  if (m.retry && onRetry) {
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'btn btn-mini bt-retry'; btn.textContent = busy ? 'Retrying…' : 'Retry';
+    btn.disabled = busy;
+    btn.addEventListener('click', onRetry);
+    host.appendChild(btn);
+  }
+}
+
+/** The project row's outcome: Checking… until the fresh list answers, then the SyncBlock in words. */
+function projectOutcome() {
+  if (el.sourceBranch && el.sourceBranch.value === PREVIOUS_BRANCH) {
+    return { icon: 'none', tone: 'muted', text: 'Starts from the branch of the run before it', note: '', retry: false, blocked: false };
+  }
+  const block = syncHasRemote === false ? null : (state.sync.block || undefined);
+  return runOutcomeModel(block, { origin: shownAutoSync(), base: effectiveBase() });
+}
+
+/** New branch hint: the real names the run creates — one per project in a workspace, suffixed. */
+function paintFeatureHint() {
+  if (!el.featureBranchHint) return;
+  const f = el.featureBranch ? el.featureBranch.value.trim() : '';
+  const ws = state.runTarget === 'workspace' ? state.workspaces.find((w) => w && w.id === state.selectedWorkspaceId) : null;
+  const paths = ws && Array.isArray(ws.projectPaths) ? ws.projectPaths : [];
+  if (!f) {
+    el.featureBranchHint.textContent = paths.length > 1
+      ? 'Leave empty and Worca will propose one for each project.'
+      : 'Leave empty and Worca will propose one.';
+    return;
+  }
+  if (state.runTarget !== 'workspace' || !paths.length) { el.featureBranchHint.textContent = `Creates ${f}.`; return; }
+  // Mirrors run-harness _resolveMemberBranches: `${feature}-${slugify(projectName)}`, sanitized.
+  const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-{2,}/g, '-').replace(/^-+|-+$/g, '') || 'untitled';
+  const names = paths.map((p) => `${f}-${slug(wsBasename(p))}`);
+  el.featureBranchHint.textContent = `Creates ${names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`}.`;
+}
+
+/** Repaint the whole Branches block: the choice, the context, every row's outcome, the blocked line. */
+function paintBranches() {
+  if (!el.btProjectRow) return;
+  const ws = state.runTarget === 'workspace';
+  const origin = shownAutoSync();
+  if (el.branchesModeWrap) el.branchesModeWrap.hidden = !syncApplies();
+  el.branchesMode?.querySelectorAll('button[data-mode]').forEach((b) => {
+    const on = (b.dataset.mode === 'origin') === origin;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+  });
+  let blocked = '';
+  if (ws) {
+    const w = state.workspaces.find((x) => x && x.id === state.selectedWorkspaceId);
+    const n = w && Array.isArray(w.projectPaths) ? w.projectPaths.length : 0;
+    if (el.branchesCtx) el.branchesCtx.textContent = w ? `${w.name || w.id} · ${n} project${n === 1 ? '' : 's'}` : '';
+    if (el.btProjectName) el.btProjectName.textContent = 'Every project';
+    if (el.btProjectOutcome) paintOutcomeCell(el.btProjectOutcome, { icon: 'none', tone: 'muted', text: 'Each project starts from its current branch', note: '' });
+    el.wsSourceBranches?.querySelectorAll('.ws-src-row[data-project-key]').forEach((row) => {
+      const key = row.dataset.projectKey;
+      if (paintMemberRow(key)?.blocked && !blocked) blocked = wsMemberName(key);
+    });
+  } else {
+    const name = selectedProjectName();
+    if (el.branchesCtx) el.branchesCtx.textContent = name || '';
+    if (el.btProjectName) el.btProjectName.textContent = name || '—';
+    const m = selectedProjectPath() ? projectOutcome() : { icon: 'none', tone: 'muted', text: 'Pick a project first', note: '' };
+    paintOutcomeCell(el.btProjectOutcome, m, { onRetry: () => { void syncNow(); }, busy: state.sync.busy });
+    if (m.blocked) blocked = name || 'This project';
+  }
+  if (el.branchesBlocked) {
+    el.branchesBlocked.hidden = !blocked;
+    el.branchesBlocked.textContent = blocked ? `${blocked} can’t start from origin yet.` : '';
+  }
+  state.sync.blocked = blocked;
+  paintFeatureHint();
+}
+const paintSyncRowNow = paintBranches;
 
 /** GET /api/sync for the current base (no network: the list fetch already fetched). */
 async function refreshSyncStatusQuiet() {
@@ -6716,6 +6966,9 @@ async function syncNow() {
 
 // ---- workspace members ----
 function wsMemberName(key) {
+  // The registered project name, as the Projects list shows it; the folder name only as a fallback.
+  const p = state.projects.find((x) => x && x.key === key);
+  if (p && p.name) return p.name;
   const ws = state.workspaces.find((w) => w && w.id === state.selectedWorkspaceId);
   const i = ws && Array.isArray(ws.projectKeys) ? ws.projectKeys.indexOf(key) : -1;
   return i >= 0 ? wsBasename(ws.projectPaths[i]) : key;
@@ -6723,45 +6976,32 @@ function wsMemberName(key) {
 function wsMemberSelect(key) {
   return el.wsSourceBranches ? [...el.wsSourceBranches.querySelectorAll('select.ws-src-select')].find((s) => s.dataset.projectKey === key) || null : null;
 }
-/** Will this member sync before the run? The touched switch for every member, else its own beforeRun. */
+/** Will this member sync before the run? The touched choice for every member, else its own beforeRun. */
 function memberAutoSync(key) {
   if (state.sync.autoSync !== null) return state.sync.autoSync;
   const b = state.sync.members[key];
   return !(b && b.settings && b.settings.beforeRun === false);
 }
-function paintMemberPill(key) {
-  const sel = wsMemberSelect(key);
-  const pill = sel && sel.closest('.ws-src-row') ? sel.closest('.ws-src-row').querySelector('.sync-pill') : null;
-  if (!pill) return;
-  const model = syncPillModel(state.sync.members[key], { autoSync: memberAutoSync(key) });
-  pill.hidden = !!model.hidden;
-  if (model.hidden) return;
-  pill.className = `sync-pill ${model.tone}`;
-  pill.querySelector('.sync-pill-txt').textContent = model.label;
-  pill.setAttribute('aria-label', `${wsMemberName(key)} sync status: ${model.label}. Show details`);
+/** Paint one member row's "What the run gets". Returns its model (blocked rows stop Start). */
+function paintMemberRow(key) {
+  const row = el.wsSourceBranches ? [...el.wsSourceBranches.querySelectorAll('.ws-src-row')].find((r) => r.dataset.projectKey === key) : null;
+  const cell = row ? row.querySelector('.bt-outcome') : null;
+  if (!cell) return null;
+  const sel = row.querySelector('select');
+  let m;
+  if (row.dataset.missing === '1') m = { icon: 'blocked', tone: 'muted', text: 'Folder missing · skipped', note: '' };
+  else if (el.wsSourcePrevious && el.wsSourcePrevious.classList.contains('on')) m = { icon: 'none', tone: 'muted', text: 'Starts from the branch of the run before it', note: '' };
+  else {
+    const v = sel ? sel.value : '';
+    m = runOutcomeModel(key in state.sync.members ? state.sync.members[key] : undefined,
+      { origin: memberAutoSync(key), base: v && v !== PREVIOUS_BRANCH ? v : ((sel && sel.dataset.current) || '') });
+  }
+  paintOutcomeCell(cell, m, { onRetry: () => { void syncMember(key); }, busy: row.dataset.busy === '1' });
+  return m;
 }
-/** Untouched switch in workspace mode shows what the run will do: every member's own beforeRun. */
+/** Untouched choice in workspace mode shows what the run will do: every member's own beforeRun. */
 function membersBeforeRun() {
   return Object.values(state.sync.members).filter(Boolean).every((b) => !b.settings || b.settings.beforeRun !== false);
-}
-function worstMemberKey() {
-  const w = worstChip(Object.values(state.sync.members));
-  if (!w) return null;
-  return Object.keys(state.sync.members).find((k) => worstChip([state.sync.members[k]])?.state === w.state) || null;
-}
-function paintWorkspaceSyncRow() {
-  const w = worstChip(Object.values(state.sync.members));
-  el.syncRow.hidden = !w;
-  if (!w) return;
-  // Auto-sync off turns a blue "behind" amber, as syncPillModel does — per member while the switch is untouched.
-  const behindOff = Object.keys(state.sync.members).some((k) => worstChip([state.sync.members[k]])?.state === 'behind' && !memberAutoSync(k));
-  const tone = w.state === 'behind' && behindOff ? 'amber' : w.tone;
-  const text = w.text.charAt(0).toUpperCase() + w.text.slice(1);
-  el.syncPill.className = `sync-pill ${tone}`;
-  el.syncPill.querySelector('.sync-pill-txt').textContent = text;
-  el.syncPill.setAttribute('aria-label', `Sync status: ${text}. Show details`);
-  el.syncBtn.classList.toggle('busy', state.sync.busy);
-  el.syncBtn.disabled = state.sync.busy;
 }
 async function syncMember(key) {
   const sel = wsMemberSelect(key);
@@ -6771,14 +7011,20 @@ async function syncMember(key) {
   if (!sel || i < 0) return cur;
   const v = sel.value;
   const base = v && v !== PREVIOUS_BRANCH ? v : (sel.dataset.current || '');
+  const row = sel.closest('.ws-src-row');
+  if (row) { row.dataset.busy = '1'; paintMemberRow(key); }
   try {
     const res = await fetch('/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: ws.projectPaths[i], base, mode: 'ff' }) });
     const data = await safeJson(res);
     // A 4xx is a refusal (e.g. a base the server will not sync), not a failed fetch.
     if (!res.ok || !data || !data.sync) return cur && !(res.status >= 400 && res.status < 500) ? { ...cur, stale: true, fetchError: { kind: 'failed' } } : cur;
-    if (sel.isConnected) { state.sync.members[key] = data.sync; paintMemberPill(key); paintWorkspaceSyncRow(); }
+    if (sel.isConnected) state.sync.members[key] = data.sync;
     return data.sync;
   } catch { return cur; }
+  finally {
+    if (row) delete row.dataset.busy;
+    if (sel.isConnected) paintBranches();
+  }
 }
 /** The sync dialog's "This project" section: GET/PUT /api/projects/:key/sync/settings.
  *  onSaved(view) lets the opener repaint what follows the project's settings. */
@@ -6805,77 +7051,19 @@ function selectedProjectKey() {
   const p = path ? state.projects.find((x) => x && x.path === path) : null;
   return p ? p.key : '';
 }
-function openMemberSyncDialog(key, opener) {
-  const b = state.sync.members[key];
-  if (!b) return;
-  void openSyncDialog({ title: 'Sync status', subtitle: `${wsMemberName(key)} · ${b.base || ''}`, sync: b,
-    autoSync: memberAutoSync(key), opener, onSync: () => syncMember(key),
-    prefs: projectSyncPrefs(key, (view) => {
-      const m = state.sync.members[key];
-      if (m && view && view.settings) {
-        m.settings = { beforeRun: view.settings.beforeRun, onDiverged: view.settings.onDiverged };
-        paintMemberPill(key);
-        paintWorkspaceSyncRow();
-      }
-    }) });
-}
-/** Shared Sync in workspace mode: one POST for every member, with each member's picked base. */
-async function syncWorkspaceNow() {
-  const id = state.selectedWorkspaceId;
-  if (!id || state.sync.busy) return;
-  const bases = {};
-  el.wsSourceBranches?.querySelectorAll('select.ws-src-select').forEach((s) => {
-    const v = (s.value || '').trim();
-    if (s.dataset.projectKey && v && v !== PREVIOUS_BRANCH) bases[s.dataset.projectKey] = v;
+// "Use branches from Origin · latest | Local copy": this run's choice, for every row at once.
+el.branchesMode?.querySelectorAll('button[data-mode]').forEach((b) => {
+  b.addEventListener('click', () => {
+    // autoSync !== null means "the person made the choice for this run".
+    state.sync.autoSync = b.dataset.mode === 'origin';
+    paintBranches();
   });
-  state.sync.busy = true;
-  paintWorkspaceSyncRow();
-  try {
-    const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}/sync`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'ff', bases }) });
-    const data = await safeJson(res);
-    if (res.ok && data && Array.isArray(data.members) && state.selectedWorkspaceId === id && state.runTarget === 'workspace') {
-      for (const m of data.members) {
-        if (!m || !m.projectKey || !(m.projectKey in state.sync.members)) continue;
-        state.sync.members[m.projectKey] = m.remote ? m : null;
-        paintMemberPill(m.projectKey);
-      }
-    }
-  } catch { /* the pills keep their last state */ }
-  finally {
-    state.sync.busy = false;
-    paintWorkspaceSyncRow();
-  }
-}
-
-if (el.syncRow) {
-  mountSyncRow(el.syncRow, {
-    onPill: () => {
-      if (state.runTarget === 'workspace') { const k = worstMemberKey(); if (k) openMemberSyncDialog(k, el.syncPill); return; }
-      const key = selectedProjectKey();
-      void openSyncDialog({ title: 'Sync status', subtitle: `${selectedProjectName()} · ${effectiveBase()}`, sync: state.sync.block,
-        autoSync: el.syncAuto.checked, opener: el.syncPill, onSync: syncNow,
-        prefs: key ? projectSyncPrefs(key, (view) => {
-          if (selectedProjectKey() !== key || !view || !view.settings) return;
-          if (state.sync.block) state.sync.block = { ...state.sync.block, settings: { beforeRun: view.settings.beforeRun, onDiverged: view.settings.onDiverged } };
-          // An untouched switch follows the project's beforeRun; a touched one is this run's choice.
-          if (state.sync.autoSync === null) el.syncAuto.checked = view.settings.beforeRun !== false;
-          paintSyncRowNow();
-        }) : null });
-    },
-    onSync: () => { if (state.runTarget === 'workspace') void syncWorkspaceNow(); else void syncNow(); },
-    onToggle: (on) => {
-      // autoSync !== null means "the person touched the switch for this run".
-      state.sync.autoSync = on;
-      if (state.runTarget === 'workspace') Object.keys(state.sync.members).forEach(paintMemberPill);
-      paintSyncRowNow();
-    },
-  });
-}
+});
+el.featureBranch?.addEventListener('input', paintFeatureHint);
 if (el.sourceBranch) {
   el.sourceBranch.addEventListener('branches-fresh', (e) => {
     if (state.runTarget === 'workspace') return;
     const detail = e.detail || {};
-    if (state.sync.autoSync === null) el.syncAuto.checked = !!(detail.sync?.settings?.beforeRun ?? true);
     if (!detail.remote) {
       syncHasRemote = false;
       ++state.sync.gen;
@@ -6893,17 +7081,15 @@ if (el.sourceBranch) {
   });
   el.sourceBranch.addEventListener('change', () => {
     if (state.runTarget === 'workspace') return;
-    if (el.sourceBranch.value === PREVIOUS_BRANCH) { el.syncRow.hidden = true; return; }
+    if (el.sourceBranch.value === PREVIOUS_BRANCH) { paintBranches(); return; }
+    paintBranches();
     void refreshSyncStatusQuiet();
   });
 }
-/** After an accepted start: Auto-sync was a choice for that run only. */
+/** After an accepted start: "Use branches from" was a choice for that run only. */
 function resetSyncChoice() {
-  if (!el.syncAuto) return;
   state.sync.autoSync = null;
-  el.syncAuto.checked = state.runTarget === 'workspace' ? membersBeforeRun() : (state.sync.block?.settings?.beforeRun ?? true);
-  if (state.runTarget === 'workspace') Object.keys(state.sync.members).forEach(paintMemberPill);
-  paintSyncRowNow();
+  paintBranches();
 }
 
 el.projectSelect.addEventListener('change', () => {
@@ -7194,25 +7380,26 @@ function setRunTarget(target) {
     }
   } else {
     // Restore the single project-driven dropdown; clear the per-project list.
-    if (el.sourceBranchWrap) el.sourceBranchWrap.classList.remove('hidden');
+    if (el.btProjectRow) el.btProjectRow.hidden = false;
     if (el.sourceBranch) el.sourceBranch.disabled = false;
     if (el.wsSourceBranches) { el.wsSourceBranches.classList.add('hidden'); el.wsSourceBranches.innerHTML = ''; }
     // Restore the project-driven branch list + config for the selected project.
     onProjectChanged();
   }
   syncPreviousBranchEverywhere();
+  paintBranches();
 }
 
 // Workspace mode with nothing to pick per member yet: keep the field occupied by
 // a disabled dropdown that says what the run will do. Its value is never read —
 // the submit handler deletes sourceBranch in workspace mode.
 function showWorkspaceBranchPlaceholder() {
-  if (el.sourceBranchWrap) el.sourceBranchWrap.classList.remove('hidden');
+  if (el.btProjectRow) el.btProjectRow.hidden = false;
   if (!el.sourceBranch) return;
   // #527: a project-mode fresh answer still in flight must not repaint the stand-in.
   el.sourceBranch._branchGen = (el.sourceBranch._branchGen || 0) + 1;
   state.sync = freshSyncState(state.sync.gen + 1);
-  if (el.syncRow) el.syncRow.hidden = true;
+  paintBranches();
   seedBranchPlaceholder(el.sourceBranch, 'current branch (auto)');
   el.sourceBranch.disabled = true;
   el.sourceBranch.title = "Set per project once a workspace is chosen; each defaults to its current branch.";
@@ -7243,61 +7430,63 @@ function renderWorkspaceSourceBranches() {
   host.innerHTML = '';
   // #527: the old member selects are gone (their late branches-fresh checks isConnected).
   state.sync.members = {};
-  if (el.syncRow) el.syncRow.hidden = true;
   const ws = state.workspaces.find((w) => w && w.id === state.selectedWorkspaceId);
   if (!ws || !Array.isArray(ws.projectPaths) || !ws.projectPaths.length) {
     host.classList.add('hidden');
     showWorkspaceBranchPlaceholder(); // nothing per-member to show: keep the field occupied
     syncPreviousBranchEverywhere();
+    paintBranches();
     return;
   }
   host.classList.remove('hidden');
   // Real per-member pickers now exist, so the disabled stand-in would only be a
   // dead control sitting above live ones.
-  if (el.sourceBranchWrap) el.sourceBranchWrap.classList.add('hidden');
+  if (el.btProjectRow) el.btProjectRow.hidden = true;
   ws.projectPaths.forEach((p, i) => {
     const key = (Array.isArray(ws.projectKeys) && ws.projectKeys[i]) || '';
     const missing = Array.isArray(ws.exists) && ws.exists[i] === false;
 
+    // Same three cells as the project row (design v3): Project · Start from · What the run gets.
     const row = document.createElement('div');
-    row.className = 'ws-src-row';
+    row.className = 'bt-row ws-src-row';
+    row.setAttribute('role', 'row');
+    row.dataset.projectKey = key;
 
     const name = document.createElement('span');
-    name.className = 'ws-src-name';
-    name.textContent = wsBasename(p) + (missing ? ' (missing)' : '');
+    name.className = 'bt-name ws-src-name';
+    name.setAttribute('role', 'cell');
+    name.id = `bt-name-${i}`;
+    name.textContent = (key ? wsMemberName(key) : wsBasename(p)) + (missing ? ' (missing)' : '');
 
     const wrap = document.createElement('div');
     wrap.className = 'select-wrap';
+    wrap.setAttribute('role', 'cell');
     const sel = document.createElement('select');
     sel.className = 'select ws-src-select';
     sel.dataset.projectKey = key;
+    sel.setAttribute('aria-labelledby', name.id);
     wrap.appendChild(sel);
 
-    row.appendChild(name);
-    row.appendChild(wrap);
+    const outcome = document.createElement('div');
+    outcome.className = 'bt-outcome';
+    outcome.setAttribute('role', 'cell');
+
+    row.append(name, wrap, outcome);
     host.appendChild(row);
 
     if (missing) {
       sel.disabled = true;
       sel.dataset.missing = '1';
+      row.dataset.missing = '1';
       seedBranchPlaceholder(sel, 'current branch (auto)');
+      paintMemberRow(key);
     } else {
-      // #527: this member's sync pill, painted from its own select's fresh answer.
-      const pill = document.createElement('button');
-      pill.type = 'button'; pill.className = 'sync-pill grey'; pill.hidden = true;
-      pill.setAttribute('aria-haspopup', 'dialog');
-      const dot = document.createElement('span'); dot.className = 'sdot'; dot.setAttribute('aria-hidden', 'true');
-      const txt = document.createElement('span'); txt.className = 'sync-pill-txt';
-      pill.append(dot, txt);
-      pill.addEventListener('click', () => openMemberSyncDialog(key, pill));
-      row.appendChild(pill);
+      paintMemberRow(key);   // Checking… until its fresh list answers
       sel.addEventListener('branches-fresh', (e) => {
         if (!sel.isConnected || state.runTarget !== 'workspace' || !key) return;
         const d = e.detail || {};
         state.sync.members[key] = d.remote && d.sync ? d.sync : null;
-        if (state.sync.autoSync === null) el.syncAuto.checked = membersBeforeRun();
-        paintMemberPill(key);
-        paintWorkspaceSyncRow();
+        paintBranches();
       });
       sel.addEventListener('change', async () => {
         // A new pick: re-read that member's status (no network) when it has a remote.
@@ -7308,8 +7497,7 @@ function renderWorkspaceSourceBranches() {
         const unknown = () => {
           if (!sel.isConnected || sel.value !== v || (prev.base === v && prev.state !== 'unknown')) return;
           state.sync.members[key] = { base: v, remote: prev.remote || 'origin', state: 'unknown', settings: prev.settings };
-          paintMemberPill(key);
-          paintWorkspaceSyncRow();
+          paintBranches();
         };
         if (!isSyncableBranchName(v)) { unknown(); return; }
         try {
@@ -7319,14 +7507,14 @@ function renderWorkspaceSourceBranches() {
           if (!res.ok || !(data && data.sync)) { unknown(); return; }
           // The status read carries the server's standing fetch failure (stale), so Offline survives a pick.
           state.sync.members[key] = data.sync.remote ? data.sync : null;
-          paintMemberPill(key);
-          paintWorkspaceSyncRow();
+          paintBranches();
         } catch { unknown(); }
       });
       populateBranchSelect(sel, p); // async; defaults to HEAD per the clarification
     }
   });
   syncPreviousBranchEverywhere();
+  paintBranches();
 }
 
 // Populate #workspaceSelect from state.workspaces (loading them if empty).
@@ -7421,9 +7609,7 @@ async function loadWorkspaces() {
 // ---- Workspaces management view --------------------------------------------
 
 function setWsMsg(text, kind) {
-  if (!el.wsMsg) return;
-  el.wsMsg.textContent = text || '';
-  el.wsMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+  reportStatus(el.wsMsg, 'form-msg', text, kind);
 }
 
 // ---- Workspaces list ----------------------------------------------------------------------
@@ -7447,7 +7633,7 @@ function renderWorkspaces() {
   const cnt = document.createElement('span');
   cnt.className = 'cnt';
   cnt.textContent = String(state.workspaces.length);
-  head.append(b, cnt);
+  head.append(b, cnt, syncCheckedNodes());
   const list = document.createElement('div');
   list.className = 'saved-list';
   // What is known before /scopes answers: this session's payload or the persisted copy paints the
@@ -7484,28 +7670,57 @@ function buildWorkspaceRow(w, known) {
     stale.textContent = 'missing projects';
     name.append(' ', stale);
   }
+  // Design board 1 (collapsed rollup): the name and one sentence with the counts, then a strip
+  // with an icon per project and the metrics summary. paintSyncChips fills the sync parts;
+  // paintWsMetricsRows rewrites .ws-projects on every team-metrics frame.
+  const roll = document.createElement('span');
+  roll.className = 'ws-rollup tone-muted';
+  const rollDot = document.createElement('span'); rollDot.className = 'ws-rollup-dot'; rollDot.setAttribute('aria-hidden', 'true');
+  const rollTxt = document.createElement('span'); rollTxt.className = 'ws-rollup-txt'; rollTxt.textContent = 'Checking…';
+  roll.append(rollDot, rollTxt);
+  const head = document.createElement('div');
+  head.className = 'ws-head-line';
+  head.append(name, roll);
+  const strip = document.createElement('div');
+  strip.className = 'ws-strip';
+  const members = document.createElement('span');
+  members.className = 'ws-strip-members';
+  const sep = document.createElement('span');
+  sep.className = 'ws-strip-sep'; sep.setAttribute('aria-hidden', 'true'); sep.textContent = '|';
   const sum = document.createElement('small');
   sum.className = 'ws-projects';
   sum.replaceChildren(known ? renderWsSummary(known, { doc: document }) : renderWsSummary(w, { doc: document, pending: true }));
-  // #527: the worst member's sync state, and one chip per member in a slot of its own
-  // (paintWsMetricsRows rewrites .ws-projects on every team-metrics frame).
-  const worst = document.createElement('span');
-  worst.className = 'sync-pill ws-sync-worst';
-  worst.hidden = true;
-  const syncSlot = document.createElement('div');
-  syncSlot.className = 'ws-sync';
-  syncSlot.hidden = true;
-  main.append(name, worst, sum, syncSlot);
+  strip.append(members, sep, sum);
+  main.append(head, strip);
+  const actions = document.createElement('div');
+  actions.className = 'ws-actions';
+  const syncAll = document.createElement('button');
+  syncAll.type = 'button'; syncAll.className = 'btn btn-primary btn-mini ws-sync-all'; syncAll.hidden = true;
+  const n = Array.isArray(w.projectPaths) ? w.projectPaths.length : 0;
+  const toggle = document.createElement('button');
+  toggle.type = 'button'; toggle.className = 'btn btn-mini ws-toggle';
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.textContent = `Show ${n} project${n === 1 ? '' : 's'}`;
   const open = document.createElement('button');
   open.type = 'button';
   open.className = 'proj-open ws-open';
   open.setAttribute('aria-label', 'Open workspace details');
   open.innerHTML = CHEVRON_RIGHT_SVG;   // static markup
-  row.append(main, open);
-  item.appendChild(row);
+  actions.append(syncAll, toggle, open);
+  row.append(main, actions);
+  // The project table sits outside the row, so its buttons never open the workspace page.
+  const table = document.createElement('div');
+  table.className = 'ws-table';
+  table.hidden = true;
+  table.id = `ws-table-${w.id}`;
+  toggle.setAttribute('aria-controls', table.id);
+  item.append(row, table);
   if (!known) item.setAttribute('aria-busy', 'true');
   return item;
 }
+// workspaceId → open (true) / closed (false), once someone pressed Show/Hide. Untouched: open
+// only when a member has diverged, the one state that wants a look before the next run.
+const wsTableOpen = new Map();
 
 // workspaceId → last "Route all members" payload. Routing emits one team-metrics-changed per
 // member, and each repaint rebuilds the metrics block — the per-member result list (the only
@@ -7594,8 +7809,12 @@ async function patchWsHome(id, metricsProject) {
   const r = await fetch(`/api/workspaces/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ metricsProject }) }).catch(() => null);
   if (r && r.ok) { closePluginModal(); await paintWsMetricsRows(true); return; }
   const j = r ? await safeJson(r) : null;
-  const modalBody = document.querySelector('#plugin-modal .tm-home-list');
-  modalBody?.after(Object.assign(document.createElement('small'), { className: 'hint err', textContent: j?.error || 'Could not save the metrics home' }));
+  const list = document.querySelector('#plugin-modal .tm-home-list');
+  if (!list) return;
+  // #555 D10: one error line, reused, instead of a new node per failed save.
+  let err = list.parentElement.querySelector('.tm-home-err');
+  if (!err) { err = Object.assign(document.createElement('small'), { className: 'hint err tm-home-err' }); list.after(err); }
+  err.textContent = (j && j.error) || 'Could not save the metrics home.';
 }
 
 // Delegated actions on the workspaces list: a row (or its chevron) opens the page.
@@ -7625,7 +7844,7 @@ if (el.wsList) {
 // editing — description, re-scan, delete, metrics home, policy home, routing, the map's overrides —
 // lives here.
 // ---------------------------------------------------------------------------
-const WS_TABS = ['overview', 'map', 'team'];
+const WS_TABS = ['overview', 'map', 'team', 'actions'];
 // workspaces-changed actions that can change the Map tab: an override (P5 routes) or a scan's save.
 const WD_MAP_ACTIONS = new Set(['map', 'scan-created', 'scan-updated', 'members']);   // members: a removal prunes the map
 function parseWsParam(param = '') {
@@ -7766,6 +7985,7 @@ const WD_TABS = [
   { key: 'overview', label: 'Overview', level: 'simple', badge: () => null, visible: () => true, build: (sec, id) => buildWdOverview(sec, id) },
   { key: 'map', label: 'Map', level: 'advanced', badge: () => null, visible: () => true, build: (sec, id) => buildWdMap(sec, id) },
   { key: 'team', label: 'Team', level: 'expert', badge: () => null, visible: () => true, build: (sec, id) => buildWdTeam(sec, id) },
+  { key: 'actions', label: 'Actions', level: 'advanced', badge: () => null, visible: () => true, build: (sec, id) => buildWdActions(sec, id) },
 ];
 function initWdTabs(screen, w) {
   initDetailTabs(screen, WD_TABS.map((t) => ({ ...t, icon: PD_TAB_ICONS[t.key] })), w, {
@@ -7800,9 +8020,17 @@ function buildWdOverview(sec, id) {
   const missing = Array.isArray(w.exists) ? w.exists.filter((e) => !e).length : 0;
   const grid = document.createElement('div');
   grid.className = 'pd-ov-grid';
-  const projCard = pdStatCard('projects', 'PROJECTS', String(paths.length), missing ? `${missing} missing on disk` : 'all on disk');
+  // "On disk" is the normal case, so the sub names the members instead and only a missing one is called out.
+  const shortNames = paths.map((path, i) => {
+    const k = Array.isArray(w.projectKeys) ? w.projectKeys[i] : null;
+    const pr = k ? projectByKey(k) : null;
+    return wsShortName((pr && pr.name) || basenameOf(path), w.name);
+  });
+  const projCard = pdStatCard('projects', 'PROJECTS', String(paths.length), missing ? `${missing} missing on disk` : shortNames.join(' · '));
   if (missing) projCard.querySelector('.pd-ov-sub').classList.add('pd-ov-missing');
   grid.appendChild(projCard);
+  // The Workspaces list's rollup sentence, as a card: the worst state up front, Sync all (N).
+  grid.appendChild(pdBranchCard('branches', 'BRANCHES'));
   // The team half: one card each, filled by the scopes painters; a click lands on the Team tab.
   for (const which of ['metrics', 'policy']) {
     const card = pdStatCard(which, which === 'metrics' ? 'METRICS HOME' : 'POLICY HOME', '…', 'checking…', { tag: 'button' });
@@ -7815,6 +8043,9 @@ function buildWdOverview(sec, id) {
   const [upDate, upTime] = w.updatedAt ? String(fmtDate(w.updatedAt)).split(', ') : ['—', ''];
   grid.appendChild(pdStatCard('updated', 'UPDATED', upDate, [upTime, w.createdAt ? `created ${String(fmtDate(w.createdAt)).split(', ')[0]}` : ''].filter(Boolean).join(' · ')));
   sec.appendChild(grid);
+  // wsDetail is set before the tab builds, so the card can paint at once (and again per status read).
+  paintPdBranchCards();
+  void refreshSyncChips();
 
   // Projects: every member once, each a hop to its project page (a registered one).
   const members = document.createElement('section');
@@ -7885,6 +8116,11 @@ function buildWdOverview(sec, id) {
     + '<button type="button" class="ws-desc-save btn btn-primary btn-mini">Save</button></div>';   // static markup
   desc.append(dh, view, pane);
   sec.appendChild(desc);
+  // MCP servers a run on this workspace gets (the workspace policy's Team set, not the members').
+  const mcp = tagLevel(document.createElement('div'), 'advanced');
+  mcp.className = 'wd-mcp';
+  sec.appendChild(mcp);
+  void paintMcpResolution(mcp, { target: { workspaceId: id }, title: `MCP servers in runs on ${w.name || w.id}`, api: mcpApi });
   if (!hdMarkdown.isReady()) void bindMarkdownReady().then((ok) => { if (ok) repaintWsDescription(); });
   void paintWsMetricsRows();
   void paintWsPolicyLines();
@@ -8578,7 +8814,7 @@ async function deleteWorkspaceFromPage(id) {
     renderWorkspaces();
     // The list entry (showView) clears the message line on the way in: route first, note after.
     showView('workspaces', '');
-    setWsMsg(warnings.length ? `Deleted. Warnings: ${warnings.join('; ')}` : 'Workspace deleted.', warnings.length ? '' : 'ok');
+    setWsMsg(warnings.length ? `Deleted. Warnings: ${warnings.join('; ')}` : 'Workspace deleted.', warnings.length ? 'warn' : 'ok');
   } catch (err) {
     setWdError(screen, err.message);
   } finally {
@@ -8874,6 +9110,7 @@ if (el.wizName) el.wizName.addEventListener('input', () => { state.wizard.name =
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (currentView() !== 'workspace-create') return;
+  if (e.target?.closest?.('.term-pane')) return;                     // Escape typed in the terminal (vim, less) is the shell's
   if (el.viewerCard && !el.viewerCard.classList.contains('hidden')) return; // modal owns Escape
   if (el.folderBrowser && !el.folderBrowser.classList.contains('hidden')) return; // modal owns Escape
   if (el.wizClose) el.wizClose.click();
@@ -8915,9 +9152,7 @@ async function loadAgentsView() {
 }
 
 function setAgentsMsg(text, kind) {
-  if (!el.agentsMsg) return;
-  el.agentsMsg.textContent = text || '';
-  el.agentsMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+  reportStatus(el.agentsMsg, 'form-msg', text, kind);
 }
 
 function agentChip(text, cls) {
@@ -9717,9 +9952,9 @@ function agentFormRender(host, meta, opts = {}) {
   const ws = document.createElement('div');
   ws.className = 'field agent-workspace';
   // NB: the heading local is `wsHeadLabel` ON PURPOSE. Do NOT shorten it to the
-  // ws + Label form: test/ui-install-removed.test.mjs guards the removed
-  // WS-status indicator with a naive substring check over app.js as PLAIN TEXT,
-  // so even a comment mentioning that token reds it. Do not weaken the guard.
+  // ws + Label form: that token named the removed WS-status indicator. The
+  // plain-text guard that kept it out of app.js is no longer tested, so keep
+  // the token out by hand.
   const wsHeadLabel = document.createElement('label');
   wsHeadLabel.textContent = 'Workspace runs';
   const variant = fmInput('agent-f-ws-variantof', m.workspaceVariantOf || '', { placeholder: 'agent key' });
@@ -9907,6 +10142,7 @@ function agentFormRead(host) {
   // this surface instead of merging into it.
   const forms = {};
   const problems = [];
+  const problemFields = [];   // [id input, rule] per offending row, for the editor's field errors
   for (const row of root.querySelectorAll('.agent-form-row')) {
     const read = readFormRow(row);
     if (!read || !read.def) continue;
@@ -9916,12 +10152,20 @@ function agentFormRead(host) {
     // (the later one silently replaced the stored form — decision P20). Keep the
     // first of a clash, name each rule once; both save paths refuse while
     // `problems` is non-empty.
-    if (!read.id) { if (!problems.includes('a form id is required')) problems.push('a form id is required'); continue; }
-    if (Object.hasOwn(forms, read.id)) { problems.push(`duplicate form id "${read.id}"`); continue; }
+    if (!read.id) {
+      if (!problems.includes('a form id is required')) problems.push('a form id is required');
+      problemFields.push([row.querySelector('.afm-id'), 'a form id is required']);
+      continue;
+    }
+    if (Object.hasOwn(forms, read.id)) {
+      problems.push(`duplicate form id "${read.id}"`);
+      problemFields.push([row.querySelector('.afm-id'), `duplicate form id "${read.id}"`]);
+      continue;
+    }
     forms[read.id] = read.def;
   }
   if (Object.keys(forms).length) meta.ask = { forms };
-  return { meta, markdown: root.querySelector('.agent-f-md').value, problems };
+  return { meta, markdown: root.querySelector('.agent-f-md').value, problems, problemFields };
 }
 
 async function openAgentEdit(card, a) {
@@ -9938,38 +10182,48 @@ async function openAgentEdit(card, a) {
   });
   pane.hidden = false;
   pane.querySelector('.agent-edit-cancel').onclick = () => { disposeAgentForm(pane); pane.hidden = true; };
+  // #555: a refusal is a card alert directly above this row of buttons.
+  pane.querySelector('.agent-edit-save').closest('.actions')?.setAttribute('data-card-actions', '');
   pane.querySelector('.agent-edit-save').onclick = () => saveAgentEdit(card, a, pane);
 }
 
+// #555: Save shows busy → "Saved"; a client rule is a field error on the offending input, a
+// server refusal a card alert above the buttons; success closes the pane and raises a toast.
 async function saveAgentEdit(card, a, pane) {
-  const msg = pane.querySelector('.agent-edit-msg');
-  msg.textContent = '';
-  msg.className = 'agent-edit-msg form-msg';
-  const body = agentFormRead(pane);
+  clearFieldErrors(pane);
+  cardAlert(pane, null);
+  const { problems, problemFields, ...body } = agentFormRead(pane);
   // The rules the store cannot see (decisions P20, P21): two rows with one form id, a row with none.
-  if (body.problems.length) { msg.textContent = body.problems.join(' · '); msg.className = 'agent-edit-msg form-msg err'; return; }
-  try {
+  if (problems.length) {
+    problemFields.forEach(([input, rule], i) => fieldError(input, rule, { focus: i === 0 }));
+    return;
+  }
+  const r = await withButton(pane.querySelector('.agent-edit-save'), async () => {
     const res = await fetch(`/api/agents/${encodeURIComponent(a.key)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     const data = await safeJson(res);
-    if (!res.ok) { msg.textContent = data.error || `HTTP ${res.status}`; msg.className = 'agent-edit-msg form-msg err'; return; }
-    disposeAgentForm(pane);   // the editors' highlight debounce must not outlive a pane loadAgentsView() replaces
-    pane.hidden = true;
-    invalidateAgentCaches();
-    // The save SUCCEEDED. `updatedVariants` is the workspace variants this port
-    // change was propagated into (a success); `warnings` names the saved pipelines
-    // it stranded — the run gate refuses those until they are re-wired.
-    const warns = Array.isArray(data.warnings) ? data.warnings : [];
-    const variants = Array.isArray(data.updatedVariants) ? data.updatedVariants : [];
-    const parts = ['Agent saved.'];
-    if (variants.length) parts.push(`Workspace variants updated: ${variants.join(', ')}.`);
-    parts.push(...warns);
-    setAgentsMsg(parts.join(' '), warns.length ? 'warn' : 'ok');
-    await loadAgentsView();
-  } catch (err) { msg.textContent = err.message; msg.className = 'agent-edit-msg form-msg err'; }
+    if (!res.ok) return { ok: false, error: data.error || `HTTP ${res.status}` };
+    return { ok: true, data };
+  });
+  if (r.skipped) return;
+  if (!r.ok) { cardAlert(pane, { title: 'Not saved', detail: r.error }); return; }
+  const { data } = r;
+  disposeAgentForm(pane);   // the editors' highlight debounce must not outlive a pane loadAgentsView() replaces
+  pane.hidden = true;
+  invalidateAgentCaches();
+  // The save SUCCEEDED. `updatedVariants` is the workspace variants this port
+  // change was propagated into (a success); `warnings` names the saved pipelines
+  // it stranded — the run gate refuses those until they are re-wired.
+  const warns = Array.isArray(data.warnings) ? data.warnings : [];
+  const variants = Array.isArray(data.updatedVariants) ? data.updatedVariants : [];
+  const parts = ['Agent saved.'];
+  if (variants.length) parts.push(`Workspace variants updated: ${variants.join(', ')}.`);
+  parts.push(...warns);
+  setAgentsMsg(parts.join(' '), warns.length ? 'warn' : 'ok');
+  await loadAgentsView();
 }
 
 if (el.agentsList) {
@@ -10012,9 +10266,7 @@ const TRASH_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13M10 11v6M14 11v6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 function setProjectsMsg(text, kind) {
-  if (!el.projectsMsg) return;
-  el.projectsMsg.textContent = text || '';
-  el.projectsMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+  reportStatus(el.projectsMsg, 'form-msg', text, kind);
 }
 
 // Folder basename, tolerant of trailing slashes and either separator.
@@ -10110,18 +10362,23 @@ function buildProjectRow(p) {
   }
   const path = document.createElement('div');
   path.className = 'proj-path';
-  path.textContent = p.path;
+  appendBreakable(path, p.path);   // a narrow column breaks it after a /, not mid-name
   path.title = p.path;
   main.append(name, path);
-  // #527: the sync chip slot, always there for a keyed row (paintSyncChips fills and unhides it).
+  row.appendChild(main);
+  // #527 / design 2026-10-01: the sync bar's own column (branch | origin status | action). A keyed
+  // row's bar is always there; paintSyncChips fills it, and hides it only for a project the
+  // status read skips (a folder that is gone).
+  const sync = document.createElement('div');
+  sync.className = 'pl-sync';
   if (p.key) {
     const syncSlot = document.createElement('div');
     syncSlot.className = 'proj-sync';
     syncSlot.dataset.key = p.key;
     syncSlot.hidden = true;
-    main.appendChild(syncSlot);
+    sync.appendChild(syncSlot);
   }
-  row.appendChild(main);
+  row.appendChild(sync);
 
   // The team column: two one-line chips (metrics, policy) that paintProjectTmCells /
   // paintProjectPolicyCells fill from the scopes payloads. Status only — every control and
@@ -10161,66 +10418,313 @@ function syncProjectName(key) {
   const p = state.projects.find((x) => x && x.key === key);
   return (p && p.name) || key;
 }
-function syncChipNodes(key, block, label = '') {
-  const m = projectChipModel(block);
-  if (!m) return null;
-  const pill = document.createElement('span');
-  pill.className = `sync-pill ${m.tone}`;
-  const dot = document.createElement('span'); dot.className = 'sdot'; dot.setAttribute('aria-hidden', 'true');
-  const txt = document.createElement('span'); txt.className = 'sync-pill-txt';
-  txt.textContent = label ? `${label} · ${m.text}` : m.text;
-  pill.append(dot, txt);
-  const when = document.createElement('span');
-  when.className = 'sync-when';
-  when.textContent = `fetched ${fetchedAgo(block)}`;
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'btn btn-mini';
-  btn.textContent = m.action;
-  btn.dataset.syncKey = key;
-  // The chips sit inside a row that opens its page on click: keep the click here.
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (m.state === 'diverged') void openChipSyncDialog(key, btn);
-    else void syncChipNow(key, btn);
-  });
-  return [pill, when, btn];
+function projBehindCount() {
+  return Object.values(state.syncChips || {}).filter((b) => b && listRowModel(b).action === 'sync').length;
 }
 function paintSyncChips() {
-  for (const slot of document.querySelectorAll('.proj-sync[data-key]')) {
-    const nodes = syncChipNodes(slot.dataset.key, state.syncChips[slot.dataset.key]);
-    slot.hidden = !nodes;
-    slot.replaceChildren(...(nodes || []));
+  for (const slot of document.querySelectorAll('.proj-sync[data-key]')) paintProjSyncBar(slot);
+  paintProjFilters();
+  if (el.projectsSyncAll && !el.projectsSyncAll.classList.contains('busy')) {
+    const behind = projBehindCount();
+    el.projectsSyncAll.hidden = !behind;
+    el.projectsSyncAll.textContent = `Sync all (${behind})`;
   }
-  for (const item of document.querySelectorAll('.ws-item[data-workspace-id]')) {
-    const w = state.workspaces.find((x) => x && x.id === item.dataset.workspaceId);
-    const keys = w && Array.isArray(w.projectKeys) ? w.projectKeys : [];
-    const slot = item.querySelector('.ws-sync');
-    if (slot) {
-      const groups = keys.map((k) => {
-        const nodes = syncChipNodes(k, state.syncChips[k], syncProjectName(k));
-        if (!nodes) return null;
-        const g = document.createElement('span');
-        g.className = 'ws-sync-member';
-        g.dataset.key = k;
-        g.append(...nodes);
-        return g;
-      }).filter(Boolean);
-      slot.hidden = !groups.length;
-      slot.replaceChildren(...groups);
+  paintSyncChecked();
+  for (const item of document.querySelectorAll('.ws-item[data-workspace-id]')) paintWsSyncItem(item);
+  paintPdBranchCards();
+}
+/** A short name for the strip: "ACME Web" in workspace "ACME" reads "Web". */
+function wsShortName(full, wsName) {
+  const pre = `${wsName || ''} `;
+  return wsName && full.toLowerCase().startsWith(pre.toLowerCase()) && full.length > pre.length ? full.slice(pre.length) : full;
+}
+function wsIcon(kind, size) {
+  const span = document.createElement('span');
+  span.className = 'ws-icon';
+  if (OUTCOME_ICONS[kind]) span.innerHTML = `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${OUTCOME_ICONS[kind]}</svg>`;   // static markup
+  return span;
+}
+function paintWsSyncItem(item) {
+  const w = state.workspaces.find((x) => x && x.id === item.dataset.workspaceId);
+  if (!w) return;
+  const keys = Array.isArray(w.projectKeys) ? w.projectKeys : [];
+  const rows = keys.map((k, i) => {
+    const b = state.syncChips[k];
+    const name = syncProjectName(k) === k && Array.isArray(w.projectPaths) ? wsBasename(w.projectPaths[i]) : syncProjectName(k);
+    return { key: k, name, short: wsShortName(name, w.name), branch: (b && b.base) || '', m: b === undefined ? { icon: 'none', tone: 'muted', label: 'Checking…', hint: '', action: null, state: 'none' } : listRowModel(b) };
+  });
+  const roll = wsRollupModel(rows.map((r) => r.m));
+  const rollEl = item.querySelector('.ws-rollup');
+  if (rollEl) { rollEl.className = `ws-rollup tone-${roll.tone}`; rollEl.querySelector('.ws-rollup-txt').textContent = roll.text; }
+  const strip = item.querySelector('.ws-strip-members');
+  if (strip) {
+    strip.replaceChildren(...rows.map((r) => {
+      const s = document.createElement('span');
+      s.className = `ws-strip-member tone-${r.m.tone}`;
+      s.title = `${r.name}: ${r.m.label}`;
+      const nm = document.createElement('span'); nm.className = 'ws-strip-name'; nm.textContent = r.short;
+      s.append(wsIcon(r.m.icon, 14), nm);
+      return s;
+    }));
+  }
+  const behind = rows.filter((r) => r.m.action === 'sync').map((r) => r.key);
+  const syncAll = item.querySelector('.ws-sync-all');
+  if (syncAll && !syncAll.classList.contains('busy')) {
+    syncAll.hidden = !behind.length;
+    syncAll.textContent = `Sync all (${behind.length})`;
+    syncAll.onclick = async (e) => {
+      e.stopPropagation();
+      syncAll.disabled = true; syncAll.classList.add('busy');
+      await syncBehindProjects(behind);
+      syncAll.disabled = false; syncAll.classList.remove('busy');
+      paintWsSyncItem(item);
+    };
+  }
+  const open = wsTableOpen.has(w.id) ? wsTableOpen.get(w.id) : rows.some((r) => r.m.state === 'diverged');
+  const toggle = item.querySelector('.ws-toggle');
+  const table = item.querySelector('.ws-table');
+  if (toggle) {
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.replaceChildren(open ? 'Hide projects' : `Show ${rows.length} project${rows.length === 1 ? '' : 's'}`, wsIcon(open ? 'chevUp' : 'chevDown', 14));
+    toggle.onclick = (e) => { e.stopPropagation(); wsTableOpen.set(w.id, !open); paintWsSyncItem(item); };
+  }
+  if (!table) return;
+  table.hidden = !open;
+  if (!open) return;
+  table.replaceChildren(...rows.map((r) => {
+    const tr = document.createElement('div');
+    tr.className = `ws-trow tone-${r.m.tone}`;
+    tr.dataset.key = r.key;
+    const nm = document.createElement('span'); nm.className = 'ws-tname'; nm.textContent = r.name;
+    const c = syncRowCells(r.key, r.m, r.branch, r.name);
+    tr.append(c.icon, nm, c.branch, c.status, c.action);
+    return tr;
+  }));
+}
+/** The cells of a Workspaces table sync row: icon, branch, status + hint, and the one action Worca
+ *  can take — Sync (behind), Details… (diverged), Retry (offline). The Projects list draws its own
+ *  bar (paintProjSyncBar). */
+function syncRowCells(key, m, branchName, name) {
+  const branch = document.createElement('span'); branch.className = 'ws-tbranch';
+  if (branchName) { branch.append(wsIcon('branch', 14)); const t = document.createElement('span'); t.textContent = branchName; branch.append(t); }
+  const status = document.createElement('span'); status.className = 'ws-tstatus';
+  const lab = document.createElement('span'); lab.className = 'ws-tlabel'; lab.textContent = m.label;
+  status.append(lab);
+  if (m.hint) { const hint = document.createElement('span'); hint.className = 'ws-thint'; hint.textContent = m.hint; status.append(hint); }
+  const action = document.createElement('span'); action.className = 'ws-tact';
+  if (m.action) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `btn btn-mini ws-tbtn ws-tbtn-${m.action}`;
+    btn.textContent = m.action === 'details' ? 'Details…' : m.action === 'retry' ? 'Retry' : 'Sync';
+    btn.dataset.syncKey = key;
+    btn.setAttribute('aria-label', `${btn.textContent.replace('…', '')} ${name}`);
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();   // a workspace row opens its page on click
+      if (m.action === 'details') void openChipSyncDialog(key, btn);
+      else void syncChipNow(key, btn);
+    });
+    action.append(btn);
+  }
+  return { icon: wsIcon(m.icon, 18), branch, status, action };
+}
+
+// ---- The Projects sync bar (design 2026-10-01): branch | origin status | action, one object
+// tinted by state (projectBarModel). Every bar has the same inner columns, so Sync, Retry and
+// Review… line up down the list. Text only ever via textContent.
+
+/** Text that is never cut: it may break after / _ or -, and nowhere else unless it must. */
+function appendBreakable(node, text) {
+  for (const piece of String(text).split(/(?<=[/_-])/)) {
+    node.append(piece);
+    if (/[/_-]$/.test(piece)) node.append(document.createElement('wbr'));
+  }
+  return node;
+}
+/** A branch name never ends in "…" (design 2026-10-01). */
+function projBranchName(name) {
+  return appendBreakable(Object.assign(document.createElement('span'), { className: 'ps-bname' }), name);
+}
+// Keys whose row Sync / Retry is in flight: a repaint under it keeps the spinner.
+const projSyncBusy = new Set();
+async function projSyncNow(key) {
+  if (projSyncBusy.has(key)) return;
+  projSyncBusy.add(key);
+  const repaint = () => {
+    const slot = document.querySelector(`.proj-sync[data-key="${cssEscape(key)}"]`);
+    if (slot) paintProjSyncBar(slot);
+    return slot;
+  };
+  repaint();
+  let synced = false;
+  try { await postProjectSync(key); synced = true; } catch (e) {   // the bar keeps its last state
+    notify({ tone: 'err', title: 'Sync failed', detail: e.message, key: `sync-${key}` });
+  }
+  projSyncBusy.delete(key);
+  const slot = repaint();
+  if (synced && slot) slot.querySelector('.ps-pill')?.classList.add('ps-flash');
+  // Keyboard focus was on the button the repaint replaced: hand it to the new one, else the row.
+  if (slot && document.activeElement === document.body) (slot.querySelector('.ps-btn') || slot.closest('.pl-row'))?.focus();
+}
+function paintProjSyncBar(slot) {
+  const key = slot.dataset.key;
+  const b = state.syncChips[key];
+  // No answer after the first read: the status read skips a folder that is gone.
+  if (b === undefined && syncChipsLoaded) { slot.hidden = true; slot.className = 'proj-sync'; slot.replaceChildren(); return; }
+  const m = projectBarModel(b);
+  slot.hidden = false;
+  slot.className = `proj-sync tone-${m.tone}`;
+  if (m.tone === 'none') {
+    const empty = document.createElement('div');
+    empty.className = 'ps-empty';
+    const what = document.createElement('b');
+    what.append(wsIcon(m.icon, 15), m.label);
+    empty.append(what, m.hint);
+    slot.replaceChildren(empty);
+    return;
+  }
+  const branch = document.createElement('div');
+  branch.className = 'ps-branch';
+  if (b && b.base) {
+    const line = document.createElement('div');
+    line.className = 'ps-bline';
+    line.title = b.base;
+    line.append(wsIcon('branch', 15), projBranchName(b.base));
+    branch.append(line);
+    if (m.vs) {
+      const vs = document.createElement('div');
+      vs.className = 'ps-vs';
+      const code = document.createElement('code');
+      code.textContent = m.vs;
+      vs.append('vs ', code);
+      branch.append(vs);
     }
-    const pill = item.querySelector('.ws-sync-worst');
-    if (pill) {
-      const worst = worstChip(keys.map((k) => state.syncChips[k]));
-      pill.hidden = !worst;
-      pill.className = `sync-pill ws-sync-worst${worst ? ` ${worst.tone}` : ''}`;
-      pill.textContent = worst ? worst.text : '';
+  } else {
+    branch.append(Object.assign(document.createElement('span'), { className: 'ps-bnone', textContent: '—' }));
+  }
+  const status = document.createElement('div');
+  status.className = 'ps-status';
+  const pill = document.createElement('span');
+  pill.className = 'ps-pill';
+  const icon = wsIcon(m.icon, 15);
+  if (m.icon === 'spin') icon.classList.add('ps-spin');
+  pill.append(icon, Object.assign(document.createElement('span'), { className: 'ps-label', textContent: m.label }));
+  status.append(pill);
+  if (m.hint) status.append(Object.assign(document.createElement('div'), { className: 'ps-hint', textContent: m.hint }));
+  const action = document.createElement('div');
+  action.className = 'ps-act';
+  if (m.action) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-mini ps-btn';
+    btn.dataset.syncKey = key;
+    btn.setAttribute('aria-label', `${m.actionLabel.replace('…', '')} ${syncProjectName(key)}`);
+    if (projSyncBusy.has(key)) {
+      btn.disabled = true;
+      btn.classList.add('busy');
+      btn.append(wsIcon('spin', 14), m.action === 'retry' ? 'Retrying' : 'Syncing');
+    } else {
+      btn.textContent = m.actionLabel;
     }
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();   // the row opens its page on click
+      if (m.action === 'details') void openChipSyncDialog(key, btn);
+      else void projSyncNow(key);
+    });
+    action.append(btn);
+  }
+  slot.replaceChildren(branch, status, action);
+}
+
+// The head's counts double as filters (design 2026-10-01). A chip shows only while its state has a
+// project; a filter whose last project leaves goes back to All. Rows without an answer count
+// toward All only.
+const PROJ_FILTERS = [
+  ['behind', 'Behind', 'blue'], ['diverged', 'Diverged', 'amber'], ['dirty', 'Uncommitted', 'peach'],
+  ['ok', 'Up to date', 'green'], ['offline', 'Offline', 'grey'], ['local', 'Local only', 'grey'],
+];
+let projFilter = 'all';
+function paintProjFilters() {
+  const card = el.projectsList && el.projectsList.querySelector('.proj-card');
+  if (!card) return;
+  const items = [...card.querySelectorAll('.pl-item')];
+  const groups = items.map((it) => {
+    const b = it.dataset.key ? state.syncChips[it.dataset.key] : undefined;
+    return b === undefined ? null : projectBarModel(b).group;
+  });
+  const counts = {};
+  for (const g of groups) if (g) counts[g] = (counts[g] || 0) + 1;
+  if (projFilter !== 'all' && !counts[projFilter]) projFilter = 'all';
+  const defs = PROJ_FILTERS.filter(([k]) => counts[k]);
+  const host = card.querySelector('.proj-filters');
+  host.hidden = !defs.length;
+  host.replaceChildren(...[['all', 'All', '']].concat(defs).map(([k, label, dot]) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'proj-fchip';
+    chip.dataset.filter = k;
+    chip.setAttribute('aria-pressed', String(projFilter === k));
+    if (dot) chip.append(Object.assign(document.createElement('span'), { className: `proj-fdot ${dot}` }));
+    chip.append(`${label} `, Object.assign(document.createElement('span'), { className: 'n', textContent: String(k === 'all' ? items.length : counts[k]) }));
+    chip.addEventListener('click', () => {
+      projFilter = k;
+      paintProjFilters();
+      host.querySelector(`.proj-fchip[data-filter="${k}"]`)?.focus();
+    });
+    return chip;
+  }));
+  let shown = 0;
+  items.forEach((it, i) => {
+    it.hidden = projFilter !== 'all' && groups[i] !== projFilter;
+    if (!it.hidden) shown++;
+  });
+  card.querySelector('.proj-empty').hidden = shown > 0;
+}
+
+// One "Checked 1 min ago ↻" per list (design board 1): the oldest fetch among the shown projects,
+// and a button that fetches every project and moves nothing (POST /api/sync/all mode 'fetch').
+function syncCheckedNodes() {
+  const wrap = document.createElement('span');
+  wrap.className = 'sync-checked';
+  const txt = document.createElement('span');
+  txt.className = 'sync-checked-txt';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'sync-check-now';
+  btn.setAttribute('aria-label', 'Check origin now');
+  btn.title = 'Fetch every project now; moves nothing';
+  btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/></svg>';   // static markup
+  btn.addEventListener('click', async () => {
+    if (btn.disabled) return;
+    btn.disabled = true; btn.classList.add('busy');
+    try {
+      const res = await fetch('/api/sync/all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'fetch' }) });
+      const data = await safeJson(res);
+      if (res.ok && data && data.projects && typeof data.projects === 'object') { state.syncChips = data.projects; paintSyncChips(); }
+      else throw new Error((data && data.error) || `The server answered ${res.status}.`);
+    } catch (e) {   // the rows keep their last state
+      notify({ tone: 'err', title: 'Check origin failed', detail: e.message, key: 'check-origin' });
+    }
+    finally { btn.disabled = false; btn.classList.remove('busy'); }
+  });
+  wrap.append(txt, btn);
+  return wrap;
+}
+function paintSyncChecked() {
+  for (const wrap of document.querySelectorAll('.sync-checked')) {
+    const blocks = Object.values(state.syncChips || {}).filter((b) => b && b.remote);
+    const times = blocks.map((b) => Date.parse(b.fetchedAt || '')).filter(Number.isFinite);
+    wrap.hidden = !blocks.length;
+    const txt = wrap.querySelector('.sync-checked-txt');
+    if (txt) txt.textContent = times.length ? `Checked ${ago(new Date(Math.min(...times)).toISOString())}` : 'Not checked yet';
   }
 }
+// unref: under Node (the jsdom tests) a bare interval would keep the process alive.
+setInterval(() => { if (document.querySelector('.sync-checked:not([hidden])')) paintSyncChecked(); }, 30000).unref?.();
 // Coalesced: Sync all and the background refresh emit one project-sync-changed per project.
 const SYNC_CHIPS_MS = 300;
 let syncChipsTimer = null;
+let syncChipsLoaded = false;   // the Branch cards say "checking…" until the first status read lands
 let syncChipsBusy = false;
 let syncChipsQueued = false;
 function refreshSyncChips() {
@@ -10234,6 +10738,7 @@ function refreshSyncChips() {
       const data = await safeJson(res);
       // The server's status read reports a standing fetch failure (background or Sync) as stale.
       state.syncChips = data && data.projects && typeof data.projects === 'object' ? data.projects : {};
+      syncChipsLoaded = true;
       paintSyncChips();
     } catch { /* the chips keep their last state */ }
     finally {
@@ -10250,10 +10755,19 @@ async function postProjectSync(key) {
   paintSyncChips();
   return data.sync;
 }
+/** Sync the behind projects of a workspace or project page; one toast tells how it went. */
+async function syncBehindProjects(behind) {
+  const results = await Promise.allSettled(behind.map((k) => postProjectSync(k)));
+  const failed = results.filter((x) => x.status === 'rejected');
+  if (failed.length) notify({ tone: 'err', title: `${failed.length} of ${behind.length} could not sync`, detail: failed[0].reason?.message || '', key: 'ws-sync' });
+  else if (behind.length) notify({ tone: 'ok', title: `Synced ${behind.length} ${behind.length === 1 ? 'project' : 'projects'}`, key: 'ws-sync' });
+}
 async function syncChipNow(key, btn) {
   btn.disabled = true;
   btn.classList.add('busy');
-  try { await postProjectSync(key); } catch { /* the chip keeps its last state */ }
+  try { await postProjectSync(key); } catch (e) {   // the chip keeps its last state
+    notify({ tone: 'err', title: 'Sync failed', detail: e.message, key: `sync-${key}` });
+  }
   // The chip was repainted (a new button) on success; this one only matters on failure.
   btn.disabled = false;
   btn.classList.remove('busy');
@@ -10271,7 +10785,12 @@ async function openChipSyncDialog(key, opener) {
     autoSync: sync.settings ? sync.settings.beforeRun !== false : true, opener,
     // A project-sync-changed repaint can replace the opener while the dialog is open.
     fallbackFocus: () => document.querySelector(`.pl-item[data-key="${cssEscape(key)}"] .pl-row`),
-    onSync: async () => { try { return await postProjectSync(key); } catch { return null; } },
+    onSync: async () => {
+      try { return await postProjectSync(key); } catch (e) {
+        notify({ tone: 'err', title: 'Sync failed', detail: e.message, key: `sync-${key}` });
+        return null;
+      }
+    },
     // The server's project-sync-changed frame repaints the chip after a save.
     prefs: projectSyncPrefs(key),
   });
@@ -10282,17 +10801,26 @@ if (el.projectsSyncAll) {
     if (btn.disabled) return;
     btn.disabled = true;
     btn.classList.add('busy');
+    btn.textContent = `Syncing ${projBehindCount()}…`;
+    const before = projBehindCount();
+    const retry = { label: 'Retry', run: () => el.projectsSyncAll.click() };
     try {
       const res = await fetch('/api/sync/all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'ff' }) });
       const data = await safeJson(res);
       if (res.ok && data && data.projects && typeof data.projects === 'object') {
         state.syncChips = data.projects;
-        paintSyncChips();
+        const left = projBehindCount();
+        notify({ tone: left ? 'warn' : 'ok', title: `Synced ${before - left} ${before - left === 1 ? 'project' : 'projects'}`,
+          detail: left ? `${left} could not be fast-forwarded. Open a project to see why.` : '', key: 'sync-all' });
+      } else {
+        notify({ tone: 'err', title: 'Sync all failed', detail: (data && data.error) || `The server answered ${res.status}.`, key: 'sync-all', action: retry });
       }
-    } catch { /* the chips keep their last state */ }
-    finally {
+    } catch (e) {
+      notify({ tone: 'err', title: 'Sync all failed', detail: e.message, key: 'sync-all', action: retry });
+    } finally {
       btn.disabled = false;
       btn.classList.remove('busy');
+      paintSyncChips();   // the label and count come back with the rows
     }
   });
 }
@@ -10306,22 +10834,46 @@ function renderProjectsList() {
     return;
   }
   const card = document.createElement('section');
-  card.className = 'card saved-card';
+  card.className = 'card saved-card proj-card';
 
+  // Design 2026-10-01: title · state filters (paintProjFilters) · "Checked … ↻" and Sync all.
   const head = document.createElement('div');
   head.className = 'saved-head';
+  const title = document.createElement('div');
+  title.className = 'proj-head-title';
   const b = document.createElement('b');
   b.textContent = 'Projects';
   const cnt = document.createElement('span');
   cnt.className = 'cnt';
   cnt.textContent = String(state.projects.length);
-  head.append(b, cnt);
+  title.append(b, cnt);
+  const filters = document.createElement('div');
+  filters.className = 'proj-filters';
+  filters.setAttribute('role', 'group');
+  filters.setAttribute('aria-label', 'Filter by sync state');
+  filters.hidden = true;
+  const tools = document.createElement('div');
+  tools.className = 'proj-head-tools';
+  tools.append(syncCheckedNodes(), el.projectsSyncAll);
+  head.append(title, filters, tools);
+
+  // Column header, wide cards only; its sync cell shares the bars' inner columns.
+  const cols = document.createElement('div');
+  cols.className = 'proj-cols';
+  cols.setAttribute('aria-hidden', 'true');
+  const colSync = document.createElement('span');
+  colSync.className = 'proj-cols-sync';
+  colSync.append(...['Branch', 'Origin', ''].map((t) => Object.assign(document.createElement('span'), { textContent: t })));
+  const colTeam = Object.assign(document.createElement('span'), { textContent: 'Team' });
+  tagLevel(colTeam, 'expert');
+  cols.append(Object.assign(document.createElement('span'), { textContent: 'Project' }), colSync, colTeam, document.createElement('span'));
 
   const list = document.createElement('div');
   list.className = 'saved-list';   // real, styled class (style.css:671)
   for (const p of state.projects) list.appendChild(buildProjectRow(p));
+  const empty = Object.assign(document.createElement('div'), { className: 'proj-empty', textContent: 'No projects in this state.', hidden: true });
 
-  card.append(head, list);
+  card.append(head, cols, list, empty);
   host.appendChild(card);
   paintProjectTmCells();
   paintProjectPolicyCells();
@@ -10369,10 +10921,10 @@ const capFirst = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
 // Project page (#projects/<key>[/memory[/<name>]]) — spec 2026-09-13-project-detail-design.md
 // ---------------------------------------------------------------------------
 // The param after "projects/" is "<key>" (Overview), "<key>/team" (Team tab), "<key>/memory"
-// (Memory tab) or "<key>/memory/<enc name>" (that file open). Keys are `<slug>-<8hex>`
+// (Memory tab), "<key>/memory/<enc name>" (that file open) or "<key>/away" (Away mode tab). Keys are `<slug>-<8hex>`
 // (store.mjs#projectKey) and never contain "/", so the first slash splits key from tab. An
 // unknown tab word reads as Overview (the hash is left alone, as History leaves an odd param alone).
-const PROJ_TABS = ['overview', 'team', 'memory'];
+const PROJ_TABS = ['overview', 'team', 'memory', 'away', 'mcp', 'actions'];
 function parseProjParam(param = '') {
   const s = String(param || '');
   if (!s) return null;
@@ -10387,7 +10939,7 @@ function parseProjParam(param = '') {
 }
 // The canonical param for a tab: Overview is plain '<key>', never '<key>/overview'.
 function projParamFor(key, tab = 'overview', sub = '') {
-  if (tab === 'team') return `${key}/team`;
+  if (tab === 'team' || tab === 'away' || tab === 'mcp' || tab === 'actions') return `${key}/${tab}`;
   if (tab !== 'memory') return key;
   return sub ? `${key}/memory/${encodeURIComponent(sub)}` : `${key}/memory`;
 }
@@ -10430,6 +10982,7 @@ function openProjDetail(p, parsed, { instant = false } = {}) {
   screen.querySelector('.pd-history').addEventListener('click', () => { openRunsForProject(p.key); });
   screen.querySelector('.pd-remove').addEventListener('click', () => { void removeProjectFromPage(p.key); });
   paintProjHeader(screen, p);
+  terminalPane?.syncOpeners();             // the cloned header's terminal button says whether the pane is open
   initPdTabs(screen, p);
   activateProjTab(parsed.tab, parsed.sub);
 
@@ -10457,6 +11010,23 @@ function paintProjHeader(screen, p) {
   const path = screen.querySelector('.pd-path');
   path.textContent = p.path;
   path.title = p.path;
+  // The path lives here only (the Overview no longer repeats it): one line, and a copy button.
+  const copy = screen.querySelector('.pd-path-copy');
+  if (copy && !copy.dataset.wired) {
+    copy.dataset.wired = '1';
+    copy.addEventListener('click', async () => {
+      const text = (projectByKey(projDetail && projDetail.key) || p).path;
+      let ok = true;
+      try {
+        if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+        else ok = legacyCopy(text);
+      } catch { ok = legacyCopy(text); }
+      copy.classList.toggle('copied', ok);
+      copy.setAttribute('aria-label', ok ? 'Path copied' : 'Copy failed');
+      clearTimeout(copy._t);
+      copy._t = setTimeout(() => { copy.classList.remove('copied'); copy.setAttribute('aria-label', 'Copy path'); }, 1200);
+    });
+  }
   const fresh = screen.querySelector('.pd-new');
   fresh.disabled = !p.exists;
   fresh.title = p.exists ? 'Start a pipeline in this project' : 'The folder is missing on disk';
@@ -10580,13 +11150,20 @@ const PD_TAB_ICONS = {
   overview: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect></svg>',
   memory: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"></path><path d="M4 20.5V5.5M8 7h8M8 10.5h6"></path></svg>',
   map: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"></circle><circle cx="19" cy="5" r="2.5"></circle><circle cx="19" cy="19" r="2.5"></circle><path d="M7.3 10.9l9.4-4.8M7.3 13.1l9.4 4.8"></path></svg>',
+  // Away mode: a door with an arrow leaving it (the developer is away).
+  away: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"></path><path d="M10 16l-4-4 4-4M6 12h9"></path></svg>',
   team: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"></circle><path d="M3.5 19c.6-3 2.8-4.6 5.5-4.6S13.9 16 14.5 19"></path><circle cx="17.5" cy="9.5" r="2.4"></circle><path d="M15.5 14.6c2.7 0 4.4 1.4 5 4.4"></path></svg>',
+  mcp: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5"></path><path d="M6 8h12v3a6 6 0 0 1-12 0z"></path><path d="M12 17v4"></path></svg>',
+  actions: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5l11 7-11 7z"></path></svg>',
 };
 // Table-driven, like HD_TABS. `build(sec, key)` takes the KEY (buildArgs), never the project object.
 const PD_TABS = [
   { key: 'overview', label: 'Overview', level: 'simple', badge: () => null, visible: () => true, build: (sec, key) => buildPdOverview(sec, key) },
   { key: 'team', label: 'Team', level: 'expert', badge: () => null, visible: () => true, build: (sec, key) => buildPdTeam(sec, key) },
   { key: 'memory', label: 'Memory', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMemory(sec, key) },
+  { key: 'away', label: 'Away mode', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdAway(sec, key) },
+  { key: 'mcp', label: 'MCP', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMcp(sec, key) },
+  { key: 'actions', label: 'Actions', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdActions(sec, key) },
 ];
 function initPdTabs(screen, p) {
   initDetailTabs(screen, PD_TABS.map((t) => ({ ...t, icon: PD_TAB_ICONS[t.key] })), p, {
@@ -10647,29 +11224,43 @@ function buildPdOverview(sec, key) {
   const grid = document.createElement('div');
   grid.className = 'pd-ov-grid';
 
-  const pathCard = pdStatCard('path', 'PATH', p.path, p.exists ? 'On disk' : 'Missing on disk');
-  pathCard.querySelector('.pd-ov-value').classList.add('pd-ov-wrap');
-  if (!p.exists) pathCard.querySelector('.pd-ov-sub').classList.add('pd-ov-missing');
-  grid.appendChild(pathCard);
+  // BRANCH replaces PATH (the header carries the path): the same row model as the Projects list,
+  // painted by paintSyncChips from /api/sync/projects.
+  grid.appendChild(pdBranchCard('branch', 'BRANCH'));
 
   const rows = projectHistoryRows(key);
   const fam = { done: 0, paused: 0, stopped: 0, error: 0 };
   for (const r of rows) { const f = histStatusMeta(r).family; if (f in fam) fam[f] += 1; }
   const live = [...runs.values()].filter((r) => r && r.projectDir === p.path && (r.status === 'running' || r.status === 'starting')).length;
-  const parts = [`${fam.done} done`, `${fam.paused} paused`, `${fam.stopped} stopped`, `${fam.error} error`];
-  if (live) parts.push(`${live} running now`);
-  grid.appendChild(pdStatCard('runs', 'RUNS', String(rows.length), parts.join(' · ')));
-
-  let last = null;
-  for (const r of rows) { const t = histTs(r.startedAt || r.mtime); if (!last || t > last.t) last = { t, r }; }
-  if (last) {
-    const card = pdStatCard('last', 'LAST RUN', fmtDate(last.r.startedAt || last.r.mtime), last.r.title || last.r.id, { tag: 'button' });
-    card.classList.add('pd-ov-link');
-    card.title = 'Open this run';
-    card.addEventListener('click', () => { location.hash = `history/${histDetailParam(last.r)}`; });
+  if (!rows.length && !live) {
+    // Nothing to count yet: one wide card that says so and starts the first run, not "0" beside "—".
+    const card = pdStatCard('runs', 'RUNS', 'No runs yet', p.exists ? 'Runs started here show up on this page.' : 'The folder is missing on disk.');
+    card.classList.add('pd-ov-wide');
+    card.querySelector('.pd-ov-value').classList.remove('mono');
+    const start = document.createElement('button');
+    start.type = 'button';
+    start.className = 'btn btn-mini pd-ov-act pd-ov-start';
+    start.textContent = 'Start one';
+    start.disabled = !p.exists;
+    start.addEventListener('click', () => { newPipelineForProject(key); });
+    card.appendChild(start);
     grid.appendChild(card);
   } else {
-    grid.appendChild(pdStatCard('last', 'LAST RUN', '—', 'No runs yet'));
+    // Only the counts that are not zero: "10 done · 2 error", never five zeros.
+    const parts = Object.entries(fam).filter(([, n]) => n).map(([f, n]) => `${n} ${f}`);
+    if (live) parts.push(`${live} running now`);
+    grid.appendChild(pdStatCard('runs', 'RUNS', String(rows.length), parts.join(' · ')));
+    let last = null;
+    for (const r of rows) { const t = histTs(r.startedAt || r.mtime); if (!last || t > last.t) last = { t, r }; }
+    if (last) {
+      const when = Number.isFinite(last.t) && last.t ? ago(new Date(last.t).toISOString()) : fmtDate(last.r.startedAt || last.r.mtime);
+      const card = pdStatCard('last', 'LAST RUN', when, [last.r.title || last.r.id, histStatusMeta(last.r).family].filter(Boolean).join(' · '), { tag: 'button' });
+      card.querySelector('.pd-ov-value').classList.remove('mono');
+      card.classList.add('pd-ov-link');
+      card.title = `Open this run · ${fmtDate(last.r.startedAt || last.r.mtime)}`;
+      card.addEventListener('click', () => { location.hash = `history/${histDetailParam(last.r)}`; });
+      grid.appendChild(card);
+    }
   }
   grid.appendChild(tagLevel(pdStatCard('key', 'KEY', p.key, `memory scope projects/${p.key}`), 'expert'));
   // The team half (docs/team-metrics.md, docs/team-policy.md): one card each, filled by the
@@ -10685,6 +11276,144 @@ function buildPdOverview(sec, key) {
   ensureHistoryLoaded();
   void paintProjectTmCells();
   void paintProjectPolicyCells();
+  paintPdBranchCards();
+  void refreshSyncChips();
+}
+
+// ---- Branch card (project page) / Branches card (workspace page) ----
+// The stat-card shape (label, short value, one sub line) with the lists' one action. Filled from
+// state.syncChips by paintPdBranchCards, which paintSyncChips calls after every status read.
+function pdBranchCard(kind, label) {
+  const card = pdStatCard(kind, label, '…', 'checking…');
+  card.classList.add('pd-ov-branch');
+  const value = card.querySelector('.pd-ov-value');
+  value.classList.remove('mono');
+  const status = document.createElement('div');
+  status.className = 'pd-ov-status';
+  card.insertBefore(status, card.querySelector('.pd-ov-sub'));
+  const act = document.createElement('div');
+  act.className = 'pd-ov-actrow';
+  card.appendChild(act);
+  return card;
+}
+function paintPdBranchCards() {
+  const pcard = projDetail && projDetail.screen && projDetail.screen.querySelector('.pd-ov-card-branch');
+  if (pcard) {
+    const key = projDetail.key;
+    const b = state.syncChips[key];
+    const value = pcard.querySelector('.pd-ov-value');
+    const status = pcard.querySelector('.pd-ov-status');
+    const sub = pcard.querySelector('.pd-ov-sub');
+    const act = pcard.querySelector('.pd-ov-actrow');
+    if (!syncChipsLoaded) {
+      value.textContent = '…'; status.replaceChildren(); sub.textContent = 'checking…'; act.replaceChildren();
+    } else if (!b || !b.remote) {
+      value.textContent = (b && b.base) || '—';
+      status.replaceChildren(); sub.textContent = 'No remote · runs use your local copy'; act.replaceChildren();
+    } else {
+      const m = listRowModel(b);
+      const c = syncRowCells(key, m, '', projDetail.name);
+      value.replaceChildren(wsIcon('branch', 18), Object.assign(document.createElement('span'), { className: 'mono', textContent: b.base || '—' }));
+      status.className = `pd-ov-status tone-${m.tone}`;
+      status.replaceChildren(c.icon, c.status.querySelector('.ws-tlabel'));
+      sub.textContent = m.hint || `Checked ${fetchedAgo(b)}`;
+      act.replaceChildren(...c.action.childNodes);
+    }
+  }
+  const wcard = wsDetail && wsDetail.screen && wsDetail.screen.querySelector('.pd-ov-card-branches');
+  if (wcard) {
+    const w = workspaceById(wsDetail.id);
+    const keys = w && Array.isArray(w.projectKeys) ? w.projectKeys : [];
+    const value = wcard.querySelector('.pd-ov-value');
+    const status = wcard.querySelector('.pd-ov-status');
+    const sub = wcard.querySelector('.pd-ov-sub');
+    const act = wcard.querySelector('.pd-ov-actrow');
+    if (!syncChipsLoaded) { value.textContent = '…'; sub.textContent = 'checking…'; status.replaceChildren(); act.replaceChildren(); return; }
+    const models = keys.map((k) => (state.syncChips[k] ? listRowModel(state.syncChips[k]) : { state: 'none', action: null }));
+    const roll = wsRollupModel(models);
+    const [head, ...rest] = roll.text.split(' · ');
+    value.textContent = head;
+    value.className = `pd-ov-value tone-${roll.tone}`;
+    status.replaceChildren();
+    sub.textContent = rest.join(' · ') || (models.some((x) => x.state === 'none') ? 'Some projects have no remote' : '');
+    const behind = keys.filter((k, i) => models[i].action === 'sync');
+    if (!behind.length) { act.replaceChildren(); return; }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-mini pd-ov-act';
+    btn.textContent = `Sync all (${behind.length})`;
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; btn.classList.add('busy');
+      await syncBehindProjects(behind);
+      if (btn.isConnected) { btn.disabled = false; btn.classList.remove('busy'); }
+    });
+    act.replaceChildren(btn);
+  }
+}
+
+// ---- MCP tab (docs/mcp-servers.md): the project's sets and the servers its runs get ----
+function buildPdMcp(sec, key) {
+  sec.innerHTML = '';
+  sec.classList.add('pd-sec-mcp');
+  const p = projectByKey(key);
+  void mountProjectMcp(sec, { key, name: p ? p.name : key, api: mcpApi });
+}
+
+// ---- Away mode tab ----
+function buildPdAway(sec, key) {
+  sec.innerHTML = '';
+  sec.classList.add('pd-sec-away');
+  const p = projectByKey(key);
+  if (p) sec.appendChild(buildPdNightCard(p));
+}
+
+// The project's Away mode layer (project_config.extra.nightMode): fields set here beat the
+// developer's and the team's; empty fields read "Same as my settings (…)".
+function buildPdNightCard(p) {
+  const card = document.createElement('section');
+  card.className = 'card pd-night-card';
+  const head = document.createElement('div');
+  head.className = 'card-head';
+  const b = document.createElement('b'); b.textContent = 'Away mode for this project';
+  const h = document.createElement('small'); h.className = 'hint';
+  h.textContent = 'Anything left as "Same as my settings" uses your Settings page. Set a value here to override it for this project only.';
+  head.append(b, h);
+  const host = document.createElement('div');
+  host.className = 'pd-night-form';
+  const global = Object.assign(document.createElement('small'), { className: 'hint', textContent: '"I\'m away now" and "Pause" are global. Change them in Settings › Away mode.' });
+  const actions = document.createElement('div');
+  actions.className = 'add-project-actions';
+  const reset = Object.assign(document.createElement('button'), { type: 'button', className: 'btn btn-ghost btn-mini pd-night-reset', textContent: 'Use my settings' });
+  const save = Object.assign(document.createElement('button'), { type: 'button', className: 'btn btn-primary btn-mini pd-night-save', textContent: 'Save' });
+  actions.append(reset, save);
+  const msg = Object.assign(document.createElement('small'), { className: 'hint pd-night-msg' });
+  card.append(head, host, global, actions, msg);
+  let seq = 0;
+  const load = async () => {
+    const mine = ++seq;
+    // Both guarded: null / [] on any failure. The catalog feeds the "Decided by" picker.
+    const [d, models] = await Promise.all([fetchAwayMode(p.path), fetchTitleModelCatalog()]);
+    if (mine !== seq || !d) return;
+    awayModelCatalog = models;
+    renderNightForm(host, { level: 'project', values: d.project || {}, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), projectName: p.name, models });
+  };
+  const send = async (nightMode) => {
+    msg.textContent = ''; msg.className = 'hint pd-night-msg';
+    try {
+      const res = await fetch('/api/config', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: p.path, nightMode }) });
+      const data = await safeJson(res);
+      if (!res.ok) { msg.textContent = data.error || `HTTP ${res.status}`; msg.className = 'hint pd-night-msg err'; return; }
+      delete state.awayModeByDir[p.path];                     // run pages refetch this project's body
+      await load();
+      msg.textContent = 'Saved.';
+    } catch (err) { msg.textContent = err.message || 'network error'; msg.className = 'hint pd-night-msg err'; }
+  };
+  save.addEventListener('click', () => send(readNightForm(host, { level: 'project' })));
+  reset.addEventListener('click', () => send(null));
+  // Never a blank card before the GET lands: nothing is inherited yet, so every choice reads plainly.
+  renderNightForm(host, { level: 'project', values: {}, inherited: { config: null, sources: {} }, projectName: p.name, models: awayModelCatalog });
+  void load().catch(() => {});
+  return card;
 }
 
 // ---- Team tab ----
@@ -10773,8 +11502,13 @@ function modalShell({
   return new Promise((resolve) => {
     el.confirmTitle.textContent = title;
     el.confirmTitle.classList.toggle('danger', !!danger);
-    el.confirmMessage.textContent = message;
-    el.confirmMessage.hidden = !message;
+    // message: a string, or parts [text | { strong: text }] so the variable bits (a branch, a command)
+    // stand out. Every part goes in as text, never as markup.
+    if (Array.isArray(message)) {
+      el.confirmMessage.replaceChildren(...message.map((p) => (typeof p === 'string' ? document.createTextNode(p)
+        : Object.assign(document.createElement('strong'), { textContent: String(p?.strong ?? '') }))));
+    } else el.confirmMessage.textContent = message;
+    el.confirmMessage.hidden = Array.isArray(message) ? !message.length : !message;
     // messageTone:'err' paints the shared message in the app's error colour
     // (.confirm-message.err → --red-ink); done() always drops it again so the
     // tint never leaks to the next caller of this shared modal.
@@ -11049,7 +11783,7 @@ function onCloneJob(job) {
     } catch { /* the projects-changed frame refreshes it too */ }
     renderProjectsList();
     renderProjectOptions(localStorage.getItem(LAST_PROJECT_KEY) || '');
-    setProjectsMsg(name ? `Cloned and added “${name}”.` : 'Cloned and added the project.');
+    setProjectsMsg(name ? `Cloned and added “${name}”.` : 'Cloned and added the project.', 'ok');
   })();
 }
 
@@ -11108,6 +11842,12 @@ function setProjBulkMsg(text, kind) {
   el.projBulkMsg.textContent = text || '';
   el.projBulkMsg.className = 'hint' + (kind ? ' ' + kind : '');
 }
+// #555: a refusal concerns the dialog the user is in — a card alert above its button row.
+const projBulkCard = () => el.projectBulkModal && el.projectBulkModal.querySelector('.card');
+function projBulkAlert(title, detail = '') {
+  setProjBulkMsg('');
+  cardAlert(projBulkCard(), { title, detail });
+}
 
 function openProjectBulkModal(paths, { onDone = null } = {}) {
   const known = new Map((state.projects || []).map((p) => [p.path, p.name]));
@@ -11125,6 +11865,7 @@ function openProjectBulkModal(paths, { onDone = null } = {}) {
   projBulk = { rows, addedNames: [], onDone, saving: false };
   if (el.projBulkTitle) el.projBulkTitle.textContent = `Add ${rows.length} projects`;
   setProjBulkMsg('');
+  cardAlert(projBulkCard(), null);
   renderProjectBulkRows();
   el.projectBulkModal.classList.remove('hidden');
   const first = el.projBulkList.querySelector('.pb-name:not(:disabled)');
@@ -11182,9 +11923,13 @@ function renderProjectBulkRows() {
 async function saveProjectBulk() {
   if (!projBulk || projBulk.saving) return;
   const pending = projBulkPending();
-  if (!pending.length) return setProjBulkMsg('Tick at least one folder to add.', 'err');
+  if (!pending.length) {
+    fieldError(el.projBulkList.querySelector('.pb-include:not(:disabled)'), 'Tick at least one folder to add.');
+    return;
+  }
   projBulk.saving = true;
   syncProjBulkSave();
+  cardAlert(projBulkCard(), null);
   setProjBulkMsg(`Adding ${pending.length} …`);
   const bulk = projBulk;
   try {
@@ -11194,7 +11939,7 @@ async function saveProjectBulk() {
       body: JSON.stringify({ projects: pending.map((r) => ({ name: r.name.trim(), path: r.path })) }),
     });
     const data = await safeJson(res);
-    if (!res.ok) { setProjBulkMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
+    if (!res.ok) { projBulkAlert('Projects not added', data.error || `HTTP ${res.status}`); return; }
     if (Array.isArray(data.projects)) state.projects = data.projects;
     let addedNow = 0;
     for (const r of Array.isArray(data.results) ? data.results : []) {
@@ -11212,9 +11957,10 @@ async function saveProjectBulk() {
     const skipped = bulk.rows.filter((r) => r.status === 'skipped');
     if (!skipped.length) { closeProjectBulkModal(); return; }
     renderProjectBulkRows();
-    setProjBulkMsg(`${addedNow ? `Added ${addedNow}. ` : ''}${skipped.length} could not be added — see the reason on each row. Rename and press Add again, or close.`, 'err');
+    projBulkAlert('Not every project was added',
+      `${addedNow ? `Added ${addedNow}. ` : ''}${skipped.length} could not be added — see the reason on each row. Rename and press Add again, or close.`);
   } catch (e) {
-    setProjBulkMsg(e.message, 'err');
+    projBulkAlert('Projects not added', e.message);
   } finally {
     bulk.saving = false;
     if (projBulk === bulk) syncProjBulkSave();
@@ -11301,9 +12047,19 @@ if (el.projDetail) {
     if (e.target.closest('.tm-change')) return void openTmEnableDialog(key, { mode: 'delegate', change: true });
     if (e.target.closest('.tm-push')) {
       const s = tmCache.data?.projects.find((x) => x.key === key);
-      const btnEl = e.target.closest('.tm-push'); btnEl.disabled = true;
-      await fetch('/api/team-metrics/flush', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(s?.sinkSlug ? { slug: s.sinkSlug } : { scope: `project:${key}` }) }).catch(() => {});
-      return void paintProjectTmCells(true);
+      const btnEl = e.target.closest('.tm-push');
+      const res = await withButton(btnEl, async () => {
+        const m = await tmPost('/api/team-metrics/flush', s?.sinkSlug ? { slug: s.sinkSlug } : { scope: `project:${key}` });
+        return m ? { ok: false, error: m } : { ok: true };
+      }, { busy: 'Pushing…', done: 'Pushed' });
+      if (res.skipped) return;
+      if (res.ok) setTimeout(() => paintProjectTmCells(true), BUTTON_DONE_MS);
+      else {
+        await paintProjectTmCells(true);
+        notify({ tone: 'err', title: 'Push failed', detail: res.error, key: 'tm-push',
+          action: { label: 'Retry', run: () => document.querySelector(`#proj-detail .tm-cell[data-key="${cssEscape(key)}"] .tm-push`)?.click() } });
+      }
+      return;
     }
     // clicks elsewhere in the block (labels, the switch) are handled by 'change'
   });
@@ -11315,9 +12071,11 @@ if (el.projDetail) {
     const r = await fetch(`/api/projects/${encodeURIComponent(cb.dataset.key)}/team-metrics`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ record: cb.checked }),
     }).catch(() => null);
-    if (!r || !r.ok) cb.checked = !cb.checked;      // revert on failure
+    const err = !r ? 'Worca did not answer.' : !r.ok ? ((await safeJson(r))?.error || `The server answered ${r.status}.`) : null;
+    if (err) cb.checked = !cb.checked;      // revert on failure
     cb.disabled = false;
     paintProjectTmCells(true);
+    if (err) notify({ tone: 'err', title: 'Could not change “Include my runs”', detail: err, key: `tm-record-${cb.dataset.key}` });
   });
 }
 if (el.projectAddBtn) el.projectAddBtn.addEventListener('click', addProjectFlow);
@@ -11534,7 +12292,7 @@ function abortAgentGen() {
   if (genId) {
     fetch('/api/agents/generate/stop', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ genId }),
-    }).catch(() => {});
+    }).catch((e) => notify({ tone: 'err', title: 'Could not stop the generation', detail: e.message, key: 'agent-gen-stop' }));
     const ws = state.ws;
     if (ws && state.wsReady) { try { ws.send(JSON.stringify({ type: 'unsubscribe', genId })); } catch { /* ignore */ } }
   }
@@ -11583,6 +12341,7 @@ el.form.addEventListener('submit', async (e) => {
   // start.disabled, or a second Enter starts the same run twice.
   if (startSubmitInFlight) return;
   setFormMsg('', '');
+  clearFieldErrors(el.form); cardAlert(newFormCard(), null);
 
   // Target branch (§5.4 mutual exclusivity): workspace mode sends {workspaceId}
   // and NO projectDir; project mode sends {projectDir} and NO workspaceId.
@@ -11593,14 +12352,14 @@ el.form.addEventListener('submit', async (e) => {
   let workspaceProjectNames = null;
   if (target === 'workspace') {
     workspaceId = (el.workspaceSelect && el.workspaceSelect.value) || '';
-    if (!workspaceId) return setFormMsg('Select a workspace first (or create one).', 'err');
+    if (!workspaceId) return fieldError(el.workspaceSelect, 'Select a workspace first (or create one).');
     const ws = state.workspaces.find((w) => w && w.id === workspaceId);
     workspaceName = (ws && ws.name) || '';
     workspaceProjectNames = ws && Array.isArray(ws.projectPaths)
       ? ws.projectPaths.map(projectName) : null;
   } else {
     projectDir = selectedProjectPath();
-    if (!projectDir) return setFormMsg('Select a project first (or add one).', 'err');
+    if (!projectDir) return fieldError(el.projectSelect, 'Select a project first (or add one).');
   }
 
   const source = (el.sourceRadios.find((r) => r.checked) || {}).value || 'prompt';
@@ -11621,6 +12380,9 @@ el.form.addEventListener('submit', async (e) => {
     // be equivalent but would change every legacy-shaped request for no gain.)
     guardrailsId: isDefragRun && state.guardrailsId === 'permissive' ? 'normal'
       : (state.guardrailsId !== 'permissive' ? state.guardrailsId : undefined),
+    // MCP registry (§6.2): absent unless something is opted out, so default bodies stay byte-identical;
+    // a memory-defrag run starts no registry servers (§6.1), so it sends none.
+    mcpOptOut: state.mcpOptOut.length && !isDefragRun ? [...state.mcpOptOut] : undefined,
     mock: el.mock.checked,
     sourceBranch: (el.sourceBranch && el.sourceBranch.value) || undefined,
     featureBranch: (el.featureBranch && el.featureBranch.value.trim()) || undefined,
@@ -11629,6 +12391,8 @@ el.form.addEventListener('submit', async (e) => {
     humanInLoop: state.workflowId === AUTO_WORKFLOW_ID ? !!(el.humanInLoop && el.humanInLoop.checked) : undefined,
     // Only this workflow carries it: every other run body stays byte-identical to the legacy one.
     memoryScope: isDefragRun ? state.memoryScope : undefined,
+    // Night mode per-run opt-in: only when ticked, so every other run body stays byte-identical.
+    nightMode: el.nightMode && el.nightMode.checked ? true : undefined,
   };
   if (target === 'workspace') {
     body.workspaceId = workspaceId;
@@ -11666,7 +12430,7 @@ el.form.addEventListener('submit', async (e) => {
     if (!title) body.title = state.memoryScope === 'project' ? `Memory defragment: ${pn}` : 'Memory defragment (global)';
   } else if (psrc) {
     const picked = collectSourcePane(el.pluginSourcePane);
-    if (picked.error) return setFormMsg(picked.error, 'err');
+    if (picked.error) return cardAlert(newFormCard(), { title: 'Run not started', detail: picked.error });
     // The profile travels with the run and is pinned onto the row, so a result
     // is reported back to the instance the task actually came from even if the
     // project is re-bound in the meantime.
@@ -11676,10 +12440,10 @@ el.form.addEventListener('submit', async (e) => {
       profile: state.activePluginProfile || undefined,
     };
   } else if (source === 'markdown') {
-    if (!mdText) return setFormMsg('Provide markdown text or load a .md file.', 'err');
+    if (!mdText) return fieldError(el.promptMarkdown, 'Provide markdown text or load a .md file.');
     body.promptMarkdown = mdText;
   } else {
-    if (!promptText) return setFormMsg('Provide a prompt describing the task.', 'err');
+    if (!promptText) return fieldError(el.prompt, 'Provide a prompt describing the task.');
     body.prompt = promptText;
   }
 
@@ -11688,104 +12452,126 @@ el.form.addEventListener('submit', async (e) => {
   const scheduling = !!pendingSchedule;
   // #527: Auto-sync only when the person touched the switch for this run (untouched, each
   // member follows its own sync.beforeRun). Before the schedule merge, so the sheet's choice wins.
-  if (state.sync.autoSync !== null && el.syncRow && !el.syncRow.hidden && levelAtLeast('advanced')) body.syncBeforeStart = state.sync.autoSync;
+  if (state.sync.blocked && levelAtLeast('advanced')) return cardAlert(newFormCard(), { title: 'Run not started', detail: `${state.sync.blocked} can’t start from origin yet. Push its commits, or use Local copy.` });
+  if (state.sync.autoSync !== null && syncApplies() && levelAtLeast('advanced')) body.syncBeforeStart = state.sync.autoSync;
   if (scheduling) {
     const { sync: schedSync, ...schedRest } = pendingSchedule;
     Object.assign(body, schedRest);
+    // branchGone is a form hint (openAfterForNew), never part of the wire's { kind, id, title }.
+    if (body.after && 'branchGone' in body.after) { const { branchGone: _bg, ...a } = body.after; body.after = a; }
     if (schedSync && typeof schedSync.beforeRun === 'boolean') body.syncBeforeStart = schedSync.beforeRun;
     if (schedSync && (schedSync.onDiverged === 'origin' || schedSync.onDiverged === 'fail')) body.syncOnDiverged = schedSync.onDiverged;
   }
 
-  // Guard the whole in-flight window: applyBudgetToNewView also drives
-  // start.disabled, and this run's own creation event repaints it.
-  startSubmitInFlight = true;
-  el.startBtn.disabled = true;
-  if (el.startMore) el.startMore.disabled = true;
-  setFormMsg(scheduling ? 'Scheduling…' : 'Starting run...', '');
+  // #555: withButton owns #start-btn from here, and reads undefined as success, so every exit
+  // returns an explicit { ok }. A failed or cancelled start never shows "Started".
+  const notStarted = (detail) => {
+    cardAlert(newFormCard(), { title: scheduling ? 'Not scheduled' : 'Run not started', detail });
+    return { ok: false };
+  };
 
-  // Upload the selected extra files' bytes; the server writes them to a temp
-  // dir and the orchestrator copies them into the pipeline's extras/ folder.
-  let extras = [];
-  try {
-    extras = await collectExtras();
-  } catch {
-    extras = [];
-  }
-  if (extras.length) body.extras = extras;
+  await withButton(el.startBtn, async () => {
+    // Guard the whole in-flight window: applyBudgetToNewView also drives
+    // start.disabled, and this run's own creation event repaints it. Set INSIDE the callback:
+    // idleDisabled reads it, so set before withButton it would make a second Start during the
+    // previous one's "Started" look gated, skip it and leave the flag stuck.
+    startSubmitInFlight = true;
+    if (el.startMore) el.startMore.disabled = true;
+    // Upload the selected extra files' bytes; the server writes them to a temp
+    // dir and the orchestrator copies them into the pipeline's extras/ folder.
+    let extras = [];
+    try {
+      extras = await collectExtras();
+    } catch {
+      extras = [];
+    }
+    if (extras.length) body.extras = extras;
 
-  try {
-    let res = await fetch('/api/run', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    let data = await safeJson(res);
-    let lastSentBody = body;
-    // Team total cap (team-policy design §7, board 9): soft — ask once, resend with the
-    // acknowledgement (and its reason) recorded; a required reason re-asks.
-    if (!res.ok && data && (data.needsPolicyAck || data.code === 'reason_required')) {
-      const choice = await policyRefusalRetry(data, res.status);
-      if (choice) {
-        lastSentBody = { ...body, pastTeamCap: true, ...(choice.reason ? { policyReason: choice.reason } : {}) };
-        res = await fetch('/api/run', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(lastSentBody),
-        });
+    try {
+      let res = await fetch('/api/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      let data = await safeJson(res);
+      let lastSentBody = body;
+      // Team total cap (team-policy design §7, board 9): soft — ask once, resend with the
+      // acknowledgement (and its reason) recorded; a required reason re-asks.
+      if (!res.ok && data && (data.needsPolicyAck || data.code === 'reason_required')) {
+        const choice = await policyRefusalRetry(data, res.status);
+        if (choice) {
+          lastSentBody = { ...body, pastTeamCap: true, ...(choice.reason ? { policyReason: choice.reason } : {}) };
+          res = await fetch('/api/run', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(lastSentBody),
+          });
+          data = await safeJson(res);
+        }
+      }
+      // #527: the base diverged (or could not be fetched) — ask once, resend with the choice.
+      if (!res.ok && data && (data.code === 'sync-diverged' || data.code === 'sync-fetch-failed')) {
+        const choice = await chooseSyncRefusal(data);
+        if (!choice) {
+          startSubmitInFlight = false;
+          if (el.startMore) el.startMore.disabled = false;
+          notify({ tone: 'warn', title: 'Start cancelled' });
+          return { ok: false, cancelled: true };
+        }
+        lastSentBody = { ...lastSentBody, syncPolicy: choice };   // keeps pastTeamCap/policyReason
+        res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(lastSentBody) });
         data = await safeJson(res);
       }
-    }
-    // #527: the base diverged (or could not be fetched) — ask once, resend with the choice.
-    if (!res.ok && data && (data.code === 'sync-diverged' || data.code === 'sync-fetch-failed')) {
-      const choice = await chooseSyncRefusal(data);
-      if (!choice) {
-        startSubmitInFlight = false; el.startBtn.disabled = false; if (el.startMore) el.startMore.disabled = false;
-        return setFormMsg('Start cancelled.', 'warn');
+      if (el.startMore) el.startMore.disabled = false;
+      if (!res.ok || !data.runId) {
+        startSubmitInFlight = false;
+        // The alert title already says "Run not started" / "Not scheduled".
+        return notStarted(data.error || `The server answered ${res.status}.`);
       }
-      lastSentBody = { ...lastSentBody, syncPolicy: choice };   // keeps pastTeamCap/policyReason
-      res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(lastSentBody) });
-      data = await safeJson(res);
-    }
-    if (el.startMore) el.startMore.disabled = false;
-    if (!res.ok || !data.runId) {
-      startSubmitInFlight = false;
-      el.startBtn.disabled = false;
-      return setFormMsg(`Failed to ${scheduling ? 'schedule' : 'start'}: ${data.error || res.status}`, 'err');
-    }
-    // 202: nothing is running — the request is a ticket now. Show it where it lives.
-    if (data.status === 'scheduled') {
-      startSubmitInFlight = false;
-      el.startBtn.disabled = !!budgetState.budget?.blocked;
-      setPendingSchedule(null);   // the form is a plain Start run form again
-      resetSyncChoice();
-      setFormMsg(data.budgetWarning ? `Scheduled. ${data.budgetWarning}` : 'Scheduled.', data.budgetWarning ? 'warn' : 'ok');
-      showView('schedules');
-      return;
-    }
+      // 202: nothing is running — the request is a ticket now. Show it where it lives.
+      if (data.status === 'scheduled') {
+        startSubmitInFlight = false;
+        setPendingSchedule(null);   // the form is a plain Start run form again
+        resetSyncChoice();
+        // Keep the warn tone when the server attached a budget warning. showView('schedules')
+        // already shows the ticket, so the toast needs no Open action.
+        notify({ tone: data.budgetWarning ? 'warn' : 'ok', title: 'Scheduled', detail: data.budgetWarning || title || '' });
+        showView('schedules');
+        return { ok: true };
+      }
 
-    // begin tracking the new run (creates a local model + switches to Running)
-    beginRun(data.runId, projectDir, title,
-      target === 'workspace' ? { workspaceId, workspaceName, projectNames: workspaceProjectNames } : {});
-    // Re-enable the form so more runs can be started concurrently — unless the
-    // budget just went over, in which case the gate keeps Start disabled.
-    startSubmitInFlight = false;
-    el.startBtn.disabled = !!budgetState.budget?.blocked;
-    resetSyncChoice();
-    setFormMsg('Run started.', 'ok');
-    if (extras.length) {
-      appendLog({
-        source: 'ui',
-        level: 'system',
-        text: `uploaded ${extras.length} extra file(s): ${extras.map((e) => e.name).join(', ')}`,
-        ts: Date.now(),
-      });
+      // begin tracking the new run (creates a local model + switches to Running)
+      beginRun(data.runId, projectDir, title,
+        target === 'workspace' ? { workspaceId, workspaceName, projectNames: workspaceProjectNames } : {});
+      // Re-enable the form so more runs can be started concurrently — unless the
+      // budget just went over, in which case idleDisabled keeps Start disabled.
+      startSubmitInFlight = false;
+      resetSyncChoice();
+      // D6: the user is on the run's page now, so the result is a toast, not a #form-msg line.
+      notify({ tone: 'ok', title: 'Run started', detail: title || '', key: `run-${data.runId}`,
+        action: { label: 'Open run', run: () => { location.hash = rdHash(data.runId); } } });
+      if (extras.length) {
+        appendLog({
+          source: 'ui',
+          level: 'system',
+          text: `uploaded ${extras.length} extra file(s): ${extras.map((e) => e.name).join(', ')}`,
+          ts: Date.now(),
+        });
+      }
+      return { ok: true };
+    } catch (err) {
+      startSubmitInFlight = false;
+      if (el.startMore) el.startMore.disabled = false;
+      return notStarted(`Error: ${err.message}`);
     }
-  } catch (err) {
-    startSubmitInFlight = false;
-    el.startBtn.disabled = false;
-    if (el.startMore) el.startMore.disabled = false;
-    setFormMsg(`Error: ${err.message}`, 'err');
-  }
+  }, { busy: scheduling ? 'Scheduling…' : 'Starting…', done: scheduling ? 'Scheduled' : 'Started',
+    idleDisabled: () => !!budgetState.budget?.blocked || startSubmitInFlight });
 });
+
+// #555: card alerts for New pipeline go into #run-form, directly above its own action row
+// (div.actions[data-card-actions], the parent of #start-split and a direct child of the form).
+// cardAlert picks the form's OWN row (:scope >); the first descendant row in document order is
+// the hidden inline add-project panel's .add-project-actions.
+function newFormCard() { return el.form; }
 
 // The split Start button's menu. "Schedule…" is a MODE, not a submit: it opens the sheet at
 // once, before any prompt is typed, exactly like Schedules › Schedule a run (#new/schedule).
@@ -11805,9 +12591,9 @@ function scheduleSyncOpt() {
   const od = state.sync.block?.settings?.onDiverged;
   const projectOnDiverged = state.sync.block ? (od === 'fail' ? 'fail' : 'origin') : null;
   return {
-    show: !!el.syncRow && !el.syncRow.hidden && levelAtLeast('advanced'),
+    show: syncApplies() && levelAtLeast('advanced'),
     beforeRun: state.sync.autoSync,                 // null = untouched → each member's own sync.beforeRun
-    shownBeforeRun: !!(el.syncAuto && el.syncAuto.checked),
+    shownBeforeRun: shownAutoSync(),
     onDiverged: state.runTarget === 'workspace' ? null : projectOnDiverged,
   };
 }
@@ -11835,7 +12621,8 @@ function setPendingSchedule(pick) {
   if (!pendingSchedule) { syncPreviousBranchEverywhere(); return; }
   if (pendingSchedule.after) {
     el.newSchedBadge.textContent = 'After run';
-    el.newSchedText.textContent = `Starts when ‘${pendingSchedule.after.title || 'the run before it'}’ finishes`;
+    el.newSchedText.textContent = `Starts when ‘${pendingSchedule.after.title || 'the run before it'}’ finishes`
+      + (pendingSchedule.after.branchGone ? ' · its branch is gone, so pick a source branch' : '');
   } else if (pendingSchedule.repeat) {
     el.newSchedBadge.textContent = 'Repeats';
     el.newSchedText.textContent = describeRule(pendingSchedule.repeat.rule);
@@ -11864,7 +12651,7 @@ el.newSchedClear?.addEventListener('click', () => setPendingSchedule(null));
 // single select becomes in workspace mode — the switch below carries the flag there.
 function syncPreviousBranchOption(select) {
   if (!select || select.classList.contains('ws-src-select')) return;
-  const want = !!(pendingSchedule && pendingSchedule.after) && state.runTarget !== 'workspace';
+  const want = !!(pendingSchedule && pendingSchedule.after && !pendingSchedule.after.branchGone) && state.runTarget !== 'workspace';
   const has = [...select.options].find((o) => o.value === PREVIOUS_BRANCH);
   if (want && !has) {
     const opt = document.createElement('option');
@@ -11889,7 +12676,7 @@ function syncPreviousBranchEverywhere() {
     if (el.sourceBranch.value === PREVIOUS_BRANCH || (state.sync.block && state.sync.block.base === effectiveBase())) paintSyncRowNow();
     else void refreshSyncStatusQuiet();
   }
-  const wsPick = !!(pendingSchedule && pendingSchedule.after) && state.runTarget === 'workspace';
+  const wsPick = !!(pendingSchedule && pendingSchedule.after && !pendingSchedule.after.branchGone) && state.runTarget === 'workspace';
   if (el.wsSourcePreviousRow) el.wsSourcePreviousRow.classList.toggle('hidden', !wsPick);
   // ON by default with a pick in workspace mode; a deliberate OFF (the click handler marks it) survives
   // member re-renders and target switches, and the FRESH member selects follow whichever it is — every
@@ -11901,6 +12688,7 @@ function setWsSourcePrevious(on) {
   el.wsSourcePrevious.classList.toggle('on', on);
   el.wsSourcePrevious.setAttribute('aria-checked', on ? 'true' : 'false');
   el.wsSourceBranches?.querySelectorAll('select.ws-src-select').forEach((s) => { s.disabled = on || s.dataset.missing === '1'; });
+  if (state.runTarget === 'workspace') paintBranches();
 }
 const flipWsSourcePrevious = () => {
   const on = !el.wsSourcePrevious.classList.contains('on');
@@ -11958,7 +12746,9 @@ async function openAfterForNew(ref) {
   } else { setFormMsg('That run’s project is not registered.', 'err'); return; }
   // A predecessor that already ended badly can only be waited for under the any policy
   // (resolveAfterRef refuses it under done) — preset the switch the sheet would need.
-  setPendingSchedule({ after: { kind: r.kind, id: r.id, title: r.title || null }, afterPolicy: ENDED_BADLY.includes(r.status) ? 'any' : 'done' });
+  // branchGone: the predecessor finished but its feature branch no longer resolves (an archived
+  // or restored run) — syncPreviousBranchOption then leaves "Branch of the run before it" out.
+  setPendingSchedule({ after: { kind: r.kind, id: r.id, title: r.title || null, branchGone: !!r.branchGone }, afterPolicy: ENDED_BADLY.includes(r.status) ? 'any' : 'done' });
   try { el.prompt?.focus(); } catch { /* jsdom */ }
 }
 function closeStartMenu() {
@@ -12028,12 +12818,6 @@ function setFormMsg(text, kind) {
 // Settings view: the machine-wide Worca root folder + the projects root
 // (§5.1) whose CLAUDE.md / .claude/skills / .mcp.json every pipeline agent sees.
 // ---------------------------------------------------------------------------
-function setSettingsMsg(text, kind) {
-  if (!el.settingsMsg) return;
-  el.settingsMsg.textContent = text || '';
-  el.settingsMsg.className = 'hint' + (kind ? ' ' + kind : '');
-}
-
 // One contract for both fields: value = the RAW setting (blank when unset),
 // placeholder = what applies while it IS blank. `projectsRootDefault` is that
 // fallback for the projects root — the WORCA_PROJECTS_ROOT override when it is
@@ -12047,6 +12831,7 @@ function paintSettings(data) {
     el.settingsProjectsRoot.value = data.projectsRoot || '';
     el.settingsProjectsRoot.placeholder = projectsRootFallback(data);
   }
+  settingsCardPainted('settingsSave');
 }
 
 // `default` is the pre-projectsRoot payload's only default; keep it as the
@@ -12072,12 +12857,20 @@ function paintAbout(info) {
   paintAboutInto(document, info);
 }
 
+// #555 D8: a failed Settings GET is shown above the tabs, at every UI level.
+function setSettingsLoadMsg(text) {
+  const n = document.getElementById('settingsLoadMsg');
+  if (!n) return;
+  n.textContent = text ? `Could not load settings: ${text}` : '';
+  n.hidden = !text;
+}
+
 async function loadSettings() {
   if (!el.settingsRoot) return;
   try {
     const res = await fetch('/api/settings');
     const data = await safeJson(res);
-    if (!res.ok) { setSettingsMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
+    if (!res.ok) { setSettingsLoadMsg(data.error || `HTTP ${res.status}`); return; }
     paintSettings(data);
     paintTheme(data.theme);
     levelCtl.confirm(data.uiLevel);
@@ -12085,7 +12878,9 @@ async function loadSettings() {
     paintBudgetSettings(data);
     paintAskSettings(data);
     paintScheduleSettings(data);
+    paintNightSettings(data);
     paintSyncSettings(data);
+    paintActionsSettings(data);
     paintDebugSpawnSettings(data);
     await paintTitleModelSettings(data);
     await paintAutoModelSettings(data);
@@ -12097,17 +12892,11 @@ async function loadSettings() {
     paintChatSettings(data.chat);
     paintCredentials();
     loadAskHistory();
-    setSettingsMsg('');
-  } catch (e) { setSettingsMsg(e.message, 'err'); }
+    setSettingsLoadMsg('');
+  } catch (e) { setSettingsLoadMsg(e.message || 'network error'); }
 }
 
 // ── Chat notifications card (chat-connectivity-design.md §4.8) ────────────────
-
-function setChatSettingsMsg(text, cls) {
-  if (!el.chatSettingsMsg) return;
-  el.chatSettingsMsg.textContent = text || '';
-  el.chatSettingsMsg.className = `hint${cls ? ` ${cls}` : ''}`;
-}
 
 // Settings › My model credentials (credential broker, docs/credential-broker.md): the card
 // stays hidden unless worca runs with a broker. Status only; keys live on the key page.
@@ -12130,43 +12919,49 @@ async function paintChatSettings(prefs) {
     channels = cs.channels || [];
   } catch { /* render prefs-only */ }
   el.chatSettingsHost.replaceChildren(renderChatSettings({ prefs, channels }));
+  settingsCardPainted('chatSettingsSave');
 }
 
-if (el.chatSettingsSave) el.chatSettingsSave.addEventListener('click', async () => {
-  el.chatSettingsSave.disabled = true;
-  try {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat: collectChatSettings(el.chatSettingsHost) }),
-    });
-    const data = await safeJson(res);
-    if (!res.ok) return setChatSettingsMsg(data.error || `HTTP ${res.status}`, 'err');
-    setChatSettingsMsg('Saved.');
-  } catch (e) { setChatSettingsMsg(e.message, 'err');
-  } finally { el.chatSettingsSave.disabled = false; }
-});
+// No repaint on success (and a chat-only POST sends no settings-changed): the tracker's
+// markClean in postSettingsCard is what clears the card.
+if (el.chatSettingsSave) {
+  el.chatSettingsSave.addEventListener('click', (e) => postSettingsCard(
+    { chat: collectChatSettings(el.chatSettingsHost) },
+    { card: document.getElementById('chat-settings-card'), button: e.currentTarget, dirty: settingsCardDirty('chatSettingsSave') }));
+  settingsCardDirty('chatSettingsSave');
+}
 
-// Delegated Test buttons: explicit user action -> POST /api/chat/test.
+// Delegated Test buttons: explicit user action -> POST /api/chat/test. The button shows
+// Sending… → Delivered (#555); a failure is a card alert naming the chats it missed.
 if (el.chatSettingsHost) el.chatSettingsHost.addEventListener('click', async (e) => {
   const t = e.target;
   if (!t || !t.classList || !t.classList.contains('chat-test')) return;
-  t.disabled = true;
-  setChatSettingsMsg('Sending test message…');
-  try {
-    const res = await fetch('/api/chat/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plugin: t.dataset.plugin, channelId: t.dataset.channelId }),
-    });
-    const data = await safeJson(res);
-    if (!res.ok) return setChatSettingsMsg(data.error || `HTTP ${res.status}`, 'err');
+  const card = document.getElementById('chat-settings-card');
+  cardAlert(card, null);
+  await withButton(t, async () => {
+    let res;
+    try {
+      res = await fetch('/api/chat/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plugin: t.dataset.plugin, channelId: t.dataset.channelId }),
+      });
+    } catch (err) {
+      cardAlert(card, { title: 'Test message not sent', detail: `Worca did not answer (${err.message}).` });
+      return { ok: false, error: err.message };
+    }
+    const data = (await safeJson(res)) || {};
+    if (!res.ok) {
+      const error = data.error || `The server answered ${res.status}.`;
+      cardAlert(card, { title: 'Test message not sent', detail: error });
+      return { ok: false, error };
+    }
     const failed = (data.results || []).filter((r) => !r.ok);
-    setChatSettingsMsg(failed.length
-      ? `Delivery failed for ${failed.map((f) => f.chatId).join(', ')}: ${failed[0].error?.message || failed[0].error?.kind}`
-      : 'Test message delivered.', failed.length ? 'err' : '');
-  } catch (err) { setChatSettingsMsg(err.message, 'err');
-  } finally { t.disabled = false; }
+    if (!failed.length) return { ok: true };
+    const detail = failed[0].error?.message || failed[0].error?.kind || '';
+    cardAlert(card, { title: `Delivery failed for ${failed.map((f) => f.chatId).join(', ')}`, detail });
+    return { ok: false, error: detail };
+  }, { busy: 'Sending…', done: 'Delivered' });
 });
 
 // Live channel-status events patch every visible badge in place (plugins view
@@ -12186,38 +12981,26 @@ function onChannelStatus(msg) {
 
 // POSTs both keys; the route writes only the keys present in the body, and an
 // explicitly empty one resets that key to its default (ui/server.mjs:1656).
-async function saveSettings(root, projectsRoot) {
+async function saveSettings(root, projectsRoot, opts = {}) {
   if (!el.settingsSave) return;
-  el.settingsSave.disabled = true;
-  if (el.settingsReset) el.settingsReset.disabled = true;
-  try {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ root, projectsRoot }),
-    });
-    const data = await safeJson(res);
-    if (!res.ok) { setSettingsMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
-    paintSettings(data);
-    setSettingsMsg('Saved. New runs use these folders.');
-    // The root relocates the project registry + workflows; reload projects so
-    // the UI reflects what's available under the new root.
-    loadProjects();
-  } catch (e) { setSettingsMsg(e.message, 'err'); }
-  finally {
-    el.settingsSave.disabled = false;
-    if (el.settingsReset) el.settingsReset.disabled = false;
-  }
+  const r = await postSettingsCard({ root, projectsRoot }, {
+    card: document.getElementById('root-settings-card'), paint: paintSettings,
+    dirty: settingsCardDirty('settingsSave'), appliesWhen: 'New runs use these folders.', ...opts });
+  // The root relocates the project registry + workflows; reload projects so
+  // the UI reflects what's available under the new root.
+  if (r.ok) loadProjects();
 }
 
 const settingsFieldValue = (node) => (node && node.value ? node.value.trim() : '');
 
 if (el.settingsSave) {
-  el.settingsSave.addEventListener('click', () => saveSettings(
-    settingsFieldValue(el.settingsRoot), settingsFieldValue(el.settingsProjectsRoot),
+  el.settingsSave.addEventListener('click', (e) => saveSettings(
+    settingsFieldValue(el.settingsRoot), settingsFieldValue(el.settingsProjectsRoot), { button: e.currentTarget },
   ));
 }
-if (el.settingsReset) el.settingsReset.addEventListener('click', () => saveSettings('', ''));
+if (el.settingsReset) el.settingsReset.addEventListener('click', (e) => saveSettings('', '',
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('settingsSave');
 
 // ---------------------------------------------------------------------------
 // ⓘ info tooltips (settings). Content lives in each icon's hidden .tip-content
@@ -12312,16 +13095,12 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { clearTim
 // /api/settings payload the root card uses, and renders the live spend readout
 // from the /api/budget snapshot paintBudget() already keeps fresh.
 // ---------------------------------------------------------------------------
-function setBudgetMsg(text, kind) {
-  el.budgetMsg.textContent = text || '';
-  el.budgetMsg.className = 'hint' + (kind ? ` ${kind}` : '');
-}
-
 function paintBudgetSettings(data) {
   el.budgetPerPipeline.value = data.pipelineCostLimitUsd ?? '';
   el.budgetTotal.value = data.totalCostLimitUsd ?? '';
   el.budgetResetPeriod.value = data.costLimitResetPeriod || 'monthly';
   el.budgetHumanRate.value = data.humanRateUsdPerHour ?? '';
+  settingsCardPainted('budgetSave');
 }
 
 function paintBudgetReadout() {
@@ -12341,53 +13120,44 @@ function readBudgetField(input) {
   return n;
 }
 
-async function saveBudgetSettings(payload) {
-  el.budgetSave.disabled = true;
-  el.budgetReset.disabled = true;
-  setBudgetMsg('Saving…');
-  try {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await safeJson(res);
-    if (!res.ok) { setBudgetMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
-    paintBudgetSettings(data);
-    setBudgetMsg('Saved.');
-    refreshBudget();                        // sidebar + readout repaint immediately
-  } catch (e) { setBudgetMsg(e.message, 'err'); }
-  finally {
-    el.budgetSave.disabled = false;
-    el.budgetReset.disabled = false;
-  }
+const budgetCard = () => document.getElementById('budget-settings-card');
+async function saveBudgetSettings(payload, opts = {}) {
+  const r = await postSettingsCard(payload, { card: budgetCard(), paint: paintBudgetSettings, dirty: settingsCardDirty('budgetSave'), ...opts });
+  if (r.ok) refreshBudget();                 // sidebar + readout repaint immediately
+  return r;
 }
 
 if (el.budgetSave) {
-  el.budgetSave.addEventListener('click', () => {
-    const per = readBudgetField(el.budgetPerPipeline);
-    const total = readBudgetField(el.budgetTotal);
-    const rate = readBudgetField(el.budgetHumanRate);
-    if (Number.isNaN(per) || Number.isNaN(total) || Number.isNaN(rate)) {
-      setBudgetMsg('Limits and the rate must be at least $0.01, or blank.', 'err');
+  el.budgetSave.addEventListener('click', (e) => {
+    clearFieldErrors(budgetCard());
+    const fields = [el.budgetPerPipeline, el.budgetTotal, el.budgetHumanRate];
+    const vals = fields.map(readBudgetField);
+    const bad = fields.filter((_, i) => Number.isNaN(vals[i]));
+    const [per, total, rate] = vals;
+    if (bad.length) {
+      bad.forEach((n, i) => fieldError(n, 'Enter at least $0.01, or leave it blank.', { focus: i === 0 }));
       return;
     }
     saveBudgetSettings({
       pipelineCostLimitUsd: per, totalCostLimitUsd: total,
       costLimitResetPeriod: el.budgetResetPeriod.value,
       humanRateUsdPerHour: rate,
-    });
+    }, { button: e.currentTarget });
   });
 }
 // Clears both limits and leaves the reset period alone: POSTing `null` deletes
 // the key server-side (the REST arm passes `body.x ?? ''` to the setter).
+// The inputs are emptied without an event: after a failed post postSettingsCard's
+// refresh shows the card as dirty; after a success paintBudgetSettings re-cleans it.
 if (el.budgetReset) {
-  el.budgetReset.addEventListener('click', () => {
+  el.budgetReset.addEventListener('click', (e) => {
     el.budgetPerPipeline.value = '';
     el.budgetTotal.value = '';
-    saveBudgetSettings({ pipelineCostLimitUsd: null, totalCostLimitUsd: null });
+    saveBudgetSettings({ pipelineCostLimitUsd: null, totalCostLimitUsd: null },
+      { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' });
   });
 }
+settingsCardDirty('budgetSave');
 
 // ---- Ask Worca limits card (budget-card pattern above) ---------------------
 // Shared by the small Settings cards (Ask Worca, Spawn diagnostics): one hint
@@ -12397,19 +13167,93 @@ function setHintMsg(id, text, kind) {
   const n = document.getElementById(id);
   if (n) { n.textContent = text || ''; n.className = `hint${kind ? ` ${kind}` : ''}`; }
 }
-async function postSettingsCard(body, { setMsg, paint, savedText = 'Saved.' }) {
-  setMsg('');
-  let res;
-  try {
-    res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  } catch (e) { setMsg(e.message || 'network error', 'err'); return; }
-  const data = await safeJson(res);
-  if (!res.ok) { setMsg(data.error || `HTTP ${res.status}`, 'err'); return; }
-  // A 2xx with an unparsable body yields {} — leave the card as the user set it
-  // rather than painting every field as "unset".
-  if (Object.keys(data).length) paint(data);
-  setMsg(savedText);
+// #555: list-view result lines. A result of a user action (ok / err / warn / info) becomes
+// a toast, so a reload that clears the line can no longer erase it. Plain text (progress such
+// as "Installing…") stays on the inline line; '' clears it. Load / refresh paths and standing
+// states pass 'err-inline' / 'warn-inline': they stay on the inline line (red / amber), because
+// a toast per background refresh (window focus, WS frame) would be noise the user never asked for.
+function reportStatus(line, base, text, kind, extra = {}) {
+  if (kind === 'ok' || kind === 'err' || kind === 'warn' || kind === 'info') {
+    if (line) { line.textContent = ''; line.className = base; }
+    if (text) notify({ tone: kind, ...splitMessage(text), ...extra });
+    return;
+  }
+  const inline = kind === 'err-inline' ? 'err' : kind === 'warn-inline' ? 'warn' : '';
+  if (line) { line.textContent = text || ''; line.className = inline ? `${base} ${inline}` : base; }
 }
+// One Settings card save (#555): the clicked button shows busy → done; a server error with a
+// `field` lands on the input that carries it in data-setting; anything else is a card alert
+// above the buttons; a change that applies elsewhere also raises a toast. Never throws;
+// resolves to { ok:true, data } | { ok:false, error, field } | { ok:false, skipped:true }.
+// `gate` = this button is the card's dirty-gated Save (Reset passes gate:false, so it never
+// locks itself disabled on a clean card).
+async function postSettingsCard(body, opts = {}) {
+  const { card = null, button = null, paint = null, dirty = null, gate = true, done = 'Saved', busy = 'Saving…', appliesWhen = '' } = opts;
+  if (card) { clearFieldErrors(card); cardAlert(card, null); }
+  // Every Settings caller passes `dirty` (its card's tracker), Reset included: success is
+  // the only thing that marks a card clean when nothing repaints it (Chat; Away when
+  // fetchAwayMode fails).
+  const r = await withButton(button, async () => {
+    let res;
+    try {
+      res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    } catch (e) {
+      return { ok: false, error: `Worca did not answer (${e.message || 'network error'}). Check it is still running, then try again.` };
+    }
+    const data = (await safeJson(res)) || {};
+    if (!res.ok) return { ok: false, error: data.error || `The server answered ${res.status}.`, field: data.field || null };
+    return { ok: true, data };
+  }, { busy, done, idleDisabled: () => (gate && dirty ? !dirty.isDirty() : false) });
+  if (r.skipped) return r;
+  if (r.ok) {
+    // A 2xx with an unparsable body yields {}: leave the card as the user set it.
+    // Await the paint: the model-picker paints are async and rebuild their selects, so the clean
+    // snapshot must be taken after them.
+    if (paint && r.data && Object.keys(r.data).length) await paint(r.data);
+    dirty?.markClean();
+    if (appliesWhen) notify({ tone: 'ok', title: 'Saved', detail: appliesWhen });
+    return r;
+  }
+  dirty?.refresh();                           // still dirty after a failure: Save is offered again
+  if (!card) return r;                        // the caller reports (Away status strip)
+  const targets = settingsFieldEls(card, r.field);
+  if (targets.length) fieldError(targets, r.error);
+  else cardAlert(card, { title: 'Not saved', detail: r.error });
+  return r;
+}
+
+// The inputs a server `field` names: [data-setting~="<path>"] (space-separated tokens, so a
+// port pair can share actions.portRange). The Away form keeps its own data-field (it is the
+// key readNightForm posts), so nightMode.<key> resolves inside #night-mode-host by data-field.
+// Inputs hidden inside the card (another level, a collapsed row) are skipped → the error becomes
+// a card alert. Only the card's own subtree counts: a closed Settings tab hides every card on it.
+function settingsFieldEls(card, field) {
+  const f = String(field || '').replace(/["\\]/g, '');
+  if (!card || !f) return [];
+  let els = [...card.querySelectorAll(`[data-setting~="${f}"]`)];
+  if (!els.length && f.startsWith('nightMode.')) {
+    els = [...card.querySelectorAll(`#night-mode-host [data-field="${f.slice('nightMode.'.length).split('.')[0]}"]`)];
+  }
+  const hiddenInCard = (n) => {
+    for (let x = n; x && x !== card; x = x.parentElement) if (x.hidden || x.classList.contains('hidden')) return true;
+    return false;
+  };
+  return els.filter((n) => !hiddenInCard(n));
+}
+
+// Dirty trackers for the Settings cards, keyed by card id. `section.card`, not
+// `.settings-card`: the Defragment model card is `section.card.mem-model-card` on purpose
+// (tooltips census) and must still get one.
+function settingsCardDirty(saveId) {
+  const save = document.getElementById(saveId);
+  const card = save?.closest('section.card');
+  if (!card || !card.id) return null;
+  if (!settingsDirty.has(card.id)) settingsDirty.set(card.id, trackDirty(card, { saveBtn: save }));
+  return settingsDirty.get(card.id);
+}
+
+// #555: a card's paint just wrote the stored values: they are the new clean base.
+function settingsCardPainted(saveId) { settingsCardDirty(saveId)?.markClean(); }
 
 // ── Appearance (dark-mode design §5.3) ──────────────────────────────────────
 // The mode lives in settings.json and is server-rendered into <html data-theme>
@@ -12424,7 +13268,8 @@ function syncThemeColorMeta() {
   let bg = '';
   try { bg = window.getComputedStyle(document.body).backgroundColor || ''; } catch { bg = ''; }
   // A fully transparent background is "no colour": read the alpha rather than comparing
-  // against a literal — test/ui-js-colors forbids `rgba(` followed by a digit in browser JS.
+  // against a literal — spec §4.2 bans `rgba(` followed by a digit in browser JS (no longer
+  // tested: the ui-js-colors guard is gone).
   const alpha = Number((/^rgba\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*([\d.]+)\s*\)$/.exec(bg) || [])[1] ?? '1');
   if (meta && bg && alpha > 0) meta.setAttribute('content', bg);
 }
@@ -12435,7 +13280,7 @@ function applyTheme(mode) {
   document.dispatchEvent(new window.CustomEvent('worca:theme', { detail: { mode: m } }));   // window.CustomEvent: jsdom rejects Node's
   return m;
 }
-function setThemeMsg(text, kind) { setHintMsg('themeMsg', text, kind); }
+const themeNotSaved = (detail) => notify({ tone: 'err', title: 'Theme not saved', detail, key: 'theme' });
 let confirmedTheme = 'system';       // the last SERVER-confirmed mode (GET, POST 200, settings-changed)
 let themeSeq = 0;                    // out-of-order POST resolutions never repaint a stale answer
 function paintTheme(mode) {
@@ -12454,15 +13299,14 @@ async function chooseTheme(mode) {
   for (const b of document.querySelectorAll('#theme-seg button[data-theme-mode]')) {
     b.classList.toggle('on', b.dataset.themeMode === mode); b.setAttribute('aria-pressed', b.dataset.themeMode === mode ? 'true' : 'false');
   }
-  setThemeMsg('');
   let res; let data;
   try {
     res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: mode }) });
     data = await safeJson(res);
-  } catch (e) { if (mine === themeSeq) { paintTheme(previous); setThemeMsg(e.message || 'network error', 'err'); } return; }
+  } catch (e) { if (mine === themeSeq) { paintTheme(previous); themeNotSaved(e.message || 'network error'); } return; }
   if (mine !== themeSeq) return;                                           // a later click owns the paint now
   if (!res.ok) {
-    setThemeMsg(data.error || `HTTP ${res.status}`, 'err');
+    themeNotSaved(data.error || `The server answered ${res.status}.`);
     // Spec §5.3: paint what the SERVER holds, not what this tab guessed.
     // A non-2xx on that re-fetch yields {error} (safeJson never throws): fall back to the last
     // CONFIRMED mode, never to an undefined theme (applyTheme would normalise it to 'system').
@@ -12490,8 +13334,95 @@ try {
   if (mq && typeof mq.addEventListener === 'function') mq.addEventListener('change', () => applyTheme(document.documentElement.dataset.theme));
 } catch { /* no media queries here */ }
 
+// ---- Away mode (Settings › Runs) ----
+// Settings › Away mode: the user layer (night-mode-form.mjs), its live summary and the status strip.
+/** A GET /api/away-mode body, or null. Other UI tests' fetch stubs answer unknown URLs with
+ *  unrelated JSON (e.g. {config:{steps}}), so check the shape, never just `config`. */
+const isAwayBody = (d) => !!(d && d.config && typeof d.config === 'object' && typeof d.toggle === 'string');
+async function fetchAwayMode(dir = null) {
+  try {
+    const r = await fetch(dir ? `/api/away-mode?projectDir=${encodeURIComponent(dir)}` : '/api/away-mode');
+    if (!r || !r.ok) return null;
+    const d = await r.json();
+    return isAwayBody(d) ? d : null;
+  } catch { return null; }
+}
+let _awayPaintSeq = 0;
+// The catalog the Away mode forms' "Decided by" picker offers (fetchTitleModelCatalog): the last one fetched.
+let awayModelCatalog = [];
+// Held by reference: renderNightForm moves it below the summary, and every re-render detaches it first.
+const awayStatusEl = document.getElementById('awayStatus');
+/** Spec §7: the card always renders its fields. Before the first GET answers, or when it fails, paint the
+ *  stored user layer from the /api/settings body; the summary then says "Away mode settings could not be read." */
+function paintNightFallback(host, data) {
+  const user = (data && data.nightMode && typeof data.nightMode === 'object') ? data.nightMode : {};
+  const toggle = typeof data?.nightModeToggle === 'string' ? data.nightModeToggle : 'auto';
+  paintAwayStatus(toggle, !!parseWindow(user.window));
+  renderNightForm(host, { level: 'user', values: user, effective: data?.nightModeEffective || user, sources: {}, inherited: { config: null, sources: {} }, toggle, now: Date.now(), statusEl: awayStatusEl, models: awayModelCatalog });
+  settingsCardPainted('nightModeSave');
+}
+async function paintNightSettings(data) {
+  try {
+    const host = document.getElementById('night-mode-host');
+    if (!host) return;
+    const seq = ++_awayPaintSeq;
+    if (!host.firstChild && host.dataset.dirty !== '1') paintNightFallback(host, data);   // never a blank card while the GET is in flight
+    const [d, models] = await Promise.all([fetchAwayMode(), fetchTitleModelCatalog()]);
+    if (seq !== _awayPaintSeq) return;                       // a newer paint won
+    awayModelCatalog = models;
+    if (!d) { if (host.dataset.dirty !== '1' && data) paintNightFallback(host, data); return; }
+    state.awayMode = d;
+    paintAwayStatus(d.toggle, !!parseWindow(d.config.window));
+    paintSideAway();
+    if (host.dataset.dirty === '1') { updateAwaySummary(host, { toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), inherited: d.inherited }); return; }   // keep unsaved edits
+    renderNightForm(host, { level: 'user', values: d.user, effective: d.config, sources: d.sources, inherited: d.inherited, toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now(), statusEl: awayStatusEl, models });
+    // Never on the keep-dirty branch above: settings-changed from another card's save lands
+    // here too, and re-cleaning would hide unsaved Away edits.
+    settingsCardPainted('nightModeSave');
+  } catch { /* the card keeps what it shows; never an unhandled rejection */ }
+}
+/** `hours` = away hours are set: without them no tip mentions them. */
+function paintAwayStatus(toggle, hours = true) {
+  const bar = awayStatusEl;
+  if (!bar) return;
+  bar.replaceChildren(...statusActions(toggle, { hours }).map((a) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'btn btn-mini'; b.textContent = a.label; b.title = a.tip; b.dataset.mode = a.mode;
+    return b;
+  }));
+}
+awayStatusEl?.addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-mode]'); if (!b) return;
+  // Only the toggle: the paint callback repaints the strip and the summary, never the unsaved fields.
+  // No card and no tracker: the Away tracker would mark unsaved form edits clean. paintAwayStatus
+  // rebuilds these buttons, so no button state either.
+  const r = await postSettingsCard({ nightModeToggle: b.dataset.mode }, { paint: () => paintNightSettings(null) });
+  if (!r.ok) {
+    void paintNightSettings(null);
+    notify({ tone: 'err', title: 'Away mode not changed', detail: r.error, key: 'away-mode' });
+  }
+});
+function postNightSettings(body, opts = {}) {
+  // The server emits settings-changed BEFORE it answers the POST, so the event's paint can run after
+  // this one. Clear the dirty flag synchronously on success: whichever paint runs last re-renders the
+  // saved values, and the form never stays stuck "dirty". When fetchAwayMode fails the repaint returns
+  // early, and postSettingsCard's own markClean is what clears the card.
+  const host = document.getElementById('night-mode-host');
+  return postSettingsCard(body, {
+    card: document.getElementById('night-settings-card'), dirty: settingsCardDirty('nightModeSave'),
+    paint: () => { if (host) delete host.dataset.dirty; void paintNightSettings(null); },
+    appliesWhen: 'The summary above is what will happen.', ...opts });
+}
+document.getElementById('nightModeSave')?.addEventListener('click', (e) => {
+  postNightSettings({ nightMode: readNightForm(document.getElementById('night-mode-host'), { level: 'user' }) }, { button: e.currentTarget });
+});
+// "Use defaults" keeps today's body: it also returns the status to "follow my away hours".
+document.getElementById('nightModeReset')?.addEventListener('click', (e) => postNightSettings({ nightMode: null, nightModeToggle: 'auto' },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('nightModeSave');
+
 // Settings › Runs › Scheduled runs: the defaults a new schedule inherits.
-function setSchedDefaultsMsg(text, kind) { setHintMsg('schedDefaultsMsg', text, kind); }
+
 function paintScheduleSettings(data) {
   const d = data && data.schedule;
   const missed = document.getElementById('schedIfMissed');
@@ -12503,25 +13434,32 @@ function paintScheduleSettings(data) {
   grace.value = String(d.graceMin);
   grace.disabled = d.ifMissed !== 'run';
   fails.value = String(d.maxFailures);
+  settingsCardPainted('schedDefaultsSave');
 }
-function saveScheduleDefaults() {
-  const raw = document.getElementById('schedMaxFailures').value.trim();
+function scheduleSettingsCard() { return document.getElementById('schedule-settings-card'); }
+function postScheduleDefaults(body, opts = {}) {
+  return postSettingsCard(body, { card: scheduleSettingsCard(), paint: paintScheduleSettings, dirty: settingsCardDirty('schedDefaultsSave'), ...opts });
+}
+function saveScheduleDefaults(e) {
+  clearFieldErrors(scheduleSettingsCard());
+  const failsEl = document.getElementById('schedMaxFailures');
+  const raw = failsEl.value.trim();
   const n = raw === '' ? '' : Number(raw);
-  if (n !== '' && (!Number.isInteger(n) || n < 0 || n > 100)) { setSchedDefaultsMsg('enter a whole number from 0 to 100', 'err'); return; }
-  postSettingsCard({
+  if (n !== '' && (!Number.isInteger(n) || n < 0 || n > 100)) { fieldError(failsEl, 'Enter a whole number from 0 to 100.'); return; }
+  postScheduleDefaults({
     schedule: { ifMissed: document.getElementById('schedIfMissed').value, graceMin: Number(document.getElementById('schedGraceMin').value), maxFailures: n },
-  }, { setMsg: setSchedDefaultsMsg, paint: paintScheduleSettings });
+  }, { button: e?.currentTarget || null });
 }
 document.getElementById('schedDefaultsSave')?.addEventListener('click', saveScheduleDefaults);
-document.getElementById('schedDefaultsReset')?.addEventListener('click', () => postSettingsCard(
-  { schedule: { ifMissed: '', graceMin: '', maxFailures: '' } }, { setMsg: setSchedDefaultsMsg, paint: paintScheduleSettings }));
+document.getElementById('schedDefaultsReset')?.addEventListener('click', (e) => postScheduleDefaults(
+  { schedule: { ifMissed: '', graceMin: '', maxFailures: '' } }, { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('schedDefaultsSave');
 document.getElementById('schedIfMissed')?.addEventListener('change', (e) => {
   const grace = document.getElementById('schedGraceMin');
   if (grace) grace.disabled = e.target.value !== 'run';
 });
 
 // Settings › Runs › Sync before run (#527): the instance defaults every project inherits.
-function setSyncDefaultsMsg(text, kind) { setHintMsg('syncDefaultsMsg', text, kind); }
 function paintSyncSettings(data) {
   const d = data && data.sync;
   const before = document.getElementById('syncDefBeforeRun');
@@ -12539,23 +13477,27 @@ function paintSyncSettings(data) {
     refresh.append(opt);
   }
   refresh.value = mins;
+  settingsCardPainted('syncDefaultsSave');
 }
-function saveSyncDefaults() {
+function postSyncDefaults(body, opts = {}) {
+  return postSettingsCard(body, { card: document.getElementById('sync-settings-card'), paint: paintSyncSettings, dirty: settingsCardDirty('syncDefaultsSave'), ...opts });
+}
+function saveSyncDefaults(e) {
   const remote = document.getElementById('syncDefRemote').value.trim();
-  postSettingsCard({
+  postSyncDefaults({
     sync: {
       beforeRun: document.getElementById('syncDefBeforeRun').checked,
       onDiverged: document.getElementById('syncDefOnDiverged').value,
       remote: remote || null,                            // empty = back to the default remote
       refreshMinutes: Number(document.getElementById('syncDefRefresh').value),
     },
-  }, { setMsg: setSyncDefaultsMsg, paint: paintSyncSettings });
+  }, { button: e?.currentTarget || null });
 }
 document.getElementById('syncDefaultsSave')?.addEventListener('click', saveSyncDefaults);
-document.getElementById('syncDefaultsReset')?.addEventListener('click', () => postSettingsCard(
-  { sync: null }, { setMsg: setSyncDefaultsMsg, paint: paintSyncSettings }));
+document.getElementById('syncDefaultsReset')?.addEventListener('click', (e) => postSyncDefaults(
+  { sync: null }, { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('syncDefaultsSave');
 
-function setAskLimitsMsg(text, kind) { setHintMsg('askLimitsMsg', text, kind); }
 function paintAskSettings(data) {
   const turns = document.getElementById('askMaxTurns');
   const budget = document.getElementById('askMaxBudgetUsd');
@@ -12572,25 +13514,30 @@ function paintAskSettings(data) {
   // Web access: repainted from every GET and save response, which also resets its dirty flag.
   const webHost = document.getElementById('ask-web-host');
   if (webHost) webHost.replaceChildren(renderAskWebFields({ askWeb: data.askWeb }, { doc: document }));
+  settingsCardPainted('askLimitsSave');
 }
-function postAskLimits(body) {
-  return postSettingsCard(body, { setMsg: setAskLimitsMsg, paint: paintAskSettings });
+function askLimitsCard() { return document.getElementById('ask-settings-card'); }
+function postAskLimits(body, opts = {}) {
+  return postSettingsCard(body, { card: askLimitsCard(), paint: paintAskSettings, dirty: settingsCardDirty('askLimitsSave'), ...opts });
 }
-function saveAskLimits() {
-  const turnsRaw = document.getElementById('askMaxTurns').value.trim();
+function saveAskLimits(e) {
+  clearFieldErrors(askLimitsCard());
+  const turnsEl = document.getElementById('askMaxTurns');
+  const capEl = document.getElementById('askMaxBudgetUsd');
+  const turnsRaw = turnsEl.value.trim();
   const noCap = document.getElementById('askNoCap').checked;
-  const budgetRaw = document.getElementById('askMaxBudgetUsd').value.trim();
+  const budgetRaw = capEl.value.trim();
   let askMaxTurns = '';
   if (turnsRaw !== '') {
     const n = Number(turnsRaw);
-    if (!Number.isInteger(n) || n < 1 || n > 500) { setAskLimitsMsg('the turn limit must be an integer between 1 and 500', 'err'); return; }
+    if (!Number.isInteger(n) || n < 1 || n > 500) { fieldError(turnsEl, 'Enter a whole number from 1 to 500, or leave it blank.'); return; }
     askMaxTurns = n;
   }
   let askMaxBudgetUsd = '';
   if (noCap) askMaxBudgetUsd = null;
   else if (budgetRaw !== '') {
     const b = Number(budgetRaw);
-    if (!Number.isFinite(b) || b < 0.1 || b > 100) { setAskLimitsMsg('the per-turn cap must be between 0.1 and 100', 'err'); return; }
+    if (!Number.isFinite(b) || b < 0.1 || b > 100) { fieldError(capEl, 'Enter an amount from 0.1 to 100, or tick No cap.'); return; }
     askMaxBudgetUsd = b;
   }
   const scriptHost = document.getElementById('ask-script-tools-host');
@@ -12598,10 +13545,13 @@ function saveAskLimits() {
   const askWebBody = webHost ? collectAskWebFields(webHost) : null;   // null = the web fields were not touched
   postAskLimits({ askMaxTurns, askMaxBudgetUsd,
     ...(scriptHost ? { chat: collectScriptToolsToggle(scriptHost) } : {}),
-    ...(askWebBody ? { askWeb: askWebBody } : {}) });
+    ...(askWebBody ? { askWeb: askWebBody } : {}) }, { button: e?.currentTarget || null });
 }
 document.getElementById('askLimitsSave')?.addEventListener('click', saveAskLimits);
-document.getElementById('askLimitsReset')?.addEventListener('click', () => postAskLimits({ askMaxTurns: '', askMaxBudgetUsd: '' }));
+document.getElementById('askLimitsReset')?.addEventListener('click', (e) => postAskLimits(
+  { askMaxTurns: '', askMaxBudgetUsd: '' },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('askLimitsSave');
 document.getElementById('askNoCap')?.addEventListener('change', () => {
   const budget = document.getElementById('askMaxBudgetUsd');
   if (budget) budget.disabled = document.getElementById('askNoCap').checked;
@@ -12613,8 +13563,7 @@ document.getElementById('askNoCap')?.addEventListener('change', () => {
 // DELETE /api/ask/threads. The server broadcasts ask-history-cleared afterwards
 // — the ask panel resets itself off that frame, nothing to do here.
 function setAskHistoryMsg(text, kind) {
-  const n = document.getElementById('askHistoryMsg');
-  if (n) { n.textContent = text || ''; n.className = `hint${kind ? ` ${kind}` : ''}`; }
+  reportStatus(document.getElementById('askHistoryMsg'), 'hint', text, kind);
 }
 function askHistoryCount(n, one, many = `${one}s`) {
   return `${n} ${n === 1 ? one : many}`;
@@ -12640,7 +13589,7 @@ async function fetchAskHistory() {
 }
 async function loadAskHistory() {
   if (!document.getElementById('askHistoryCounts')) return;
-  try { paintAskHistory(await fetchAskHistory()); } catch (e) { setAskHistoryMsg(e.message, 'err'); }
+  try { paintAskHistory(await fetchAskHistory()); } catch (e) { setAskHistoryMsg(e.message, 'err-inline'); }
 }
 // One bullet per non-zero count; the in-progress line only when a turn is live.
 function askHistoryConfirmMessage(c) {
@@ -12677,13 +13626,12 @@ async function deleteAskHistory() {
   const failed = Array.isArray(data.failed) ? data.failed.length : 0;
   const summary = `Deleted ${askHistoryCount(removed.threads, 'chat')} and ${askHistoryCount(removed.worktrees, 'worktree')}.`;
   if (failed) setAskHistoryMsg(`${summary} ${askHistoryCount(failed, 'chat')} could not be removed.`, 'err');
-  else setAskHistoryMsg(summary);
+  else setAskHistoryMsg(summary, 'ok');
   await loadAskHistory();
 }
 document.getElementById('askHistoryDelete')?.addEventListener('click', deleteAskHistory);
 
 // ---- Spawn-debug diagnostics card (shares the Ask card's helpers above) ----
-function setDebugSpawnMsg(text, kind) { setHintMsg('debugSpawnMsg', text, kind); }
 // The checkbox is the STORED preference; the note says when the environment
 // overrides it (a non-empty WORCA_DEBUG_SPAWN at launch), so an operator never
 // sees an unchecked box while diagnostics are flowing — or the reverse.
@@ -12696,18 +13644,21 @@ function paintDebugSpawnSettings(data) {
   setHintMsg('debugSpawnEnvNote', envOverride
     ? `WORCA_DEBUG_SPAWN is set in the environment: diagnostics are ${eff.enabled ? 'ON' : 'OFF'} regardless of this setting.`
     : '', envOverride ? 'warn' : '');
+  settingsCardPainted('debugSpawnSave');
 }
-function postDebugSpawn(body) {
+function postDebugSpawn(body, opts = {}) {
   return postSettingsCard(body, {
-    setMsg: setDebugSpawnMsg, paint: paintDebugSpawnSettings,
-    savedText: 'Saved. Applies to the next spawn — no restart needed.',
+    card: document.getElementById('debug-spawn-settings-card'), paint: paintDebugSpawnSettings,
+    dirty: settingsCardDirty('debugSpawnSave'), appliesWhen: 'Applies to the next spawn. No restart needed.', ...opts,
   });
 }
-function saveDebugSpawn() {
-  postDebugSpawn({ debugSpawnEnabled: document.getElementById('debugSpawnEnabled').checked });
+function saveDebugSpawn(e) {
+  postDebugSpawn({ debugSpawnEnabled: document.getElementById('debugSpawnEnabled').checked }, { button: e?.currentTarget || null });
 }
 document.getElementById('debugSpawnSave')?.addEventListener('click', saveDebugSpawn);
-document.getElementById('debugSpawnReset')?.addEventListener('click', () => postDebugSpawn({ debugSpawnEnabled: false }));
+document.getElementById('debugSpawnReset')?.addEventListener('click', (e) => postDebugSpawn({ debugSpawnEnabled: false },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('debugSpawnSave');
 
 // ---- Title generation card (#422) ----
 // A SELECT over the project-less catalog, never a text field: free text could
@@ -12767,20 +13718,24 @@ async function paintTitleModelSettings(data) {
   setHintMsg('titleModelEnvNote', note, kind);
   const testBtn = document.getElementById('titleModelTest');
   if (testBtn) testBtn.disabled = !sel.value || sel.options[sel.selectedIndex]?.disabled;
+  settingsCardPainted('titleModelSave');
 }
-function postTitleModel(body) {
+// A not-installed pick on a model card is a field problem: the select says what to do.
+const MODEL_GONE_TEXT = 'That model is no longer installed. Pick another, or use the default.';
+function postTitleModel(body, opts = {}) {
   return postSettingsCard(body, {
-    setMsg: setTitleModelMsg, paint: paintTitleModelSettings,
-    savedText: 'Saved. Applies to the next title — no restart needed.',
+    card: document.getElementById('title-model-settings-card'), paint: paintTitleModelSettings,
+    dirty: settingsCardDirty('titleModelSave'), appliesWhen: 'Applies to the next title.', ...opts,
   });
 }
-document.getElementById('titleModelSave')?.addEventListener('click', () => {
+document.getElementById('titleModelSave')?.addEventListener('click', (e) => {
   const sel = document.getElementById('titleModel');
   const opt = sel.options[sel.selectedIndex];
-  if (opt && opt.disabled) { setTitleModelMsg('that model is no longer installed — pick another or use the default', 'err'); return; }
-  postTitleModel({ titleModel: sel.value || '' });
+  if (opt && opt.disabled) { fieldError(sel, MODEL_GONE_TEXT); return; }
+  postTitleModel({ titleModel: sel.value || '' }, { button: e.currentTarget });
 });
-document.getElementById('titleModelReset')?.addEventListener('click', () => postTitleModel({ titleModel: '' }));
+document.getElementById('titleModelReset')?.addEventListener('click', (e) => postTitleModel({ titleModel: '' },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
 document.getElementById('titleModel')?.addEventListener('change', () => {
   const sel = document.getElementById('titleModel');
   const testBtn = document.getElementById('titleModelTest');
@@ -12790,26 +13745,32 @@ document.getElementById('titleModel')?.addEventListener('change', () => {
 // tiny spawn through the id's catalog routing. Without it the first evidence of
 // a bad pick is a missing title three minutes into a run. Shared by BOTH model
 // cards (title generation and the Auto workflow model) — one implementation.
+// #555: Test shows busy → done on the button. The model's reply stays in the card's line
+// (green); a failure is a card alert above the buttons. The paint-time and change-time
+// disabled toggles keep the no-model rule; idleDisabled holds it after a Test.
 async function testModelFromSettings(selectId, buttonId, setMsg) {
   const sel = document.getElementById(selectId);
   const btn = document.getElementById(buttonId);
   const id = sel.value;
   if (!id) return;
-  btn.disabled = true;
-  setMsg(`Testing ${id}…`);
-  try {
-    const res = await fetch(`/api/models/${encodeURIComponent(id)}/test`, { method: 'POST' });
-    const data = await safeJson(res);
-    if (!res.ok) setMsg(`✗ ${data.error || `HTTP ${res.status}`}`, 'err');
-    else if (data.ok) setMsg(`✓ ${id} replied: ${data.text}`);
-    else setMsg(`✗ ${data.hint || data.message}`, 'err');
-  } catch (e) {
-    setMsg(`✗ ${e.message}`, 'err');
-  } finally {
-    btn.disabled = false;
-  }
+  const card = btn.closest('section.card');
+  cardAlert(card, null);
+  setMsg('');
+  const noModel = () => !sel.value || !!sel.options[sel.selectedIndex]?.disabled;
+  const r = await withButton(btn, async () => {
+    try {
+      const res = await fetch(`/api/models/${encodeURIComponent(id)}/test`, { method: 'POST' });
+      const data = (await safeJson(res)) || {};
+      if (!res.ok) return { ok: false, error: data.error || `The server answered ${res.status}.` };
+      return data.ok ? { ok: true, text: data.text } : { ok: false, error: data.hint || data.message || 'The model did not reply.' };
+    } catch (e) { return { ok: false, error: `Worca did not answer (${e.message}).` }; }
+  }, { busy: 'Testing…', done: 'Works', idleDisabled: noModel });
+  if (r.skipped) return;
+  if (r.ok) setMsg(`${id} replied: ${r.text}`, 'ok');
+  else cardAlert(card, { title: `${id} did not answer`, detail: r.error });
 }
 document.getElementById('titleModelTest')?.addEventListener('click', () => testModelFromSettings('titleModel', 'titleModelTest', setTitleModelMsg));
+settingsCardDirty('titleModelSave');
 
 // ---- Auto workflow model (spec D14 / §7.7): the model that classifies a task into a workflow.
 // Reuses fetchTitleModelCatalog (the project-less /api/config catalog), setHintMsg and
@@ -12856,19 +13817,25 @@ async function paintAutoModelSettings(data) {
   setHintMsg('autoModelEnvNote', note, kind);
   const testBtn = document.getElementById('autoModelTest');
   if (testBtn) testBtn.disabled = !sel.value || sel.options[sel.selectedIndex]?.disabled;
+  settingsCardPainted('autoModelSave');
 }
-function postAutoModel(body) {
-  return postSettingsCard(body, { setMsg: setAutoModelMsg, paint: paintAutoModelSettings, savedText: 'Saved. Applies to the next Auto run — no restart needed.' });
+function postAutoModel(body, opts = {}) {
+  return postSettingsCard(body, {
+    card: document.getElementById('auto-model-settings-card'), paint: paintAutoModelSettings,
+    dirty: settingsCardDirty('autoModelSave'), appliesWhen: 'Applies to the next Auto run.', ...opts,
+  });
 }
-document.getElementById('autoModelSave')?.addEventListener('click', () => {
+document.getElementById('autoModelSave')?.addEventListener('click', (e) => {
   const sel = document.getElementById('autoModel');
   const opt = sel.options[sel.selectedIndex];
-  if (opt && opt.disabled) { setAutoModelMsg('that model is no longer installed — pick another or use the default', 'err'); return; }
-  postAutoModel({ autoWorkflowModel: sel.value || '' });
+  if (opt && opt.disabled) { fieldError(sel, MODEL_GONE_TEXT); return; }
+  postAutoModel({ autoWorkflowModel: sel.value || '' }, { button: e.currentTarget });
 });
-document.getElementById('autoModelReset')?.addEventListener('click', () => postAutoModel({ autoWorkflowModel: '' }));
+document.getElementById('autoModelReset')?.addEventListener('click', (e) => postAutoModel({ autoWorkflowModel: '' },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
 document.getElementById('autoModel')?.addEventListener('change', () => { const sel = document.getElementById('autoModel'); const b = document.getElementById('autoModelTest'); if (b) b.disabled = !sel.value || sel.options[sel.selectedIndex]?.disabled; });
 document.getElementById('autoModelTest')?.addEventListener('click', () => testModelFromSettings('autoModel', 'autoModelTest', setAutoModelMsg));
+settingsCardDirty('autoModelSave');
 
 // ---- PR description model: the model behind the "Ship it?" modal's Generate with AI.
 // The Auto workflow card's recipe verbatim (buildAutoModelOptions, the server-decided
@@ -12892,19 +13859,25 @@ async function paintPrDescModelSettings(data) {
   setHintMsg('prDescModelNote', note, kind);
   const testBtn = document.getElementById('prDescModelTest');
   if (testBtn) testBtn.disabled = !sel.value || sel.options[sel.selectedIndex]?.disabled;
+  settingsCardPainted('prDescModelSave');
 }
-function postPrDescModel(body) {
-  return postSettingsCard(body, { setMsg: setPrDescModelMsg, paint: paintPrDescModelSettings, savedText: 'Saved. Applies to the next Generate with AI — no restart needed.' });
+function postPrDescModel(body, opts = {}) {
+  return postSettingsCard(body, {
+    card: document.getElementById('pr-description-model-settings-card'), paint: paintPrDescModelSettings,
+    dirty: settingsCardDirty('prDescModelSave'), appliesWhen: 'Applies to the next Generate with AI.', ...opts,
+  });
 }
-document.getElementById('prDescModelSave')?.addEventListener('click', () => {
+document.getElementById('prDescModelSave')?.addEventListener('click', (e) => {
   const sel = document.getElementById('prDescModel');
   const opt = sel.options[sel.selectedIndex];
-  if (opt && opt.disabled) { setPrDescModelMsg('that model is no longer installed — pick another or use the default', 'err'); return; }
-  postPrDescModel({ prDescriptionModel: sel.value || '' });
+  if (opt && opt.disabled) { fieldError(sel, MODEL_GONE_TEXT); return; }
+  postPrDescModel({ prDescriptionModel: sel.value || '' }, { button: e.currentTarget });
 });
-document.getElementById('prDescModelReset')?.addEventListener('click', () => postPrDescModel({ prDescriptionModel: '' }));
+document.getElementById('prDescModelReset')?.addEventListener('click', (e) => postPrDescModel({ prDescriptionModel: '' },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
 document.getElementById('prDescModel')?.addEventListener('change', () => { const sel = document.getElementById('prDescModel'); const b = document.getElementById('prDescModelTest'); if (b) b.disabled = !sel.value || sel.options[sel.selectedIndex]?.disabled; });
 document.getElementById('prDescModelTest')?.addEventListener('click', () => testModelFromSettings('prDescModel', 'prDescModelTest', setPrDescModelMsg));
+settingsCardDirty('prDescModelSave');
 
 // ---- Settings › Memory: the Defragment model (memory-defrag-model.mjs) — the model + effort EVERY
 // Memory defragment run uses. The flat list of the Auto card (buildAutoModelOptions) over the same
@@ -12952,6 +13925,7 @@ async function paintMemDefragModelSettings(data) {
   else if (stored) note = `Every Memory defragment run uses ${memDefragLabel(stored)}${pair.effort ? ` · ${pair.effort}` : ''}, whatever the project picked.`;
   else note = `Unset: defragment runs use ${fallback}.`;
   setHintMsg('memDefragModelNote', note, kind);
+  settingsCardPainted('memDefragModelSave');
 }
 /** Once per visit to the tab (loadMemoryTab) and on a settings-changed frame — never per file route,
  *  so an unsaved pick survives opening a file. */
@@ -12970,35 +13944,39 @@ async function loadMemDefragModelCard() {
     if (msg && msg.classList.contains('err') && memDefragCatalog.length) setMemDefragMsg('');
   } catch (e) { memDefragCatalog = []; setMemDefragMsg(e.message, 'err'); }
 }
-function postMemDefragModel(body) {
+function postMemDefragModel(body, opts = {}) {
   return postSettingsCard(body, {
-    setMsg: setMemDefragMsg,
+    card: document.getElementById('mem-defrag-model-card'), dirty: settingsCardDirty('memDefragModelSave'),
+    appliesWhen: 'Applies to the next defragment run.', ...opts,
     paint: (data) => {
       // The health card's hint names the pair: reload the scope (keepDraft — an open draft stays).
       if (memoryTabCtl && memoryTabCtl.loaded()) void memoryTabCtl.load(memoryTabCtl.selectedName(), { keepDraft: true });
       return paintMemDefragModelSettings(data);
     },
-    savedText: 'Saved. Applies to the next defragment run — no restart needed.',
   });
 }
 document.getElementById('memDefragModel')?.addEventListener('change', () => {
   paintMemDefragEffort(document.getElementById('memDefragEffort')?.value || '');
 });
-document.getElementById('memDefragModelSave')?.addEventListener('click', () => {
+// Nothing painted (the settings or the model list failed to load): not a field problem.
+const MODEL_LIST_GONE = { title: 'Not saved', detail: 'The model list did not load. Reload the page to change this.' };
+document.getElementById('memDefragModelSave')?.addEventListener('click', (e) => {
   // Nothing painted (the settings or the model list failed to load, or the tab is still loading):
   // a Save would post the empty pair and CLEAR the stored one. Refuse rather than guess.
-  if (!memDefragCatalog.length) { setMemDefragMsg('the model list did not load — reload the page to change this', 'err'); return; }
+  if (!memDefragCatalog.length) { cardAlert(document.getElementById('mem-defrag-model-card'), MODEL_LIST_GONE); return; }
   const msel = document.getElementById('memDefragModel');
   const opt = msel.options[msel.selectedIndex];
-  if (opt && opt.disabled) { setMemDefragMsg('that model is no longer installed — pick another or use the default', 'err'); return; }
+  if (opt && opt.disabled) { fieldError(msel, MODEL_GONE_TEXT); return; }
   const model = msel.value || '';
-  postMemDefragModel({ memoryDefrag: { model, effort: model ? (document.getElementById('memDefragEffort').value || '') : '' } });
+  postMemDefragModel({ memoryDefrag: { model, effort: model ? (document.getElementById('memDefragEffort').value || '') : '' } },
+    { button: e.currentTarget });
 });
-document.getElementById('memDefragModelReset')?.addEventListener('click', () => postMemDefragModel({ memoryDefrag: null }));
+document.getElementById('memDefragModelReset')?.addEventListener('click', (e) => postMemDefragModel({ memoryDefrag: null },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('memDefragModelSave');
 
 // ---- Settings › Runs › Workspaces: the models every scan starts with (D17). Create workspace
 // can change them for one scan; Re-scan uses them.
-function setWsScanModelsMsg(text, kind) { setHintMsg('wsScanModelsMsg', text, kind); }
 async function paintWorkspaceScanModelsSettings(data) {
   if (!document.getElementById('wsScanModel')) return;
   wsScanCatalog = await fetchTitleModelCatalog();
@@ -13008,35 +13986,44 @@ async function paintWorkspaceScanModelsSettings(data) {
   const stale = !!pick.scanModel && wsScanCatalog.length > 0 && !wsScanCatalog.some((m) => m && m.id === pick.scanModel);
   keepVisible(document.getElementById('ws-scan-models-card'), !!(data && data.workspaceScan));
   setHintMsg('wsScanModelsNote', stale ? `Model "${pick.scanModel}" is no longer in the catalog — scans fall back to the default.` : '', stale ? 'warn' : '');
+  settingsCardPainted('wsScanModelsSave');
 }
-function postWorkspaceScanModels(body) {
-  return postSettingsCard(body, { setMsg: setWsScanModelsMsg, paint: paintWorkspaceScanModelsSettings, savedText: 'Saved. Applies to the next scan.' });
+function postWorkspaceScanModels(body, opts = {}) {
+  return postSettingsCard(body, {
+    card: document.getElementById('ws-scan-models-card'), paint: paintWorkspaceScanModelsSettings,
+    dirty: settingsCardDirty('wsScanModelsSave'), appliesWhen: 'Applies to the next scan.', ...opts,
+  });
 }
 document.getElementById('wsScanModel')?.addEventListener('change', () => {
   paintScanEffort(WS_SCAN_SETTINGS_IDS, document.getElementById('wsScanEffort')?.value || '', wsScanCatalog);
 });
-document.getElementById('wsScanModelsSave')?.addEventListener('click', () => {
-  if (!wsScanCatalog.length) { setWsScanModelsMsg('the model list did not load — reload the page to change this', 'err'); return; }
+document.getElementById('wsScanModelsSave')?.addEventListener('click', (e) => {
+  if (!wsScanCatalog.length) { cardAlert(document.getElementById('ws-scan-models-card'), MODEL_LIST_GONE); return; }
   const sel = document.getElementById('wsScanModel');
   const opt = sel && sel.options[sel.selectedIndex];
-  if (opt && opt.disabled) { setWsScanModelsMsg('that model is no longer installed — pick another or use the default', 'err'); return; }
+  if (opt && opt.disabled) { fieldError(sel, MODEL_GONE_TEXT); return; }
   const pick = readScanModelPickers(WS_SCAN_SETTINGS_IDS);
-  postWorkspaceScanModels({ workspaceScan: { ...pick, scanEffort: pick.scanEffort || null } });
+  postWorkspaceScanModels({ workspaceScan: { ...pick, scanEffort: pick.scanEffort || null } }, { button: e.currentTarget });
 });
-document.getElementById('wsScanModelsReset')?.addEventListener('click', () => postWorkspaceScanModels({ workspaceScan: null }));
+document.getElementById('wsScanModelsReset')?.addEventListener('click', (e) => postWorkspaceScanModels({ workspaceScan: null },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('wsScanModelsSave');
 
 // Browse… for the projects root: native OS dialog, in-app modal fallback —
 // the same two endpoints the add-project Browse button uses (app.js:3793).
 if (el.settingsProjectsRootBrowse) {
   el.settingsProjectsRootBrowse.addEventListener('click', async () => {
     el.settingsProjectsRootBrowse.disabled = true;
-    setSettingsMsg('');
+    const card = document.getElementById('root-settings-card');
+    cardAlert(card, null);
+    // A picked path is a write without an event: tell the card's tracker (#555).
+    const use = (p) => { el.settingsProjectsRoot.value = p; settingsCardDirty('settingsSave')?.refresh(); };
     try {
       const data = await pickFolder();
-      if (data && data.status === 'picked' && data.path) el.settingsProjectsRoot.value = data.path;
+      if (data && data.status === 'picked' && data.path) use(data.path);
       else if (data && data.status === 'canceled') { /* user dismissed the dialog */ }
-      else if (data && data.status === 'busy') setSettingsMsg('A folder dialog is already open — finish or cancel it first.', 'err');
-      else await openFolderBrowser(settingsFieldValue(el.settingsProjectsRoot), (p) => { el.settingsProjectsRoot.value = p; });
+      else if (data && data.status === 'busy') cardAlert(card, { tone: 'warn', title: 'A folder dialog is already open', detail: 'Finish or cancel it first.' });
+      else await openFolderBrowser(settingsFieldValue(el.settingsProjectsRoot), use);
     } finally {
       el.settingsProjectsRootBrowse.disabled = false;
     }
@@ -13047,10 +14034,8 @@ if (el.settingsProjectsRootBrowse) {
 // Plugins view. Pure rendering lives in plugins-view.mjs; this block owns the
 // endpoint calls, the modal shell, and ONE delegated click handler on the list.
 // ---------------------------------------------------------------------------
-function setPluginsMsg(text, kind) {
-  if (!el.pluginsMsg) return;
-  el.pluginsMsg.textContent = text || '';
-  el.pluginsMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+function setPluginsMsg(text, kind, extra) {
+  reportStatus(el.pluginsMsg, 'form-msg', text, kind, extra);
 }
 
 // Tiny modal shell around #plugin-modal: swap in a body element + action buttons.
@@ -13144,12 +14129,14 @@ async function openTmEnableDialog(projectKeyStr, { mode = 'here', change = false
 
 // JSON fetch helper: { ok, status, data } — body omitted when undefined.
 async function pluginApi(method, url, body) {
-  const res = await fetch(url, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  return { ok: res.ok, status: res.status, data: await safeJson(res) };
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { ok: res.ok, status: res.status, data: await safeJson(res) };
+  } catch (e) { return { ok: false, status: 0, data: { error: `Worca did not answer (${e.message}).` } }; }
 }
 
 // Snapshot of the last GET /api/marketplaces payload — the delegated install
@@ -13171,7 +14158,7 @@ async function loadPluginsView({ refresh = false } = {}) {
   try {
     const [pRes, mRes] = await Promise.all([fetch('/api/plugins'), fetch('/api/marketplaces')]);
     const data = await safeJson(pRes);
-    if (!pRes.ok) { renderMarketplaceSections([]); return setPluginsMsg(data.error || `HTTP ${pRes.status}`, 'err'); }
+    if (!pRes.ok) { renderMarketplaceSections([]); return setPluginsMsg(data.error || `HTTP ${pRes.status}`, 'err-inline'); }
     let channelStatus = [];
     try {
       const cs = await safeJson(await fetch('/api/chat/status'));
@@ -13182,7 +14169,7 @@ async function loadPluginsView({ refresh = false } = {}) {
     el.pluginsList.replaceChildren(...parts);
     const mData = await safeJson(mRes);
     renderMarketplaceSections(mRes.ok ? mData.marketplaces || [] : []);
-  } catch (e) { setPluginsMsg(e.message, 'err'); }
+  } catch (e) { setPluginsMsg(e.message, 'err-inline'); }
   if (refresh) refreshMarketplacesInBackground(); // C3: only the view-open path kicks the background refresh
   paintPluginsPolicy(refresh);                   // team policy (design board 10): the required-by strip
 }
@@ -13236,12 +14223,16 @@ async function addMarketplaceFromInput() {
   }
 }
 
-function openInstallConsent(entry) {
+// #555 D5: the consent dialog closes before the request, so its result is a keyed toast that
+// replaces the progress one — visible from Team policy as well as the Plugins page.
+// `onInstalled` lets the caller repaint its own page (Team policy) after a success.
+function openInstallConsent(entry, { onInstalled = null } = {}) {
   pluginModal(`Will install: ${entry.name}`, renderInstallConsent(entry, entry.inventory || {}), [
     ['Cancel', 'btn btn-ghost btn-mini', closePluginModal],
     ['Install', 'btn btn-primary btn-mini', async () => {
       closePluginModal();
-      setPluginsMsg(`Installing ${entry.name}…`);
+      const key = `plugin-install-${entry.name}`;
+      notify({ tone: 'info', title: `Installing ${entry.name}…`, key, timeout: 0 });
       const { ok, data } = await pluginApi('POST', '/api/plugins/install',
         { repoUrl: entry.repoUrl, subdir: entry.subdir, name: entry.name, sha: entry.sha,
           ...(entry.marketplace ? { marketplace: entry.marketplace } : {}) });
@@ -13249,13 +14240,14 @@ function openInstallConsent(entry) {
         // A cached snapshot can point at a sha the remote no longer has (force-push,
         // rebase): git's raw complaint is unreadable, so map it to the real fix (C3).
         if (/not a valid object name|does not exist/.test(data.error || '')) {
-          return setPluginsMsg('This plugin snapshot is stale — Refresh the marketplace and try again.', 'err');
+          return setPluginsMsg('This plugin snapshot is stale — Refresh the marketplace and try again.', 'err', { key });
         }
-        return setPluginsMsg(data.error || 'install failed', 'err');
+        return setPluginsMsg(data.error || 'install failed', 'err', { key });
       }
-      setPluginsMsg(`Installed ${entry.name}.`, 'ok');
+      setPluginsMsg(`Installed ${entry.name}.`, 'ok', { key, action: { label: 'Open', run: () => openPluginSettings(entry.name) } });
       invalidateAgentCaches();                 // plugin agents join the registry
       loadPluginsView();
+      onInstalled?.();
     }],
   ]);
 }
@@ -13555,7 +14547,8 @@ if (el.pluginsList) el.pluginsList.addEventListener('click', async (e) => {
   } else if (t.classList.contains('pl-remove')) {
     const res = await confirmModal({
       title: 'Uninstall plugin',
-      message: `Uninstall "${name}"?`,
+      message: `Uninstall "${name}"?${t.dataset.mcpSets
+        ? `\n\nIts MCP servers leave these sets, with their values, secrets and test results: ${t.dataset.mcpSets}.` : ''}`,
       confirmLabel: 'Uninstall',
       checkbox: { label: 'Also delete config, secrets and state (purge — cannot be undone)' },
     });
@@ -13565,7 +14558,9 @@ if (el.pluginsList) el.pluginsList.addEventListener('click', async (e) => {
       'DELETE', `/api/plugins/${encodeURIComponent(name)}${purge ? '?purge=1' : ''}`,
     );
     if (status === 409) {
-      pluginModal(`Cannot uninstall ${name}`, renderReferences409(data.references || []));
+      const refs = data.references || [];
+      notify({ tone: 'err', title: `Cannot uninstall ${name}`, detail: String(data.error || '').split('\n')[0],
+        action: { label: 'Details', run: () => pluginModal(`Cannot uninstall ${name}`, renderReferences409(refs)) } });
       return;
     }
     if (!ok) return setPluginsMsg(data.error || 'uninstall failed', 'err');
@@ -13647,9 +14642,7 @@ const grvClone = (o) => JSON.parse(JSON.stringify(o));
 const emptyGuardrails = () => ({ honorProjectSettings: true, envScrub: false, envAllowlist: [], protectedPaths: [], deny: [] });
 
 function setGuardrailsMsg(text, kind) {
-  if (!el.guardrailsMsg) return;
-  el.guardrailsMsg.textContent = text || '';
-  el.guardrailsMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+  reportStatus(el.guardrailsMsg, 'form-msg', text, kind);
 }
 
 const GRV_LIST_FIELDS = { 'gr-allow': 'envAllowlist', 'gr-paths': 'protectedPaths', 'gr-deny': 'deny' };
@@ -13771,8 +14764,10 @@ function memoryApiBase(scopeKey) { return scopeKey === 'global' ? '/api/memory/g
 async function memoryApi(method, url, body) {
   const init = { method };
   if (body !== undefined) { init.headers = { 'Content-Type': 'application/json' }; init.body = JSON.stringify(body); }
-  const res = await fetch(url, init);
-  return { ok: res.ok, status: res.status, data: await safeJson(res) };
+  try {
+    const res = await fetch(url, init);
+    return { ok: res.ok, status: res.status, data: await safeJson(res) };
+  } catch (e) { return { ok: false, status: 0, data: { error: `Worca did not answer (${e.message}).` } }; }
 }
 // Instant feedback only: isValidMemoryName on the server is the authority (it also knows the Win32
 // reserved stems), and both spell the rule with the SAME string.
@@ -13792,7 +14787,8 @@ function createMemoryController({ host, msgEl, scopeKey, hostProject = null, nav
   // LAST one issued must win however the responses land.
   let seq = 0;
   let frameOwed = false;
-  const say = (text, kind) => { if (msgEl) { msgEl.textContent = text || ''; msgEl.className = 'form-msg' + (kind ? ' ' + kind : ''); } };
+  // #555: a result is a toast (reportStatus); load()'s failure and the frame conflict stay inline.
+  const say = (text, kind) => reportStatus(msgEl, 'form-msg', text, kind);
   const route = (name) => { if (navigate) location.hash = memoryRoute(scopeKey, name); };
   const hostRef = () => (typeof hostProject === 'function' ? hostProject() : hostProject);
 
@@ -13844,7 +14840,7 @@ function createMemoryController({ host, msgEl, scopeKey, hostProject = null, nav
     const dirty = isDirty();
     const r = await memoryApi('GET', base);
     if (my !== seq) return;
-    if (!r.ok) { say(r.data.error || `HTTP ${r.status}`, 'err'); st.report = null; paint(); return; }
+    if (!r.ok) { say(r.data.error || `HTTP ${r.status}`, 'err-inline'); st.report = null; paint(); return; }
     const report = r.data;
     const hist = await memoryApi('GET', `${base}/history`);
     if (my !== seq) return;
@@ -13860,7 +14856,7 @@ function createMemoryController({ host, msgEl, scopeKey, hostProject = null, nav
       const owed = fromFrame || frameOwed;
       frameOwed = false;
       if (st.flash) { say(...st.flash); st.flash = null; }
-      else if (owed) say('This scope changed on disk while you were editing — Save overwrites, Cancel reloads.', 'warn');
+      else if (owed) say('This scope changed on disk while you were editing — Save overwrites, Cancel reloads.', 'warn-inline');
       return;
     }
     frameOwed = false;
@@ -13869,20 +14865,30 @@ function createMemoryController({ host, msgEl, scopeKey, hostProject = null, nav
       const f = await memoryApi('GET', `${base}/files/${encodeURIComponent(name)}`);
       if (my !== seq) return;
       if (f.ok) { st.selected = name; st.editor = { name, text: f.data.text, loaded: f.data.text }; }
-      else say(f.data.error || `memory file "${name}" not found`, 'err');
+      else say(f.data.error || `memory file "${name}" not found`, 'err-inline');
     }
     paint();
     if (st.flash) { say(...st.flash); st.flash = null; }
   }
 
+  // #555: Save shows busy → "Saved"; the name rule is a field error, a refusal a card alert above
+  // the buttons (the editor keeps what was typed, so no repaint); success is a toast.
   async function save() {
     const ed = host.querySelector('.mem-editor');
     if (!ed) return;
+    ed.querySelector('.mem-actions')?.setAttribute('data-card-actions', '');
+    clearFieldErrors(ed);
+    cardAlert(ed, null);
     const { name, text } = collectEditor(ed);
-    if (!memoryNameOk(name)) { st.editor = { ...st.editor, name, text, msg: `Name: ${MEMORY_NAME_HELP}.`, msgErr: true }; paint(); return; }
-    const r = await memoryApi('PUT', `${base}/files/${encodeURIComponent(name)}`, { text });
-    if (!r.ok) { st.editor = { ...st.editor, name, text, msg: r.data.error || `HTTP ${r.status}`, msgErr: true }; paint(); return; }
-    st.flash = [`Saved ${name}.md`, 'ok'];
+    st.editor = { ...st.editor, name, text, msg: '', msgErr: false };
+    if (!memoryNameOk(name)) { fieldError(ed.querySelector('.mem-name'), `Name: ${MEMORY_NAME_HELP}.`); return; }
+    const r = await withButton(ed.querySelector('.mem-save'), async () => {
+      const res = await memoryApi('PUT', `${base}/files/${encodeURIComponent(name)}`, { text });
+      return res.ok ? res : { ok: false, error: res.data.error || `HTTP ${res.status}` };
+    });
+    if (r.skipped) return;
+    if (!r.ok) { cardAlert(ed, { title: 'Not saved', detail: r.error }); return; }
+    st.flash = [`Memory saved: ${name}.md`, 'ok'];
     st.selected = name; st.isNew = false;
     st.editor = { ...st.editor, name, text, loaded: text, msg: '', msgErr: false };
     // Route only when the hash would actually change: an unchanged hash fires no hashchange, so the
@@ -14006,6 +15012,476 @@ async function scriptsCall(method, url, body) {
 }
 const scriptUrl = (key, tail = '') => `/api/scripts/${encodeURIComponent(key)}${tail}`;
 
+// ── Actions (issue #529) ────────────────────────────────────────────────────
+// actions-view.mjs / actions-config-view.mjs own the pixels; this owns the endpoint calls,
+// the controllers' lifetime and the shared run-model cache the strips read.
+const actionControllers = new Set();        // live createActionsController() objects (History + run page)
+const actionsModelCache = new Map();        // runId -> last run model, read by the Overview and Ship It strips
+const histActionEntries = new WeakMap();    // .hist-card -> its history entry (p.checkout), for in-place badge repaints
+
+async function actionsCall(method, url, body) {
+  const init = { method };
+  if (body !== undefined) { init.headers = { 'Content-Type': 'application/json' }; init.body = JSON.stringify(body); }
+  try {
+    const res = await fetch(url, init);
+    return { ok: res.ok, status: res.status, data: await safeJson(res) };
+  } catch (e) {
+    return { ok: false, status: 0, data: { error: e.message } };
+  }
+}
+const actionsRunUrl = (runId, tail, scopeQuery) => `/api/runs/${encodeURIComponent(runId)}${tail}?${scopeQuery}`;
+
+/** The run page's scope query: the same projectKey / workspaceId keys runActionQuery builds for History. */
+function rdScopeQuery(run) {
+  const qs = new URLSearchParams();
+  if (run.workspaceId) qs.set('workspaceId', String(run.workspaceId).replace(/^workspaces\//, ''));
+  else if (run.projectKey) qs.set('projectKey', run.projectKey);
+  else qs.set('projectDir', run.projectDir || '');
+  return qs.toString();
+}
+
+/** Repaint every mounted strip for runId (Overview strip on either page, Ship It "Try it first") from the cache. */
+function paintActionsStrips(runId) {
+  const model = actionsModelCache.get(runId);   // undefined when the model GET failed: the strip stays empty
+  // Compare the dataset instead of building a selector: no CSS.escape needed (jsdom tests lack it).
+  for (const el of [...document.querySelectorAll('.act-strip[data-run-id]')].filter((x) => x.dataset.runId === runId)) {
+    el.replaceChildren(...(model ? [renderOverviewStrip(model, { doc: document, handlers: stripHandlers(el) })].filter(Boolean) : []));
+  }
+}
+/** Mount point: stamps the run id and scope, then paints from the cache or fetches the model once. */
+async function paintActionsStrip(strip, runId, scopeQuery) {
+  strip.dataset.runId = runId; strip.__scopeQuery = scopeQuery;
+  if (!actionsModelCache.has(runId)) {
+    const r = await actionsCall('GET', actionsRunUrl(runId, '/actions', scopeQuery));
+    if (r.ok) actionsModelCache.set(runId, r.data);
+  }
+  paintActionsStrips(runId);
+}
+/** Refetch one run's model into the cache, repaint its strips and refresh its open controllers. */
+async function refreshActionsModel(runId, scopeQuery) {
+  const r = await actionsCall('GET', actionsRunUrl(runId, '/actions', scopeQuery));
+  if (r.ok) actionsModelCache.set(runId, r.data);
+  paintActionsStrips(runId);
+  for (const c of actionControllers) if (c.runId === runId) c.refresh();
+  return r;
+}
+/**
+ * actions-changed: a stop from the sidebar or the pill, or a crash, changes runs whose tab may never have
+ * opened. Refetch every mounted strip's model; a run with a live controller repaints through its onModel.
+ * Cached models of unmounted runs are dropped, so a revisit fetches instead of painting a stale state.
+ */
+function refreshActionsStrips() {
+  const mounted = new Map();
+  for (const el of document.querySelectorAll('.act-strip[data-run-id]')) mounted.set(el.dataset.runId, el.__scopeQuery);
+  for (const runId of [...actionsModelCache.keys()]) if (!mounted.has(runId)) actionsModelCache.delete(runId);
+  const controlled = new Set([...actionControllers].map((c) => c.runId));
+  for (const [runId, scopeQuery] of mounted) {
+    if (controlled.has(runId)) continue;
+    actionsCall('GET', actionsRunUrl(runId, '/actions', scopeQuery)).then((r) => {
+      if (r.ok) actionsModelCache.set(runId, r.data);
+      paintActionsStrips(runId);
+    });
+  }
+  for (const box of document.querySelectorAll('.shipit-try[data-run-id]')) box.__repaint?.();   // Ship It "Try it first"
+}
+/** The strip's one primary button makes the controller's calls, then refetches the model. */
+function stripHandlers(el) {
+  const runId = () => el.dataset.runId;
+  const scope = () => el.__scopeQuery;
+  const after = () => refreshActionsModel(runId(), scope());
+  return {
+    onCheckout: async () => { await actionsCall('POST', actionsRunUrl(runId(), '/checkout', scope()), {}); await after(); },
+    onStop: async (member, actionId) => {
+      await actionsCall('POST', actionsRunUrl(runId(), `/actions/${encodeURIComponent(actionId)}/stop`, scope()), { member });
+      await after();
+    },
+    onOpenTab: () => {
+      if (el.closest('.hd') && histDetailState) location.hash = hdHash(histDetailState, 'details', 'actions');
+      else if (el.closest('.rd') && runDetailState.runId) location.hash = rdHash(runDetailState.runId, 'details', 'actions');
+    },
+  };
+}
+
+function buildRdActions(sec, ctx) {
+  const paint = (c) => {
+    // ctx.run is a makeRun object: runId, pipelineId (null until state frames arrive), status. It has no `id`.
+    // isTerminalStatus includes 'interrupted'; the card then shows the server's finished:false hint.
+    if (!isTerminalStatus(c.run.status) || !c.run.pipelineId) {
+      destroyActionsCtl(sec);
+      const p = document.createElement('p'); p.className = 'hint act-hint';
+      p.textContent = 'Actions are available once the run finishes.';
+      sec.replaceChildren(p);
+      return;
+    }
+    mountActionsController(sec, c.run.pipelineId, rdScopeQuery(c.run));
+  };
+  paint(ctx);
+  sec.__update = paint;
+}
+function buildHdActions(sec, record) {
+  // runActionQuery prefers projectKey (a deep-link stub may lack projectDir) and maps workspace records to workspaceId.
+  mountActionsController(sec, record.id, runActionQuery(record.projectDir, record).toString());
+}
+function mountActionsController(sec, runId, scopeQuery) {
+  if (sec.__actionsCtl && sec.__actionsCtl.runId === runId) return;
+  destroyActionsCtl(sec);
+  const host = document.createElement('div'); sec.replaceChildren(host);
+  const ctl = createActionsController({ runId, scopeQuery, host, doc: document,
+    api: actionsCall, ws: { send: (o) => { if (state.ws && state.wsReady) state.ws.send(JSON.stringify(o)); } },
+    confirm: confirmModal, navigate: (hash) => { location.hash = hash; },
+    onModel: (m) => { actionsModelCache.set(runId, m); paintActionsStrips(runId); } });
+  // destroy() also drops the controller from the live set, so frames stop reaching it.
+  const wrapped = { ...ctl, destroy: () => { actionControllers.delete(wrapped); ctl.destroy(); } };
+  sec.__actionsCtl = wrapped;
+  actionControllers.add(wrapped);
+  ctl.refresh();
+}
+function destroyActionsCtl(sec) {
+  if (!sec.__actionsCtl) return;
+  sec.__actionsCtl.destroy();
+  sec.__actionsCtl = null;
+}
+/** Tear down every Actions controller mounted under root (a detail screen about to go away). */
+function destroyActionsIn(root) {
+  if (!root) return;
+  for (const sec of root.querySelectorAll('[data-sec="actions"]')) destroyActionsCtl(sec);
+}
+
+// ---- running actions: sidebar card, header pill, tab dots, History badges ----
+async function refreshRunningActions() {
+  const r = await actionsCall('GET', '/api/actions/running');
+  if (r.ok && Array.isArray(r.data)) state.actionsRunning = r.data;
+  paintRunningActions();
+}
+const runningServicesOf = (runId) => (state.actionsRunning || []).filter((s) => s.runId === runId && s.kind === 'service');
+async function stopActionInstance(s) {
+  await actionsCall('POST', `/api/actions/instances/${encodeURIComponent(s.instanceId)}/stop`, {});
+  refreshRunningActions();
+}
+function openActionRun(s) {
+  if (s.histKey == null) return;   // the run row was archived meanwhile: nowhere to go
+  location.hash = hdHash({ projectKey: s.histKey, id: s.runId }, 'details', 'actions');
+}
+function paintRunningActions() {
+  const running = state.actionsRunning || [];
+  const side = document.getElementById('side-actions');
+  if (side) {
+    const card = renderRunningActionsCard(running.filter((s) => s.kind === 'service'),
+      { doc: document, titleOf: (s) => s.runTitle || s.runId, onStop: stopActionInstance, onOpen: openActionRun });
+    side.replaceChildren(...(card ? [card] : []));
+    side.hidden = !card;
+  }
+  paintActionsHeaders();
+  paintHistActionBadges();
+}
+/** The header pill and the Actions tab dot on whichever detail screens are open. */
+function paintActionsHeaders() {
+  const hdScreen = histDetailState && histDetailState.screen;
+  if (hdScreen) {
+    const record = histDetailState.record || { projectKey: histDetailState.key, id: histDetailState.id };
+    paintActionsHeader(hdScreen, '.hd-row1 .act-pill-slot', '.hd-tab[data-sec="actions"]', histDetailState.id,
+      () => { location.hash = hdHash({ projectKey: record.projectKey, id: record.id }, 'details', 'actions'); });
+  }
+  const rdScreen = runDetailState && runDetailState.screen;
+  if (rdScreen) {
+    const r = runs.get(runDetailState.runId);
+    const runId = runDetailState.runId;
+    paintActionsHeader(rdScreen, '.rd-row1 .act-pill-slot', '.rd-tab[data-sec="actions"]', r && r.pipelineId,
+      () => { location.hash = rdHash(runId, 'details', 'actions'); });
+  }
+}
+function paintActionsHeader(screen, slotSel, tabSel, runId, onClick) {
+  const list = runId ? runningServicesOf(runId) : [];
+  const slot = screen.querySelector(slotSel);
+  if (slot) {
+    const pill = renderRunPill(list, { doc: document, onClick });
+    slot.replaceChildren(...(pill ? [pill] : []));
+  }
+  const tab = screen.querySelector(tabSel);
+  if (tab) {
+    const on = list.length > 0;
+    const dot = tab.querySelector('.tab-dot');
+    if (on && !dot) { const d = document.createElement('span'); d.className = 'tab-dot'; tab.appendChild(d); }
+    else if (!on && dot) dot.remove();
+  }
+}
+function paintHistCardActions(node, p) {
+  const box = node.querySelector('.hist-actions-badges');
+  if (!box) return;
+  box.replaceChildren(...historyActionBadges(p, state.actionsRunning || []).map((b) => {
+    const s = document.createElement('span'); s.className = b.cls; s.textContent = b.text; return s;
+  }));
+}
+function paintHistActionBadges() {
+  for (const node of document.querySelectorAll('.hist-card[data-pipeline-id]')) {
+    const p = histActionEntries.get(node);
+    if (p) paintHistCardActions(node, p);
+  }
+}
+
+// ---- Ship It "Try it first" ----
+// Follows loadShipItRemotes: every await re-checks the generation, and nothing here ever
+// blocks .shipit-ok.
+async function paintShipItTry(modal, record, gen, isClosed) {
+  const box = modal.querySelector('.shipit-try');
+  if (!box) return;
+  box.hidden = true;
+  box.replaceChildren();
+  const scope = runActionQuery(record.projectDir, record).toString();
+  const call = (method, tail, body) => actionsCall(method, actionsRunUrl(record.id, tail, scope), body);
+  const repaint = async () => {
+    if (gen !== shipItRemotesGen || isClosed()) return;   // a closed dialog stops following actions-changed
+    const r = await call('GET', '/actions');
+    if (gen !== shipItRemotesGen || isClosed()) return;
+    if (!r.ok) { box.hidden = true; box.replaceChildren(); return; }
+    actionsModelCache.set(record.id, r.data);
+    paintActionsStrips(record.id);
+    const node = renderShipItStrip(r.data, { doc: document, handlers });
+    box.replaceChildren(...(node ? [node] : []));
+    box.hidden = !node;
+  };
+  const handlers = {
+    onCheckout: async (members) => { await call('POST', '/checkout', members ? { members } : {}); await repaint(); },
+    onStart: async (member, actionId) => { await call('POST', `/actions/${encodeURIComponent(actionId)}/start`, { member }); await repaint(); },
+    onBuiltin: async (member, key) => { await call('POST', `/builtins/${encodeURIComponent(key)}`, { member }); },
+    onStop: async (member, actionId) => { await call('POST', `/actions/${encodeURIComponent(actionId)}/stop`, { member }); await repaint(); },
+  };
+  box.dataset.runId = record.id;
+  box.__repaint = repaint;                       // refreshActionsStrips() calls it on actions-changed
+  await repaint();
+}
+
+// ---- project / workspace Actions tabs ----
+function actionsTabError(sec, text) {
+  const p = document.createElement('p'); p.className = 'hint err'; p.textContent = text;
+  sec.replaceChildren(p);
+}
+// #555: the editor's Save reports on the button; a field the server names gets the error,
+// anything else is a card alert above Save; success also raises a toast naming the project.
+function actionsEditorSave(sec, url, okTitle) {
+  let dirty = null;
+  const save = async (body, button) => {
+    const editor = sec.querySelector('.actions-config');
+    dirty ||= trackDirty(editor, { saveBtn: button });
+    clearFieldErrors(editor);
+    cardAlert(editor, null);
+    // The tracker owns the idle state (withButton reads button._fbIsClean), so no idleDisabled.
+    const s = await withButton(button, () => actionsCall('PUT', url, body));
+    if (s.skipped) return;
+    if (s.ok) { dirty.markClean(); notify({ tone: 'ok', title: okTitle }); return; }
+    const text = sentenceCase(s.data?.error || `The server answered ${s.status}.`);
+    const target = editorFieldEl(editor, s.data?.field);
+    if (target) fieldError(target, text);
+    else cardAlert(editor, { title: 'Not saved', detail: text });
+  };
+  // Track from first paint so Save starts disabled. The editor is built once per tab
+  // (dataset.loaded) and not re-rendered on save, and this microtask runs after
+  // sec.replaceChildren, so the tracker is never bound to stale DOM.
+  queueMicrotask(() => {
+    const editor = sec.querySelector('.actions-config');
+    const btn = editor?.querySelector('.ac-save');
+    if (editor && btn && !dirty) dirty = trackDirty(editor, { saveBtn: btn });
+  });
+  return save;
+}
+function sentenceCase(s) { const t = String(s || '').trim(); return t ? t[0].toUpperCase() + t.slice(1) : t; }
+async function buildPdActions(sec, key) {
+  sec.classList.add('pd-sec-actions');
+  const url = `/api/projects/${encodeURIComponent(key)}/actions`;
+  const r = await actionsCall('GET', url);
+  if (!r.ok) { actionsTabError(sec, r.data?.error || 'Could not load actions.'); return; }
+  const onTry = async (actionId, btn) => {
+    btn.disabled = true;
+    const t = await actionsCall('POST', `${url}/${encodeURIComponent(actionId)}/try`, {});
+    btn.disabled = false;
+    if (t.ok) { location.hash = hdHash({ projectKey: t.data.histKey, id: t.data.runId }, 'details', 'actions'); return; }
+    btn.title = t.data?.code === 'NO_FINISHED_RUN' ? 'No finished run yet' : (t.data?.error || `HTTP ${t.status}`);
+    notify({ tone: 'err', title: `Could not try ${actionId || 'the action'}`, detail: btn.title, key: `try-${actionId}` });
+  };
+  const onSave = actionsEditorSave(sec, url, `Actions saved for ${projectByKey(key)?.name || key}`);
+  sec.replaceChildren(renderProjectActionsEditor(r.data.config, { doc: document, detected: r.data.detected, onSave, onTry }));
+}
+async function buildWdActions(sec, id) {
+  sec.classList.add('pd-sec-actions');
+  const url = `/api/workspaces/${encodeURIComponent(id)}/actions`;
+  const r = await actionsCall('GET', url);
+  if (!r.ok) { actionsTabError(sec, r.data?.error || 'Could not load stacks.'); return; }
+  const onSave = actionsEditorSave(sec, url, 'Stacks saved');
+  sec.replaceChildren(renderStackEditor(r.data, { doc: document, onSave }));
+}
+
+// ---- Settings › Runs › Actions ----
+function paintActionsSettings(data) {
+  const a = (data && data.actions) || {};
+  const set = (id, v) => { const n = document.getElementById(id); if (n) n.value = v ?? ''; };
+  set('act-keep', a.keep || 'never');
+  set('act-port-low', a.portLow);
+  set('act-port-high', a.portHigh);
+  set('act-editor', a.editor);
+  set('act-terminal', a.terminal);
+  set('act-max', a.maxCheckouts);
+  actionsDetected = (data && data.actionsDetected) || {};
+  // A save answers with actionsWarnings (a program Worca cannot find): amber on that field until it changes.
+  for (const key of ['editor', 'terminal']) {
+    const warn = data && data.actionsWarnings && data.actionsWarnings[key];
+    if (warn) actionsFieldMsg[key] = { kind: 'warn', text: warn }; else delete actionsFieldMsg[key];
+    paintActionsDetectNote(key);
+  }
+  void loadActionsLaunchers();
+  settingsCardPainted('act-save');
+}
+// Blank Editor / Terminal fall back to detection: the placeholder and the note say what it found, so a
+// blank field never claims "detected" when nothing was (the run page then says "No editor was found").
+let actionsDetected = {};
+const actionsFieldMsg = {};   // editor | terminal -> { kind: ok | warn | err, text }: a Try result or a save warning, until the field changes
+let actionsLaunchers = null;  // GET /api/actions/launchers (what "Choose…" lists, the hover examples), loaded once
+// What the field takes: ONE program, run as `<program> <checkout folder>` (no shell). Umbrella terms, no product names.
+const ACT_DETECT_MISSING = {
+  editor: 'No editor was found on this machine. Enter the command or full path of an IDE or code editor that opens a folder.',
+  terminal: 'No terminal was found on this machine. Enter the command or full path of a terminal app that opens in a folder.',
+};
+function paintActionsDetectNote(key) {
+  const input = document.getElementById(`act-${key}`);
+  const note = document.getElementById(`act-${key}-note`);
+  if (!input || !note) return;
+  const label = actionsDetected[key] || null;
+  input.placeholder = label ? `${label} (detected)` : 'None found on this machine';
+  note.classList.remove('ok', 'warn', 'err');
+  const msg = actionsFieldMsg[key];
+  if (msg) { note.textContent = msg.text; note.classList.add(msg.kind); note.hidden = false; return; }
+  note.textContent = input.value.trim() ? '' : label ? `Left blank, Worca uses ${label}.` : ACT_DETECT_MISSING[key];
+  note.hidden = !note.textContent;
+}
+const ACT_OS_NAME = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' };
+const ACT_BROWSE = '__browse__';   // the dropdown's Browse… entry (an app path never looks like this)
+/** A picked app (a found one, or Browse…) fills the field with its command line. */
+function useActionsLine(key, label, line) {
+  const input = document.getElementById(`act-${key}`);
+  if (!input) return;
+  input.value = line;
+  settingsCardDirty('act-save')?.refresh();          // a write without an event (Browse… lands here after an await)
+  actionsFieldMsg[key] = { kind: 'ok', text: `Picked ${label}. Try checks that it opens a folder; Save keeps it.` };
+  paintActionsDetectNote(key);
+  input.focus();
+}
+/** The dropdown lists what is installed on the machine that runs the command (the server), and the ⓘ shows
+ *  that machine's examples: a Windows browser on a Mac server gets the macOS forms. */
+async function loadActionsLaunchers() {
+  if (actionsLaunchers) return actionsLaunchers;
+  try {
+    const r = await fetch('/api/actions/launchers');
+    if (!r.ok) return null;
+    actionsLaunchers = await r.json();
+  } catch { return null; }
+  for (const key of ['editor', 'terminal']) {
+    const sel = document.getElementById(`act-${key}-choose`);
+    if (sel) {
+      // The closed dropdown shows its label through a hidden placeholder, so the first real entry (Browse…)
+      // can be picked like any other: picking the entry that is already selected fires no change.
+      const opt = (label, value) => Object.assign(document.createElement('option'), { textContent: label, value });
+      const label = actionsLaunchers.browse ? 'Browse…' : 'Pick an app';
+      const ph = opt(label, ''); ph.hidden = true; ph.disabled = true; ph.selected = true;
+      const items = [ph];
+      if (actionsLaunchers.browse) items.push(opt('Browse…', ACT_BROWSE));
+      const found = actionsLaunchers[key] || [];
+      const group = document.createElement('optgroup');
+      group.label = found.length ? 'Found on this machine' : `No ${key} found on this machine`;
+      for (const f of found) group.append(opt(f.label, f.line));
+      items.push(group);
+      sel.replaceChildren(...items);
+      sel.value = '';
+    }
+    const tip = document.getElementById(`act-${key}-tip`);
+    const ex = (actionsLaunchers.examples || {})[key] || [];
+    if (tip && ex.length) {
+      tip.dataset.base ??= tip.textContent.trim();
+      const os = ACT_OS_NAME[actionsLaunchers.platform] || actionsLaunchers.platform;
+      tip.replaceChildren(document.createTextNode(tip.dataset.base), document.createElement('br'), document.createElement('br'),
+        document.createTextNode(`Examples on ${os}:`));
+      for (const line of ex) tip.append(document.createElement('br'), Object.assign(document.createElement('code'), { textContent: line }));
+    }
+  }
+  return actionsLaunchers;
+}
+for (const key of ['editor', 'terminal']) {
+  const input = document.getElementById(`act-${key}`);
+  input?.addEventListener('input', () => { delete actionsFieldMsg[key]; paintActionsDetectNote(key); });
+  // The dropdown: a found app fills its command line; Browse… opens the system's app picker on the machine
+  // that runs Worca, and the pick comes back as a command line too.
+  document.getElementById(`act-${key}-choose`)?.addEventListener('change', async (e) => {
+    const sel = e.target;
+    const value = sel.value;
+    sel.value = '';                                   // back to the label, so any entry can be picked again
+    if (!value) return;
+    if (value !== ACT_BROWSE) {
+      const f = ((actionsLaunchers || {})[key] || []).find((x) => x.line === value);
+      useActionsLine(key, f ? f.label : 'the app', value);
+      return;
+    }
+    sel.disabled = true;
+    try {
+      const r = await fetch('/api/actions/launchers/browse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: key }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) actionsFieldMsg[key] = { kind: 'err', text: j.error || `Browse failed (HTTP ${r.status}).` };
+      else if (j.status === 'picked') { useActionsLine(key, j.label, j.line); return; }
+      else if (j.status === 'busy') actionsFieldMsg[key] = { kind: 'warn', text: 'A picker is already open on this machine. Finish or cancel it first.' };
+      else if (j.status === 'unsupported') actionsFieldMsg[key] = { kind: 'warn', text: 'No app picker can open on this machine. Pick a found app or type the command.' };
+    } catch (err) {
+      actionsFieldMsg[key] = { kind: 'err', text: `Browse failed: ${err?.message || err}` };
+    } finally {
+      sel.disabled = false;
+      paintActionsDetectNote(key);
+    }
+  });
+  // Try: run what is typed (or the detected default) on the home folder, and say what happened on the field.
+  document.getElementById(`act-${key}-try`)?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const line = (input?.value || '').trim();
+    btn.disabled = true;
+    btn.textContent = 'Trying…';
+    try {
+      const r = await fetch('/api/actions/launchers/try', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: key, line }) });
+      const j = await r.json().catch(() => ({}));
+      const what = line ? 'It' : (actionsDetected[key] || `The detected ${key}`);
+      actionsFieldMsg[key] = r.ok ? { kind: 'ok', text: `${what} opened your home folder as a test.${line ? ' Save to keep it.' : ''}` }
+        : { kind: 'err', text: j.error ? `It did not open: ${j.error}` : `Try failed (HTTP ${r.status}).` };
+    } catch (err) {
+      actionsFieldMsg[key] = { kind: 'err', text: `Try failed: ${err?.message || err}` };
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Try';
+      paintActionsDetectNote(key);
+    }
+  });
+}
+const actionsSettingsCard = () => document.getElementById('actions-settings-card');
+function saveActionsSettings(actions, opts = {}) {
+  return postSettingsCard({ actions }, {
+    card: actionsSettingsCard(), paint: paintActionsSettings, dirty: settingsCardDirty('act-save'), ...opts });
+}
+/** The card's values, or null when a check failed (the field already says why). */
+function readActionsSettingsForm() {
+  const val = (id) => (document.getElementById(id)?.value ?? '').trim();
+  const num = (id) => (val(id) === '' ? null : Number(val(id)));   // blank -> null clears the key
+  const form = { keep: val('act-keep') || 'never', portLow: num('act-port-low'), portHigh: num('act-port-high'),
+    editor: val('act-editor'), terminal: val('act-terminal'), maxCheckouts: num('act-max') };
+  if (form.portLow != null && form.portHigh != null && form.portLow > form.portHigh) {
+    fieldError([document.getElementById('act-port-low'), document.getElementById('act-port-high')], 'The low port can’t be higher than the high port.');
+    return null;
+  }
+  return form;
+}
+document.getElementById('act-save')?.addEventListener('click', (e) => {
+  clearFieldErrors(actionsSettingsCard());
+  const actions = readActionsSettingsForm();
+  if (actions) saveActionsSettings(actions, { button: e.currentTarget });
+});
+document.getElementById('act-reset')?.addEventListener('click', (e) => saveActionsSettings(
+  { keep: null, portLow: null, portHigh: null, editor: null, terminal: null, maxCheckouts: null },
+  { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
+settingsCardDirty('act-save');
+
 const scriptsApi = {
   async list() {
     const r = await scriptsCall('GET', '/api/scripts');
@@ -14048,6 +15524,7 @@ function mountScriptsView(param = '') {
       host: el.scriptsHost,
       msgEl: el.scriptsMsg,
       api: scriptsApi,
+      notify: (o) => notify(o),
       navigate: (hash) => { if (location.hash.slice(1) !== hash) location.hash = hash; },
       confirm: confirmModal,
       highlight: scriptHighlight,
@@ -14085,7 +15562,7 @@ async function loadGuardrailsView(param = '') {
   try {
     const res = await fetch('/api/guardrails');
     const data = await safeJson(res);
-    if (!res.ok) return setGuardrailsMsg(data.error || `HTTP ${res.status}`, 'err');
+    if (!res.ok) return setGuardrailsMsg(data.error || `HTTP ${res.status}`, 'err-inline');
     grvState.sets = Array.isArray(data.guardrails) ? data.guardrails : [];
     el.guardrailsList.replaceChildren(renderGuardrailList(grvState.sets));
     if (param) {
@@ -14097,7 +15574,7 @@ async function loadGuardrailsView(param = '') {
       grvState.wizard = null; grvState.editing = null; closePluginModal();
     }
   } catch (e) {
-    setGuardrailsMsg(e.message, 'err');
+    setGuardrailsMsg(e.message, 'err-inline');
   }
 }
 
@@ -14127,9 +15604,7 @@ const mvState = {
 };
 
 function setModelsMsg(text, kind) {
-  if (!el.modelsMsg) return;
-  el.modelsMsg.textContent = text || '';
-  el.modelsMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+  reportStatus(el.modelsMsg, 'form-msg', text, kind);
 }
 
 function renderModelsViewBody() {
@@ -14228,7 +15703,7 @@ async function saveHideBuiltinModels(cb) {
     });
     const data = await safeJson(res);
     if (!res.ok) { cb.checked = !wanted; return setModelsMsg(data.error || `HTTP ${res.status}`, 'err'); }
-    setModelsMsg(wanted ? 'Built-in models hidden from every picker. Runs that already use one keep working.' : 'Built-in models shown again.');
+    setModelsMsg(wanted ? 'Built-in models hidden from every picker. Runs that already use one keep working.' : 'Built-in models shown again.', 'ok');
     await refreshModelsEverywhere();
   } catch (e) {
     cb.checked = !wanted;
@@ -14373,7 +15848,7 @@ async function loadModelsView() {
   try {
     const [res, pres] = await Promise.all([fetch('/api/models'), fetch('/api/providers'), loadCredentials()]);
     const data = await safeJson(res);
-    if (!res.ok) return setModelsMsg(data.error || `HTTP ${res.status}`, 'err');
+    if (!res.ok) return setModelsMsg(data.error || `HTTP ${res.status}`, 'err-inline');
     mvState.data = data;
     // Providers are best-effort: a failed read paints the card in its
     // "not connected" state rather than hiding the catalog.
@@ -14391,7 +15866,7 @@ async function loadModelsView() {
       }).catch(() => {});
     }
   } catch (e) {
-    setModelsMsg(e.message, 'err');
+    setModelsMsg(e.message, 'err-inline');
   }
 }
 
@@ -14415,18 +15890,16 @@ async function loadProvidersView() {
   try {
     const res = await fetch('/api/providers');
     const data = await safeJson(res);
-    if (!res.ok) return setProvidersMsg(data.error || `HTTP ${res.status}`, 'err');
+    if (!res.ok) return setProvidersMsg(data.error || `HTTP ${res.status}`, 'err-inline');
     mvState.providers = data;
     renderProvidersViewBody();
   } catch (e) {
-    setProvidersMsg(e.message, 'err');
+    setProvidersMsg(e.message, 'err-inline');
   }
 }
 
 function setProvidersMsg(text, kind) {
-  if (!el.providersMsg) return;
-  el.providersMsg.textContent = text || '';
-  el.providersMsg.className = 'form-msg' + (kind ? ' ' + kind : '');
+  reportStatus(el.providersMsg, 'form-msg', text, kind);
 }
 
 function renderProvidersViewBody() {
@@ -14536,26 +16009,34 @@ async function copilotSignOutFlow() {
     if (!res.ok) return setProviderMsg('copilot', data.error || `HTTP ${res.status}`, true);
     mvState.providers = data;
     mvState.copilotModels = [];
-    setTabMsg('Signed out of GitHub Copilot.');
+    setTabMsg('Signed out of GitHub Copilot.', 'ok');
     await refreshModelsEverywhere();
   } catch (e) {
     setProviderMsg('copilot', e.message, true);
   }
 }
 
-async function patchProviderFlow(name, body, { okText = 'Saved.' } = {}) {
-  try {
+// #555: the row's Save button shows busy → "Saved"; the row's line carries only errors. A change
+// on a select (account type, concurrency) has no button, so its success is the new value itself.
+async function patchProviderFlow(name, body, { btn = null } = {}) {
+  setProviderMsg(name, '');
+  const r = await withButton(btn, async () => {
     const res = await fetch(`/api/providers/${encodeURIComponent(name)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const data = await safeJson(res);
-    if (!res.ok) return setProviderMsg(name, data.error || `HTTP ${res.status}`, true);
+    if (!res.ok) return { ok: false, error: data.error || `HTTP ${res.status}` };
     mvState.providers = data;
     repaintProviders();
     // Readiness may have changed: the catalog's needs-sign-in state and every picker follow.
     await refreshModelsEverywhere();
-    // AFTER the refresh: it repaints this card too, and would wipe a message written before it.
-    setProviderMsg(name, okText);
-  } catch (e) {
-    setProviderMsg(name, e.message, true);
+    return { ok: true };
+  }, { done: 'Saved' });
+  if (r.skipped) return;
+  if (!r.ok) { setProviderMsg(name, r.error, true); return; }
+  // The repaint replaced the clicked button: give its successor the "Saved" state.
+  if (btn && !btn.isConnected) {
+    const cls = btn.classList.contains('mv-sp-save') ? 'mv-sp-save' : 'mv-pv-save';
+    const next = providerRoot()?.querySelector(`.mv-pv-row[data-provider="${name}"] .${cls}`);
+    if (next) await withButton(next, () => undefined, { done: 'Saved' });
   }
 }
 
@@ -14620,33 +16101,38 @@ async function testProviderFlow(btn) {
   // What the user is LOOKING at, not what is stored: an unsaved base URL or key is tested as typed,
   // and a local endpoint therefore answers for itself instead of for api.openai.com.
   const typed = (name === 'copilot' ? null : collectProviderRow(providerRoot(), name)) || {};
-  btn.disabled = true;
+  const pill = providerRoot()?.querySelector(`.mv-pv-row[data-provider="${name}"] .mv-pv-result`);
+  if (pill) pill.title = '';
   setProviderResult(name, 'busy', 'Testing…');
   setProviderMsg(name, '');
-  try {
-    const res = await fetch(`/api/providers/${encodeURIComponent(name)}/test`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...(typed.baseUrl ? { baseUrl: typed.baseUrl } : {}), ...(typed.apiKey !== undefined ? { apiKey: typed.apiKey } : {}) }),
-    });
-    const data = await safeJson(res);
-    const where = typed.baseUrl || (mvState.providers && mvState.providers[name] && mvState.providers[name].baseUrl) || '';
-    const unsaved = hasUnsavedProviderEdits(name, typed);
-    if (data.ok) {
-      setProviderResult(name, 'ok', `Reachable${data.models != null ? ` — ${data.models} model${data.models === 1 ? '' : 's'}` : ''}`);
-      // `detail` is what the endpoint says about the key itself — OpenRouter's credit, free-model
-      // allowance and rate limit (provider-ops formatOpenRouterKeyInfo); never the key.
-      setProviderMsg(name, `${where}${data.models != null ? ` answered with ${data.models} model${data.models === 1 ? '' : 's'}` : ' answered'}.${data.detail ? ` Key: ${data.detail}.` : ''}${unsaved ? ' Press Save to keep these settings.' : ''}`);
-    } else {
+  // #555: the button shows Testing… → "Connected"; the pill keeps the verdict; the line only errors.
+  await withButton(btn, async () => {
+    try {
+      const res = await fetch(`/api/providers/${encodeURIComponent(name)}/test`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...(typed.baseUrl ? { baseUrl: typed.baseUrl } : {}), ...(typed.apiKey !== undefined ? { apiKey: typed.apiKey } : {}) }),
+      });
+      const data = await safeJson(res);
+      const where = typed.baseUrl || (mvState.providers && mvState.providers[name] && mvState.providers[name].baseUrl) || '';
+      const unsaved = hasUnsavedProviderEdits(name, typed);
+      if (data.ok) {
+        setProviderResult(name, 'ok', `Reachable${data.models != null ? ` — ${data.models} model${data.models === 1 ? '' : 's'}` : ''}`);
+        // `detail` is what the endpoint says about the key itself — OpenRouter's credit, free-model
+        // allowance and rate limit (provider-ops formatOpenRouterKeyInfo); never the key. It rides on
+        // the pill's tooltip now that the row's line carries only errors.
+        if (pill) pill.title = `${where}${data.models != null ? ` answered with ${data.models} model${data.models === 1 ? '' : 's'}` : ' answered'}.${data.detail ? ` Key: ${data.detail}.` : ''}${unsaved ? ' Press Save to keep these settings.' : ''}`;
+        return { ok: true };
+      }
       const why = data.message || data.error || `HTTP ${res.status}`;
       setProviderResult(name, 'err', 'Failed');
       setProviderMsg(name, `${where ? `${where}: ` : ''}${why}${providerFixHint(why)}`, true);
+      return { ok: false };
+    } catch (e) {
+      setProviderResult(name, 'err', 'Failed');
+      setProviderMsg(name, e.message, true);
+      return { ok: false };
     }
-  } catch (e) {
-    setProviderResult(name, 'err', 'Failed');
-    setProviderMsg(name, e.message, true);
-  } finally {
-    btn.disabled = false;
-  }
+  }, { busy: 'Testing…', done: 'Connected' });
 }
 
 /** Whether the row carries edits the user has not saved — the test used them, the runs will not. */
@@ -14931,31 +16417,37 @@ async function toggleModelEnvReveal(btn) {
     }
     btn.dataset.on = '1';
     btn.textContent = 'Hide values';
-  } catch { /* reveal is best-effort */ }
+  } catch (e) {
+    notify({ tone: 'err', title: 'Could not show the values', detail: e.message, key: `env-reveal-${id}` });
+  }
 }
 
+// #555: Save shows busy → "Saved"; a missing id is a field error, a server refusal a card alert
+// above the editor's buttons; success closes the dialog and raises a toast naming the model.
 async function saveModelEditorFlow() {
   const rootEl = modelEditorEl();
   if (!rootEl) return;
-  const msg = rootEl.querySelector('.mv-editor-msg');
-  const say = (text) => { if (msg) { msg.textContent = text; msg.className = 'form-msg mv-editor-msg err'; } };
+  rootEl.querySelector('.mv-editor-btns')?.setAttribute('data-card-actions', '');
+  clearFieldErrors(rootEl);
+  cardAlert(rootEl, null);
   const { id, body } = collectModelEditor(rootEl);
-  if (!id && !body.id) return say('model id is required');
-  try {
-    const res = await fetch(id ? `/api/models/${encodeURIComponent(id)}` : '/api/models', {
-      method: id ? 'PATCH' : 'POST',
+  if (!id && !body.id) { fieldError(rootEl.querySelector('.mv-id'), 'model id is required'); return; }
+  const editing = !!id;   // collectModelEditor returns an id only when editing
+  const r = await withButton(rootEl.querySelector('.mv-save'), async () => {
+    const res = await fetch(editing ? `/api/models/${encodeURIComponent(id)}` : '/api/models', {
+      method: editing ? 'PATCH' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     const data = await safeJson(res);
-    if (!res.ok) return say(data.error || `HTTP ${res.status}`);
-    // Saved work is no longer unsaved work: the dialog closes without asking.
-    await closeModelEditorDialog({ force: true });
-    setModelsMsg(id ? 'Saved.' : 'Model added.', 'ok');
-    await refreshModelsEverywhere();
-  } catch (e) {
-    say(e.message);
-  }
+    return res.ok ? { ok: true } : { ok: false, error: data.error || `HTTP ${res.status}` };
+  }, editing ? {} : { done: 'Added' });
+  if (r.skipped) return;
+  if (!r.ok) { cardAlert(rootEl, { title: editing ? 'Not saved' : 'Not added', detail: r.error }); return; }
+  // Saved work is no longer unsaved work: the dialog closes without asking.
+  await closeModelEditorDialog({ force: true });
+  setModelsMsg(editing ? 'Model saved.' : 'Model added.', 'ok');
+  await refreshModelsEverywhere();
 }
 
 async function deleteModelFlow(id) {
@@ -15031,18 +16523,22 @@ if (el.providersList) {
     if (!t) return;
     if (t.classList.contains('mv-cp-signin')) copilotSignInFlow();
     else if (t.classList.contains('mv-cp-cancel')) { stopCopilotPoll(); mvState.signIn = null; renderProvidersViewBody(); }
-    else if (t.classList.contains('mv-cp-copy')) { try { navigator.clipboard.writeText(t.dataset.code || ''); t.textContent = 'Copied'; } catch { /* no clipboard */ } }
+    else if (t.classList.contains('mv-cp-copy')) {
+      try { navigator.clipboard.writeText(t.dataset.code || ''); t.textContent = 'Copied'; } catch (e) {
+        notify({ tone: 'err', title: 'Could not copy the code', detail: e.message, key: 'copy-device-code' });
+      }
+    }
     else if (t.classList.contains('mv-cp-signout')) copilotSignOutFlow();
     else if (t.classList.contains('mv-cp-terms')) ensureCopilotTerms({ force: true }).then(() => renderProvidersViewBody());
     else if (t.classList.contains('mv-cp-fetch-models')) openImportDialog({ source: 'copilot' });
     else if (t.classList.contains('mv-cp-quota-refresh')) refreshCopilotQuotaFlow(t);
     else if (t.classList.contains('mv-pv-save')) {
       const body = collectProviderRow(providerRoot(), t.dataset.provider);
-      if (body) patchProviderFlow(t.dataset.provider, body);
+      if (body) patchProviderFlow(t.dataset.provider, body, { btn: t });
     } else if (t.classList.contains('mv-pv-test')) testProviderFlow(t);
     else if (t.classList.contains('mv-sp-save')) {
       const body = collectSpeechRow(providerRoot());
-      if (body) patchProviderFlow('speech', body);
+      if (body) patchProviderFlow('speech', body, { btn: t });
     } else if (t.classList.contains('mv-sp-test')) testSpeechFlow(t);
     else if (t.classList.contains('mv-sp-clear')) clearSpeechCacheFlow(t);
     else if (t.classList.contains('mv-pv-preset')) {
@@ -15059,8 +16555,8 @@ if (el.providersList) {
   el.providersList.addEventListener('change', (ev) => {
     const t = ev.target;
     if (!t || !t.classList) return;
-    if (t.classList.contains('mv-cp-account')) patchProviderFlow('copilot', { accountType: t.value }, { okText: 'Account type saved.' });
-    else if (t.classList.contains('mv-pv-conc') && t.dataset.provider === 'copilot') patchProviderFlow('copilot', { maxConcurrent: Number(t.value) }, { okText: 'Concurrency cap saved.' });
+    if (t.classList.contains('mv-cp-account')) patchProviderFlow('copilot', { accountType: t.value });
+    else if (t.classList.contains('mv-pv-conc') && t.dataset.provider === 'copilot') patchProviderFlow('copilot', { maxConcurrent: Number(t.value) });
   });
 }
 
@@ -15290,7 +16786,10 @@ async function deleteGuardrailSetFlow(id) {
     const res = await fetch(`/api/guardrails/${encodeURIComponent(id)}`, { method: 'DELETE' });
     const data = await safeJson(res);
     if (res.status === 409) {
-      pluginModal('Cannot delete guardrail set', renderGuardrailReferences409(data.references || []));
+      const refs = data.references || [];
+      const label = (set && set.name) || id;
+      notify({ tone: 'err', title: `Cannot delete ${label}`, detail: String(data.error || '').split('\n')[0],
+        action: { label: 'Details', run: () => pluginModal('Cannot delete guardrail set', renderGuardrailReferences409(refs)) } });
       return;
     }
     if (!res.ok) return setGuardrailsMsg(data.error || `HTTP ${res.status}`, 'err');
@@ -15438,26 +16937,49 @@ if (typeof window !== 'undefined') {
 // Returns {ok:true} | {ok:false,error} so a caller with its own error surface
 // (the stop modal) can render the failure inline. The card log write below is
 // unchanged, so the run's own log still records every failure.
-async function stopRun(runId, btn) {
+// A PAUSED run also sends its pipeline id — and a paused saved run no run in this tab
+// stands for sends only that (runId ''): the server settles it from its saved row, even
+// when this tab's runId is from before a server restart. When the server drove no run of
+// ours (it answers another runId, or none), no frame will settle our copy: finish it here,
+// as done(stopped) would — and every other paused copy of the pipeline (one from before a
+// server restart). A paused run already went through finishRun(r, 'paused') (it is
+// _finished), so re-arm it first or finishRun returns at its guard.
+// On the run page the server's done(stopped) frame can hand the page off to the saved run
+// (closing the dialog) before this response lands — the teardown commits and removes the
+// worktree after the frames. That is the success path, not a bug: the dialog's `closed`
+// guard drops the late response.
+async function stopRun(runId, btn, { pipelineId = '' } = {}) {
   if (btn) btn.disabled = true;
+  const r = runId ? runs.get(runId) : null;
+  const pid = pipelineId || (r && isPaused(r) ? (r.pipelineId || '') : '');
   try {
     const res = await fetch('/api/stop', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ runId }),
+      body: JSON.stringify({ ...(runId ? { runId } : {}), ...(pid ? { pipelineId: pid } : {}) }),
     });
     if (!res.ok) {
       const err = await safeJson(res);
       if (btn) btn.disabled = false;
       const msg = String((err && err.error) || res.status);
-      const r = runs.get(runId);
-      if (r) onLog(r, { source: 'ui', level: 'error', text: `stop failed: ${msg}`, ts: Date.now() });
+      const rr = runs.get(runId);
+      if (rr) onLog(rr, { source: 'ui', level: 'error', text: `stop failed: ${msg}`, ts: Date.now() });
       return { ok: false, error: msg };
+    }
+    const data = await safeJson(res);
+    // Every paused copy of this pipeline in this tab that the server's frames will not reach — this
+    // run, or a copy from before a server restart — is finished here.
+    if (pid) {
+      for (const x of [...runs.values()]) {
+        if (x.pipelineId !== pid || !isPaused(x) || (data && data.runId === x.runId)) continue;
+        x._finished = false;
+        finishRun(x, 'stopped');
+      }
     }
   } catch (e) {
     if (btn) btn.disabled = false;
-    const r = runs.get(runId);
-    if (r) onLog(r, { source: 'ui', level: 'error', text: `stop error: ${e.message}`, ts: Date.now() });
+    const rr = runs.get(runId);
+    if (rr) onLog(rr, { source: 'ui', level: 'error', text: `stop error: ${e.message}`, ts: Date.now() });
     return { ok: false, error: e.message };
   }
   return { ok: true };
@@ -15467,6 +16989,7 @@ async function stopRun(runId, btn) {
 // 'pausing' (state event keeps the card visible via liveRuns) and the eventual
 // done(paused) routes through finishRun — the record resurfaces in History
 // with a Resume button. On failure re-enable the button and log to that card.
+// Resolves to the failure's reason (a page that does not show the log says it), or null.
 async function pauseRun(runId, btn) {
   if (btn) btn.disabled = true;
   try {
@@ -15480,11 +17003,14 @@ async function pauseRun(runId, btn) {
       if (btn) btn.disabled = false;
       const r = runs.get(runId);
       if (r) onLog(r, { source: 'ui', level: 'error', text: `pause failed: ${err.error || res.status}`, ts: Date.now() });
+      return String(err.error || `HTTP ${res.status}`);
     }
+    return null;
   } catch (e) {
     if (btn) btn.disabled = false;
     const r = runs.get(runId);
     if (r) onLog(r, { source: 'ui', level: 'error', text: `pause error: ${e.message}`, ts: Date.now() });
+    return e.message;
   }
 }
 
@@ -15544,12 +17070,14 @@ async function confirmCostOverride(runId, btn) {
   if (ok) resumeRunFromCard(runId, btn, { ignoreCostCap: true });
 }
 
-async function resumeRunFromCard(runId, btn, { ignoreCostCap = false, pastTeamCap = false, policyReason = null, baseAck = false } = {}) {
+async function resumeRunFromCard(runId, btn, opts = {}) {
+  const { ignoreCostCap = false, pastTeamCap = false, policyReason = null, baseAck = false } = opts;
   const r = runs.get(runId);
   if (!r || !isPaused(r)) return;
   const pipelineId = r.pipelineId;
   if (!pipelineId) {
     onLog(r, { source: 'ui', level: 'error', text: 'resume failed: run has no pipelineId', ts: Date.now() });
+    notify({ tone: 'err', title: 'Could not resume the run', detail: 'This run has no pipeline id, so Worca cannot find it to resume.', key: `resume-${runId}` });
     return;
   }
   // Snapshot the pre-pause log BEFORE the old run is dropped, to seed the resumed
@@ -15601,15 +17129,17 @@ async function resumeRunFromCard(runId, btn, { ignoreCostCap = false, pastTeamCa
     if (btn) { btn.disabled = false; btn.innerHTML = prevBtnHtml; }
     const rr = runs.get(runId);
     if (rr) onLog(rr, { source: 'ui', level: 'error', text: `resume failed: ${err.message}`, ts: Date.now() });
+    notify({ tone: 'err', title: 'Could not resume the run', detail: err.message, key: `resume-${runId}`,
+      action: { label: 'Retry', run: () => resumeRunFromCard(runId, btn && btn.isConnected ? btn : null, opts) } });
   }
 }
 
-// Resume splits (run page, History detail + its glance): a click outside any split closes every
+// Resume splits (the run page's bar and the saved run's): a click outside any split closes every
 // open resume menu. One listener covers every location; the caret/item clicks already
 // stopPropagation, so the parity with #start-split's click-away holds (closeStartMenu).
 document.addEventListener('click', (e) => {
-  if (e.target.closest && e.target.closest('.hd-resume-split, .rd-resume-split, .hd-g-resume-split')) return;
-  for (const menu of document.querySelectorAll('.hd-resume-menu, .rd-resume-menu, .hd-g-resume-menu')) {
+  if (e.target.closest && e.target.closest('.hd-resume-split, .rd-resume-split')) return;
+  for (const menu of document.querySelectorAll('.hd-resume-menu, .rd-resume-menu')) {
     if (!menu.hidden) {
       menu.hidden = true;
       const more = menu.closest('.btn-split')?.querySelector('.btn-split-more');
@@ -15636,25 +17166,31 @@ document.addEventListener('click', (e) => {
 let stopModalClose = null;
 function closeStopModal() { if (stopModalClose) stopModalClose(); }
 
-function openStopModal(runId) {
+// `target`: { runId } — a run this tab holds (the run page; the saved run's live run) — or
+// { pipelineId, title, branch, onStopped } — a paused saved run no run in this tab stands for.
+function openStopModal(target) {
   const modal = document.getElementById('stop-modal');
-  const r = runs.get(runId);
-  if (!modal || !r) return;
+  const t = target || {};
+  const r = t.runId ? runs.get(t.runId) : null;
+  if (!modal || (t.runId ? !r : !t.pipelineId)) return;
   if (!modal.classList.contains('hidden')) return;   // double-open guard: a second
                                                      // open would stack a second
                                                      // onOk -> two POST /api/stop
   const q = (sel) => modal.querySelector(sel);
-  modal.dataset.runId = runId;                       // both openers stamp the target
-  q('.stop-ident-title').textContent = r.title || runId;
-  const branch = r.branchFeature || '';
+  if (t.runId) modal.dataset.runId = t.runId;        // both openers stamp the target
+  else modal.dataset.pipelineId = t.pipelineId;
+  q('.stop-ident-title').textContent = (r ? r.title : t.title) || t.runId || t.pipelineId;
+  const branch = (r ? r.branchFeature : t.branch) || '';
   const branchEl = q('.stop-ident-branch');
   branchEl.textContent = branch;
   branchEl.hidden = !branch;                         // no branch -> no blank line
-  const err = q('.stop-err');
-  err.hidden = true; err.textContent = '';
+  const card = q('.stop-actions').parentElement;
+  cardAlert(card, null);
   const ok = q('.stop-confirm');
   const cancel = q('.stop-cancel');
   ok.disabled = false; ok.textContent = 'Stop pipeline';
+  // A paused run is not running: the way out of the dialog keeps it paused.
+  cancel.textContent = (r ? isPaused(r) : true) ? 'Keep paused' : 'Keep running';
   cancel.disabled = false;                           // a prior generation may have parked it
   modal.classList.remove('hidden');
   ok.focus();
@@ -15673,6 +17209,7 @@ function openStopModal(runId) {
     closed = true;
     modal.classList.add('hidden');
     delete modal.dataset.runId;
+    delete modal.dataset.pipelineId;
     if (stopModalClose === done) stopModalClose = null;  // never clobber a newer handle
     ok.removeEventListener('click', onOk);
     cancel.removeEventListener('click', onCancel);
@@ -15690,15 +17227,15 @@ function openStopModal(runId) {
     ok.disabled = true;
     ok.textContent = 'Stopping…';
     cancel.disabled = true;
-    const res = await stopRun(runId, ok);
+    cardAlert(card, null);
+    const res = await stopRun(t.runId || '', ok, { pipelineId: t.pipelineId || '' });
     inFlight = false;
     if (closed) return;                 // torn down from outside while in flight
-    if (res && res.ok) { done(); return; }
+    if (res && res.ok) { done(); if (t.onStopped) t.onStopped(); return; }
     ok.disabled = false;                // stopRun already re-enabled it; be explicit
     ok.textContent = 'Stop pipeline';
     cancel.disabled = false;            // the run is still live — retry or keep it
-    err.hidden = false;
-    err.textContent = `Could not stop: ${(res && res.error) || 'unknown error'}`;
+    cardAlert(card, { title: 'Could not stop the run', detail: (res && res.error) || 'unknown error' });
   };
   ok.addEventListener('click', onOk);
   cancel.addEventListener('click', onCancel);
@@ -15850,7 +17387,7 @@ async function loadTpScopes({ force = false } = {}) {
   return p;
 }
 
-// Projects list: fills the .tp-slot placeholders left by buildProjectRow (board 2).
+// Projects list: fills the .pl-tp chips left by buildProjectRow (board 2).
 async function paintProjectPolicyCells(force = false) {
   const data = await loadTpScopes({ force });
   const byKey = new Map(data.projects.map((s) => [s.key, s]));
@@ -16006,7 +17543,7 @@ async function openWsPolicyHomeSheet(workspaceId) {
 }
 
 // The Team policy page (boards 4–5): read mode by default, the editor behind "Edit policy".
-const tpState = { scopeId: localStorage.getItem('worca.teamPolicy.scope') || '', data: null, loadSeq: 0, editing: false, showAll: false, notice: null, tab: 'policy', checking: false };
+const tpState = { scopeId: localStorage.getItem('worca.teamPolicy.scope') || '', data: null, loadSeq: 0, editing: false, showAll: false, tab: 'policy', checking: false };
 const semverGte = (a, b) => { const p = (v) => String(v || '').split('-')[0].split('.').map((x) => parseInt(x, 10) || 0); const x = p(a); const y = p(b); for (let i = 0; i < 3; i++) { if ((x[i] || 0) > (y[i] || 0)) return true; if ((x[i] || 0) < (y[i] || 0)) return false; } return true; };
 async function loadTeamPolicyView(param = '') {
   if (!el.tpBody || !el.tpScope) return;
@@ -16049,7 +17586,6 @@ function renderTeamPolicyRead() {
   el.tpSync.hidden = false;
   el.tpSync.replaceChildren(renderPolicySyncChip(data, { doc: document, now: Date.now(), busy: tpState.checking }));
   const parts = [];
-  if (tpState.notice) { parts.push(Object.assign(document.createElement('p'), { className: 'form-msg ok', textContent: tpState.notice })); tpState.notice = null; }
   const ver = (data.rows || []).find((r) => r.key === 'worca.minVersion' && r.team);
   if (ver && data.worcaVersion && !semverGte(data.worcaVersion, ver.team.value)) {
     parts.push(Object.assign(document.createElement('div'), { className: 'hint tm-warn', textContent: `Your Worca is ${data.worcaVersion}; this policy expects at least ${ver.team.value}. Some fields may not apply.` }));
@@ -16165,25 +17701,24 @@ async function publishFromEditor(editor, registry) {
   const doc = docFromEditor(editor, { registry });
   const msgEl = editor.querySelector('.tp-msg');
   const btn = el.tpBody.querySelector('.tp-publish');   // on the header, beside Cancel editing
-  btn.disabled = true;
-  msgEl.className = 'form-msg tp-msg'; msgEl.textContent = 'Publishing…';
-  try {
+  msgEl.className = 'form-msg tp-msg'; msgEl.textContent = '';
+  const fail = (text) => { msgEl.className = 'form-msg tp-msg err'; msgEl.textContent = text; return { ok: false }; };
+  // #555: the header button carries the progress; a rejection stays verbatim at the top of the form.
+  const r = await withButton(btn, async () => {
     const v = await safeJson(await fetch('/api/policy/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ doc }) }));
-    if (!v.ok) { msgEl.className = 'form-msg tp-msg err'; msgEl.textContent = (v.warnings || []).join('\n') || 'invalid policy document'; btn.disabled = false; return; }
-    const r = await fetch('/api/policy', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: tpState.scopeId, doc }) });
-    const j = await safeJson(r);
-    if (!r.ok) {
-      msgEl.className = 'form-msg tp-msg err';
-      msgEl.textContent = [j?.error, j?.stderr && String(j.stderr).trim(), j?.hint, ...(Array.isArray(j?.warnings) ? j.warnings : [])].filter(Boolean).join(' · ');
-      btn.disabled = false;
-      return;
-    }
-    tpCache.at = 0;
-    tpState.notice = j.unchanged ? 'Nothing to publish — the branch already holds this document.' : `Published · commit ${String(j.sha || '').slice(0, 7)}`;
-    await loadTeamPolicyView();
-  } catch (err) {
-    msgEl.className = 'form-msg tp-msg err'; msgEl.textContent = err?.message || 'publish failed'; btn.disabled = false;
-  }
+    if (!v.ok) return fail((v.warnings || []).join('\n') || 'invalid policy document');
+    const res = await fetch('/api/policy', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: tpState.scopeId, doc }) });
+    const j = await safeJson(res);
+    if (!res.ok) return fail([j?.error, j?.stderr && String(j.stderr).trim(), j?.hint, ...(Array.isArray(j?.warnings) ? j.warnings : [])].filter(Boolean).join(' · '));
+    return { ok: true, j };
+  }, { busy: 'Publishing…', done: 'Published' });
+  if (r.skipped) return;
+  if (!r.ok) { if (r.error) fail(r.error); return; }
+  tpCache.at = 0;
+  notify(r.j.unchanged
+    ? { tone: 'ok', title: 'Nothing to publish', detail: 'The branch already holds this document.' }
+    : { tone: 'ok', title: 'Policy published', detail: `Commit ${String(r.j.sha || '').slice(0, 7)}` });
+  await loadTeamPolicyView();
 }
 
 if (el.tpScope) el.tpScope.addEventListener('change', () => {
@@ -16197,10 +17732,17 @@ if (tpSection) tpSection.addEventListener('click', async (e) => {
     if (tpState.editing) renderTeamPolicyRead(); else void renderTeamPolicyEdit();
     return;
   }
-  if (e.target.closest && e.target.closest('.tp-check-now')) {
+  const checkBtn = e.target.closest && e.target.closest('.tp-check-now');
+  if (checkBtn) {
     tpState.checking = true;
     if (tpState.data && !tpState.editing) renderTeamPolicyRead();
-    await fetch('/api/policy/discover', { method: 'POST' }).catch(() => {});
+    // #555: a failed check says so (the chip repaint alone looked like success); Retry re-clicks
+    // whichever Check now the repaint left on the page.
+    const checkFailed = (detail) => notify({ tone: 'err', title: 'Check failed', detail, key: 'tp-check',
+      action: { label: 'Retry', run: () => (document.querySelector('#tp-sync .tp-check-now, #tp-body .tp-check-now') || checkBtn)?.click() } });
+    await fetch('/api/policy/discover', { method: 'POST' })
+      .then(async (r) => { if (!r.ok) checkFailed((await safeJson(r))?.error || `The server answered ${r.status}.`); })
+      .catch((err) => checkFailed(err?.message || 'network error'));
     tpCache.at = 0;
     tpState.checking = false;
     loadTeamPolicyView();
@@ -16235,7 +17777,66 @@ let policyLineSeq = 0;
 function schedulePolicyLine() {
   if (!el.policyLine) return;
   clearTimeout(policyLineTimer);
-  policyLineTimer = setTimeout(() => { void paintPolicyLine(); }, 150);
+  policyLineTimer = setTimeout(() => { void paintPolicyLine(); void paintMcpRuns(); }, 150);
+}
+/** The models the run will pick: the Agents accordion's selects, else the legacy per-role config. */
+function selectedRunModels() {
+  const picked = [...document.querySelectorAll('#agents-rows select.step-model')].map((s) => s.value).filter((v) => v && v !== '__add__');
+  const models = picked.length ? picked
+    : Object.values((state.config && state.config.steps) || {}).map((s) => s && s.model).filter((m) => typeof m === 'string' && m);
+  return [...new Set(models)];
+}
+// New pipeline › MCP servers (MCP registry §6.2): the target's registry copies, fetched with the
+// form's models (they set the tool-name limit) and without the opt-out, which is toggled locally.
+let mcpRunsSeq = 0;
+async function paintMcpRuns() {
+  if (!el.mcpRunsField || currentView() !== 'new') return;
+  const scope = currentRunScopeId();
+  const seq = ++mcpRunsSeq;
+  const i = scope.indexOf(':');
+  const kind = scope.slice(0, i);
+  let data = null;
+  if (scope) {
+    try {
+      const r = await fetch('/api/mcp/preview', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: kind === 'project' ? { projectKey: scope.slice(i + 1) } : { workspaceId: scope.slice(i + 1) }, models: selectedRunModels() }),
+      });
+      data = r.ok ? await safeJson(r) : null;
+    } catch { data = null; }
+  }
+  if (seq !== mcpRunsSeq) return;
+  const valid = !!data && Array.isArray(data.sets) && Array.isArray(data.copies) && Array.isArray(data.skipped);
+  // An answer prunes the opt-out to the target's memberships; no answer (no target, defrag, a
+  // failed fetch) keeps it: the server drops whatever the run's target does not know.
+  if (valid) {
+    const known = new Set([...data.copies, ...data.skipped].map((m) => `${m.setId}|${m.serverId}`));
+    state.mcpOptOut = state.mcpOptOut.filter((k) => known.has(k));
+  }
+  state.mcpPreview = valid && data.copies.length + data.skipped.length > 0 ? { ...data, workspace: kind === 'workspace' } : null;
+  renderMcpRuns();
+}
+function renderMcpRuns() {
+  // §6.1: a memory-defrag run starts no registry servers, so the control hides for it.
+  const p = state.workflowId === MEMORY_DEFRAG_WORKFLOW_ID ? null : state.mcpPreview;
+  el.mcpRunsField.hidden = !p;
+  if (!p) { el.mcpRunsPop.replaceChildren(); return; }
+  el.mcpRunsLabel.textContent = mcpRunsLabel(p, state.mcpOptOut);
+  // A toggle re-renders the popover: the keyboard focus goes back to the box that was ticked.
+  const active = document.activeElement;
+  const focused = active && el.mcpRunsPop.contains(active) ? { keys: active.dataset.keys, kind: active.dataset.kind } : null;
+  el.mcpRunsPop.replaceChildren(renderMcpRunsPop(p, state.mcpOptOut, {
+    doc: document,
+    projectName: p.workspace ? (k) => (state.projects.find((x) => x && x.key === k) || {}).name || k : null,
+    onToggle: (keys, on) => {
+      const off = new Set(state.mcpOptOut);
+      for (const k of keys) { if (on) off.delete(k); else off.add(k); }
+      state.mcpOptOut = [...off];
+      renderMcpRuns();
+      void paintPolicyLine();                 // an opted-out required server is off-policy
+    },
+  }));
+  if (focused) [...el.mcpRunsPop.querySelectorAll('input')].find((i) => i.dataset.keys === focused.keys && i.dataset.kind === focused.kind)?.focus();
 }
 function currentRunScopeId() {
   if (state.runTarget === 'workspace') {
@@ -16255,10 +17856,9 @@ async function paintPolicyLine() {
   const qs = new URLSearchParams({ scope, guardrailsId: state.guardrailsId || 'permissive' });
   // What the run will actually pick: the Agents accordion's model selects (per workflow node),
   // falling back to the legacy per-role config when the accordion has not painted yet.
-  const picked = [...document.querySelectorAll('#agents-rows select.step-model')].map((s) => s.value).filter((v) => v && v !== '__add__');
-  const models = picked.length ? picked
-    : Object.values((state.config && state.config.steps) || {}).map((s) => s && s.model).filter((m) => typeof m === 'string' && m);
-  if (models.length) qs.set('models', [...new Set(models)].join(','));
+  const models = selectedRunModels();
+  if (models.length) qs.set('models', models.join(','));
+  if (state.mcpOptOut.length) qs.set('mcpOptOut', state.mcpOptOut.join(','));
   let data = null;
   try { const r = await fetch(`/api/policy/notes?${qs}`); data = r.ok ? await safeJson(r) : null; } catch { data = null; }
   if (seq !== policyLineSeq) return;
@@ -16339,12 +17939,13 @@ function marketplaceEntryFor(name, marketplaceHint) {
 }
 async function installRequiredPlugin(name, { marketplace = '', silent = false } = {}) {
   const hit = marketplaceEntryFor(name, marketplace);
-  if (!hit) { setPluginsMsg(`${name}: not found in a synced marketplace — refresh marketplaces${marketplace ? ` (the policy names ${marketplace})` : ''}.`, 'err'); return false; }
+  if (!hit) { setPluginsMsg(`${name}: not found in a synced marketplace — refresh marketplaces${marketplace ? ` (the policy names ${marketplace})` : ''}.`, silent ? 'err-inline' : 'err'); return false; }
   const entry = { name: hit.p.name, subdir: hit.p.subdir, repoUrl: hit.m.url, sha: hit.m.lastSync.sha, inventory: hit.p.inventory || {}, marketplace: hit.m.id };
-  if (!silent) { openInstallConsent(entry); return true; }
+  // The dialog only opens here: the result is reported by the consent handler, not by this button.
+  if (!silent) { openInstallConsent(entry, { onInstalled: () => { tpCache.at = 0; if (currentView() === 'team-policy') loadTeamPolicyView(); } }); return true; }
   setPluginsMsg(`Installing ${name} (trusted policy home)…`);
   const { ok, data } = await pluginApi('POST', '/api/plugins/install', { repoUrl: entry.repoUrl, subdir: entry.subdir, name: entry.name, sha: entry.sha, marketplace: entry.marketplace });
-  if (!ok) { setPluginsMsg(`${name}: ${data.error || 'install failed'}`, 'err'); return false; }
+  if (!ok) { setPluginsMsg(`${name}: ${data.error || 'install failed'}`, 'err-inline'); return false; }
   setPluginsMsg(`Installed ${name} (trusted policy home).`, 'ok');
   invalidateAgentCaches();
   tpCache.at = 0;
@@ -16380,15 +17981,20 @@ async function updateRequiredPlugin(name) {
   const body = renderUpdatePreview(data);
   pluginModal(`Update ${name}`, body);
   const confirmBtn = body.querySelector('.pl-confirm-update');
+  // #555 D5: the dialog's own button carries the progress; the result is a toast after it closes.
   if (confirmBtn) confirmBtn.addEventListener('click', async () => {
-    confirmBtn.disabled = true;
-    const r2 = await pluginApi('POST', `/api/plugins/${encodeURIComponent(name)}/update`, { confirm: true });
+    const r2 = await withButton(confirmBtn, async () => {
+      const r = await pluginApi('POST', `/api/plugins/${encodeURIComponent(name)}/update`, { confirm: true });
+      return r.ok ? r : { ...r, ok: false };
+    }, { busy: 'Updating…', done: 'Updated' });
+    if (r2.skipped) return;
     closePluginModal();
-    if (!r2.ok) return setPluginsMsg(r2.data.error || 'update failed', 'err');
+    if (!r2.ok) return setPluginsMsg((r2.data && r2.data.error) || r2.error || 'update failed', 'err');
     setPluginsMsg(`Updated ${name}.`, 'ok');
     invalidateAgentCaches();
     tpCache.at = 0;
     loadPluginsView();
+    if (currentView() === 'team-policy') loadTeamPolicyView();
   });
   return true;
 }
@@ -16396,11 +18002,13 @@ if (el.pluginsPolicy) el.pluginsPolicy.addEventListener('click', (e) => { void h
 async function openSetupChecklist() {
   const data = await loadTpScopes({ force: true });
   const reqs = data.requirements || [];
-  const homes = [...new Set(reqs.flatMap((r) => r.homes || []))];
+  const mcp = data.mcpRequirements || [];
+  const homes = [...new Set([...reqs.flatMap((r) => r.homes || []), ...mcp.map((r) => r.home)])];
   const home = homes[0] || (data.homes[0] && data.homes[0].slug) || '';
-  const body = renderSetupChecklist({ home, requirements: reqs, seeds: [], trusted: policyHomeTrusted(home) }, { doc: document });
+  const body = renderSetupChecklist({ home, requirements: reqs, seeds: [], trusted: policyHomeTrusted(home), mcp }, { doc: document });
   body.addEventListener('click', (e) => {
     if (e.target.closest('.tp-install-all')) { closePluginModal(); void installAllRequired(reqs); return; }
+    if (e.target.closest('.tp-mcp-act')) { void handleMcpTeamClick(e); return; }
     void handlePolicyPluginClick(e);
   });
   body.addEventListener('change', (e) => {
@@ -16408,6 +18016,75 @@ async function openSetupChecklist() {
     if (cb) { try { localStorage.setItem(TP_TRUST_PREFIX + cb.dataset.home, cb.checked ? '1' : '0'); } catch { /* private mode */ } }
   });
   pluginModal(`Set up for ${home || 'the team policy'}`, body);
+}
+// MCP requirements (MCP registry spec §11.3): Install / Turn on / Update post only { expectHash } — the
+// hash the dialog showed; the server reads the definition from the cached policy. Trust never reaches here.
+const MCP_TEAM_TITLE = { install: 'Install MCP server', 'turn-on': 'Turn on MCP server', update: 'Update MCP server' };
+const MCP_TEAM_VERB = { install: 'Install', 'turn-on': 'Turn on', update: 'Update' };
+async function paintMcpStrip(host) {
+  if (!host.dataset.wired) {
+    host.dataset.wired = '1';
+    host.addEventListener('click', (e) => {
+      if (e.target.closest('.tp-mcp-act')) void handleMcpTeamClick(e);
+      else if (e.target.closest('.pl-policy-setup')) void openSetupChecklist();
+    });
+  }
+  const fill = (data) => { const strip = renderMcpStrip(data.mcpRequirements || [], { doc: document }); host.replaceChildren(strip || ''); host.hidden = !strip; };
+  // P6 hands a fresh, hidden host on every paint of the pane: paint the last state at once (no flicker; a button painted
+  // from it that has moved on repaints instead of acting), then read fresh — the pane repaints after each write on it
+  // (a token set, a switch), and the strip must show that state.
+  if (tpCache.data) fill(tpCache.data);
+  fill(await loadTpScopes({ force: true }));
+}
+setMcpStripRenderer((host) => { void paintMcpStrip(host); });
+/** After a Team action, every surface that shows Team state reads it again: `openSetId` (Install, Set <field>) opens
+ *  that Team set; on the MCP tab the pane reloads (its paint repaints the strip), so a card never contradicts the strip;
+ *  the Team policy page reloads ("Yours", deviations). */
+function refreshMcpSurfaces(openSetId = null) {
+  const to = openSetId ? `settings/mcp/sets/${encodeURIComponent(openSetId)}` : null;
+  if (to && location.hash.slice(1) !== to) { location.hash = to; return; }
+  if (currentView() === 'settings' && currentSettingsTab === 'mcp') { void mcpTab().show(location.hash.slice(1).replace(/^settings\/mcp\/?/, '')); return; }
+  if (currentView() === 'team-policy' && !tpState.editing) loadTeamPolicyView();
+}
+async function runMcpTeamAction(r, action, { owner = null } = {}) {
+  // mcpApi never rejects: offline or a restarting server is an answer the error modal shows.
+  const res = await mcpApi('POST', `/api/mcp/teams/${encodeURIComponent(r.home)}/members/${encodeURIComponent(r.serverId)}/${action}`, { expectHash: r.hash });
+  await loadTpScopes({ force: true });   // the checklist, the strip and the Projects cells read the new state; an older in-flight read never lands
+  if (!res.ok) {
+    pluginModal(`${MCP_TEAM_TITLE[action]}: ${r.name}`, Object.assign(document.createElement('p'), { className: 'form-msg err', textContent: res.data?.error || `${action} failed` }));
+    refreshMcpSurfaces();   // a 409 means the row moved on: show where it is now
+    return;
+  }
+  // The dialog the action came from (the checklist, the consent dialog) closes, only while it is still the one shown: an
+  // action from the strip opened none, and no action closes a dialog the user opened while its POST was out.
+  if (owner && el.pluginModalBody.contains(owner)) closePluginModal();
+  refreshMcpSurfaces(action === 'install' ? res.data.setId : null);   // Install opens its Team set
+}
+async function handleMcpTeamClick(e) {
+  const t = e.target.closest('.tp-mcp-act');
+  e.stopPropagation();
+  if (t.dataset.busy === '1') return;   // a double click acts once: one POST, one dialog
+  t.dataset.busy = '1';
+  try {
+    // The dialog the click came from (read before the await: a repaint meanwhile detaches `t`).
+    const owner = t.closest('#plugin-modal') ? el.pluginModalBody.firstElementChild : null;
+    const r = ((await loadTpScopes({ force: true })).mcpRequirements || []).find((x) => x.home === t.dataset.home && x.serverId === t.dataset.server);
+    // The button was painted for one state. When the row has moved on (a new team definition, another tab), repaint instead
+    // of acting: a Turn on painted without the consent dialog must never post for a member that now needs one.
+    if (!r || r.state !== t.dataset.state) {
+      if (owner) void openSetupChecklist(); else refreshMcpSurfaces();
+      return;
+    }
+    const action = t.dataset.action;
+    if (action === 'set') { if (owner && el.pluginModalBody.contains(owner)) closePluginModal(); refreshMcpSurfaces(r.setId); return; }
+    if (t.dataset.consent !== '1') { await runMcpTeamAction(r, action, { owner }); return; }
+    const body = renderMcpConsent(r, action, { doc: document });
+    let sent = false;   // a double click posts once (a second Install would answer 409 "already installed")
+    pluginModal(MCP_TEAM_TITLE[action], body, [
+      ['Cancel', 'btn btn-ghost btn-mini', closePluginModal],
+      [MCP_TEAM_VERB[action], 'btn btn-primary btn-mini', () => { if (sent) return; sent = true; void runMcpTeamAction(r, action, { owner: body }); }],
+    ]);
+  } finally { delete t.dataset.busy; }
 }
 // One dialog after another — a consent dialog for each missing plugin, an update preview for each
 // one below the floor — the next opens when the previous closes (done or cancelled). Nothing runs
@@ -16485,6 +18162,13 @@ function setTmChipBusy(on) {
  * (decision 36). Verified without it: delaying scope A's response by 150 ms and switching to
  * B left the select on B while the body — and "Export CSV" — showed A's runs.
  */
+/** POST a team-metrics action; null on success, else what went wrong. */
+async function tmPost(url, body) {
+  try {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    return r.ok ? null : ((await safeJson(r))?.error || `The server answered ${r.status}.`);
+  } catch (e) { return e.message || 'network error'; }
+}
 async function loadTeamMetricsView({ refresh = false } = {}) {
   const body = document.getElementById('tm-body');
   const chip = document.getElementById('tm-sync');
@@ -16842,13 +18526,30 @@ if (tmSection) {
     }
     if (e.target.closest('.tm-refresh')) return loadTeamMetricsView({ refresh: true });
     if (e.target.closest('.tm-push-now')) {
-      e.target.closest('.tm-push-now').disabled = true;
-      await fetch('/api/team-metrics/flush', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: tmState.scopeId }) }).catch(() => {});
-      return loadTeamMetricsView();
+      const b = e.target.closest('.tm-push-now');
+      const res = await withButton(b, async () => { const m = await tmPost('/api/team-metrics/flush', { scope: tmState.scopeId }); return m ? { ok: false, error: m } : { ok: true }; },
+        { busy: 'Pushing…', done: 'Pushed' });
+      if (res.skipped) return;
+      // loadTeamMetricsView re-renders the section and replaces this button, so reloading at
+      // once would wipe "Pushed" before anyone sees it. Reload after the done state on success.
+      if (res.ok) setTimeout(() => loadTeamMetricsView(), BUTTON_DONE_MS);
+      else {
+        await loadTeamMetricsView();
+        notify({ tone: 'err', title: 'Push failed', detail: res.error, key: 'tm-push', action: { label: 'Retry', run: () => document.querySelector('.tm-push-now')?.click() } });
+      }
+      return;
     }
     if (e.target.closest('.tm-check-now')) {
-      await fetch('/api/team-metrics/discover', { method: 'POST' }).catch(() => {});
-      return loadTeamMetricsView();
+      const b = e.target.closest('.tm-check-now');
+      const res = await withButton(b, async () => { const m = await tmPost('/api/team-metrics/discover'); return m ? { ok: false, error: m } : { ok: true }; },
+        { busy: 'Checking…', done: 'Checked' });
+      if (res.skipped) return;
+      if (res.ok) setTimeout(() => loadTeamMetricsView(), BUTTON_DONE_MS);
+      else {
+        await loadTeamMetricsView();
+        notify({ tone: 'err', title: 'Check failed', detail: res.error, key: 'tm-check', action: { label: 'Retry', run: () => document.querySelector('.tm-check-now')?.click() } });
+      }
+      return;
     }
   });
   tmSection.addEventListener('keydown', (e) => {
@@ -16983,9 +18684,16 @@ async function loadHistoryView({ force = false } = {}) {
 }
 
 // Loading affordance: the Runs list is aria-busy while History (re)loads.
-function setHistoryLoading(on) {
-  if (el.runsList) el.runsList.setAttribute('aria-busy', on ? 'true' : 'false');
+// The list is aria-busy while EITHER feed loads: the active history (setHistoryLoading,
+// through Phase 2) or the Archived toggle's (setArchivedLoading) — one finishing must not
+// clear the other's busy state.
+let historyBusy = false;
+let archivedBusy = false;
+function paintRunsBusy() {
+  if (el.runsList) el.runsList.setAttribute('aria-busy', historyBusy || archivedBusy ? 'true' : 'false');
 }
+function setHistoryLoading(on) { historyBusy = !!on; paintRunsBusy(); }
+function setArchivedLoading(on) { archivedBusy = !!on; paintRunsBusy(); }
 
 // Phase-2 trigger + WS handler. The spinner stays on through PR enrichment and is
 // cleared by the final batch, a failed/!ok POST, or the per-token watchdog — so it
@@ -17271,10 +18979,11 @@ function setupDiscardWorktreeButton(node, projectDir, p, onDiscarded) {
         // is still true — repaint nothing away, tell the user what happened.
         btn.disabled = false;
         btn.textContent = previous;
-        showViewer('Discard incomplete',
-          'The retained worktree could not be fully removed:\n\n' +
+        const text = 'The retained worktree could not be fully removed:\n\n' +
           `${Array.isArray(data.warnings) && data.warnings.length ? data.warnings.join('\n') : 'unknown error'}\n\n` +
-          'The retained-work warning stays until the checkout is gone.');
+          'The retained-work warning stays until the checkout is gone.';
+        notify({ tone: 'warn', title: 'Discard incomplete', detail: 'The retained checkout is still on disk.', key: 'discard-wt',
+          action: { label: 'Details', run: () => showViewer('Discard incomplete', text) } });
         return;
       }
       p.retainedWork = null;
@@ -17288,13 +18997,18 @@ function setupDiscardWorktreeButton(node, projectDir, p, onDiscarded) {
       btn.textContent = previous;
       if (typeof onDiscarded === 'function') onDiscarded(data);
       const paths = Array.isArray(data.patches) ? data.patches : [];
-      showViewer('Retained worktree discarded', paths.length
+      const text = paths.length
         ? `Recovery patch${paths.length === 1 ? '' : 'es'} saved before removal:\n\n${paths.join('\n')}`
-        : 'No recovery patch was needed (nothing uncommitted remained to save); the retained checkout is gone.');
+        : 'No recovery patch was needed (nothing uncommitted remained to save); the retained checkout is gone.';
+      notify({ tone: 'ok', title: 'Retained worktree discarded',
+        detail: paths.length ? `${paths.length} recovery patch${paths.length === 1 ? '' : 'es'} saved.` : 'Nothing uncommitted needed saving.',
+        key: 'discard-wt', action: paths.length ? { label: 'Details', run: () => showViewer('Retained worktree discarded', text) } : null });
     } catch (err) {
       btn.disabled = false;
       btn.textContent = previous;
       btn.title = `Could not discard retained worktree: ${err.message}`;
+      notify({ tone: 'err', title: 'Could not discard the retained worktree', detail: err.message, key: 'discard-wt',
+        action: { label: 'Retry', run: () => btn.isConnected && btn.click() } });
     }
   });
 }
@@ -17323,26 +19037,18 @@ function applyHistResumeGate(btn, pauseReason, budget, pauseDetail = '') {
   }
 }
 
-// Re-gate the mounted history Resume button from the dataset.pauseReason stamp
-// paintHdBanners left behind, so a budget change unblocks it without a refetch.
-// Detail-screen roots ONLY: Resume left the list card with the accordion.
+// Re-gate the mounted history Resume button from its pause reason (the live run's,
+// else the dataset.pauseReason stamp paintHdBanners left behind), so a budget change
+// unblocks it without a refetch. Detail-screen roots ONLY: Resume left the list card
+// with the accordion.
 function refreshHistResumeGating() {
   const roots = el.histDetail ? [...el.histDetail.querySelectorAll('.hd')] : [];
   for (const root of roots) {
     const btn = root.querySelector('.hd-resume');
     if (!btn || btn.hidden) continue;
-    // An IN-FLIGHT resume owns its button outright: applyHistResumeGate would
-    // re-enable it mid-POST (second click = second POST /api/resume).
-    if (btn.dataset.resumeState === 'busy') continue;
-    // A FAILED one does not get to opt out of budget gating for the life of the
-    // screen (the detail screen is never rebuilt, and nothing clears the flag) —
-    // otherwise a `cost_total` block that lands later leaves the button enabled and
-    // the user clicks into a guaranteed 403. Re-gate, then restore the D3 error
-    // title when gating did not take the button away.
-    applyHistResumeGate(btn, root.dataset.pauseReason || '', budgetState.budget, root.dataset.pauseDetail || '');
-    if (btn.dataset.resumeState === 'error' && btn.dataset.resumeError && !btn.disabled) {
-      btn.title = btn.dataset.resumeError;
-    }
+    if (btn.dataset.resumeState === 'busy') continue;   // an in-flight resume (gateHdResume)
+    const live = histDetailState && histDetailState.screen === root ? hdLiveRun(histDetailState.record) : null;
+    gateHdResume(btn, hdResumeReason(root, live));
   }
 }
 
@@ -17787,6 +19493,11 @@ function routeHistoryDetail(param, { instant = false } = {}) {
 function histRecordFor(parsed) {
   const hit = (state.historyAll || []).find((r) => r && r.id === parsed.id && r.projectKey === parsed.projectKey);
   if (hit) return hit;
+  // The Archived feed is its own source of truth (archived rows never enter
+  // historyAll): without this an archived run opens as the stub below — no
+  // projectDir, no title — and the glance head prints "(no project)".
+  const arch = (state.historyArchived || []).find((r) => r && r.id === parsed.id && r.projectKey === parsed.projectKey);
+  if (arch) return arch;
   // Deep link before the list loaded: a minimal record is enough for the keyed
   // detail/log/diff URL builders (they only read projectKey/target). It has NO
   // pauseReason and NO retainedWork — neither lives in the detail payload — so
@@ -17808,6 +19519,7 @@ function openHistDetail(parsed, { instant = false } = {}) {
   const record = histRecordFor(parsed);
   histDetailState = { key: parsed.projectKey, id: parsed.id, record, data: null, screen: null };
 
+  destroyActionsIn(host);                   // the old screen's Actions controller stops following frames
   destroyGraphMounts(host);                 // a detail->detail hop never passes closeHistDetail
   host.innerHTML = '';
   host.scrollTop = 0;                       // a prior visit's scroll must not carry over
@@ -17852,6 +19564,7 @@ function openHistDetail(parsed, { instant = false } = {}) {
   const ship = pendingShipIt;
   pendingShipIt = null;
   loadHistDetailScreen(screen, record, parsed, ship);
+  paintActionsHeaders();
 }
 
 // Double rAF: one frame is not always enough for the browser to commit the
@@ -17868,13 +19581,16 @@ function closeHistDetail({ instant = false } = {}) {
   // Same class, same reason — and the detail->list hop inside History never reaches
   // showView (the view name does not change), so this is the only call that covers it.
   // Safe above the detail-open early return, like closeShipItModal: #report-modal
-  // opens ONLY from the detail screen, never from a list card (that is what keeps
-  // #stop-modal below closeRunDetail's guard).
+  // opens ONLY from the detail screen, never from a list card.
   closeReportModal();
   const shell = el.histShell;
   const host = el.histDetail;
   if (!shell || !host) return;
   if (!shell.classList.contains('detail-open')) { histDetailState = null; hdCommentState = null; return; }
+  destroyActionsIn(host);
+  // The bar's Stop opens #stop-modal too, and showView closes it only when leaving
+  // Running. Below the early return: the run page's own Stop is closeRunDetail's.
+  closeStopModal();
   histDetailState = null;
   hdCommentState = null;
   host.setAttribute('aria-hidden', 'true');
@@ -17937,9 +19653,17 @@ async function loadHistDetailScreen(screen, record, parsed, ship = null) {
   // continuation runs first — the list paint happens while this screen's `data`
   // is still null, and nothing else would re-resolve the record afterwards. The
   // minimal {id, projectKey} stub would then stick for the life of the screen.
-  const row = (state.historyAll || []).find(
-    (r) => r && r.id === parsed.id && r.projectKey === parsed.projectKey);
+  const matchRow = (r) => r && r.id === parsed.id && r.projectKey === parsed.projectKey;
+  const row = (state.historyAll || []).find(matchRow)
+    // An ARCHIVED deep link resolves from the Archived feed when it has loaded;
+    // an archived row never appears in historyAll, so without this the stub —
+    // no projectDir, no title — sticks and the glance head prints "(no project)".
+    || (state.historyArchived || []).find(matchRow);
   if (row) histDetailState.record = row;
+  // A deep-linked ARCHIVED run on a cold feed: the payload's stamp says the row
+  // lives in the archived feed, so fetch that feed now (its lazy load runs
+  // refreshHdFromRow at the end, which repairs the stub record and repaints).
+  if (!row && data.state.archivedAt) loadHistoryArchived();
   const rec = histDetailState.record;
 
   // (3) PAINT — deliberately OUTSIDE the fetch try. A painter bug must not be
@@ -17953,7 +19677,7 @@ async function loadHistDetailScreen(screen, record, parsed, ship = null) {
   // carries `record` in the bag for the keyed artifact route); v1: the untouched
   // column painter, as a thunk.
   paintGraphFor(flow, st.stepper, isGraphManifest(st.stepper) ? Object.assign(
-    decorFromState(st, { live: false, now: 0, subsOf: (id) => subAgentsForNode(st, id) }),
+    decorFromState(st, { live: false, now: 0, subsOf: (id) => subAgentsForNode(st, id), modelLabel: graphModelLabel }),
     { run: st, runId: parsed.id, mode: 'monitor', record: rec }) : null, st.steps);
   if (isGraphManifest(st.stepper)) paintQuiescenceBanner(screen.querySelector('.hd-banners'), decorFromState(st, { live: false, now: 0 }));
 
@@ -17989,7 +19713,7 @@ async function loadHistDetailScreen(screen, record, parsed, ship = null) {
       rec.pr = null;
     }
     paintHdPr(screen, rec, data);
-    paintHdAfter(screen, rec);
+    paintHdAfter(screen, rec, data);
     // histCanShip carries both old belts plus the workspace rule:
     //  - `!rec.pr` (single runs) — the stale-button -> double-POST race is fixed at the
     //    source (the ship path calls patchHistoryPr); this is the backstop.
@@ -18238,8 +19962,8 @@ function openShipItModal(record, data) {
   // (No `&& !record.branch` term: histPrEligible gates BOTH doors into this modal
   // and requires `branch`, so that clause could never be false.)
   q('.shipit-summary').hidden = nFiles == null && added == null;
-  const err = q('.shipit-err');
-  err.hidden = true; err.textContent = '';
+  const card = q('.shipit-actions').parentElement;
+  cardAlert(card, null);
   resetShipItDesc(modal);
   const okBtn = q('.shipit-ok');
   okBtn.disabled = false; okBtn.textContent = 'Open pull request';
@@ -18340,6 +20064,7 @@ function openShipItModal(record, data) {
     okBtn.disabled = true;
     okBtn.textContent = 'Opening…';
     setShipItRemotesDisabled(modal, true);
+    cardAlert(card, null);
     const payload = { projectDir: record.projectDir || null, projectKey: record.projectKey, id: record.id };
     if (!q('.shipit-remotes').hidden) {
       payload.pushRemote = q('.shipit-push-remote').value;
@@ -18368,7 +20093,7 @@ function openShipItModal(record, data) {
       const screen = histDetailState && histDetailState.screen;
       if (screen) {
         paintHdPr(screen, record, histDetailState.data);
-        paintHdAfter(screen, record);
+        paintHdAfter(screen, record, histDetailState.data);
         const mergeEl = screen.querySelector('.hist-merge');
         if (mergeEl) {
           setMergePill(mergeEl, dd.mergeable);
@@ -18387,8 +20112,7 @@ function openShipItModal(record, data) {
       okBtn.disabled = false;
       okBtn.textContent = 'Open pull request';
       if (!q('.shipit-remotes').hidden || !q('.shipit-base-wrap').hidden) setShipItRemotesDisabled(modal, false);
-      err.hidden = false;
-      err.textContent = `Could not open PR: ${e2.message}`;
+      cardAlert(card, { title: 'Not shipped', detail: e2.message });
     }
   };
   okBtn.addEventListener('click', onOk);
@@ -18397,6 +20121,7 @@ function openShipItModal(record, data) {
   document.addEventListener('keydown', onKey);
   descBox.addEventListener('click', onDescClick);
   loadShipItRemotes(modal, record, gen, () => closed);
+  paintShipItTry(modal, record, gen, () => closed);
 }
 
 // A finished run on the Running page reads its PR from History's rows, and gets no live
@@ -18639,8 +20364,8 @@ function openShipItWsModal(record, data) {
     list.appendChild(p);
   }
   list.hidden = false;
-  const err = q('.shipit-err');
-  err.hidden = true; err.textContent = '';
+  const card = q('.shipit-actions').parentElement;
+  cardAlert(card, null);
   const okBtn = q('.shipit-ok');
   let openedHere = false;
   const picked = () => rows.filter((r) => r.pick && r.pick.checked && !r.done);
@@ -18684,7 +20409,7 @@ function openShipItWsModal(record, data) {
     if (!batch.length) { done(); return; }             // the "Close" state after a finished batch
     okBtn.disabled = true;
     okBtn.textContent = 'Opening…';
-    err.hidden = true; err.textContent = '';
+    cardAlert(card, null);
     for (const r of rows) { r.busy = true; setShipItRowDisabled(r, true); }
     const opened = [];
     const failedRows = [];
@@ -18727,8 +20452,7 @@ function openShipItWsModal(record, data) {
         'Opened ones stay open — fix the cause and retry the rest.');
     }
     if (note) msgs.push(note);
-    err.textContent = msgs.join(' ');
-    err.hidden = false;
+    cardAlert(card, { title: 'Not shipped', detail: msgs.join(' ') });
     paintOk();
   };
   okBtn.addEventListener('click', onOk);
@@ -18818,17 +20542,19 @@ function hdSyncPr(projectKey, id, row) {
   if (histDetailState.id !== id || histDetailState.key !== projectKey) return;
   if (row) histDetailState.record = row;   // a deep link's minimal record upgrades to the real row
   paintHdPr(histDetailState.screen, histDetailState.record, histDetailState.data);
-  paintHdAfter(histDetailState.screen, histDetailState.record);
+  paintHdAfter(histDetailState.screen, histDetailState.record, histDetailState.data);
   paintHdGlance(histDetailState.screen, histDetailState.record, histDetailState.data);
 }
 
 // ── History glance ──────────────────────────────────────────────────────────
-// The Running page's status line, trail and result sheet over the SAVED run. The
-// actions are mirrors: each glance button clicks the Details header's own control
-// (Create PR, Resume, Schedule after), so there is one wiring and one busy state.
+// The Running page's status line, trail and result sheet over the SAVED run. The run
+// controls sit in the shared bar, as on the Running page; the card's one action, the
+// pull request, mirrors the Details header's control, so there is one wiring and one
+// busy state.
 function paintHdGlance(screen, record, data) {
   const glance = screen && screen.querySelector('.hd-glance');
   if (!glance || !data || !data.state) return;
+  void loadHdAwayAnswers(screen, record && record.id, data.state.steps);   // `st` is declared below (TDZ)
   const st = data.state;
   const run = { status: st.status, steps: st.steps, stepper: st.stepper, pendingQuestion: null, active: st.active };
   const meta = histStatusMeta({ status: st.status });
@@ -18853,116 +20579,163 @@ function paintHdGlance(screen, record, data) {
 
   // Time · Cost · Changes, as on the Running page in every state.
   const activeMs = typeof st.totalActiveMs === 'number' ? st.totalActiveMs : liveTotalMs(st.steps, 0);
-  paintGlanceFacts(glance, { summary: s || null, activeMs, cost: st.totalCostUsd || 0 });
+  paintGlanceFacts(glance, { summary: s || null, activeMs, cost: st.totalCostUsd || 0,
+    costNote: costSummaryText(runCostBreakdown(st.steps, st.totalCostUsd), fmtUsd) });
 
   // The result: every tab, the actions. The things to check live in Overview only.
   const host = glance.querySelector('.hd-result');
   host.replaceChildren();
-  const done = copy.state === 'done';
   const trail = trailColumns(run);
   host.append(...rdActivityGroups(screen, {
     overview: activityOverviewValue(results),
     workflow: trail.count ? `${trail.count} step${trail.count === 1 ? '' : 's'}` : '',
   }));
 
-  // Mirrors of the Details header's controls: visible exactly when theirs are. A
-  // merged pull request is a fact (the headline), so its link is secondary.
-  const acts = document.createElement('div');
-  acts.className = 'rd-result-actions';
-  const mirror = (sel, label, cls, icon) => {
-    const src = screen.querySelector(sel);
-    if (!src || src.hidden || !levelAtLeast(src.dataset.minLevel || 'simple')) return;
-    if (src.tagName === 'A') {
-      const a = document.createElement('a');
-      a.className = `rd-cta ${cls}`;
-      a.href = src.href;
-      a.target = '_blank';
-      a.rel = 'noopener';
-      setCtaContent(a, icon, label);
-      acts.appendChild(a);
-      return;
-    }
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = `rd-cta ${cls}`;
-    setCtaContent(b, icon, label);
-    b.addEventListener('click', () => src.click());
-    acts.appendChild(b);
-  };
-  const finished = done || RD_TERMINAL.includes(st.status);
-  mirror('.hd-resume', 'Resume', 'hd-g-resume', 'resume');
-  splitGlanceResume(screen, acts);
-  mirror('.hd-pr', 'Create pull request', 'hd-g-pr', 'pr-create');
-  mirror('.hd-pr-link', 'View pull request', `hd-g-pr-link${pr === 'MERGED' ? ' alt' : ''}`, pr === 'MERGED' ? 'merged' : 'pr-open');
-  mirror('.hd-after', finished ? 'Start a follow-up run' : 'Schedule a run after this', 'alt hd-g-after', finished ? 'follow-up' : 'schedule');
-  if (acts.childNodes.length) host.appendChild(acts);
-}
-
-// The glance's Resume mirrors the Details split as well: a caret whose "Resume at…"
-// drives the Details item, so there is one scheduling path and one cap gate. Rebuilt
-// with the glance on every repaint, like the mirrors themselves.
-function splitGlanceResume(screen, acts) {
-  const cta = acts.querySelector('.hd-g-resume');
-  const split = screen.querySelector('.hd-resume-split');
-  const srcMore = screen.querySelector('.hd-resume-more');
-  const srcItem = screen.querySelector('.hd-resume-at-item');
-  if (!cta || !split || split.hidden || !srcMore || !srcItem || !levelAtLeast(srcMore.dataset.minLevel || 'simple')) return;
-  const wrap = document.createElement('div');
-  wrap.className = 'btn-split hd-g-resume-split';
-  const more = document.createElement('button');
-  more.type = 'button';
-  more.className = 'btn-split-more hd-g-resume-more';
-  more.setAttribute('aria-haspopup', 'menu');
-  more.setAttribute('aria-expanded', 'false');
-  more.title = 'Schedule the resume';
-  more.setAttribute('aria-label', 'Schedule the resume');
-  const caret = srcMore.querySelector('svg');
-  if (caret) more.append(caret.cloneNode(true));
-  const menu = document.createElement('div');
-  menu.className = 'btn-split-menu hd-g-resume-menu';
-  menu.setAttribute('role', 'menu');
-  menu.hidden = true;
-  const item = document.createElement('button');
-  item.type = 'button';
-  item.setAttribute('role', 'menuitem');
-  item.className = 'hd-g-resume-at';
-  const b = document.createElement('b'); b.textContent = 'Resume at…';
-  const small = document.createElement('small'); small.textContent = 'Schedule the resume';
-  item.append(b, small);
-  item.disabled = srcItem.disabled;
-  item.title = srcItem.title;
-  menu.append(item);
-  cta.replaceWith(wrap);
-  wrap.append(cta, more, menu);
-  const close = () => { if (!menu.hidden) { menu.hidden = true; more.setAttribute('aria-expanded', 'false'); } };
-  more.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const open = menu.hidden;
-    menu.hidden = !open;
-    more.setAttribute('aria-expanded', open ? 'true' : 'false');
-    (open ? item : more).focus();
-  });
-  item.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (item.disabled) return;
-    close();
-    srcItem.click();
-  });
-  menu.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { e.stopPropagation(); close(); more.focus(); }
-  });
+  // The pull request, mirrored from the Details header's control into the card's slot
+  // (paintPrCta, outside the host rebuilt above): visible exactly when it is, so at most one
+  // button, coloured by the PR's state. While the lookup runs (and the control's level shows
+  // it), the slot holds the placeholder that morphs into whichever button the answer brings.
+  const shown = (src) => !!src && levelAtLeast(src.dataset.minLevel || 'simple');
+  const createBtn = screen.querySelector('.hd-pr');
+  const link = screen.querySelector('.hd-pr-link');
+  const slot = glance.querySelector('.rd-pr-slot');
+  if (shown(link) && !link.hidden) {
+    paintPrCta(slot, { state: pr === 'MERGED' ? 'merged' : 'view', href: link.href, cls: 'hd-g-pr-link' });
+  } else if (shown(createBtn) && !createBtn.hidden) {
+    // The one wiring: the header's button opens the ship-it modal (re-read at click time).
+    paintPrCta(slot, { state: 'create', cls: 'hd-g-pr', onClick: () => { const b = screen.querySelector('.hd-pr'); if (b) b.click(); } });
+  } else if (pr === 'PENDING' && shown(createBtn)) {
+    paintPrCta(slot, { state: 'pending' });
+  } else {
+    paintPrCta(slot, { state: 'none' });
+  }
 }
 
 // Detail-header PR control from the record's tri-state (undefined = enrichment
 // pending -> hidden; null = resolved/none -> Create when eligible; object = link).
 // Link-first: a merged-but-branch-gone run still shows "Merged".
 // Run chains: every pipeline can be waited for — the button deep-links to New pipeline with the pick made.
-function paintHdAfter(screen, record) {
+// The record's status is the list row's (fresher than the load-time payload); a deep link's stub has
+// none, so the detail payload's stands in.
+function paintHdAfter(screen, record, data = null) {
   const btn = screen.querySelector('.hd-after');
   if (!btn) return;
+  // An ARCHIVED run is a read-only record: the chain gate deliberately refuses an
+  // archived predecessor ("was archived", spec D9), so hide the follow-up until the
+  // run is restored — hiding beats a late failure in the New-pipeline form.
+  const archived = !!(data && data.state && data.state.archivedAt);
   const id = record && record.id ? record.id : null;
-  btn.hidden = !id;
-  btn.onclick = id ? () => { location.hash = `#new/after/${id}`; } : null;   // never a handler over a null record
+  btn.hidden = !id || archived;
+  btn.onclick = (id && !archived) ? () => { location.hash = `#new/after/${id}`; } : null;   // never a handler over a null record
+  const status = (record && record.status) || (data && data.state && data.state.status) || '';
+  const title = runAfterTitle(String(status).toLowerCase());
+  btn.title = title;
+  btn.setAttribute('aria-label', title);
+}
+
+// Run after's words, on both run pages' bars: a finished run is followed up, any other waited for.
+function runAfterTitle(status) {
+  return RD_TERMINAL.includes(status) ? 'Start a follow-up run' : 'Schedule a run after this';
+}
+
+// The pipeline's newest run in this tab's runs map (latestPipelineRun: never a superseded
+// lineage) that the current server knows. An entry from before a server restart died with the
+// old process: its run is neither live nor the end of the pipeline (the saved state rules).
+function hdPipelineRun(record) {
+  return record && record.id ? latestPipelineRun(record.id, { currentBoot: true }) : null;
+}
+
+// That run while it is not over. POST /api/pause and /api/stop take a live runId, which the
+// saved run does not have (a PAUSED saved run is stopped by its pipeline id instead).
+function hdLiveRun(record) {
+  const r = hdPipelineRun(record);
+  return r && !RD_TERMINAL.includes(r.status) ? r : null;
+}
+
+// What the bar's Resume is gated on: the live run's pause reason when the pipeline has one (it
+// paused after this screen loaded), else the one paintHdBanners stamped on the screen.
+function hdResumeReason(screen, live) {
+  return live
+    ? { reason: live.pauseReason || '', detail: live.pauseDetail || '' }
+    : { reason: screen.dataset.pauseReason || '', detail: screen.dataset.pauseDetail || '' };
+}
+
+// Budget-gate the bar's Resume. Callers skip an IN-FLIGHT resume: it owns its button outright,
+// and applyHistResumeGate would re-enable it mid-POST (second click = second POST /api/resume).
+// A FAILED one does not get to opt out of budget gating for the life of the screen (the detail
+// screen is never rebuilt, and nothing clears the flag) — otherwise a `cost_total` block that
+// lands later leaves the button enabled and the user clicks into a guaranteed 403. Re-gate,
+// then restore the D3 error title when gating did not take the button away.
+function gateHdResume(btn, { reason, detail }) {
+  applyHistResumeGate(btn, reason, budgetState.budget, detail);
+  if (btn.dataset.resumeState === 'error' && btn.dataset.resumeError && !btn.disabled) {
+    btn.title = btn.dataset.resumeError;
+  }
+}
+
+// The bar's run controls that follow the pipeline's live run, by paintRdHeader's rules: Pause
+// while it is not paused, Stop while it is not over, the Resume split while it is paused (with no
+// live run, a paused saved run offers Stop too: it is stopped through its row). With
+// no live run, Resume keeps the saved state's rule (paused + interrupted only, D3, and only while
+// a resume point exists — v1 points were retired by the v2 upgrade; a LIVE snapshot has no
+// `resumable` field, so `!== false` keeps the live path untouched).
+// Idempotent: runs on load, when the row lands and on every run frame (renderRunningView).
+function paintHdLive(screen, record, data) {
+  const pauseBtn = screen.querySelector('.hd-pause');
+  const stopBtn = screen.querySelector('.hd-stop');
+  if (!pauseBtn || !stopBtn) return;
+  const live = hdLiveRun(record);
+  // No live run but a pipeline run in this tab: its newest run ended (resumed elsewhere, then
+  // finished), so the load-time pause is stale and the pipeline is over.
+  const over = !live && !!hdPipelineRun(record);
+  // The saved run's status: the History row when it has one — `pipelines-changed` refreshes it
+  // (refreshHdFromRow), so a stop or resume from another tab, the CLI or chat lands here — else
+  // the detail loaded with the page (a deep link's minimal record carries no status).
+  const savedStatus = String((record && record.status) || (data.state && data.state.status) || '').toLowerCase();
+  // An archived run is a read-only record: no resume, and the stop refuses it (stopPausedRun).
+  const archived = !!(data.state && data.state.archivedAt);
+  // A paused saved run no run in this tab stands for is stopped through its row (POST /api/stop
+  // {pipelineId}). An interrupted one never is: it stays resumable.
+  const pausedSaved = !live && !over && !archived && savedStatus === 'paused';
+  pauseBtn.hidden = !live || isPaused(live);
+  stopBtn.hidden = live ? live.status === 'interrupted' : !pausedSaved;
+  // pauseRun disables Pause and re-enables it only on failure, and frames keep landing before
+  // the run flips to `pausing` (C16): never re-enable mid-request. Only a new live run (a
+  // resume mints a fresh runId) re-arms it.
+  const runId = live ? live.runId : '';
+  if (pauseBtn.dataset.runId !== runId) { pauseBtn.dataset.runId = runId; pauseBtn.disabled = false; }
+  if (live && live.status === 'pausing') pauseBtn.disabled = true;
+
+  const split = screen.querySelector('.hd-resume-split');
+  const resumeBtn = screen.querySelector('.hd-resume');
+  if (!split || !resumeBtn || resumeBtn.dataset.resumeState === 'busy') return;
+  const st = data.state;
+  // An ARCHIVED run has no run dir to resume from (archive reclaimed it); a restored one
+  // keeps its resume_point but the detail read has already dropped st.resumable for the
+  // same reason — hide the split either way instead of failing deep in the engine.
+  const resumable = !archived && (live ? isPaused(live)
+    : !over && HD_RESUMABLE.has(savedStatus) && st.resumable !== false);
+  split.hidden = !resumable;
+  resumeBtn.hidden = !resumable;
+  const resumeMore = screen.querySelector('.hd-resume-more');
+  const resumeMenu = screen.querySelector('.hd-resume-menu');
+  if (!resumable) {
+    if (resumeMenu) resumeMenu.hidden = true;
+    if (resumeMore) resumeMore.setAttribute('aria-expanded', 'false');
+    return;
+  }
+  const gate = hdResumeReason(screen, live);
+  gateHdResume(resumeBtn, gate);
+  // Scheduled resume ("Resume at…" in the split's menu): every resumable pause; cap pauses
+  // KEEP the arrow but DISABLE the item (clarify: caps are live decisions).
+  const resumeAtItem = screen.querySelector('.hd-resume-at-item');
+  if (resumeAtItem) {
+    const refused = SCHEDULE_REFUSED_PAUSE.has(gate.reason);
+    resumeAtItem.disabled = refused;
+    resumeAtItem.title = refused
+      ? 'This run paused on a cost cap — continuing past it is a live decision and cannot be scheduled.'
+      : '';
+  }
 }
 
 function paintHdPr(screen, record, data) {
@@ -19059,6 +20832,7 @@ function paintHdHeaderMeta(screen, record, data) {
   const st = data.state;
   paintAutoBadge(screen.querySelector('.hd-row1 .auto-badge'), st && st.stepper);
   const meta = screen.querySelector('.hd-meta');
+  const costFocus = costTriggerFocused(meta);
   meta.innerHTML = '';
   const { family, word } = histStatusMeta({ status: st.status });
   const w = document.createElement('span');
@@ -19080,6 +20854,7 @@ function paintHdHeaderMeta(screen, record, data) {
     if (cls === 'hd-cost') seg.title = estTitle(st.totalCostUsd);
     meta.appendChild(seg);
   }
+  paintCostBreakdown(screen.querySelector('.hd-header'), meta.querySelector('.hd-cost'), runCostBreakdown(st.steps, st.totalCostUsd), costFocus);
   // Scheduled runs: say HOW this run started — "by schedule" links to the Schedules view.
   if (st.scheduledFor) {
     meta.appendChild(hdDot());
@@ -19170,6 +20945,7 @@ function paintHdHeaderMeta(screen, record, data) {
   base.textContent = source ? `${source} →` : '';
   base.hidden = !source;
   copyBtn.hidden = !feature;
+  paintPageBranch(screen.querySelector('.hd-glance'), feature);
   if (feature) {
     screen.querySelector('.hd-branch-name').textContent = feature;
     if (copyBtn.dataset.bound !== '1') {              // paintHdHeaderMeta re-runs (refreshHdFromRow)
@@ -19197,7 +20973,8 @@ function btnLabelEl(btn) { return btn.querySelector('.hd-btn-label') || btn; }
 
 // The POST /api/resume -> upsert -> seed-log -> land-on-running recipe, shared by
 // the detail header and the cost-override path.
-async function resumePipeline(p, projectDir, btn, { ignoreCostCap = false, pastTeamCap = false, policyReason = null, baseAck = false } = {}) {
+async function resumePipeline(p, projectDir, btn, opts = {}) {
+  const { ignoreCostCap = false, pastTeamCap = false, policyReason = null, baseAck = false } = opts;
   const labelEl = btnLabelEl(btn);
   btn.disabled = true;
   // Claim the button for the duration of the round-trip (and keep the failure
@@ -19274,6 +21051,8 @@ async function resumePipeline(p, projectDir, btn, { ignoreCostCap = false, pastT
     btn.disabled = false;
     labelEl.textContent = label;
     btn.title = btn.dataset.resumeError;             // D3: the server's 400 surfaces here
+    notify({ tone: 'err', title: 'Could not resume the run', detail: err.message, key: `resume-${p.id}`,
+      action: { label: 'Retry', run: () => resumePipeline(p, projectDir, btn, opts) } });
   }
 }
 
@@ -19314,11 +21093,8 @@ async function scheduleResumeAt({ pipelineId, title, projectDir = null, workspac
   } catch (err) {
     if (btn) btn.disabled = false;
     // The menu has closed by now, so the reason needs a surface of its own.
-    const open = await confirmModal({
-      title: 'Could not schedule the resume', message: err.message, messageTone: 'err',
-      confirmLabel: 'Open Schedules', cancelLabel: 'Close',
-    });
-    if (open) location.hash = 'schedules/once';
+    notify({ tone: 'err', title: 'Could not schedule the resume', detail: err.message,
+      action: { label: 'Open Schedules', run: () => { location.hash = 'schedules'; } } });
   }
 }
 
@@ -19521,66 +21297,87 @@ function hdSetArchiveGate(btn, retained) {
 
 function setupHdActions(screen, record, data) {
   const st = data.state;
-  const status = String(st.status || '').toLowerCase();
   const retained = paintHdBanners(screen, record, data);
 
-  // Resume: paused + interrupted only (D3), and only while a resume point exists
-  // (v1 points were retired by the v2 upgrade). A LIVE snapshot has no
-  // `resumable` field, so `!== false` keeps the live path untouched.
+  // The bar's run controls. Bound unconditionally, once: their visibility follows the
+  // pipeline's live run (paintHdLive, every frame), so a pipeline that pauses after the
+  // screen loaded offers a working Resume. Every handler resolves the record at CLICK time.
   const resumeBtn = screen.querySelector('.hd-resume');
-  if (HD_RESUMABLE.has(status) && st.resumable !== false) {
-    resumeBtn.hidden = false;
-    applyHistResumeGate(resumeBtn, screen.dataset.pauseReason || '', budgetState.budget, screen.dataset.pauseDetail || '');
-    resumeBtn.addEventListener('click', () => {
-      const r = hdCurrentRecord(record);              // never the load-time object
-      resumePipeline(r, r.projectDir || null, resumeBtn);
-    });
-  }
+  resumeBtn.addEventListener('click', () => {
+    const r = hdCurrentRecord(record);              // never the load-time object
+    resumePipeline(r, r.projectDir || null, resumeBtn);
+  });
 
-  // Scheduled resume ("Resume at…" in the split's menu): every resumable pause; cap
-  // pauses KEEP the arrow but DISABLE the item (clarify: caps are live decisions).
-  const resumeSplit = screen.querySelector('.hd-resume-split');
+  // Scheduled resume ("Resume at…" in the split's menu); paintHdLive gates the item.
   const resumeMore = screen.querySelector('.hd-resume-more');
   const resumeMenu = screen.querySelector('.hd-resume-menu');
   const resumeAtItem = screen.querySelector('.hd-resume-at-item');
-  const pauseReasonForSchedule = screen.dataset.pauseReason || '';
-  if (HD_RESUMABLE.has(status) && st.resumable !== false) {
-    if (resumeSplit) resumeSplit.hidden = false;
-    const refused = SCHEDULE_REFUSED_PAUSE.has(pauseReasonForSchedule);
-    if (resumeAtItem) {
-      resumeAtItem.disabled = refused;
-      resumeAtItem.title = refused
-        ? 'This run paused on a cost cap — continuing past it is a live decision and cannot be scheduled.'
-        : '';
-    }
-    if (resumeMore && resumeMenu && resumeAtItem) {
-      const closeResumeMenu = () => {
-        if (!resumeMenu.hidden) { resumeMenu.hidden = true; resumeMore.setAttribute('aria-expanded', 'false'); }
-      };
-      resumeMore.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const open = resumeMenu.hidden;
-        resumeMenu.hidden = !open;
-        resumeMore.setAttribute('aria-expanded', open ? 'true' : 'false');
-        (open ? resumeAtItem : resumeMore).focus();
-      });
-      resumeAtItem.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (resumeAtItem.disabled) return;
-        closeResumeMenu();
-        const r = hdCurrentRecord(record);   // never the load-time object (record-identity rule)
-        scheduleResumeAt({ pipelineId: r.id, title: r.title, projectDir: r.projectDir || null, workspaceId: r.workspaceId || null }, resumeAtItem);
-      });
-      resumeMenu.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') { e.stopPropagation(); closeResumeMenu(); resumeMore.focus(); }
-      });
-    }
+  if (resumeMore && resumeMenu && resumeAtItem) {
+    const closeResumeMenu = () => {
+      if (!resumeMenu.hidden) { resumeMenu.hidden = true; resumeMore.setAttribute('aria-expanded', 'false'); }
+    };
+    resumeMore.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = resumeMenu.hidden;
+      resumeMenu.hidden = !open;
+      resumeMore.setAttribute('aria-expanded', open ? 'true' : 'false');
+      (open ? resumeAtItem : resumeMore).focus();
+    });
+    resumeAtItem.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (resumeAtItem.disabled) return;
+      closeResumeMenu();
+      const r = hdCurrentRecord(record);   // never the load-time object (record-identity rule)
+      scheduleResumeAt({ pipelineId: r.id, title: r.title, projectDir: r.projectDir || null, workspaceId: r.workspaceId || null }, resumeAtItem);
+    });
+    resumeMenu.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); closeResumeMenu(); resumeMore.focus(); }
+    });
   }
+
+  // Pause / Stop: the pipeline's live run, resolved at CLICK time (record-identity rule; a
+  // resume mints a new live run), never the one painted at bind time.
+  const pauseBtn = screen.querySelector('.hd-pause');
+  pauseBtn.addEventListener('click', async () => {
+    if (pauseBtn.disabled) return;   // a pause request is in flight (C16)
+    const live = hdLiveRun(hdCurrentRecord(record));
+    if (!live) return;
+    // pauseRun logs a failure to the run's log, which this page does not show: say it inline, and
+    // take it away once a retry goes through (only our own line: the slot is shared).
+    const failed = await pauseRun(live.runId, pauseBtn);
+    const errEl = screen.querySelector('.hd-error');
+    if (failed && errEl) { errEl.hidden = false; errEl.textContent = `Could not pause: ${failed}`; }
+    else if (errEl && errEl.textContent.startsWith('Could not pause: ')) { errEl.hidden = true; errEl.textContent = ''; }
+  });
+  screen.querySelector('.hd-stop').addEventListener('click', () => {
+    const rec = hdCurrentRecord(record);
+    const live = hdLiveRun(rec);
+    if (live) { openStopModal({ runId: live.runId }); return; }
+    // A paused saved run: stopped through its row, then this page re-reads what it became.
+    const st = histDetailState && histDetailState.data ? histDetailState.data.state : null;
+    if (!st || String((rec && rec.status) || st.status || '').toLowerCase() !== 'paused') return;
+    openStopModal({
+      pipelineId: rec.id, title: st.title || rec.title || rec.id,
+      branch: (st.branch && st.branch.feature) || '',
+      onStopped: () => {
+        // The list row says so at once (Needs you drops it) and its repaint re-reads this page
+        // (refreshHdFromRow) — once, whichever lands first, this or the `pipelines-changed` reload.
+        const row = (state.historyAll || []).find((p) => p && p.id === rec.id && p.projectKey === rec.projectKey);
+        if (row) { row.status = 'stopped'; paintHistory(); }
+        else reloadHistDetail();
+      },
+    });
+  });
+  paintHdLive(screen, record, data);
 
   // Archive: honest copy (D2), confirmModal (not window.confirm). Deletability is
   // judged on the AUTHORITATIVE detail status (a deep link's minimal record has none).
+  // An ARCHIVED run flips the menu to Restore instead: Archive must not re-run over a
+  // row whose FS was already reclaimed (the server would only stamp a second archive).
   const archiveBtn = screen.querySelector('.hd-archive');
-  if (isDeletableEntry({ ...record, status: st.status })) {
+  const restoreBtn = screen.querySelector('.hd-restore');
+  const archived = !!st.archivedAt;
+  if (!archived && isDeletableEntry({ ...record, status: st.status })) {
     archiveBtn.hidden = false;
     hdSetArchiveGate(archiveBtn, retained);
     archiveBtn.addEventListener('click', async () => {
@@ -19594,10 +21391,12 @@ function setupHdActions(screen, record, data) {
       delete archiveBtn.dataset.archiveState; archiveBtn.disabled = false;
       // Spec §5.2/D2 fixes this copy VERBATIM — do not paraphrase (only the
       // run-title context line above it is ours; only the page name changed when
-      // History merged into Runs). `.confirm-message` already
+      // History merged into Runs). The title says "run", matching the Runs page's
+      // own naming; the message body below is the spec's, untouched.
+      // `.confirm-message` already
       // declares white-space:pre-line, so the blank line renders as a paragraph.
       const ok = await confirmModal({
-        title: 'Archive this pipeline?',
+        title: 'Archive this run?',
         message: `${r.title || r.id}\n\nIt moves out of Runs. The local branch, worktree, and run artifacts (logs, results, diff) are removed. The remote branch and any open PR stay untouched.${chainNote}`,
         confirmLabel: 'Archive',
         danger: true,
@@ -19613,6 +21412,12 @@ function setupHdActions(screen, record, data) {
         const dd = await safeJson(res);
         if (!res.ok) throw new Error((dd && dd.error) || `HTTP ${res.status}`);
         state.historyAll = state.historyAll.filter((x) => !(x && x.id === r.id && x.projectKey === r.projectKey));
+        // The archived feed too, so a revisit of the Archived toggle does not show the
+        // just-archived run as still archived.
+        if (state.historyArchived) {
+          state.historyArchived = state.historyArchived.filter((x) => !(x && x.id === r.id && x.projectKey === r.projectKey));
+          paintRunsList();
+        }
         // The same guard loadHistoryView uses ("never cache empty/error"):
         // archiving the LAST pipeline would otherwise persist `{pipelines: []}`
         // and the next boot would paint an empty History from cache before the
@@ -19622,14 +21427,56 @@ function setupHdActions(screen, record, data) {
         if (m && m.pipelineId === r.id && (!m.projectKey || m.projectKey === r.projectKey)) forgetLastRun();
         paintHistory();
         goRunsList();                               // the list itself: the archived run is gone
+        notify({ tone: 'ok', title: 'Run archived' });
       } catch (err) {
         // Cleared only on failure: the success path navigates back to the list and
         // the screen (button included) is discarded.
         delete archiveBtn.dataset.archiveState;
         archiveBtn.disabled = false;
         label.textContent = 'Archive';
-        const errEl = screen.querySelector('.hd-error');   // spec §5.2: inline error
-        if (errEl) { errEl.hidden = false; errEl.textContent = `Could not archive: ${err.message}`; }
+        notify({ tone: 'err', title: 'Could not archive the run', detail: err.message, key: `archive-${r.id}`,
+          action: { label: 'Retry', run: () => archiveBtn.isConnected && archiveBtn.click() } });
+      }
+    });
+  }
+
+  // Restore (the Archived list's inverse): shown only when the AUTHORITATIVE detail says
+  // the run is archived. Same confirmModal pattern as Archive; the server clears
+  // archived_at, and nothing on disk comes back — the restored run is a read-only record
+  // with a working PR link, its audit timeline and its Statistics cost.
+  if (archived && restoreBtn) {
+    restoreBtn.hidden = false;
+    restoreBtn.addEventListener('click', async () => {
+      if (restoreBtn.disabled) return;
+      const r = hdCurrentRecord(record);              // never the load-time object
+      const ok = await confirmModal({
+        title: 'Restore this run?',
+        message: `${r.title || r.id}\n\nIt moves back into Runs with its PR link, Q&A, review verdicts and audit timeline. The run artifacts (logs, results, diff), branch and worktree were reclaimed by the archive and are not rebuilt.`,
+        confirmLabel: 'Restore',
+      });
+      if (!ok) return;
+      const label = btnLabelEl(restoreBtn);
+      restoreBtn.disabled = true;
+      label.textContent = 'Restoring…';
+      try {
+        const qs = runActionQuery(r.projectDir || null, r);
+        const res = await fetch(`/api/runs/${encodeURIComponent(r.id)}/restore?${qs.toString()}`, { method: 'POST' });
+        const dd = await safeJson(res);
+        if (!res.ok) throw new Error((dd && dd.error) || `HTTP ${res.status}`);
+        // The archived feed loses the row, and the plain list refreshes so the run
+        // re-enters Finished (its status is terminal).
+        state.historyArchived = (state.historyArchived || []).filter((x) => !(x && x.id === r.id && x.projectKey === r.projectKey));
+        loadHistoryView({ force: true });
+        // Back to the list under the SAME chip: from Archived, that is the rest of the
+        // archive (restoring several in a row), so the toast carries the way to the run.
+        goRunsList();
+        notify({ tone: 'ok', title: 'Run restored', key: `restore-${r.id}`,
+          action: { label: 'Open', run: () => { location.hash = `history/${r.projectKey}/${r.id}`; } } });
+      } catch (err) {
+        restoreBtn.disabled = false;
+        label.textContent = 'Restore';
+        notify({ tone: 'err', title: 'Could not restore the run', detail: err.message, key: `restore-${r.id}`,
+          action: { label: 'Retry', run: () => restoreBtn.isConnected && restoreBtn.click() } });
       }
     });
   }
@@ -19652,11 +21499,12 @@ function setupHdActions(screen, record, data) {
   // that goes terminal while the screen is open offers the button on the next visit,
   // exactly like Archive.
 
-  // The ⋯ trigger, gated on its own contents: a live run can be neither archived nor
-  // reported, and a trigger that opens onto an empty menu is worse than no trigger.
+  // The ⋯ trigger, gated on its own contents: a live run can be neither archived,
+  // restored nor reported, and a trigger that opens onto an empty menu is worse than
+  // no trigger.
   const moreBtn = screen.querySelector('.hd-more');
   const moreMenu = screen.querySelector('.hd-menu');
-  moreBtn.hidden = archiveBtn.hidden && reportBtn.hidden;
+  moreBtn.hidden = archiveBtn.hidden && reportBtn.hidden && (!restoreBtn || restoreBtn.hidden);
   moreBtn.addEventListener('click', () => {
     const opening = moreMenu.hidden;
     moreMenu.hidden = !opening;
@@ -19664,7 +21512,7 @@ function setupHdActions(screen, record, data) {
   });
 
   paintHdPr(screen, record, data);
-  paintHdAfter(screen, record);
+  paintHdAfter(screen, record, data);
 }
 
 // Re-run only the IDEMPOTENT painters after the open detail's real list row
@@ -19712,11 +21560,138 @@ document.addEventListener('click', (e) => {
   closeHdMenu();
 }, true);
 
+// ---- the header cost's breakdown (run page and History run page) -------------
+// The run page's meta line is rebuilt whenever what it says changes, and History's on every
+// paint, so a cost trigger can be replaced; the panel hangs off the header card (outside the
+// meta line), so an open panel survives the repaint. Old runs (no
+// Away mode, Auto workflow or run title share, no cut agent turns) keep the plain cost text and
+// get no panel. Bound once, module-level, like the ⋯ menu above. Escape is handled by the two
+// capture-phase detail-screen arms (closeCostPop), which would otherwise navigate before a local
+// listener ran.
+function costTriggerFocused(meta) {
+  const a = document.activeElement;
+  return !!(a && meta && meta.contains(a) && a.classList.contains('cost-bd-btn'));
+}
+
+function costPopFor(header) {
+  let pop = header.querySelector(':scope > .cost-pop');
+  if (!pop) {
+    pop = document.createElement('div');
+    pop.className = 'cost-pop';
+    pop.id = header.classList.contains('hd-header') ? 'hd-cost-pop' : 'rd-cost-pop';
+    pop.setAttribute('role', 'group');
+    pop.setAttribute('aria-label', 'Cost breakdown');
+    pop.hidden = true;
+    header.appendChild(pop);
+  }
+  return pop;
+}
+
+/** Under the trigger, clamped inside the header card (a phone-width card included). */
+function placeCostPop(header, btn, pop) {
+  const hb = header.getBoundingClientRect();
+  const bb = btn.getBoundingClientRect();
+  const w = pop.offsetWidth || 240;
+  pop.style.top = `${Math.round(bb.bottom - hb.top + 6)}px`;
+  pop.style.left = `${Math.round(Math.max(8, Math.min(bb.left - hb.left, hb.width - w - 8)))}px`;
+}
+
+/** Turn the meta line's cost segment into the panel's trigger when the run has a share or a cut-off
+ *  lower bound to show. */
+function paintCostBreakdown(header, seg, b, refocus = false) {
+  if (!header) return;
+  const pop = costPopFor(header);
+  if (!seg || (!b.lines.length && !b.cut.turns)) {
+    pop.hidden = true;
+    pop.replaceChildren();
+    delete pop.dataset.sig;
+    // A trigger the meta line kept, with nothing left to open: the plain cost again.
+    if (seg && seg.classList.contains('cost-bd-btn')) {
+      const span = document.createElement('span');
+      span.className = seg.className;
+      span.classList.remove('cost-bd-btn');
+      span.textContent = seg.textContent;
+      if (seg.title) span.title = seg.title;
+      seg.replaceWith(span);
+    }
+    return;
+  }
+  // A trigger the meta line kept (nothing it says changed) is reused as it is: a <button>
+  // replaced between a press and its release loses the click.
+  let btn = seg;
+  if (!seg.classList.contains('cost-bd-btn')) {
+    btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `${seg.className} cost-bd-btn`;
+    btn.textContent = seg.textContent;
+    if (seg.title) btn.title = seg.title;
+    seg.replaceWith(btn);
+  }
+  btn.setAttribute('aria-controls', pop.id);
+  btn.setAttribute('aria-expanded', String(!pop.hidden));
+  // Rebuilt only when the numbers change, so an open panel does not flicker on every frame.
+  const sig = JSON.stringify(b);
+  if (pop.dataset.sig !== sig) {
+    pop.dataset.sig = sig;
+    pop.replaceChildren(costBreakdownEl(document, b, { fmtUsd }));
+  }
+  if (!pop.hidden) placeCostPop(header, btn, pop);
+  // preventScroll: a browser focuses a clicked button, so a plain focus() after a rebuild scrolled
+  // the page back to the header while the user read further down.
+  if (refocus && document.activeElement !== btn) btn.focus({ preventScroll: true });
+}
+
+/** Close any open cost panel. @returns whether one was open. */
+function closeCostPop({ focusTrigger = false } = {}) {
+  let closed = false;
+  for (const pop of document.querySelectorAll('.cost-pop:not([hidden])')) {
+    pop.hidden = true;
+    closed = true;
+    const btn = pop.parentElement && pop.parentElement.querySelector('.cost-bd-btn');
+    if (btn) {
+      btn.setAttribute('aria-expanded', 'false');
+      if (focusTrigger) btn.focus();
+    }
+  }
+  return closed;
+}
+
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  const btn = t && typeof t.closest === 'function' ? t.closest('.cost-bd-btn') : null;
+  if (!btn) return;
+  const header = btn.closest('.rd-header, .hd-header');
+  const pop = header && header.querySelector(':scope > .cost-pop');
+  if (!pop) return;
+  pop.hidden = !pop.hidden;
+  btn.setAttribute('aria-expanded', String(!pop.hidden));
+  if (!pop.hidden) placeCostPop(header, btn, pop);
+});
+// A click anywhere else closes it (capture phase, like the ⋯ menu's closer); the trigger toggles itself.
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  if (t && typeof t.closest === 'function' && (t.closest('.cost-bd-btn') || t.closest('.cost-pop'))) return;
+  closeCostPop();
+}, true);
+// Back and Forward change the route with no click, so the outside closer never runs: close the panel
+// here, or one left open on a screen the route hid would eat the next Escape (closeCostPop looks
+// through the whole document). A route change through replaceState fires no hashchange; the one that
+// leaves Details that way (the finished-run hand-off) empties the screen, the panel with it.
+window.addEventListener('hashchange', () => { closeCostPop(); });
+
 function refreshHdFromRow() {
   if (!histDetailState || !histDetailState.screen || !histDetailState.data) return;
-  const row = (state.historyAll || []).find(
-    (r) => r && r.id === histDetailState.id && r.projectKey === histDetailState.key);
-  if (!row) return;                       // archived / filtered out of the model entirely
+  const match = (r) => r && r.id === histDetailState.id && r.projectKey === histDetailState.key;
+  // historyAll first, then the Archived feed: an open ARCHIVED run's row lives
+  // only there, and without this lookup its stub deep-link record (no
+  // projectDir, no title) is never repaired once the feed lands.
+  const row = (state.historyAll || []).find(match)
+    || (state.historyArchived || []).find(match);
+  if (!row) return;                       // filtered out of the model entirely
+  // A parked saved run that ended under the page (stopped through this tab's paused entry, or from
+  // another tab, the CLI or chat): its header, banners and tabs read the loaded detail, so load it again.
+  const loaded = String((histDetailState.data.state && histDetailState.data.state.status) || '').toLowerCase();
+  if (HD_RESUMABLE.has(loaded) && RD_TERMINAL.includes(String(row.status || '').toLowerCase()) && reloadHistDetail()) return;
   histDetailState.record = row;
   const { screen, data } = histDetailState;
   paintHdHeaderMeta(screen, row, data);
@@ -19724,8 +21699,27 @@ function refreshHdFromRow() {
   hdSetArchiveGate(screen.querySelector('.hd-archive'), retained);
   refreshHistResumeGating();
   paintHdPr(screen, row, data);                         // idempotent; re-binds btn.onclick
-  paintHdAfter(screen, row);
+  paintHdAfter(screen, row, data);
+  paintHdLive(screen, row, data);
+  paintHdGlance(screen, row, data);   // the head's project/day/clock line re-reads the record
   refreshHdOverviewTab();   // the one tab body that reads mutable record fields
+}
+
+// Re-open the saved run in place (a fresh detail fetch): its status moved under the page — a
+// Stop — and the bar, banners and tabs all read the loaded detail, which refreshHdFromRow keeps.
+function reloadHistDetail() {
+  if (!histDetailState || !histDetailState.screen) return false;
+  const parsed = parseHistDetailParam(location.hash.replace(/^#history\//, ''));
+  if (!parsed || parsed.id !== histDetailState.id || parsed.projectKey !== histDetailState.key) return false;
+  // A Stop dialog opened on this page asks about the run it was (another tab, the CLI or chat may have
+  // stopped it): it closes with the page, as leaving the page closes it (closeHistDetail).
+  closeStopModal();
+  // An open diff-comment draft lives only in this page: keep the page, whose bar still repaints from
+  // the row (refreshHdFromRow). The next row refresh with no draft open re-reads it.
+  if (histDetailState.screen.querySelector('.hd-cmt-thread[data-draft="1"], .hd-cmt-block[data-composer="1"]')) return false;
+  openHistDetail(parsed, { instant: true });
+  if (histDetailState && histDetailState.screen) setHdMode(histDetailState.screen, parsed.mode, parsed.tab, { focus: false });
+  return true;
 }
 
 // --- section tabs: pill row + lazily-built section bodies -------------------
@@ -19737,6 +21731,7 @@ const HD_TAB_ICONS = {
   clarify: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4.5h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-6.5L8 21v-3.5H5a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z" stroke-linejoin="round"/><path d="M9.9 9.1a2.2 2.2 0 1 1 3.2 2c-.7.4-1.1.9-1.1 1.6M12 14.9h.01" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   logs: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h16M4 12h16M4 18h10" stroke-linecap="round"/></svg>',
   artifacts: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 8l9-4 9 4-9 4-9-4z" stroke-linejoin="round"/><path d="M3 8v8l9 4 9-4V8" stroke-linejoin="round"/><path d="M12 12v8" stroke-linecap="round"/></svg>',
+  actions: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5l11 7-11 7z"></path></svg>',
 };
 
 // Per-screen tab state, keyed by the SCREEN element. The cells + activate() pair
@@ -19871,8 +21866,8 @@ const HD_TABS = [
   // counted in filesDeleted, so adding filesDeleted double-counts every deletion
   // against the rendered file list.
   // ONE order on both run pages (RD_TABS matches), in the order a reader asks: what did
-  // it produce (Overview · Diff · Artifacts), then how did it get there, coarse to fine
-  // (Workflow · Q&A · Logs · Agents). "Details ›" opens the first shown tab; the trail
+  // it produce (Overview · Diff · Artifacts), what can I do with it (Actions), then how did it
+  // get there, coarse to fine (Workflow · Q&A · Logs · Agents). "Details ›" opens the first shown tab; the trail
   // opens Workflow.
   { key: 'overview', label: 'Overview', level: 'simple', badge: () => null, visible: () => true, build: (...a) => buildHdOverview(...a) },
   { key: 'diff', label: 'Diff', level: 'advanced',
@@ -19890,6 +21885,8 @@ const HD_TABS = [
     },
     visible: (d) => Array.isArray(d.artifacts) && d.artifacts.some(isDisplayableArtifact),
     build: (...a) => buildHdArtifacts(...a) },
+  { key: 'actions', label: 'Actions', level: 'advanced', badge: () => null, visible: () => true,
+    build: (...a) => buildHdActions(...a) },
   // The graph, moved off the page body into its own tab (as on the Running page).
   // loadHistDetailScreen paints it into `.hd-graph` before the tabs exist; the builder
   // MOVES that node, so its mounted view, decor and log links come along.
@@ -20523,7 +22520,10 @@ function afterDiffPaint(win = window) {
 // 500,000-code-unit section cap (diff-view.mjs); this bounds what one paint
 // CONNECTS, so a 250k-row generated diff cannot mint a million gutter/source
 // nodes at once while every hidden row stays one click away.
-const HD_DIFF_WINDOW_LINES = 5_000;
+const HD_DIFF_WINDOW_LINES = testHookInt('diffWindowLines', 5_000);
+// Parse cap for the Diff tab (diff-view.mjs is a shared, once-per-process module, so the
+// test hook travels as an argument; the server's diff-anchor keeps the exported cap).
+const HD_MAX_SECTION_CODE_UNITS = testHookInt('maxSectionCodeUnits', MAX_FILE_SECTION_CODE_UNITS);
 
 // One selected file's render state, shared by the window appender and the
 // highlighter so rows connected by a later "Show more" still get enhanced.
@@ -21213,7 +23213,7 @@ function buildHdDiff(sec, record, data) {
       pane.appendChild(body);
       return;
     }
-    const parsed = parseFileSection(section.raw);
+    const parsed = parseFileSection(section.raw, { maxCodeUnits: HD_MAX_SECTION_CODE_UNITS });
     if (parsed.binary || !parsed.hunks.length) {
       body.classList.add('hint');
       const note = document.createElement('div');
@@ -21423,6 +23423,11 @@ function buildHdOverview(sec, record, data) {
     verdict.append(chip, document.createTextNode(' No review results captured — the run did not complete.'));
   }
   wrap.appendChild(verdict);
+  if (isTerminalStatus(record.status)) {
+    const strip = document.createElement('div'); strip.className = 'act-strip'; tagLevel(strip, 'advanced');
+    wrap.appendChild(strip);
+    paintActionsStrip(strip, record.id, runActionQuery(record.projectDir, record).toString());
+  }
   if (checks.length) wrap.appendChild(issueList(checks.map((c) => ({ ...c, origin: 'review' }))));
 
   // 2) Stat cards.
@@ -21437,7 +23442,8 @@ function buildHdOverview(sec, record, data) {
       : `${steps.length} step${steps.length === 1 ? '' : 's'} · ${maxCycle} cycle${maxCycle === 1 ? '' : 's'}`));
   const costCard = hdStatCard('cost', 'COST',
     typeof st.totalCostUsd === 'number' ? fmtUsd(st.totalCostUsd) : '—',
-    `across ${steps.length} step${steps.length === 1 ? '' : 's'}`);
+    [`across ${steps.length} step${steps.length === 1 ? '' : 's'}`,
+      costSummaryText(runCostBreakdown(steps, st.totalCostUsd), fmtUsd)].filter(Boolean).join(' · '));
   if (typeof st.totalCostUsd === 'number') costCard.querySelector('.hd-ov-value').title = estTitle(st.totalCostUsd);
   grid.appendChild(costCard);
   const wt = st.branch && typeof st.branch === 'object' ? st.branch : {};
@@ -21531,7 +23537,8 @@ function buildHdOverview(sec, record, data) {
   }
   const chips = document.createElement('div');
   chips.className = 'hd-ov-chips';
-  const subCount = Array.isArray(st.subAgents) ? st.subAgents.length : 0;
+  // The agents' own sub-agents: worca's AI calls (run title, Auto workflow, Away mode) are on the Agents tab.
+  const subCount = Array.isArray(st.subAgents) ? st.subAgents.filter((s) => !isWorcaSub(s)).length : 0;
   for (const text of [
     record.projectName || record.projectKey || '',
     (st.branch && typeof st.branch === 'object' ? st.branch.source : '') || record.sourceBranch || '',
@@ -21586,7 +23593,7 @@ function buildHdAgents(sec, record, data) {
     card.className = 'hd-ag-group';
     // Non-empty: roll up from the rows. Empty: the main agent's own step status —
     // subGroupStatus would report a bare 'done' for an agent that is still running.
-    const gstat = list.length ? subGroupStatus(list) : (statusOf[key] || 'done');
+    const gstat = agentGroupStatus(list, statusOf[key], 'done');
     const durSum = list.reduce((n, s) => n + (hdSubDuration(s) || 0), 0);
     const costSum = list.reduce((n, s) => n + (Number(s && s.costUsd) || 0), 0);
     const metaBits = [
@@ -21624,13 +23631,14 @@ function buildHdAgents(sec, record, data) {
       // `margin-left:auto`. Last = the pills get their own row under a complete
       // first line, which is the intended design.
       row.innerHTML =
-        `<span class="hd-ag-name">${escapeHtml((s && s.label) || (s && s.id) || '')}</span>` +
-        agentTypePillHtml(s && s.subagentType) +
+        `<span class="hd-ag-name">${escapeHtml(subRowLabel(s))}</span>` +
+        subTypePillHtml(s) +
         subModelPillHtml(s && s.runModel) +
+        subTokPillHtml(s) +
         graphifyCountPillHtml(s && s.graphifyCount) +
         `<span class="st ${rstat}">${SUBS_STAT_TEXT[rstat] || rstat}</span>` +
         `<span class="hd-ag-dur mono">${dur != null ? escapeHtml(fmtDuration(dur)) : ''}</span>` +
-        `<span class="hd-ag-cost mono">${s && s.costUsd != null ? escapeHtml(fmtUsd4(s.costUsd)) : ''}</span>` +
+        `<span class="hd-ag-cost mono">${subCostCellHtml(s)}</span>` +
         skillPillsHtml(s && s.skills);
       card.appendChild(row);
     }
@@ -21701,7 +23709,7 @@ function buildHdClarify(sec, record, data) {
   const questions = (data.clarify && data.clarify.questions) || [];
   const answers = (data.clarify && data.clarify.answers) || [];
   const byId = new Map(answers.map((a) => [a.id, a]));
-  const addCard = (q, ans) => {
+  const addCard = (q, ans, night = null) => {
     const card = document.createElement('div');
     card.className = 'hd-cl-card';
     const qRow = document.createElement('div');
@@ -21724,10 +23732,25 @@ function buildHdClarify(sec, record, data) {
     aText.textContent = chosen || '(none)';
     aRow.append(aChip, aText);
     card.append(qRow, aRow);
+    // Away mode's reason for this one answer (its per-question record), flagged ones marked.
+    const nd = night && Array.isArray(night.questions) ? night.questions.find((d) => d && d.id === q.id) : null;
+    if (nd && nd.rationale) {
+      const why = document.createElement('div');
+      why.className = 'hint hd-cl-away' + (nd.flagged ? ' flagged' : '');
+      why.textContent = `${nd.flagged ? 'Away mode, please check' : 'Away mode'}: ${String(nd.rationale).trim().replace(/\.$/, '')}.`;
+      card.appendChild(why);
+    }
     wrap.appendChild(card);
   };
   // Who answered (step 3): shown under step 2's rule (shared sign-ins only, "you" for the viewer).
-  const answeredByLine = (by) => {
+  const answeredByLine = (by, night) => {
+    // Away mode is named for every viewer: it is not a person, and a solo user needs to know it most.
+    if (night || by === 'night-mode') {
+      const el = document.createElement('div');
+      el.className = 'hint hd-cl-by hd-cl-by-away';
+      el.textContent = `Answered by Away mode${night && night.flagged ? ' · please check' : ''}`;
+      return el;
+    }
     const who = personLabel(by);
     if (!who) return null;
     const el = document.createElement('div');
@@ -21736,15 +23759,15 @@ function buildHdClarify(sec, record, data) {
     el.title = `Answered by ${personShown(by)}`;
     return el;
   };
-  for (const q of questions) addCard(q, byId.get(q.id));
-  if (questions.length && data.clarify) { const by = answeredByLine(data.clarify.answeredBy); if (by) wrap.appendChild(by); }
+  for (const q of questions) addCard(q, byId.get(q.id), data.clarify && data.clarify.night);
+  if (questions.length && data.clarify) { const by = answeredByLine(data.clarify.answeredBy, data.clarify.night); if (by) wrap.appendChild(by); }
   if (data.clarify && data.clarify.ask) wrap.appendChild(hdRenderAskForm(record, data.clarify.ask));
   for (const r of Array.isArray(data.stepQuestions) ? data.stepQuestions : []) {
     const roundLabel = `${r && (r.agentKey || r.nodeId) ? (r.agentKey || r.nodeId) : 'agent'} — round ${r && r.round}`
       + (String((r && r.stepKey) || '').split('#')[1] ? ` · cycle ${String(r.stepKey).split('#')[1]}` : '');
     if (r && r.ask) {
       wrap.appendChild(hdRenderAskForm(record, r.ask, roundLabel));
-      const by = answeredByLine(r.answeredBy);
+      const by = answeredByLine(r.answeredBy, r.night);
       if (by) wrap.appendChild(by);
     }
     if (!((r && r.questions) || []).length) continue;
@@ -21753,8 +23776,8 @@ function buildHdClarify(sec, record, data) {
     caption.textContent = roundLabel;
     wrap.appendChild(caption);
     const rById = new Map((r.answers || []).map((a) => [a.id, a]));
-    for (const q of r.questions) addCard(q, rById.get(q.id));
-    const by = answeredByLine(r.answeredBy);
+    for (const q of r.questions) addCard(q, rById.get(q.id), r.night);
+    const by = answeredByLine(r.answeredBy, r.night);
     if (by) wrap.appendChild(by);
   }
 }
@@ -21807,7 +23830,7 @@ const RD_WORKFLOW_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="
 // not here.
 const RD_TABS = [
   // The same order as History's HD_TABS: results first, then the process —
-  // Overview · Diff · Artifacts · Workflow · Q&A · Logs · Agents.
+  // Overview · Diff · Artifacts · Actions · Workflow · Q&A · Logs · Agents.
   {
     key: 'overview', label: 'Overview', icon: HD_TAB_ICONS.overview, level: 'simple',
     badge: () => null, visible: () => true,
@@ -21828,6 +23851,11 @@ const RD_TABS = [
     },
     visible: () => true,
     build: (sec, ctx) => buildRdArtifacts(sec, ctx),
+  },
+  {
+    key: 'actions', label: 'Actions', icon: HD_TAB_ICONS.actions, level: 'advanced',
+    badge: () => null, visible: () => true,
+    build: (sec, ctx) => buildRdActions(sec, ctx),
   },
   {
     key: 'workflow', label: 'Workflow', icon: RD_WORKFLOW_ICON, level: 'simple',
@@ -21912,8 +23940,12 @@ function rdLoadData(r, { force = false } = {}) {
     .catch(() => null)
     .then((data) => {
       entry.data = data;
-      // Repaint the open glance once the numbers land (a stale entry stays silent).
-      if (r._rdData === entry && rdOpenRun() === r && runDetailState.screen) paintRdGlance(runDetailState.screen, r);
+      // Repaint the open glance once the numbers land (a stale entry stays silent), and the
+      // "Answered for you" heading, whose Away mode cost reads the same saved steps (rdGlanceRun).
+      if (r._rdData === entry && rdOpenRun() === r && runDetailState.screen) {
+        paintRdGlance(runDetailState.screen, r);
+        paintNightDecisions(runDetailState.screen, r);
+      }
       return data;
     });
   r._rdData = entry;
@@ -21970,7 +24002,7 @@ function rdRenderFileBody(pane, index, entry) {
   const body = document.createElement('div');
   body.className = 'hd-diff-body mono';
   const section = index && index.get(sectionKey(entry.project, entry.f.path));
-  const parsed = section ? parseFileSection(section.raw) : null;
+  const parsed = section ? parseFileSection(section.raw, { maxCodeUnits: HD_MAX_SECTION_CODE_UNITS }) : null;
   if (!parsed || parsed.binary || !parsed.hunks.length) {
     body.classList.add('hint');
     const note = document.createElement('div');
@@ -22335,6 +24367,7 @@ function rdStateCopy(r, stepName) {
   if (r.pauseReason === 'cost_total') return 'Paused — total budget reached.';
   if (r.pauseReason === 'cost_pipeline_policy') return 'Paused — team cost cap reached.';
   if (r.pauseReason === 'cost_total_policy') return 'Paused — team total cap reached.';
+  if (r.pauseReason === 'night_guardrail') return r.pauseDetail || 'Paused: Away mode limit reached.';
   if (r.pauseReason === 'error') {
     const why = r.pauseDetail ? `: ${r.pauseDetail}` : '';
     return `Paused after an error${why}. Fix the cause, then Resume — the worktree and progress are kept.`;
@@ -22404,9 +24437,10 @@ function rdOvStats(host, r) {
   // null/absent means no cap is configured, and the sub-line falls back to a fact
   // rather than a fabricated number.
   const cap = Number(budgetState.budget && budgetState.budget.pipelineLimitUsd);
-  const costSub = Number.isFinite(cap) && cap > 0
+  const costSub = [Number.isFinite(cap) && cap > 0
     ? `cap ${fmtUsd(cap)} per pipeline`
-    : `across ${steps.length} step${steps.length === 1 ? '' : 's'}`;
+    : `across ${steps.length} step${steps.length === 1 ? '' : 's'}`,
+  costSummaryText(runCostBreakdown(steps, r.totalCostUsd), fmtUsd)].filter(Boolean).join(' · ');
   const cost = hdStatCard('cost', 'COST SO FAR', fmtUsd(r.totalCostUsd || 0), costSub);
   cost.querySelector('.hd-ov-value').title = estTitle(r.totalCostUsd || 0);
   host.appendChild(cost);
@@ -22445,7 +24479,8 @@ function rdOvTask(r) {
   }
   const chips = document.createElement('div');
   chips.className = 'hd-ov-chips';
-  const subCount = Array.isArray(r.subAgents) ? r.subAgents.length : 0;
+  // The agents' own sub-agents: worca's AI calls (run title, Auto workflow, Away mode) are on the Agents tab.
+  const subCount = Array.isArray(r.subAgents) ? r.subAgents.filter((s) => !isWorcaSub(s)).length : 0;
   // A workspace run carries NO projectDir (the New form sends workspaceId
   // instead) — name it by its member list rather than letting projectName()
   // print "(no project)".
@@ -22474,9 +24509,17 @@ function buildRdOverview(sec, ctx) {
   // The Task card is built ONCE and never re-rendered: the prompt cannot change
   // mid-run, and rebuilding it would slam the "Show more" expander shut under the
   // user on every arriving `state` frame.
-  wrap.append(banner, grid, rdOvTask(ctx.run));
+  // Actions strip: terminal runs only, filled once the run has its pipeline id.
+  const strip = document.createElement('div'); strip.className = 'act-strip'; tagLevel(strip, 'advanced');
+  strip.hidden = true;
+  wrap.append(banner, strip, grid, rdOvTask(ctx.run));
   sec.appendChild(wrap);
-  const paint = (c) => { rdOvStateBanner(banner, c.run); rdOvStats(grid, c.run); };
+  const paintStrip = (run) => {
+    const on = isTerminalStatus(run.status) && !!run.pipelineId;
+    strip.hidden = !on;
+    if (on && strip.dataset.runId !== run.pipelineId) paintActionsStrip(strip, run.pipelineId, rdScopeQuery(run));
+  };
+  const paint = (c) => { rdOvStateBanner(banner, c.run); paintStrip(c.run); rdOvStats(grid, c.run); };
   paint(ctx);
   sec.__update = paint;
 }
@@ -22521,7 +24564,7 @@ function rdAgentsBody(sec, r) {
     // Non-empty: roll up from the rows. Empty: the main agent's own step status.
     // History's twin defaults to 'done' here because it paints a FINISHED run; a
     // live one must default to 'run' or an agent still in flight would read "done".
-    const gstat = list.length ? subGroupStatus(list) : (statusOf[key] || 'run');
+    const gstat = agentGroupStatus(list, statusOf[key], 'run');
     const durSum = list.reduce((n, s) => n + (hdSubDuration(s) || 0), 0);
     const costSum = list.reduce((n, s) => n + (Number(s && s.costUsd) || 0), 0);
     const sep = String(key).indexOf(CYCLE_KEY_SEP);
@@ -22559,14 +24602,15 @@ function rdAgentsBody(sec, r) {
       row.innerHTML =
         `<span class="rd-ag-name">` +
           `<span class="rd-ag-dot ${st.family}"></span>` +
-          `<span class="rd-ag-label">${escapeHtml((s && s.label) || (s && s.id) || '')}</span>` +
-          agentTypePillHtml(s && s.subagentType) +
+          `<span class="rd-ag-label">${escapeHtml(subRowLabel(s))}</span>` +
+          subTypePillHtml(s) +
           subModelPillHtml(s && s.runModel) +
+          subTokPillHtml(s) +
           graphifyCountPillHtml(s && s.graphifyCount) +
         `</span>` +
         `<span class="rd-ag-state ${st.family}">${escapeHtml(st.word)}</span>` +
         `<span class="rd-ag-dur mono">${dur != null ? escapeHtml(fmtDuration(dur)) : ''}</span>` +
-        `<span class="rd-ag-cost mono">${s && s.costUsd != null ? escapeHtml(fmtUsd4(s.costUsd)) : ''}</span>` +
+        `<span class="rd-ag-cost mono">${subCostCellHtml(s)}</span>` +
         skillPillsHtml(s && s.skills);
       card.appendChild(row);
     }
@@ -22647,6 +24691,7 @@ function rdUpdateSections(r) {
     if (typeof sec.__update === 'function') sec.__update(ctx);
   }
   rdPaintTabBadges(screen, ctx);
+  paintActionsHeaders();   // the pill needs the run's pipeline id, which arrives with state frames
 }
 
 // One arriving log record, straight into the open detail's pane. A full
@@ -22782,6 +24827,7 @@ function rdHandOffOpen() {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (askPanel?.ownsKey(e)) return;
+  if (e.target?.closest?.('.term-pane')) return;                     // Escape typed in the terminal (vim, less) is the shell's
   // #527: a sync dialog (details / refusal card) owns Escape; the detail screen stays.
   if (document.querySelector('.viewer-modal.sync-modal')) return;
   if (currentView() !== 'history') return;
@@ -22806,6 +24852,7 @@ document.addEventListener('keydown', (e) => {
   // screen. Handled HERE rather than in its own listener because this one is capture
   // phase — a separate listener would fire after the navigation had already run.
   if (closeHdMenu({ focusTrigger: true })) return;
+  if (closeCostPop({ focusTrigger: true })) return;
   // Details steps back to the run's glance; the glance steps back to the list, in the
   // slide only: side by side the list is already there.
   const hs = histDetailState;
@@ -22819,6 +24866,7 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (askPanel?.ownsKey(e)) return;
+  if (e.target?.closest?.('.term-pane')) return;                     // Escape typed in the terminal (vim, less) is the shell's
   // #527: a sync dialog (details / refusal card) owns Escape; the detail screen stays.
   if (document.querySelector('.viewer-modal.sync-modal')) return;
   if (currentView() !== 'running') return;
@@ -22833,6 +24881,8 @@ document.addEventListener('keydown', (e) => {
   if (el.reportModal && !el.reportModal.classList.contains('hidden')) return;
   const stop = document.getElementById('stop-modal');
   if (stop && !stop.classList.contains('hidden')) return;
+  // The header cost's breakdown owns Escape while it is open (same reason as History's ⋯ menu).
+  if (closeCostPop({ focusTrigger: true })) return;
   // Details steps back to the run's glance; the glance steps back to the list, in the
   // slide only: side by side the list is already there.
   const screen = runDetailState.screen;
@@ -22846,6 +24896,7 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (askPanel?.ownsKey(e)) return;
+  if (e.target?.closest?.('.term-pane')) return;                     // Escape typed in the terminal (vim, less) is the shell's
   // #527: a sync dialog (details / refusal card) owns Escape; the detail screen stays.
   if (document.querySelector('.viewer-modal.sync-modal')) return;
   if (currentView() !== 'projects') return;
@@ -23119,7 +25170,7 @@ el.reportDownload.addEventListener('click', () => {
 
 // The shared viewer with a plain string: errors, notices, anything that is text.
 function showViewer(title, text) {
-  el.viewerTitle.textContent = title ? `Saved: ${title}` : 'Saved pipeline';
+  el.viewerTitle.textContent = title || 'Saved pipeline';
   // Only hideViewer cleared this, so an artifact fetch that failed rendered its
   // error string — and any saved pipeline opened next without closing the modal —
   // in a shell with no padding, border or scroll container.
@@ -23134,9 +25185,8 @@ function showViewer(title, text) {
  *  upstream's DOM tests describe this path unchanged. The <pre>'s white-space is
  *  neutralised by `.artifact-view{white-space:normal}`, which is why an
  *  iframe/img/embed is safe in here.
- *  `title` is the FULL heading text: unlike showViewerNode/showViewer, which
- *  prepend "Saved: " themselves, callers here pass their own
- *  "Saved: "/"Artifact: " prefix. */
+ *  `title` is the FULL heading text, as it is for showViewer: callers pass
+ *  their own "Saved: "/"Artifact: " prefix. */
 function showViewerHost(title) {
   el.viewerTitle.textContent = title || 'Saved pipeline';
   const host = document.createElement('div');
@@ -23314,6 +25364,10 @@ function activeCopy(r) {
   return { family: 'peach', text: 'Running' };
 }
 
+/** A model id as the graph's Away mode band names it: the catalog label when known, else the raw id.
+ *  A declaration, not a const: History's paint (above) and runDecorFor may run before this line is reached. */
+function graphModelLabel(id) { return id ? (modelById(id)?.label || id) : null; }
+
 /** The decor bag for a run, memoised per state generation: onState / onSubagent /
  *  onQuestion / onQuestionResolved / finishRun bump `r._decorSeq`, and every caller
  *  in between (the card, the detail, the pill, the progress chip) shares ONE
@@ -23328,7 +25382,7 @@ function runDecorFor(r, mode = 'monitor') {
   const seq = r._decorSeq || 0;
   if (!r._decorCache || r._decorCache.seq !== seq) {
     r._decorCache = { seq, views: new Map(),
-      decor: decorFromState(r, { live: isLive(r), now: Date.now(), subsOf: (id) => subAgentsForNode(r, id), lastLines: liveLinesOf(r) }) };
+      decor: decorFromState(r, { live: isLive(r), now: Date.now(), subsOf: (id) => subAgentsForNode(r, id), lastLines: liveLinesOf(r), modelLabel: graphModelLabel }) };
   }
   const cache = r._decorCache;
   let bag = cache.views.get(mode);
@@ -23378,19 +25432,25 @@ function askRunSnapshot(r) {
     stepper: graph ? r.stepper : null, decor,
   };
 }
+// A pipeline's current run in this tab's runs Map. D23: a resumed pipeline can leave its superseded lineage in
+// this Map — another tab's paused entry (only the acting tab deletes it, resumeRunFromCard/resumePipeline), a
+// scheduled "Resume at…", a History resume whose paused run had no log lines to match — and Map order lists that
+// dead entry FIRST. The lineage still live wins; among settled ones the newest (orderKey, minted once per runId)
+// does. Shared by Ask's progress cards and the saved run's bar (hdPipelineRun), which passes `currentBoot` to
+// skip the runs a restarted server no longer knows (staleBoot).
+function latestPipelineRun(pipelineId, { currentBoot = false } = {}) {
+  if (!pipelineId) return null;
+  let best = null;
+  for (const r of runs.values()) {
+    if (!isPipelineRun(r) || r.pipelineId !== pipelineId || (currentBoot && r.staleBoot)) continue;
+    if (!best || (isLive(r) && !isLive(best)) || (isLive(r) === isLive(best) && (r.orderKey || 0) > (best.orderKey || 0))) best = r;
+  }
+  return best;
+}
 const askRunStore = Object.freeze({
   get(runId) { const r = runId ? runs.get(runId) : null; return r && isPipelineRun(r) ? askRunSnapshot(r) : null; },
   byPipeline(pipelineId) {
-    if (!pipelineId) return null;
-    // D23: a resumed pipeline can leave its superseded lineage in this Map — another tab's paused entry (only the
-    // acting tab deletes it, resumeRunFromCard/resumePipeline), a History resume whose paused run had no log lines
-    // to match — and Map order lists that dead entry FIRST. The lineage still live wins; among settled ones the
-    // newest (orderKey, minted once per runId) does.
-    let best = null;
-    for (const r of runs.values()) {
-      if (!isPipelineRun(r) || r.pipelineId !== pipelineId) continue;
-      if (!best || (isLive(r) && !isLive(best)) || (isLive(r) === isLive(best) && (r.orderKey || 0) > (best.orderKey || 0))) best = r;
-    }
+    const best = latestPipelineRun(pipelineId);
     return best ? askRunSnapshot(best) : null;
   },
   subscribe(fn) { askRunListeners.add(fn); return () => { askRunListeners.delete(fn); }; },
@@ -23482,6 +25542,7 @@ function statusPill(r) {
     // A team cap names its source too (team-policy design board 9).
     if (r.pauseReason === 'cost_pipeline_policy') return { family: 'amber', text: 'Paused · team cap' };
     if (r.pauseReason === 'cost_total_policy') return { family: 'amber', text: 'Paused · team total' };
+    if (r.pauseReason === 'night_guardrail') return { family: 'amber', text: 'Paused · Away mode limit' };
     // An error pause is parked and resumable (never dead), so it stays in the amber family.
     if (r.pauseReason === 'error') return { family: 'amber', text: 'Paused · error' };
     if (r.pauseReason === 'recoverable') return { family: 'amber', text: 'Paused · recoverable' };
@@ -23593,6 +25654,43 @@ function agentTypePillHtml(type) {
   const t = type == null ? '' : String(type).trim();
   if (!t) return '';
   return `<span class="agent-type-pill">${escapeHtml(t)}</span>`;
+}
+
+// worca's own AI calls during a run, by stored subagent_type -> the type pill they wear. Stored labels
+// and types are frozen (an old Away mode row says "Night decider (clarify)"), so the tab maps them here.
+const WORCA_SUB_PILL = Object.freeze({ 'night-decider': 'Away mode', 'auto-classify': 'Auto workflow', 'run-title': 'Run title' });
+const isWorcaSub = (s) => !!s && Object.hasOwn(WORCA_SUB_PILL, String(s.subagentType));
+const kindFromLabel = (label) => (/\(([^)]+)\)\s*$/.exec(String(label || '')) || [])[1] || null;
+/** An Away mode review that ended before its result frame: it booked no cost (its lower bound is on
+ *  the step and the answer, never on the row). */
+const isCutReview = (s) => !!s && s.subagentType === 'night-decider' && s.costUsd == null;
+/** A sub-agent row's label. Only the Away mode review is relabelled (its kind in parentheses survives);
+ *  every other row, Auto workflow's "(round N)" included, keeps its own stored label. */
+function subRowLabel(s) {
+  if (s && s.subagentType === 'night-decider') return auxLabelForSubagent('night-decider', kindFromLabel(s.label));
+  return (s && s.label) || (s && s.id) || '';
+}
+/** The type pill: worca's own calls by name, every other row its raw subagent_type. */
+const subTypePillHtml = (s) => agentTypePillHtml(s && (isWorcaSub(s) ? WORCA_SUB_PILL[s.subagentType] : s.subagentType));
+/** A stopped review's tokens beside its cost cell. Every other row keeps today's pills. */
+function subTokPillHtml(s) {
+  if (!isCutReview(s) || !(Number(s.tokens) > 0)) return '';
+  const n = Number(s.tokens);
+  return `<span class="sub-model-pill sub-tok-pill">${n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n} tok</span>`;
+}
+/** The cost cell: the row's cost; '—' for a stopped review (never a blank that reads as free); blank
+ *  for every other cost-less row, as before. */
+function subCostCellHtml(s) {
+  if (s && s.costUsd != null) return escapeHtml(fmtUsd4(s.costUsd));
+  return isCutReview(s) ? '—' : '';
+}
+/** An Agents group's status. worca's own rows are not the step's sub-agents: a review the user's answer cut
+ *  short is `stopped` by design and must never paint the step stopped (or done while it still runs). With
+ *  no rows of its own the step's status decides, then `fallback` (History 'done', a live run 'run'). */
+function agentGroupStatus(list, stepStatus, fallback) {
+  const own = list.filter((s) => !isWorcaSub(s));
+  if (own.length) return subGroupStatus(own);
+  return stepStatus || (list.length ? 'done' : fallback);
 }
 
 // The model a sub-agent actually ran on (sub_agents.run_model): the alias its Task
@@ -23931,7 +26029,7 @@ async function openRunArtifact(ctx, path, srcKind) {
     // already-relative rel (`deck/deck.html` says more than the basename does).
     const url = rawArtifactUrl(base, rel);
     const err = await rawArtifactError(url);
-    if (err) { showViewer(name, `Error: ${err}`); return; }
+    if (err) { showViewer(`Saved: ${name}`, `Error: ${err}`); return; }
     await renderArtifact({ kind: srcKind || null, relPath: rel, url },
       showViewerHost(`Saved: ${isAbsoluteArtifactPath(rel) ? name : rel}`));
     return;
@@ -23939,10 +26037,10 @@ async function openRunArtifact(ctx, path, srcKind) {
   try {
     const res = await fetch(`${base}/artifact?rel=${encodeURIComponent(rel)}`);
     const data = await safeJson(res);
-    if (!res.ok) { showViewer(name, `Error: ${data.error || res.status}`); return; }
+    if (!res.ok) { showViewer(`Saved: ${name}`, `Error: ${data.error || res.status}`); return; }
     await renderArtifact({ kind: srcKind || null, relPath: rel, text: data.text || '' },
       showViewerHost(`Saved: ${data.rel || name}`), artifactViewerDeps());
-  } catch (e) { showViewer(name, `Error: ${e.message}`); }
+  } catch (e) { showViewer(`Saved: ${name}`, `Error: ${e.message}`); }
 }
 
 // ── Per-step artifact viewers (Phase 3 UI) ──────────────────────────────────
@@ -24516,6 +26614,11 @@ function questionCount(pq) {
 
 function renderRunningView({ skipDetail = false } = {}) {
   if (!skipDetail) scheduleRunsPaint();   // a log line changes nothing a row shows
+  // An open saved run whose pipeline is still live: its bar's Pause / Stop / Resume follow the
+  // run. Only once the detail landed: setupHdActions binds them after that fetch.
+  if (!skipDetail && histDetailState && histDetailState.screen && histDetailState.data) {
+    paintHdLive(histDetailState.screen, histDetailState.record, histDetailState.data);
+  }
   const screen = runDetailState.screen;
   if (!screen) return;
   const r = runs.get(runDetailState.runId);
@@ -24547,6 +26650,7 @@ const schedulesView = createSchedulesView({
   msgEl: $('#schedules-msg'),
   deps: {
     confirmModal: (opts) => confirmModal(opts),
+    notify: (o) => notify(o),
     // "Project · demo-shop" / "Workspace · Storefront": the kind first, then the name the
     // rest of the app shows — every scheduled run card says what it runs against.
     targetLabel: (item) => {
@@ -24669,6 +26773,7 @@ function runsHistItem(p) {
     id: p.id, projectKey: p.projectKey, title: p.title, status: p.status, pauseReason: p.pauseReason,
     startedAt: p.startedAt, mtime: p.mtime, groupName: histGroupName(p), by: runsPersonKey(p.startedBy),
     pr: glancePrInput(p),
+    archived: !!p.archived,
     checks: typeof p.checks === 'number' ? p.checks : null,
     files: typeof p.files === 'number' ? p.files : null,
   };
@@ -24700,14 +26805,23 @@ function runsFocusTarget(host, { key, slot, pid, group }) {
 function paintRunsList() {
   const host = el.runsList;
   if (!host) return;
+  // The Archived toggle reads its own lazy-loaded feed: archived rows never enter
+  // state.historyAll (that keeps meaning "active history").
+  const archivedView = runsUi.filter === 'archived';
+  const histSource = archivedView ? (state.historyArchived || []) : (state.historyAll || []);
   const model = buildRunsModel({
     live: overviewRuns().map(runsLiveItem),
-    history: (Array.isArray(state.historyAll) ? state.historyAll : []).filter(Boolean).map(runsHistItem),
+    history: histSource.filter(Boolean).map(runsHistItem),
     scheduled: schedulesView.upcoming(SCHEDULED_GROUP_WINDOW_MS).map(runsSchedItem),
     person: viewer.shared ? state.historyPerson : '',
     query: runsUi.query, filter: runsUi.filter, groupBy: runsUi.groupBy, collapsed: runsUi.collapsed, now: Date.now(),
   });
-  const note = state.historyError && !(state.historyAll || []).length ? `Could not load finished runs: ${state.historyError}` : '';
+  const note = archivedView
+    ? (state.historyArchivedError && !histSource.length ? `Could not load archived runs: ${state.historyArchivedError}` : '')
+    : (state.historyError && !(state.historyAll || []).length ? `Could not load finished runs: ${state.historyError}` : '');
+  // The filter survives a reload: a first paint under the Archived toggle fetches its
+  // feed without a click.
+  if (archivedView && state.historyArchived === null) loadHistoryArchived();
   const sig = JSON.stringify([
     model.needs.map(runsRowSig),
     model.groups.map((g) => [g.key, g.name, g.count, g.collapsed, g.collapsed ? [] : g.rows.map(runsRowSig)]),
@@ -24811,16 +26925,64 @@ function paintRunsFilter() {
     b.classList.toggle('on', on);
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
   }
+  // The header's Archived toggle: no chip is pressed while it is on (it swaps the list's
+  // source). docs/ui-levels.md rule 2: the Advanced toggle stays on screen below Advanced
+  // while it is the stored pick — otherwise the list shows only archived runs with no way out.
+  const arch = el.runsArchivedBtn;
+  if (arch) {
+    const on = runsUi.filter === 'archived';
+    arch.classList.toggle('on', on);
+    arch.setAttribute('aria-pressed', on ? 'true' : 'false');
+    keepVisible(arch, on);
+  }
+}
+function setRunsFilter(f) {
+  if (f === runsUi.filter) return;
+  runsUi.filter = f;
+  try { localStorage.setItem(RUNS_FILTER_KEY, runsUi.filter); } catch { /* private mode */ }
+  // Each Archived activation refetches its feed; a never-loaded one is fetched by the
+  // paint below (state.historyArchived === null), so it is not asked for twice.
+  if (runsUi.filter === 'archived' && state.historyArchived !== null) void loadHistoryArchived();
+  paintRunsFilter();
+  paintRunsList();
 }
 el.runsFilter?.addEventListener('click', (e) => {
   const b = e.target.closest && e.target.closest('button[data-filter]');
-  if (!b || b.dataset.filter === runsUi.filter) return;
-  runsUi.filter = b.dataset.filter;
-  try { localStorage.setItem(RUNS_FILTER_KEY, runsUi.filter); } catch { /* private mode */ }
-  paintRunsFilter();
-  paintRunsList();
+  if (b) setRunsFilter(b.dataset.filter);
 });
+el.runsArchivedBtn?.addEventListener('click', () => setRunsFilter(runsUi.filter === 'archived' ? 'all' : 'archived'));
 paintRunsFilter();
+
+// The Archived toggle's feed (issue #575): fetched lazily on activation, and again on
+// every pipelines-changed once loaded (an archive or restore here, in another tab or from
+// the CLI). Deliberately NOT the Phase-2 PR enrichment: an archived run's branch is gone,
+// so there is nothing to enrich. One fetch at a time; a call that lands mid-flight queues
+// exactly one re-fetch, so the last change is never dropped.
+let historyArchivedLoading = false;
+let historyArchivedAgain = false;
+async function loadHistoryArchived() {
+  if (historyArchivedLoading) { historyArchivedAgain = true; return; }
+  historyArchivedLoading = true;
+  setArchivedLoading(true);
+  try {
+    const res = await fetch('/api/history?archived=1');
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
+    state.historyArchived = Array.isArray(data.pipelines) ? data.pipelines.filter(Boolean) : [];
+    state.historyArchivedError = '';
+  } catch (e) {
+    state.historyArchived = state.historyArchived || [];
+    state.historyArchivedError = e.message;
+  } finally {
+    historyArchivedLoading = false;
+    setArchivedLoading(false);
+  }
+  if (historyArchivedAgain) { historyArchivedAgain = false; void loadHistoryArchived(); return; }
+  paintRunsList();
+  // An archived run opened by deep link (before the feed loaded) carries a stub
+  // record — no projectDir, no title. Now that the feed landed, repair it.
+  refreshHdFromRow();
+}
 
 // "Group by" menu: opens under its header button; a pick, Escape or a click elsewhere closes it.
 function paintRunsGroupBy() {
@@ -25142,6 +27304,7 @@ function openRunDetail(runId, { instant = false } = {}) {
   const shell = el.runShell;
   if (!host || !shell) return;
 
+  destroyActionsIn(host);                   // the old screen's Actions controller stops following frames
   destroyGraphMounts(host);                 // a detail->detail hop never passes closeRunDetail
   host.innerHTML = '';
   host.scrollTop = 0;                       // a prior visit's scroll must not carry over
@@ -25197,8 +27360,11 @@ function openRunDetail(runId, { instant = false } = {}) {
     // has to hold for programmatic dispatch — but the double-POST it prevents is
     // exactly what the disable exists for, so the guard belongs on the handler.
     if (btn.disabled) return;
-    if (btn.dataset.action === 'resume') resumeRunFromCard(runDetailState.runId, btn);
-    else pauseRun(runDetailState.runId, btn);
+    const runId = runDetailState.runId;
+    if (btn.dataset.action === 'resume') { resumeRunFromCard(runId, btn); return; }
+    pauseRun(runId, btn).then((reason) => {
+      if (reason) notify({ tone: 'err', title: 'Could not pause the run', detail: reason, key: `pause-${runId}` });
+    });
   });
   // Resume split: same menu as the run card's. The run is read at CLICK time (a
   // detail->detail hop must never schedule the run that was open at bind time).
@@ -25229,8 +27395,38 @@ function openRunDetail(runId, { instant = false } = {}) {
   // module state at CLICK time, so a detail->detail hop can never stop the run
   // that was open when the listener was bound.
   screen.querySelector('.rd-stop').addEventListener('click', () => {
-    openStopModal(runDetailState.runId);
+    openStopModal({ runId: runDetailState.runId });
   });
+  // Away mode on this run (POST /api/run/night). Reads the run at CHANGE time, like Stop; the run id is
+  // captured before the POST, since the user may open another run while it is in flight.
+  screen.querySelector('.rd-night').addEventListener('change', async (e) => {
+    const sel = e.currentTarget;
+    const runId = runDetailState.runId;
+    // A refused change puts the select back on what the run still has (the state-only rule).
+    const failed = (detail) => {
+      const run = runs.get(runId);
+      if (run) onLog(run, { source: 'ui', level: 'error', text: `Away mode: ${detail}`, ts: Date.now() });
+      if (runDetailState.runId === runId) sel.value = (run && run.night && run.night.override) || 'auto';
+      notify({ tone: 'err', title: 'Could not change Away mode for this run', detail: String(detail), key: `away-${runId}` });
+    };
+    sel.disabled = true;
+    try {
+      const res = await fetch('/api/run/night', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId, mode: sel.value }) });
+      if (!res.ok) {
+        const err = await safeJson(res);
+        failed(err.error || res.status);
+      } else {
+        const run = runs.get(runId);
+        if (run) {
+          run.night = { ...(run.night || {}), override: sel.value };
+          if (runDetailState.runId === runId) paintRdAwayPill(runDetailState.screen, run);   // still the open run
+        }
+      }
+    } catch (err) {
+      failed(err.message || err);
+    } finally { sel.disabled = false; }
+  });
+
   // Chain a run after this one (the list card's old schedule-after button): New pipeline, predecessor picked.
   screen.querySelector('.rd-after').addEventListener('click', () => {
     const r = runs.get(runId);
@@ -25243,6 +27439,7 @@ function openRunDetail(runId, { instant = false } = {}) {
     screen.querySelector('.rd-title').textContent = runId;
     screen.querySelector('.rd-now-title').textContent = runId;
   }
+  if (r) loadNightDecisions(r);
 
   if (instant) holdRunsAnim();
   shell.classList.add('detail-open');                  // #run-shell: "the live detail is open"
@@ -25267,6 +27464,7 @@ function closeRunDetail({ instant = false } = {}) {
   // openStopModal's double-open guard makes Stop permanently dead. Below the
   // detail-open guard: with no detail open there is no modal of its to close.
   closeStopModal();
+  destroyActionsIn(host);
   const runId = runDetailState.runId;
   // Read before the reset: a finished run was acknowledged when it opened, so its row is its
   // History row now (focusRunsRow's pipeline fallback).
@@ -25310,6 +27508,151 @@ function paintRunDetail(r) {
   paintRdGraph(screen, r);
   paintRdQuestions(screen, r);
   paintRdGlance(screen, r);
+  paintNightDecisions(screen, r);
+}
+
+/** The night decisions already stored for this run (history), merged with the live frames. */
+async function loadNightDecisions(r) {
+  if (!r.pipelineId) return;
+  try {
+    const res = await fetch(`/api/night-decisions?pipelineId=${encodeURIComponent(r.pipelineId)}`);
+    if (!res.ok) return;
+    const data = await safeJson(res);
+    if (!Array.isArray(data.decisions) || !data.decisions.length) return;
+    addNightDecisions(r, data.decisions);
+    if (runDetailState && runDetailState.runId === r.runId && runDetailState.screen) paintNightDecisions(runDetailState.screen, r);
+  } catch { /* the list stays live-only */ }
+}
+
+function paintNightDecisions(screen, r) {
+  paintAwayAnswers(screen.querySelector('.rd-night-sec'), r.nightDecisions, rdGlanceRun(r).steps);
+}
+
+/** The History run page's copy of the list: read once per run from the stored answers. */
+async function loadHdAwayAnswers(screen, pipelineId, steps = []) {
+  const sec = screen && screen.querySelector('.hd-night-sec');
+  if (!sec || !pipelineId || sec.dataset.for === pipelineId) return;
+  sec.dataset.for = pipelineId;
+  sec.hidden = true;
+  try {
+    const res = await fetch(`/api/night-decisions?pipelineId=${encodeURIComponent(pipelineId)}`);
+    const data = res.ok ? await safeJson(res) : null;
+    if (sec.dataset.for !== pipelineId) return;                 // another run was opened meanwhile
+    paintAwayAnswers(sec, data && Array.isArray(data.decisions) ? data.decisions : [], steps);
+  } catch { /* the section stays hidden */ }
+}
+
+/** The note at the top of the run's card (run page and History run page), painted from the same
+ *  answers as the list below it, so the two never disagree: how many answers, how many to check,
+ *  and a button down to the first one to check. Hidden when Away mode gave no answer. */
+function paintAwayNote(sec, counts) {
+  const note = sec.closest('.rd-glance')?.querySelector('.rd-away-note');
+  if (!note) return;
+  const line = awayAnswersSummary(counts);
+  note.hidden = !line;
+  if (!line) return;
+  note.classList.toggle('has-checks', counts.checks > 0);
+  note.querySelector('.rd-away-note-text').textContent = `Away mode: ${line}.`;
+  note.querySelector('.rd-away-jump').onclick = () => {
+    const to = sec.querySelector('.rd-na-row.is-check') || sec;
+    if (!sec.hidden) to.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+}
+
+/** "Answered for you" into `sec` (run page and History run page): one group per ask, captioned with
+ *  what kind of ask it was, when, and — when a review answered it — the model and what that review
+ *  cost; one row per answer; a row with a reason opens it underneath. The heading adds what every
+ *  Away mode review of the run cost, read from the steps (`steps[].auxCosts.away`). */
+function paintAwayAnswers(sec, decisions, steps = []) {
+  if (!sec) return;
+  const list = Array.isArray(decisions) ? decisions : [];
+  sec.hidden = !list.length;
+  const spent = awayTotalText(runCostBreakdown(steps), fmtUsd);
+  // The run page repaints on every frame: rebuild only when the answers or the reviews' cost
+  // changed, so an open reason, a hover and the keyboard focus survive.
+  const sig = `${JSON.stringify(list)}|${spent}`;
+  if (sec.__awaySig === sig) return;
+  sec.__awaySig = sig;
+  const counts = awayAnswerCounts(list);
+  sec.querySelector('.rd-night-count').textContent = (counts.answers
+    ? ` · ${counts.answers} answer${counts.answers === 1 ? '' : 's'}${counts.checks ? `, ${counts.checks} to check` : ''}` : '')
+    + (spent ? ` · ${spent}` : '');
+  paintAwayNote(sec, counts);
+  const host = sec.querySelector('.rd-night-asks');
+  const open = new Set([...host.querySelectorAll('.rd-na-row.open')].map((li) => li.dataset.key));
+  const focused = document.activeElement && host.contains(document.activeElement) ? document.activeElement.closest('.rd-na-row') : null;
+  const refocus = focused ? focused.dataset.key : null;
+  host.replaceChildren();
+  list.forEach((d, i) => {
+    const group = document.createElement('div');
+    group.className = 'rd-sgroup rd-na';
+    const cap = document.createElement('div');
+    cap.className = 'rd-slabel';
+    const at = d.at ? startedLabel(d.at).slice(0, 5) : '';
+    // One review answers the whole ask, so its model and cost are the group's, never a row's.
+    cap.textContent = [kindShort(d.kind), at, ...awayAskCaption(d, {
+      fmtUsd, modelLabel: (id) => modelById(id)?.label || id, fmtFloor: (v) => floorText(v, fmtUsd),
+    })].filter(Boolean).join(' · ');
+    const ul = document.createElement('ul');
+    ul.className = 'rd-slist rd-na-list';
+    // The answers to check lead their ask; the key stays the row's own place, so an open row survives.
+    const rows = awayAnswerRows(d).map((row, j) => ({ ...row, key: `${d.questionId || i}:${j}` }));
+    checksFirst(rows).forEach((row) => {
+      const key = row.key;
+      const li = document.createElement('li');
+      li.className = 'rd-na-row' + (row.check ? ' is-check' : '');
+      li.dataset.key = key;
+      const head = document.createElement(row.why ? 'button' : 'div');
+      head.className = 'rd-srow rd-na-btn';
+      const tx = document.createElement('span');
+      tx.className = 'rd-srow-tx';
+      if (row.q) {
+        const q = document.createElement('small');
+        q.className = 'rd-na-q';
+        q.textContent = row.q;
+        tx.appendChild(q);
+      }
+      const a = document.createElement('span');
+      a.className = 'rd-na-a';
+      a.textContent = row.a;
+      tx.appendChild(a);
+      if (row.by !== undefined) {
+        // Only an answer the review gave names its model (awayAnswerRows); the catalog label when known.
+        const by = document.createElement('small');
+        by.className = 'rd-na-by';
+        by.textContent = decidedByText(row.by ? (modelById(row.by)?.label || row.by) : null);
+        tx.appendChild(by);
+      }
+      head.appendChild(tx);
+      if (row.check) {
+        const chip = document.createElement('span');
+        chip.className = 'rd-na-check';
+        chip.textContent = 'Check';
+        chip.title = 'worca was not sure: please check this answer';
+        head.appendChild(chip);
+      }
+      li.appendChild(head);
+      if (row.why) {
+        head.type = 'button';
+        head.classList.add('chv');
+        const why = document.createElement('p');
+        why.className = 'rd-na-why';
+        why.textContent = row.why;
+        li.appendChild(why);
+        const setOpen = (on) => { li.classList.toggle('open', on); head.setAttribute('aria-expanded', String(on)); why.hidden = !on; };
+        setOpen(open.has(key));
+        head.addEventListener('click', () => setOpen(!li.classList.contains('open')));
+      }
+      ul.appendChild(li);
+    });
+    group.append(cap, ul);
+    host.appendChild(group);
+  });
+  if (refocus) {
+    const back = [...host.querySelectorAll('.rd-na-row')].find((li) => li.dataset.key === refocus);
+    const btn = back && back.querySelector('button.rd-na-btn');
+    if (btn) btn.focus();
+  }
 }
 
 // ── The glance: status line, trail, sheet ───────────────────────────────────
@@ -25407,6 +27750,7 @@ function paintRdGlance(screen, r) {
   paintGlanceFacts(glance, {
     summary, liveFiles: liveDiff != null && liveDiff !== '' ? Number(liveDiff) : null,
     activeMs: rdActiveMs(r), cost: r.totalCostUsd || 0,
+    costNote: costSummaryText(runCostBreakdown(r.steps, r.totalCostUsd), fmtUsd),
     ticking: (r.status === 'running' || r.status === 'starting') && r.pendingQuestion == null,
   });
 
@@ -25462,7 +27806,7 @@ function rdSheetRow({ label, detail = '', value = '', tab = '', state = '', icon
 // produced, then how it ran. Each row is named like its tab, carries its icon and
 // previews its content: `values[key]`, else the tab's own badge with a unit.
 const ACTIVITY_GROUPS = [
-  ['Results', ['overview', 'diff', 'artifacts']],
+  ['Results', ['overview', 'diff', 'artifacts', 'actions']],
   ['How it ran', ['workflow', 'qa', 'clarify', 'logs', 'agents']],
 ];
 const ACTIVITY_UNITS = { diff: 'file', qa: 'question', clarify: 'question', agents: 'agent' };
@@ -25538,6 +27882,29 @@ function paintPageHead(glance, title, meta) {
   }
 }
 
+// The run's feature branch in the glance's meta line: the template's one chip, updated in
+// place (paintPageHead owns the line's first text node, the Running page appends a person
+// chip after it), hidden when there is none. Copies like the Details header's button. Bound
+// once; the click reads the PAINTED name, never the one this paint saw (the stale-capture
+// note in paintHdHeaderMeta).
+function paintPageBranch(glance, name) {
+  const btn = glance && glance.querySelector('.rd-page-branch');
+  if (!btn) return;
+  btn.hidden = !name;
+  const label = btn.querySelector('.rd-page-branch-name');
+  if (name && label.textContent !== name) {
+    label.textContent = name;
+    btn.title = name;
+    btn.setAttribute('aria-label', `Copy branch name ${name}`);
+  }
+  if (btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', () => {
+    const painted = label.textContent || '';
+    if (painted) copyBranchToClipboard(btn, painted, painted);
+  });
+}
+
 // The bar repeats the run's name only once the page title has scrolled under it
 // (CSS: [data-title-out]). One observer per page kind; a new screen replaces the old.
 const pageTitleWatch = { rd: null, hd: null };
@@ -25566,7 +27933,7 @@ function activityOverviewValue(results) {
 // the time to the 1 s ticker (`.run-time`, rdTickHosts) while the run executes; a live
 // run knows only how many files its worktree changed (`liveFiles`), a finished one the
 // line counts too (`summary`).
-function glanceTiles({ summary = null, liveFiles = null, activeMs = null, cost = null, ticking = false } = {}) {
+function glanceTiles({ summary = null, liveFiles = null, activeMs = null, cost = null, costNote = '', ticking = false } = {}) {
   const tiles = document.createElement('div');
   tiles.className = 'rd-stats';
   const tile = (big, small, cls = '') => {
@@ -25580,7 +27947,7 @@ function glanceTiles({ summary = null, liveFiles = null, activeMs = null, cost =
     return t;
   };
   if (activeMs != null) tiles.append(tile(fmtDuration(activeMs) || '0s', 'time', ticking ? 'run-time' : ''));
-  if (cost != null) tiles.append(tile(fmtUsd(cost), 'cost'));
+  if (cost != null) tiles.append(tile(fmtUsd(cost), costNote || 'cost'));
   if (summary) {
     const files = (summary.filesNew || 0) + (summary.filesChanged || 0);
     tiles.append(tile(hdFileCountsNode(document, { added: summary.linesAdded || 0, removed: summary.linesRemoved || 0 }),
@@ -25625,20 +27992,104 @@ function glancePrInput(record) {
 const CTA_ICONS = {
   // A pull request with a plus where its head will be.
   'pr-create': '<circle cx="6" cy="6" r="2.5"/><path d="M6 8.5V21M13 6h3a2 2 0 0 1 2 2v3M18 15v6M15 18h6"/>',
-  // A pull request: the base line, and the branch line arrowing into it.
-  'pr-open': '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5V21M12.5 6H16a2 2 0 0 1 2 2v7.5M15 3.5 12.5 6 15 8.5"/>',
+  // An open pull request is on GitHub: a box with an arrow leaving it (a new tab).
+  external: '<path d="M18 13.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4.5"/><path d="M14 4h6v6M20 4l-9 9"/>',
   // Merged: two lines joining into one.
   merged: '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5V21M6 9a9 9 0 0 0 9 9h.5"/>',
-  resume: '<path d="M7 4.5v15l12-7.5z"/>',
-  // A follow-up: the next run branches off this one.
-  'follow-up': '<path d="M5 4v7a4 4 0 0 0 4 4h10M15 11l4 4-4 4"/>',
-  schedule: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
 };
 function setCtaContent(node, icon, label) {
   node.innerHTML = `<svg class="rd-cta-ico" data-icon="${icon}" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${CTA_ICONS[icon]}</svg>`;
   const tx = document.createElement('span');
   tx.textContent = label;
   node.appendChild(tx);
+}
+
+// The glance's pull request button, in its slot: one node per screen (the templates'
+// .rd-pr-slot, outside the result hosts their painters rebuild), because a recreated node
+// cannot morph. `state`: 'pending' (the lookup runs: a white placeholder with a spinner at
+// the button's height, nothing to click), 'create' | 'view' | 'merged' (the button in its
+// colour; View and Merged link to `href`, Create calls `onClick`), 'none' (no slot).
+// Pending -> a button morphs: the colour grows as a circle from the spinner (.rd-pr-fill),
+// the spinner fades, the icon and label come in. Pending -> none fades out and collapses.
+// Any other change paints the end state at once, so a known state (a cached row) never
+// animates and a repaint never replays. Every animation is CSS; these timers only end them
+// (the slowest CSS animation is shorter) and remove the spinner and the colour layer.
+const PR_CTA_MORPH_MS = 420;
+const PR_CTA_OUT_MS = 380;
+const PR_CTA_LOOK = {
+  create: { look: '', icon: 'pr-create', label: 'Create pull request' },
+  view: { look: 'pr-view', icon: 'external', label: 'View pull request' },
+  merged: { look: 'pr-merged', icon: 'merged', label: 'View pull request' },
+};
+function paintPrCta(slot, { state = 'none', href = '', onClick = null, cls = '' } = {}) {
+  if (!slot) return;
+  slot._prClick = onClick;                         // read at click time: a repaint re-binds it
+  const sig = `${state}|${href}|${cls}`;
+  if (slot.dataset.sig === sig) return;
+  const from = slot.dataset.state || 'none';
+  slot.dataset.sig = sig;
+  slot.dataset.state = state;
+  clearTimeout(slot._prTimer);
+  slot.classList.remove('is-pending', 'is-morph', 'is-out');
+  slot.style.removeProperty('--h');
+  slot.removeAttribute('aria-busy');
+  const done = (fn) => { slot._prTimer = setTimeout(fn, state === 'none' ? PR_CTA_OUT_MS : PR_CTA_MORPH_MS); };
+
+  if (state === 'pending') {
+    const spin = document.createElement('span');
+    spin.className = 'rd-pr-spin';
+    // The button's own glyph and line, invisible, hold its final height.
+    const wait = document.createElement('div');
+    wait.className = 'rd-pr-wait';
+    setCtaContent(wait, 'pr-create', 'Checking the pull request…');
+    slot.replaceChildren(spin, wait);
+    slot.classList.add('is-pending');
+    slot.setAttribute('aria-busy', 'true');
+    slot.hidden = false;
+    return;
+  }
+
+  if (state === 'none') {
+    if (from !== 'pending') { slot.replaceChildren(); slot.hidden = true; return; }
+    slot.style.setProperty('--h', `${slot.offsetHeight}px`);
+    slot.classList.add('is-out');
+    done(() => {
+      slot.classList.remove('is-out');
+      slot.style.removeProperty('--h');
+      slot.replaceChildren();
+      slot.hidden = true;
+    });
+    return;
+  }
+
+  const { look, icon, label } = PR_CTA_LOOK[state];
+  let ctl;
+  if (state === 'create') {
+    ctl = document.createElement('button');
+    ctl.type = 'button';
+    ctl.addEventListener('click', () => { if (slot._prClick) slot._prClick(); });
+  } else {
+    ctl = document.createElement('a');
+    ctl.href = href;
+    ctl.target = '_blank';
+    ctl.rel = 'noopener';
+  }
+  ctl.className = ['rd-cta', look, cls].filter(Boolean).join(' ');
+  setCtaContent(ctl, icon, label);
+  slot.hidden = false;
+  const wait = from === 'pending' && slot.querySelector('.rd-pr-wait');
+  if (!wait) { slot.replaceChildren(ctl); return; }
+  // The spinner stays where it turns (a moved node would restart its spin) and fades out.
+  const fill = document.createElement('span');
+  fill.className = ['rd-pr-fill', look].filter(Boolean).join(' ');
+  wait.replaceWith(ctl);
+  slot.prepend(fill);
+  slot.classList.add('is-morph');
+  done(() => {
+    slot.classList.remove('is-morph');
+    fill.remove();
+    slot.querySelector('.rd-pr-spin')?.remove();
+  });
 }
 
 function rdSheetGroup(title, rows) {
@@ -25703,14 +28154,45 @@ function rdFilesChanged(r) {
   return s ? (s.filesNew || 0) + (s.filesChanged || 0) + (s.filesDeleted || 0) : null;
 }
 
-// Every tab (Activity) always; once the run is over, also the
-// actions (the facts row above carries Time · Cost · Changes in every state). Numbers come from
-// results.json; "Create pull request" hands over to History's ship-it modal
-// (pendingShipIt), which owns the remotes picker and the push. Rebuilt only when its
-// content changes (a replaced row loses :hover).
+// The pull request button under the result, in its slot (paintPrCta). Same tri-state as
+// paintHdPr: an open or merged PR links, `null` (resolved, none) offers Create when
+// eligible, `undefined` (the lookup runs) and a History row not loaded yet hold the
+// placeholder. One button at most, in the state's colour: ink to create, blue while open,
+// violet once merged (the orb's). Only a finished run whose History key resolves.
+// "Create pull request" hands over to History's ship-it modal (pendingShipIt), which owns
+// the remotes picker and the push.
+function paintRdPrCta(screen, r) {
+  const slot = screen.querySelector('.rd-pr-slot');
+  if (!slot) return;
+  const key = r.status === 'done' ? historyKeyForRun(r) : '';
+  if (!key) { paintPrCta(slot, { state: 'none' }); return; }
+  const record = rdHistoryRecord(r);
+  if (glancePrInput(record) === 'PENDING') { paintPrCta(slot, { state: 'pending' }); return; }
+  const pr = record.pr && typeof record.pr === 'object' ? record.pr : null;
+  const prState = pr ? String(pr.state || '').toUpperCase() : '';
+  if (pr && (prState === 'OPEN' || prState === 'MERGED') && pr.url) {
+    paintPrCta(slot, { state: prState === 'MERGED' ? 'merged' : 'view', href: pr.url });
+  } else if (histPrEligible(record) && record.pr !== undefined) {
+    paintPrCta(slot, {
+      state: 'create', cls: 'rd-create-pr',
+      onClick: () => {
+        pendingShipIt = { id: r.pipelineId, projectKey: key };
+        location.hash = `history/${key}/${r.pipelineId}`;
+      },
+    });
+  } else {
+    paintPrCta(slot, { state: 'none' });
+  }
+}
+
+// Every tab (Activity) always; once the run is over, the pull request under it (its own
+// slot, paintRdPrCta; the facts row above carries Time · Cost · Changes in every state).
+// Numbers come from results.json. Rebuilt only when its content changes (a replaced row
+// loses :hover).
 function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
   const host = screen.querySelector('.rd-result');
   if (!host) return;
+  paintRdPrCta(screen, r);
   const terminal = RD_TERMINAL.includes(r.status);
   const steps = trailCount ? `${trailCount} step${trailCount === 1 ? '' : 's'}` : '';
   if (!terminal) {
@@ -25725,55 +28207,13 @@ function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
   }
   host.hidden = false;
   const data = r._rdData && r._rdData.data;
-  const key = historyKeyForRun(r);
-  const record = rdHistoryRecord(r);
-  // `undefined` (lookup pending) and `null` (none) must differ: only the second offers Create.
-  const prSig = record ? `${record.pr === undefined ? 'u' : JSON.stringify(record.pr)}${histPrEligible(record) ? 1 : 0}` : '';
-  const sig = [r.status, glance, data ? 1 : 0, key, prSig, r.totalCostUsd, steps, currentLevel()].join('|');
+  const sig = [r.status, glance, data ? 1 : 0, r.totalCostUsd, steps, currentLevel()].join('|');
   if (host.dataset.key === sig) return;
   host.dataset.key = sig;
   host.replaceChildren();
 
   const results = data && data.results;
   host.append(...rdActivityGroups(screen, { overview: activityOverviewValue(results), workflow: steps, diff: rdDiffRowValue(r) }));
-
-  const acts = document.createElement('div');
-  acts.className = 'rd-result-actions';
-  // Same tri-state as paintHdPr: an open or merged PR links, `null` (resolved, none)
-  // offers Create when eligible, `undefined` (enrichment pending) offers nothing yet.
-  // A merged PR is a fact (the headline says so), so its link is secondary.
-  const pr = record && record.pr && typeof record.pr === 'object' ? record.pr : null;
-  const prState = pr ? String(pr.state || '').toUpperCase() : '';
-  if (r.status === 'done' && record && key) {
-    if (pr && (prState === 'OPEN' || prState === 'MERGED') && pr.url) {
-      const a = document.createElement('a');
-      a.className = `rd-cta${prState === 'MERGED' ? ' alt' : ''}`;
-      a.href = pr.url;
-      a.target = '_blank';
-      a.rel = 'noopener';
-      setCtaContent(a, prState === 'MERGED' ? 'merged' : 'pr-open', 'View pull request');
-      acts.appendChild(a);
-    } else if (histPrEligible(record) && record.pr !== undefined) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'rd-cta rd-create-pr';
-      setCtaContent(b, 'pr-create', 'Create pull request');
-      b.addEventListener('click', () => {
-        pendingShipIt = { id: r.pipelineId, projectKey: key };
-        location.hash = `history/${key}/${r.pipelineId}`;
-      });
-      acts.appendChild(b);
-    }
-  }
-  if (r.pipelineId) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'rd-cta alt rd-follow-up';
-    setCtaContent(b, 'follow-up', 'Start a follow-up run');
-    b.addEventListener('click', () => { location.hash = `#new/after/${r.pipelineId}`; });
-    acts.appendChild(b);
-  }
-  if (acts.childNodes.length) host.appendChild(acts);
 }
 
 // The heading over a waiting question on the glance: what is asked, by which step. It
@@ -26132,7 +28572,7 @@ function paintRdHeader(screen, r) {
 
   // Meta: project · started · elapsed · cost · step n/m · step name.
   const meta = screen.querySelector('.rd-meta');
-  meta.innerHTML = '';
+  const costFocus = costTriggerFocused(meta);
   const step = runStepLabel(r);
   // Guard on `name`, not on `n`: runStepLabel always returns n >= 1, so `step.n`
   // can never be falsy and an unresolvable node would render `step 1/7 · ` with a
@@ -26154,7 +28594,22 @@ function paintRdHeader(screen, r) {
     ['rd-cost', fmtUsd(r.totalCostUsd || 0) + (freeRequestsSuffix(r.steps) || bridgeRequestsSuffix(r.steps)), true],
     ['rd-step', stepText, false],
   ];
-  segs.forEach(([cls, txt, strong]) => {
+  // Rebuilt only when what it says changed. Every frame of every run repaints this header, and a
+  // <button> rebuilt between a press and its release loses the click (the two land on different
+  // nodes). The elapsed segment changes on every frame, so it is written in place instead (the
+  // 1 s ticker writes it too).
+  const metaSig = JSON.stringify([r.runId, r.totalCostUsd || 0,
+    segs.map(([cls, txt]) => (cls.includes('run-time') ? [cls, !!txt] : [cls, txt]))]);
+  const rebuild = meta.dataset.sig !== metaSig;
+  if (rebuild) {
+    meta.dataset.sig = metaSig;
+    meta.innerHTML = '';
+  } else {
+    const dur = meta.querySelector('.run-time');
+    const durText = segs.find(([cls]) => cls.includes('run-time'))[1];
+    if (dur && dur.textContent !== durText) dur.textContent = durText;
+  }
+  if (rebuild) segs.forEach(([cls, txt, strong]) => {
     if (!txt) return;
     if (meta.childNodes.length) meta.appendChild(rdDot());
     const seg = document.createElement('span');
@@ -26164,6 +28619,7 @@ function paintRdHeader(screen, r) {
     else if (cls === 'rd-cost') seg.title = estTitle(r.totalCostUsd || 0) + (bridgeRequestsSuffix(r.steps) ? ' Requests: calls this run initiated through the model bridge (Copilot bills premium requests, not tokens); tool-loop continuations are not counted.' : '');
     meta.appendChild(seg);
   });
+  paintCostBreakdown(screen.querySelector('.rd-header'), meta.querySelector('.rd-cost'), runCostBreakdown(r.steps, r.totalCostUsd), costFocus);
 
   // Branch row.
   const br = r.branch && typeof r.branch === 'object' ? r.branch : {};
@@ -26184,20 +28640,27 @@ function paintRdHeader(screen, r) {
   const copyBtn = screen.querySelector('.rd-branch-copy');
   copyBtn.hidden = !feature;
   if (feature) screen.querySelector('.rd-branch-name').textContent = feature;
+  paintPageBranch(screen.querySelector('.rd-glance'), feature);
 
   // Actions. A terminal run offers neither (D8); a later task adds the History
   // link here.
   const paused = isPaused(r);
   const pauseBtn = screen.querySelector('.rd-pause');
   const stopBtn = screen.querySelector('.rd-stop');
-  // Hidden iff the run is OVER. An interrupted/pausing run keeps both controls: it is
-  // parked, not finished, and can still be resumed or discarded.
+  // Hidden iff the run is OVER. A paused/pausing run keeps both controls: it is parked,
+  // not finished. An interrupted one keeps no Stop: it is only ever resumed.
   pauseBtn.hidden = terminal;
-  stopBtn.hidden = terminal;
-  // Schedule a run after this one (the list card's old schedule-after button): a pipeline run with a
-  // pipeline id, while it is not over — a finished run gets "Start a follow-up run" instead.
+  // An interrupted run is never stopped — it stays resumable (stop-paused.mjs refuses it).
+  stopBtn.hidden = terminal || r.status === 'interrupted';
+  // Run after this one (the list card's old schedule-after button): a pipeline run with a pipeline
+  // id, in every state. A finished run is followed up, as on the saved run's bar (paintHdAfter).
   const afterBtn = screen.querySelector('.rd-after');
-  if (afterBtn) afterBtn.hidden = terminal || !r.pipelineId || !isPipelineRun(r);
+  if (afterBtn) {
+    afterBtn.hidden = !r.pipelineId || !isPipelineRun(r);
+    const afterTitle = runAfterTitle(r.status);
+    afterBtn.title = afterTitle;
+    afterBtn.setAttribute('aria-label', afterTitle);
+  }
   // C16: read the PREVIOUS action before overwriting it. The disabled rule below
   // needs to tell "the run genuinely changed state" from "another frame landed
   // while a request was in flight".
@@ -26260,6 +28723,22 @@ function paintRdHeader(screen, r) {
     const refused = typeof r.pauseReason === 'string' && SCHEDULE_REFUSED_PAUSE.has(r.pauseReason);
     resumeAt.disabled = refused;
     resumeAt.title = refused ? 'This run paused on a cost cap — continuing past it is a live decision and cannot be scheduled.' : '';
+  }
+
+  // Away mode switch: any run that is not over (a paused run stores it in its resume point).
+  const ns = screen.querySelector('.rd-night');
+  if (ns) {
+    ns.closest('.rd-night-wrap').hidden = terminal;
+    if (!ns.options.length) {                // fill once, BEFORE the value: a value on an empty select is a no-op
+      for (const o of RUN_SWITCH_OPTIONS) {
+        const opt = document.createElement('option');
+        opt.value = o.value; opt.textContent = o.label; opt.title = o.tip;
+        ns.append(opt);
+      }
+      ns.closest('.rd-night-wrap').title = RUN_SWITCH_TIP;
+    }
+    if (document.activeElement !== ns) ns.value = (r.night && r.night.override) || 'auto';
+    paintRdAwayPill(screen, r);
   }
 }
 
@@ -26436,18 +28915,15 @@ async function setOnboardingPrefs(patch) {
   try {
     res = await fetch('/api/onboarding', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
     data = await safeJson(res);
-  } catch (e) { setGsSettingsMsg(e.message || 'network error', 'err'); return false; }
-  if (!res.ok) { setGsSettingsMsg(data.error || `HTTP ${res.status}`, 'err'); return false; }
+  } catch (e) { setGsSettingsMsg(e.message || 'network error', 'err-inline'); return false; }
+  if (!res.ok) { setGsSettingsMsg(data.error || `HTTP ${res.status}`, 'err-inline'); return false; }
   if (data && data.steps) { gs.status = data; paintOnboarding(); }
   return true;
 }
 
 // ── Settings › General › Getting started ────────────────────────────────────
 function setGsSettingsMsg(text, cls) {
-  const m = document.getElementById('gsSettingsMsg');
-  if (!m) return;
-  m.textContent = text || '';
-  m.className = `hint${cls ? ` ${cls}` : ''}`;
+  reportStatus(document.getElementById('gsSettingsMsg'), 'hint', text, cls);
 }
 function paintGsSettings() {
   const btn = document.getElementById('gsShowAgain');
@@ -26507,16 +28983,20 @@ function openClaudeSetup() {
   paintClaudeSetupStatus();
   modal.classList.remove('hidden');
   document.getElementById('claude-setup-check')?.focus?.();
+  // The page's status may predate a sign-in (or a transient signed-out probe):
+  // ask again on open instead of repeating it.
+  recheckClaudeSetup();
+}
+async function recheckClaudeSetup() {
+  const btn = document.getElementById('claude-setup-check');
+  if (btn) btn.disabled = true;
+  try { await loadOnboarding({ recheck: true }); } finally { if (btn) btn.disabled = false; }
+  paintClaudeSetupStatus();
 }
 function closeClaudeSetup() { document.getElementById('claude-setup-modal')?.classList.add('hidden'); }
 document.getElementById('claude-setup-close')?.addEventListener('click', closeClaudeSetup);
 document.getElementById('claude-setup-modal')?.addEventListener('click', (e) => { if (e.target === e.currentTarget) closeClaudeSetup(); });
-document.getElementById('claude-setup-check')?.addEventListener('click', async () => {
-  const btn = document.getElementById('claude-setup-check');
-  btn.disabled = true;
-  try { await loadOnboarding({ recheck: true }); } finally { btn.disabled = false; }
-  paintClaudeSetupStatus();
-});
+document.getElementById('claude-setup-check')?.addEventListener('click', recheckClaudeSetup);
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   const m = document.getElementById('claude-setup-modal');
@@ -27071,11 +29551,11 @@ const VIEW_MIN_LEVEL = Object.freeze({
   'team-metrics': 'expert', 'team-policy': 'expert', agents: 'expert', scripts: 'expert',
   schedules: 'advanced',
 });
-const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ ask: 'advanced', guardrails: 'advanced', plugins: 'advanced', memory: 'advanced', models: 'expert', providers: 'expert' });
+const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ ask: 'advanced', guardrails: 'advanced', plugins: 'advanced', mcp: 'advanced', memory: 'advanced', models: 'expert', providers: 'expert' });
 const VIEW_TITLES = Object.freeze({
   stats: 'Statistics', composer: 'Workflow Composer', workspaces: 'Workspaces', 'workspace-create': 'Workspaces',
   'agent-create': 'Create agent', 'team-metrics': 'Team metrics', 'team-policy': 'Team policy', agents: 'Agents', scripts: 'Scripts',
-  guardrails: 'Guardrails', plugins: 'Plugins', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
+  guardrails: 'Guardrails', plugins: 'Plugins', mcp: 'MCP servers', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
   schedules: 'Schedules',
 });
 function pageMinLevel() {
@@ -27132,7 +29612,7 @@ document.addEventListener('worca:level', () => {
 // The tab is the Settings view's hash param; a guardrail deep link nests its id
 // behind it (#settings/guardrails/<id>). parseHash splits on the FIRST '/' only,
 // so that is view 'settings', param 'guardrails/<id>' — no parseHash change.
-const SETTINGS_TABS = ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'models', 'providers'];
+const SETTINGS_TABS = ['general', 'runs', 'ask', 'guardrails', 'memory', 'plugins', 'mcp', 'models', 'providers'];
 // The tabs whose cards GET /api/settings paints (loadSettings paints every card, wherever it sits).
 // Models is not one: loadModelsView repaints its two helper-model cards with the catalog.
 const SETTINGS_FORM_TABS = ['general', 'runs', 'ask'];
@@ -27223,6 +29703,8 @@ function showView(name, param = '') {
     // The Memory controller owns two delegated listeners and a painted host; a tab switch tears it
     // down so the next entry mounts a fresh one (and a stray frame paints nothing).
     if (currentSettingsTab === 'memory' && memoryTabCtl) { memoryTabCtl.destroy(); memoryTabCtl = null; }
+    // MCP servers' pickers and forms open in #plugin-modal, which lives outside the pane.
+    if (currentSettingsTab === 'mcp') closePluginModal();
   }
   // Moving between the three Runs routes swaps the pane at once; going back to the bare
   // list (#runs) slides the detail away in the narrow layout and hands focus back to its
@@ -27259,6 +29741,8 @@ function showView(name, param = '') {
     param = settingsParamFor(tab, sub);
   }
   const prevView = currentShownView;
+  if (prevView === 'agents' && name !== 'agents') setAgentsMsg('');
+  if (prevView === 'new' && name !== 'new') setFormMsg('');
   // The schedule sheet and the Start menu are body-level overlays of the view that opened them.
   if (prevView !== name) { closeScheduleSheet(); closeStartMenu(); }
   currentShownView = name;
@@ -27266,6 +29750,7 @@ function showView(name, param = '') {
   // The guide re-derives its hop on a tick, so it is told here — before a view's
   // own loader runs — and never misses a switch because a loader threw.
   onboardingViewChanged(name);
+  if (terminalPane) terminalPane.onContextChange();
 
   // Focus selection lives only while on the Running view.
   state.selectedRunId = (name === 'running') ? runDetailParts(param).runId : '';
@@ -27365,6 +29850,8 @@ function showView(name, param = '') {
   if (name === 'settings') showSettingsTab(param);
   if (name === 'new') {
     loadTaskSources(); applyBudgetToNewView(); refreshMentionHighlights();
+    paintNewRunAwayHint();
+    if (!state.awayMode) void fetchAwayMode().then((d) => { if (d) { state.awayMode = d; paintNewRunAwayHint(); } });
     schedulePolicyLine();                    // team policy notes for the current target (board 8)
     // Drop the per-id workflow memo on every (re-)entry so a workflow re-saved
     // in Composer repaints with its new topology rather than the cached one.
@@ -27412,12 +29899,48 @@ function showSettingsTab(param = '') {
   // request, and re-entry refetches (which is what lets grvExitWizard's
   // '#settings/guardrails/<id>' -> '#settings/guardrails' hop reset the wizard).
   paintLevelBanner();
-  if (SETTINGS_FORM_TABS.includes(tab)) loadSettings();
+  if (SETTINGS_FORM_TABS.includes(tab)) {
+    // '#settings/runs/actions' and the like: a link to one card (the Actions tab's "Set one in Settings").
+    const card = sub ? document.getElementById(`${sub}-settings-card`) : null;
+    void loadSettings().then(() => {
+      if (!card || card.closest('.settings-pane')?.dataset.tab !== tab) return;
+      card.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      card.querySelector('input, select, textarea')?.focus({ preventScroll: true });
+    });
+  }
+  if (tab === 'ask') void paintAskMcpBlock(document.getElementById('ask-mcp-host'), { api: mcpApi });
   if (tab === 'guardrails') loadGuardrailsView(sub);
   if (tab === 'models') loadModelsView(sub);
   if (tab === 'providers') loadProvidersView();
   if (tab === 'plugins') loadPluginsView({ refresh: true });
   if (tab === 'memory') loadMemoryTab(sub);
+  if (tab === 'mcp') void mcpTab().show(sub);
+}
+
+// Settings › MCP servers (mcp-view.mjs): one controller, made on first entry; its sub-route
+// ('', 'sets/<id>', 'servers') rides behind #settings/mcp/.
+async function mcpApi(method, path, body) {
+  try {
+    const res = await fetch(path, body === undefined ? { method }
+      : { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    return { ok: res.ok, status: res.status, data: await safeJson(res) };
+  } catch (err) {   // offline, or the server restarting: an answer the views show, never a rejection under `void`
+    return { ok: false, status: 0, data: { error: err?.message || 'network error' } };
+  }
+}
+let mcpViewCtl = null;
+function mcpTab() {
+  if (!mcpViewCtl) {
+    mcpViewCtl = createMcpView({
+      host: document.querySelector('.settings-pane[data-tab="mcp"]'),
+      api: mcpApi,
+      navigate: (hash) => { if (location.hash.slice(1) !== hash) location.hash = hash; },
+      confirm: confirmModal,
+      modal: { open: pluginModal, close: closePluginModal },
+      notify: (o) => notify(o),
+    });
+  }
+  return mcpViewCtl;
 }
 
 // Tracks the currently shown view so the leave-guard can fire on transition.
@@ -27490,7 +30013,10 @@ function rdTickHosts(r) {
   return hosts;
 }
 
-const _timerTick = setInterval(() => {
+function timerTick() {
+  try { paintSideAway(); } catch { /* the word moves with the clock (away hours start and end) */ }
+  // The Away mode pill counts down while the run WAITS on a question, which the loop below skips.
+  try { const open = rdOpenRun(); if (open && runDetailState.screen) paintRdAwayPill(runDetailState.screen, open); } catch { /* a closed test window must not throw from a timer */ }
   for (const r of runs.values()) {
     const active = r.status === 'running' || r.status === 'starting';
     const paused = r.pendingQuestion != null;
@@ -27517,7 +30043,10 @@ const _timerTick = setInterval(() => {
       }
     }
   }
-}, 1000);
+}
+const _timerTick = setInterval(timerTick, 1000);
+// Test hook: a suite drives the 1 s tick itself instead of waiting a real second.
+if (typeof window !== 'undefined') window.__np = Object.assign(window.__np || {}, { timerTick });
 // In a real browser, setInterval returns a numeric id and this timer simply runs
 // for the page's lifetime. Under node:test the jsdom harness imports THIS module,
 // where bare `setInterval` resolves to Node's global and returns a Timeout that
@@ -27614,6 +30143,17 @@ function getPageContext() {
     ctx.workspaceId = state.selectedWorkspaceId;
     return ctx;
   }
+  // The New Pipeline page is ABOUT its project target (MCP registry §9.1): untagged, unlike the fallback below.
+  if (ctx.view === 'new' && state.runTarget !== 'workspace') {
+    const dir = selectedProjectPath();
+    if (dir) ctx.projectDir = dir;
+    return ctx;
+  }
+  // A workspace page names its workspace (§9.1), like a project page names its project.
+  if (ctx.view === 'workspaces' && param) {
+    const ws = parseWsParam(param);
+    if (ws && workspaceById(ws.id)) { ctx.workspaceId = ws.id; return ctx; }
+  }
   // The Team metrics page's selection: scope id, range, group-by and the active filters, so
   // "why did spend jump?" refers to the chart on screen. Ids and enum slugs only — the server
   // validates each and resolves the scope name itself.
@@ -27629,8 +30169,10 @@ function getPageContext() {
     if (f) ctx.tmFilter = f.slice(0, 200);
     return ctx;
   }
+  // The generic fallback: the dropdown's project on a page that is not about one. Tagged, so the server
+  // ignores it for MCP servers, the context header and the memory mount (§9.1).
   const dir = selectedProjectPath();
-  if (dir) ctx.projectDir = dir;
+  if (dir) { ctx.projectDir = dir; ctx.projectSource = 'fallback'; }
   return ctx;
 }
 
@@ -27738,11 +30280,140 @@ async function applyAskPrefill() {
   }
 }
 
+// ---- Away mode on the run page and New run --------------------------------
+// state.awayMode: the user-level GET /api/away-mode body (Settings card, boot, settings-changed).
+// state.awayModeByDir: one body per run project, since a run's config includes its project's layer.
+state.awayModeByDir = {};
+const _awayLoading = {};
+const _awayMiss = new Set();   // dirs whose fetch failed: not retried on every 1 s tick; settings-changed clears it
+/** The Away mode body for a run's project (null dir = the user-level body). Never rejects. */
+function awayModeFor(dir) {
+  if (!dir) return Promise.resolve(state.awayMode || null);
+  if (state.awayModeByDir[dir]) return Promise.resolve(state.awayModeByDir[dir]);
+  if (_awayMiss.has(dir)) return Promise.resolve(null);
+  return (_awayLoading[dir] ||= fetchAwayMode(dir).then((d) => {
+    delete _awayLoading[dir];
+    if (d) state.awayModeByDir[dir] = d; else _awayMiss.add(dir);
+    return d;
+  }));
+}
+/** The body already in hand for this run, or null. */
+const awayBodyFor = (r) => (r.projectDir ? state.awayModeByDir[r.projectDir] : state.awayMode) || null;
+/** The run page's Away mode pill. Cheap: pure text from describeRun; the fetch happens once per project. */
+function paintRdAwayPill(screen, r) {
+  const pill = screen && screen.querySelector('.rd-night-pill');
+  if (!pill) return;
+  const d0 = awayBodyFor(r);
+  if (!d0) {
+    pill.textContent = '';
+    // Re-paint only when the lookup now hits, so a missing body can never loop.
+    if (r.projectDir) void awayModeFor(r.projectDir).then(() => { if (awayBodyFor(r)) paintRdAwayPill(screen, r); });
+    else if (!_awayLoading['']) _awayLoading[''] = fetchAwayMode().then((d) => { if (d && !state.awayMode) state.awayMode = d; });   // once; the 1 s tick repaints
+    return;
+  }
+  const d = describeRun({ config: d0.config, toggle: d0.toggle, hereSince: d0.hereSince ?? null, now: Date.now(),
+    run: { ...(r.night || {}), waiting: r.pendingQuestion != null, done: RD_TERMINAL.includes(r.status) } });
+  pill.textContent = d.pill; pill.title = d.reason; pill.dataset.state = d.state;
+}
+/** settings-changed: refresh the user-level body and every cached project body, keeping the old ones until the new land. */
+let _awayRefreshSeq = 0;
+async function refreshAwayBodies() {
+  _awayMiss.clear();
+  const seq = ++_awayRefreshSeq;
+  const d = await fetchAwayMode();
+  if (seq !== _awayRefreshSeq) return;                    // a newer refresh (a later settings-changed) wins
+  if (d) {
+    state.awayMode = d;
+    // An open project tab: the status is global, so its summary follows (unsaved edits survive).
+    for (const host of document.querySelectorAll('.pd-night-form')) { if (host.querySelector('.away-summary')) updateAwaySummary(host, { toggle: d.toggle, hereSince: d.hereSince ?? null, now: Date.now() }); }
+  }
+  _sideAwayRead = true;
+  paintNewRunAwayHint(); paintSideAway();
+  await Promise.all(Object.keys(state.awayModeByDir).map(async (dir) => { const x = await fetchAwayMode(dir); if (x) state.awayModeByDir[dir] = x; }));
+  const open = rdOpenRun();
+  if (open && runDetailState.screen) paintRdAwayPill(runDetailState.screen, open);
+}
+// ---- The sidebar's "I'm here | I'm away" control ----
+// The lit side is what applies right now, the away hours included. Clicking the other side says it:
+// "I'm away" = "I'm away now"; "I'm here" = here, even inside the away hours (the next ones apply by
+// themselves). Pause stays in Settings. Unread settings leave it disabled; a click opens Settings › Runs.
+let _sideAwaySig = '';
+let _sideAwayBusy = false;
+let _sideAwayErr = '';            // the last failed click, kept in the tooltip until the next one
+let _sideAwayRead = false;        // the first GET has answered (until then the slot stays empty, never "could not be read")
+let _sideAwayNote = '';           // "Away hours started / ended" from the server, shown for a minute under the control
+let _sideAwayNoteTimer = null;
+const SIDE_AWAY_NOTE_MS = 60_000;
+const sideAwayMount = document.getElementById('side-away');   // held, like awayStatusEl: the 1 s tick paints this page's own mount
+const SIDE_AWAY_ICONS = {         // shown alone on the collapsed menu
+  here: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-4v-5h-6v5H5a1 1 0 0 1-1-1z"></path></svg>',
+  away: AWAY_GLYPH,                // shared with the workflow graph's Away mode band (away-glyph.mjs)
+};
+function paintSideAway() {
+  const mount = sideAwayMount;
+  if (!mount || !_sideAwayRead) return;
+  const d0 = state.awayMode;
+  const s = describeAwaySwitch({ config: d0 ? d0.config : null, toggle: d0 ? d0.toggle : 'auto', hereSince: d0 ? d0.hereSince : null, now: Date.now() });
+  const sig = JSON.stringify([s, _sideAwayBusy, _sideAwayErr, _sideAwayNote]);
+  if (sig === _sideAwaySig && mount.firstChild) return;      // the 1 s tick repaints only on a change
+  _sideAwaySig = sig;
+  const seg = document.createElement('div');
+  seg.className = 'seg side-away'; seg.setAttribute('role', 'group'); seg.setAttribute('aria-label', 'Away mode');
+  seg.dataset.status = s.status;
+  seg.title = _sideAwayErr ? `${s.tip} (Could not change it: ${_sideAwayErr})` : s.tip;
+  for (const [side, label] of [['here', "I'm here"], ['away', "I'm away"]]) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.dataset.side = side;
+    const on = s.side === side;
+    b.className = on ? 'on' : '';
+    b.setAttribute('aria-pressed', String(on));
+    if (s.disabled || _sideAwayBusy) b.setAttribute('aria-disabled', 'true');
+    b.innerHTML = SIDE_AWAY_ICONS[side];
+    b.append(Object.assign(document.createElement('span'), { className: 'side-away-label', textContent: label }));
+    b.setAttribute('aria-label', label);
+    seg.append(b);
+  }
+  const note = _sideAwayNote ? Object.assign(document.createElement('small'), { className: 'hint side-away-note', textContent: _sideAwayNote }) : null;
+  if (note) note.setAttribute('role', 'status');
+  mount.replaceChildren(seg, ...(note ? [note] : []));
+}
+/** The server's away-hours edge (night/hours-watch.mjs): one line for a minute, and a fresh status. */
+function onAwayHoursEdge(msg) {
+  _sideAwayNote = typeof msg.text === 'string' ? msg.text : '';
+  if (_sideAwayNoteTimer) clearTimeout(_sideAwayNoteTimer);
+  _sideAwayNoteTimer = setTimeout(() => { _sideAwayNote = ''; _sideAwayNoteTimer = null; paintSideAway(); }, SIDE_AWAY_NOTE_MS);
+  void refreshAwayBodies().catch(() => {});
+  paintSideAway();
+}
+sideAwayMount?.addEventListener('click', async (e) => {
+  const b = e.target.closest('.side-away button[data-side]');
+  if (!b || _sideAwayBusy) return;
+  const d0 = state.awayMode;
+  if (!d0 || b.getAttribute('aria-disabled') === 'true') { location.hash = 'settings/runs'; return; }
+  if (b.getAttribute('aria-pressed') === 'true') return;     // already what applies
+  _sideAwayBusy = true; _sideAwayErr = ''; paintSideAway();
+  try {
+    const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nightModeToggle: b.dataset.side === 'away' ? 'on' : 'here' }) });
+    if (!res.ok) _sideAwayErr = (await safeJson(res)).error || `HTTP ${res.status}`;
+  } catch (err) { _sideAwayErr = err.message || 'network error'; }
+  _sideAwayBusy = false;
+  // settings-changed does the same; the newest refresh wins
+  await refreshAwayBodies().catch((e) => notify({ tone: 'err', title: 'Could not refresh Away mode', detail: e.message, key: 'away-refresh' }));
+  paintSideAway();
+});
+
+/** The New-run "Mark this run" hint, from the user-level settings (the project is not fixed until submit). */
+function paintNewRunAwayHint() {
+  const h = document.getElementById('nightModeHint');
+  if (h) h.textContent = describeNewRun(state.awayMode || {});
+}
+
 // ---------------------------------------------------------------------------
 // boot
 // ---------------------------------------------------------------------------
 syncSourceToggle();
 loadProjects();
+void refreshAwayBodies().catch(() => {});   // the sidebar switch (and the New-run hint) need the user-level body
 connectWS();
 // Restore the New-Pipeline target (project | workspace). 'workspace' lazy-loads
 // the workspace options + re-points the config panel; 'project' is the default.
@@ -27771,7 +30442,7 @@ loadWhoami();
 }
 
 // Ask Worca mount (§10.2 seam 1): a JS-built body-level overlay — index.html is
-// untouched so ui-shell's routed-view census stays at 11. No network happens here;
+// untouched, so the routed-view count in test/ui-boot.test.mjs stays as it is. No network happens here;
 // the panel fetches only on first open / hello.
 askPanel = createAskPanel({
   doc: document,
@@ -27799,12 +30470,42 @@ askPanel = createAskPanel({
 });
 document.body.appendChild(askPanel.root);
 
+// Terminal pane (issue #573): a JS-built body-level pane on the right, like the Ask dock above. No
+// network until it is opened (or was left open); xterm.js loads on first open, and opening it on a run
+// or a project starts (or reattaches) that page's shell.
+terminalPane = createTerminalPane({
+  doc: document,
+  win: window,
+  fetch: (...args) => fetch(...args),
+  // false while /ws is down: the pane shows it is reconnecting instead of dropping keys silently.
+  sendWs: (obj) => {
+    const ws = state.ws;
+    if (!ws || !state.wsReady) return false;
+    try { ws.send(JSON.stringify(obj)); return true; } catch { return false; }
+  },
+  getPageContext,
+  storage: window.localStorage,
+});
+document.body.appendChild(terminalPane.root);
+// Its openers are the run and project pages' header buttons (.term-opener); a page cloned later (the
+// project page) syncs its own, see openProjDetail.
+document.addEventListener('click', (e) => { if (e.target.closest?.('.term-opener')) terminalPane?.toggle(); });
+terminalPane.syncOpeners();
+
 // ---------------------------------------------------------------------------
 // Export to Claude Code — modal wiring. Turns a saved v2 workflow into a runnable
 // skill via POST /api/workflows/:id/export (dry-run = Plan, apply = Apply). The
 // export button is added to each v2 row in the graph-view saved list (gvRenderSaved).
 // (Re-homed from the retired v1 composer after the Node-graph v2 rebase.)
 // ---------------------------------------------------------------------------
+
+// #555 D2c: every export status line says whether it is an error.
+function exportSay(text, err = false) {
+  const m = document.getElementById('export-msg');
+  if (!m) return;
+  m.textContent = text || '';
+  m.classList.toggle('err', !!err);
+}
 
 async function exportCall(id, opts) {
   const res = await fetch(`/api/workflows/${encodeURIComponent(id)}/export`, {
@@ -27837,7 +30538,7 @@ function openExportModal(item) {
   document.getElementById('export-plugin-name').value = '';
   document.getElementById('export-keep-version').checked = false;
   document.getElementById('export-include-agents').checked = true;
-  document.getElementById('export-msg').textContent = '';
+  exportSay('');
   const planEl = document.getElementById('export-plan');
   planEl.textContent = ''; planEl.classList.add('hidden');
   exportSetDone(false);
@@ -28044,8 +30745,7 @@ function exportInvalidatePlan() {
   // Export re-plans on its own, so a stale preview never leaves the button dead.
   const applyBtn = document.getElementById('export-apply-btn');
   if (applyBtn) applyBtn.disabled = false;
-  const msg = document.getElementById('export-msg');
-  if (msg) msg.textContent = '';
+  exportSay('');
 }
 function bindExportModal() {
   const modal = document.getElementById('export-modal');
@@ -28071,26 +30771,24 @@ function bindExportModal() {
     const data = await pickFolder(exportModalState.format === 'plugin' ? 'plugin' : 'export');
     if (data && data.status === 'picked' && data.path) { set(data.path); return; }
     if (data && data.status === 'canceled') return;
-    if (data && data.status === 'busy') { document.getElementById('export-msg').textContent = 'A folder dialog is already open — finish or cancel it first.'; return; }
+    if (data && data.status === 'busy') { exportSay('A folder dialog is already open — finish or cancel it first.'); return; }
     openFolderBrowser(folder.value.trim(), set);
   });
   document.getElementById('export-cancel').addEventListener('click', closeExportModal);
   document.getElementById('export-done-close').addEventListener('click', closeExportModal);
   // Preview: the optional dry run — shows what Export would write, writes nothing.
   document.getElementById('export-plan-btn').addEventListener('click', async () => {
-    const msg = document.getElementById('export-msg');
-    msg.textContent = 'Previewing…';
+    exportSay('Previewing…');
     try {
       const plan = await exportPlan(exportModalState.item.id, exportBuildOpts());
       exportRenderPlan(plan);
-      msg.textContent = plan.conflicts.length ? 'Resolve each conflict below, then Export.' : 'Preview only — nothing is written until you click Export.';
-    } catch (err) { msg.textContent = `Preview failed: ${err.message}`; }
+      exportSay(plan.conflicts.length ? 'Resolve each conflict below, then Export.' : 'Preview only — nothing is written until you click Export.');
+    } catch (err) { exportSay(`Preview failed: ${err.message}`, true); }
   });
   // Export: writes. Without a preview for the current inputs it runs the dry run
   // itself first; a conflict (only the skill format can raise one) stops it and is
   // shown for per-file resolution — nothing is ever written past an unresolved one.
   document.getElementById('export-apply-btn').addEventListener('click', async () => {
-    const msg = document.getElementById('export-msg');
     if (exportModalState.format === 'json') {
       // A plain download of the stored graph — the server sets Content-Disposition.
       const a = document.createElement('a');
@@ -28106,13 +30804,13 @@ function bindExportModal() {
       });
       return;
     }
-    msg.textContent = 'Exporting…';
+    exportSay('Exporting…');
     try {
       if (!exportModalState.planned) {
         const plan = await exportPlan(exportModalState.item.id, exportBuildOpts());
         if ((plan.conflicts || []).length) {
           exportRenderPlan(plan);
-          msg.textContent = 'Resolve each conflict below, then Export.';
+          exportSay('Resolve each conflict below, then Export.');
           return;
         }
       }
@@ -28126,7 +30824,7 @@ function bindExportModal() {
       if (unwritten.length) {
         exportRenderPlan(applied);
         appendLog({ source: 'ui', level: 'error', text: `export of ${exportModalState.item.name} incomplete: ${applied.written.length} written, ${unwritten.length} conflict(s) left unwritten` });
-        msg.textContent = `${unwritten.length} unresolved conflict(s) were left unwritten — resolve below and Export again.`;
+        exportSay(`${unwritten.length} unresolved conflict(s) were left unwritten — resolve below and Export again.`, true);
         return;
       }
       // A plugin folder that does not validate stays open: the recipient's
@@ -28135,7 +30833,7 @@ function bindExportModal() {
         exportRenderPlan(applied);
         const problems = applied.validation.problems.filter((p) => p.level === 'error').map((p) => p.message);
         appendLog({ source: 'ui', level: 'error', text: `plugin export of ${exportModalState.item.name} does not validate: ${problems.join('; ')}` });
-        msg.textContent = `Written, but the plugin folder does not validate: ${problems.join('; ')}`;
+        exportSay(`Written, but the plugin folder does not validate: ${problems.join('; ')}`, true);
         return;
       }
       appendLog({ source: 'ui', level: 'info', text: `exported ${exportModalState.item.name}: ${applied.written.length} written, ${applied.skipped.length} skipped` });
@@ -28160,7 +30858,7 @@ function bindExportModal() {
       }
     } catch (err) {
       exportInvalidatePlan();
-      msg.textContent = `Export failed: ${err.message}`;
+      exportSay(`Export failed: ${err.message}`, true);
     }
   });
   // Backdrop click (the overlay itself, not the inner card) closes the modal.

@@ -20,6 +20,7 @@ import {
 } from './run-harness.mjs';
 import { resolveGraph, loadAgentFile, GRAPH_DEFAULT_WORKFLOW, writeGraphWorkflow, readWorkflow } from './workflows.mjs';
 import { loadScriptRegistry } from './script-registry.mjs';
+import { loadAgentRegistry } from './agent-registry.mjs';
 import { AUTO_WORKFLOW_ID, AUTO_WORKFLOW_NAME } from './graph/builtin-workflows.mjs';
 import { classifyLoops } from '../shared/graph/loops.mjs';
 import { buildGraphManifest, manifestTemplate, manifestPortsFn } from '../shared/graph/manifest.mjs';
@@ -384,6 +385,8 @@ export class GraphOrchestrator extends RunHarness {
       signal: AbortSignal.any([this.abort.signal, this.pauseAbort.signal]),
       envScrub: this.guardrails?.envScrub || undefined,
       envAllowlist: this.guardrails?.envScrub ? this.guardrails.envAllowlist : undefined,
+      // A bridged Auto model: the upstream's own cost comes back under this tag (classify.mjs).
+      bridgeTag: `auto-classify:${this.pipeline?.id || 'run'}:${round}`,
     };
     const startedAt = new Date().toISOString();
     let classified = null;
@@ -412,7 +415,10 @@ export class GraphOrchestrator extends RunHarness {
       // book it before the shell parks the run, or the caps never see it (D14). No cap
       // check here — the error pause is happening anyway; the next round checks.
       const spent = (Number(classified?.costUsd) || 0) + (Number(err?.costUsd) || 0);
-      if (spent > 0 || err?.usage) this._recordAutoCost(round, { costUsd: spent, usage: sumUsage(classified?.usage, err?.usage) }, startedAt, model, { checkCaps: false });
+      // A round a pause or stop cut short is booked as `stopped`, never as a finished call.
+      if (spent > 0 || err?.usage) this._recordAutoCost(round, { costUsd: spent, usage: sumUsage(classified?.usage, err?.usage) }, startedAt, model,
+        // A pause during the 429 backoff rethrows the earlier attempt's ClassifierError: the signal says it was cut.
+        { checkCaps: false, status: err?.name === 'AbortError' || input.signal?.aborted ? 'stopped' : 'finished' });
       throw err;
     }
     // B4: keep this round's shape (and the classifier's warnings) from here on — a cost cap raised
@@ -600,12 +606,12 @@ export class GraphOrchestrator extends RunHarness {
 
   /** Cost of one classifier round: a sub-agent row (state list + table + delta) + the preflight ledger + the caps (spec §5.7).
    *  `checkCaps: false` books the spend of a round that FAILED without raising a cost pause on top of the error pause. */
-  _recordAutoCost(round, classified, startedAt, model, { checkCaps = true } = {}) {
+  _recordAutoCost(round, classified, startedAt, model, { checkCaps = true, status = 'finished' } = {}) {
     const costUsd = Number.isFinite(Number(classified?.costUsd)) ? Number(classified.costUsd) : 0;
     const usage = classified?.usage || {};
     this._auto.costUsd = Math.round((this._auto.costUsd + costUsd) * 1e6) / 1e6;
     const rec = {
-      id: `auto-classify-${round}`, label: `Auto workflow (round ${round})`, status: 'finished',
+      id: `auto-classify-${round}`, label: `Auto workflow (round ${round})`, status,
       startedAt, finishedAt: new Date().toISOString(), costUsd,
       tokens: (Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0),
       subagentType: 'auto-classify', uiPhase: 'preflight', nodeId: 'preflight', stepKey: 'x:preflight:1',
@@ -626,7 +632,7 @@ export class GraphOrchestrator extends RunHarness {
     // attributes a cost whose stepKey names a ledger row (state.steps + totalCostUsd —
     // no else branch; the DB spend ledger is written regardless), and
     // _checkCostLimits reads that total: without the row the pipeline cap could never trip.
-    this._recordCost(costUsd, 'x:preflight:1');
+    this._recordCost(costUsd, 'x:preflight:1', { aux: 'auto' });
     if (checkCaps) this._checkCostLimits();   // a cost cap pauses here (_capReached → pauseErr()); the resume re-enters the decision
   }
 
@@ -880,7 +886,11 @@ export class GraphOrchestrator extends RunHarness {
           pending: this._auto.pending ? jsonClone(this._auto.pending) : null,            // B4/B6
         }
         : null,
+      // Night mode: the run's own switches (the start opt-in and the run-view override),
+      // read back by the harness constructor. `auto` above is the Auto-workflow state.
+      night: { optIn: this._night.optIn, override: this._night.override, ...(this._night.since != null ? { since: this._night.since } : {}) },
       guardrailsId: this.guardrailsId,
+      ...(this.mcpOptOut?.length ? { mcpOptOut: [...this.mcpOptOut] } : {}),   // MCP registry §6.2: resume re-resolves minus it
       memoryScope: this.memoryScope || null,   // agent memory §7.3: a paused defrag resumes with ONE scope (B10)
       checkpointRef: this.checkpointRef || null,
       checkpointRefs: { ...this.checkpointRefs },
@@ -1247,6 +1257,11 @@ export class GraphOrchestrator extends RunHarness {
       runRoot: this.runRoot,
       mcpConfigPath: this.mcpConfigPath,
       mcpServerGrants: this.mcpServerGrants,
+      // MCP registry (design §6.1): the copies' secret env, the values to redact and the tools
+      // withheld for the run's tool-name limit. Never persisted anywhere.
+      mcpEnv: this.mcpLayer?.env,
+      mcpRedact: this.mcpLayer?.redact,
+      mcpDisallowed: this.mcpLayer?.disallowed,
       repos: this._reposCtx(),
       pipelineDir: this.pipeline.dir,
       pipelineId: this.pipeline.id,
@@ -1310,6 +1325,8 @@ export class GraphOrchestrator extends RunHarness {
       // Who answered question `id` (identity.mjs actor; answer() records it) — the clarifier
       // stores it with the answer and audits it.
       answeredBy: (id) => this.answeredBy(id),
+      // The night mode decision behind question `id`, or null — stored beside the answer.
+      nightDecision: (id) => this.nightDecision(id),
       onEvent: (e) => this._onAgentEvent(nc.key || node.kind, e, attr),
       claudeOpts: {
         bin: this.claude.bin,
@@ -1318,7 +1335,10 @@ export class GraphOrchestrator extends RunHarness {
         effort: nc.effort,                     // per-node effort (undefined when unset)
         permissionRules: this.guardrailPermissionRules || undefined,
         envScrub: this.guardrails?.envScrub || undefined,
-        envAllowlist: this.guardrails?.envScrub ? this.guardrails.envAllowlist : undefined,
+        // §5.5.1: a scrubbed spawn with a registry stdio copy keeps the launcher's keep-list.
+        envAllowlist: this.guardrails?.envScrub
+          ? (this.mcpLayer?.allowlist?.length ? [...this.guardrails.envAllowlist, ...this.mcpLayer.allowlist] : this.guardrails.envAllowlist)
+          : undefined,
         mock: this.claude.mock,
       },
     };
@@ -1354,6 +1374,7 @@ export class GraphOrchestrator extends RunHarness {
     const now = new Date().toISOString();
     const terminal = status === 'done' || status === 'error' || status === 'stopped' || status === 'paused';
     let step = this.state.steps.find((s) => s.key === key);
+    const reentry = !!step;                 // a retry or a resume re-enters its own row
     if (!step) {
       step = {
         key,
@@ -1390,6 +1411,11 @@ export class GraphOrchestrator extends RunHarness {
       if (status === 'start') step.endedAt = null;
     }
     if (terminal) step.endedAt = now;
+    // Turns this execution's spawn never closed with a `result` (a pause, a stop, a crash, a retried
+    // attempt): counted apart on the row (run-harness _closeOpenTurns). A result already cleared them.
+    // At 'start' only on RE-entry (a retry, a resume): a fresh execution has nothing of its own to
+    // close, and its bridge tag (a bare execution id) may hold another live run's in-flight spend.
+    if (terminal || (status === 'start' && reentry)) this._closeOpenTurns(key);
     if (terminal && ctx.human) {
       step.humanHours = ctx.human.hours;
       step.humanSignals = ctx.human.signals;
@@ -1462,6 +1488,34 @@ export class GraphOrchestrator extends RunHarness {
       const est = estimateStepHours(evidence, resolveConstants(humanEstimateOverrides()));
       ctx.human = { hours: est.hours, signals: { ...est.signals, method: est.method } };
     }).catch(() => { ctx.human = null; });
+  }
+
+  /**
+   * Engine hook (stopPaused): the executions a pause parked end for good at the stop. A pause
+   * skips their estimate (_execute's finally) because the resume credits it at their real
+   * terminal, from the cursor the resume point carries, and a stop is that terminal. Credit the
+   * pre-pause work as _execute's finally would have: the code delta since that cursor (the
+   * checkouts are re-attached and still live) under the agent's estimate overrides. Their md/json
+   * outputs are not read: the process that paused allocated their paths. Never throws.
+   * @param {object} rp the resume point
+   * @param {Set<string>} keys the ledger keys (execution ids) of the parked executions
+   */
+  async _engineCreditParked(rp, keys) {
+    if (!rp?.humanCursor) return;   // no agent or script ever started: nothing was parked mid-work
+    let nodes;
+    try { nodes = resolvedFromManifest(rp.manifest || this.state.stepper, this.registry || loadAgentRegistry(this.agentsDir)).nodes; } catch { return; }
+    this._humanCursor = rp.humanCursor;
+    for (const step of this.state.steps || []) {
+      const nc = keys.has(step.key) ? nodes[step.nodeId] : null;
+      // Agents only: nothing runs after a stop, so a parked script advancing the cursor would only hand the
+      // agents' code to an execution that earns no hours (a live stop unwinds the agent first).
+      if (!nc || nc.kind !== 'agent') continue;
+      // _execute's finally for an agent execution that ends here.
+      const ctx = { node: { id: step.nodeId, kind: nc.kind, key: nc.key }, meta: nc.meta || {} };
+      await this._humanEstimate(ctx);
+      if (ctx.human) { step.humanHours = ctx.human.hours; step.humanSignals = ctx.human.signals; }
+    }
+    this.state.humanHours = sumStepHours(this.state.steps);
   }
 
   /** The retry loop around ONE execution — the NODE site of failure-policy.mjs.
@@ -1734,7 +1788,9 @@ export class GraphOrchestrator extends RunHarness {
    * clarifier nodes have their own gate; auto mode would answer noise.
    */
   _primeQuestions(nc, ctx) {
-    const enabled = !!nc.askQuestions && nc.runnerType !== 'clarifier' && !this.auto && !ctx.slice;
+    // --yes blocks agent questions unless night mode owns this run's answers.
+    const autoBlocks = this.auto && !this._nightOwnsAuto('questions');
+    const enabled = !!nc.askQuestions && nc.runnerType !== 'clarifier' && !autoBlocks && !ctx.slice;
     ctx.questionsEnabled = enabled;
     if (!enabled) return;
     ctx.questionsAnswered = readStepQuestions(this.pipeline.id)
@@ -1879,6 +1935,7 @@ export class GraphOrchestrator extends RunHarness {
         const answered = await this._enqueueAsk(() => this._ask({
           id: `questions-${stepKey}-r${round}`,
           kind: 'form',
+          origin: 'questions',               // night mode: neverDecide 'questions' covers it
           agent: agentLabel,
           nodeId: ctx.nodeId,
           executionId: ctx.executionId,
@@ -1901,9 +1958,10 @@ export class GraphOrchestrator extends RunHarness {
         const { values, held } = redactSecrets((answered && typeof answered === 'object' && answered.values) || {}, formSecrets);
         Object.assign(this._secretEnv, held);
         const formBy = this.answeredBy(`questions-${stepKey}-r${round}`);
+        const formNight = this.nightDecision(`questions-${stepKey}-r${round}`);
         await writeStepQuestions(this.pipeline.id, stepKey, round, {
           agentKey: nc.key, nodeId: ctx.nodeId,
-          answers: { kind: 'form', form: formAsk.form, version: formAsk.version, values, ...(formBy ? { answeredBy: formBy } : {}) },
+          answers: { kind: 'form', form: formAsk.form, version: formAsk.version, values, ...(formBy ? { answeredBy: formBy } : {}), ...(formNight ? { night: formNight } : {}) },
         });
         await appendAudit(this.pipeline.dir, `${agentLabel}: form "${formAsk.form}" answered${byActor(formBy)} (round ${round}).`, { actor: formBy }).catch(() => {});
         await rm(qPath, { force: true }).catch(() => {});
@@ -1935,8 +1993,9 @@ export class GraphOrchestrator extends RunHarness {
       const byId = new Map(questions.map((q) => [q.id, q]));
       const enriched = answers.map((a) => ({ id: a.id, question: byId.get(a.id)?.question || '', choice: a.choice }));
       const answerBy = this.answeredBy(`questions-${stepKey}-r${round}`);
+      const answerNight = this.nightDecision(`questions-${stepKey}-r${round}`);
       await writeStepQuestions(this.pipeline.id, stepKey, round, {
-        agentKey: nc.key, nodeId: ctx.nodeId, answers: { answers: enriched, ...(answerBy ? { answeredBy: answerBy } : {}) },
+        agentKey: nc.key, nodeId: ctx.nodeId, answers: { answers: enriched, ...(answerBy ? { answeredBy: answerBy } : {}), ...(answerNight ? { night: answerNight } : {}) },
       });
       await appendAudit(this.pipeline.dir, `${agentLabel}: ${enriched.length} answer(s) received${byActor(answerBy)} (round ${round}).`, { actor: answerBy }).catch(() => {});
       // Consume the processed round file: the DB row is authoritative, and a

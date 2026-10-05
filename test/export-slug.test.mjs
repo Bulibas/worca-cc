@@ -7,27 +7,31 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { exportSlugPreview, slugifyLocal } from '../ui/public/export-slug.mjs';
 import { isValidSkillName } from '../src/core/skills.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
-test('an explicit slug is used verbatim; validity matches isValidSkillName', () => {
-  for (const raw of ['ok-slug', 'Good_1.2', 'has space', 'bad/slug', '..', '.', 'a'.repeat(60), 'дефолт']) {
-    const { slug, preview, valid } = exportSlugPreview(raw, 'Ignored Name');
-    assert.equal(slug, raw.trim());
-    assert.equal(preview, `/${raw.trim()}`);
-    assert.equal(valid, isValidSkillName(raw.trim()), `drift for explicit slug ${JSON.stringify(raw)}`);
-  }
-});
-
-test('no explicit slug → slugified workflow name, capped at 48, always valid', () => {
-  const { slug, valid } = exportSlugPreview('', 'Fix: login bug #123');
-  assert.equal(slug, 'fix-login-bug-123');
-  assert.equal(valid, true);
-  assert.equal(isValidSkillName(slug), true);
-  // Capped at 48 characters.
-  const long = exportSlugPreview('', 'x'.repeat(80));
-  assert.equal(long.slug.length, 48);
-  assert.equal(isValidSkillName(long.slug), true);
-  // A name with no slug-able characters falls back to slugifyLocal's 'untitled' default.
-  assert.equal(slugifyLocal('!!!'), 'untitled');
-  assert.equal(exportSlugPreview('', '!!!').slug, 'untitled');
-  assert.equal(isValidSkillName(exportSlugPreview('', '!!!').slug), true);
+test('export slug preview matches isValidSkillName, explicit or slugified', async () => {
+  await checkRows([
+    { name: 'an explicit slug is used verbatim; validity matches isValidSkillName', run: () => {
+      for (const raw of ['ok-slug', 'Good_1.2', 'has space', 'bad/slug', '..', '.', 'a'.repeat(60), 'дефолт']) {
+        const { slug, preview, valid } = exportSlugPreview(raw, 'Ignored Name');
+        assert.equal(slug, raw.trim());
+        assert.equal(preview, `/${raw.trim()}`);
+        assert.equal(valid, isValidSkillName(raw.trim()), `drift for explicit slug ${JSON.stringify(raw)}`);
+      }
+    } },
+    { name: 'no explicit slug → slugified workflow name, capped at 48, always valid', run: () => {
+      const { slug, valid } = exportSlugPreview('', 'Fix: login bug #123');
+      assert.equal(slug, 'fix-login-bug-123');
+      assert.equal(valid, true);
+      assert.equal(isValidSkillName(slug), true);
+      // Capped at 48 characters.
+      const long = exportSlugPreview('', 'x'.repeat(80));
+      assert.equal(long.slug.length, 48);
+      assert.equal(isValidSkillName(long.slug), true);
+      // A name with no slug-able characters falls back to slugifyLocal's 'untitled' default.
+      assert.equal(slugifyLocal('!!!'), 'untitled');
+      assert.equal(exportSlugPreview('', '!!!').slug, 'untitled');
+      assert.equal(isValidSkillName(exportSlugPreview('', '!!!').slug), true);
+    } },
+  ]);
 });

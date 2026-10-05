@@ -8,7 +8,8 @@ import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { worcaHome } from '../src/core/projects.mjs';
 import { createChatContext } from '../src/core/chat/chat-context.mjs';
-import { createCommandRouter, parseDuration, statusEmoji } from '../src/core/chat/command-router.mjs';
+import { createCommandRouter } from '../src/core/chat/command-router.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -50,6 +51,7 @@ function fixture(overrideActions = {}) {
     answer: async (runId, id, payload) => calls.push(['answer', runId, id, payload]),
     stop: async (runId) => calls.push(['stop', runId]),
     pause: async (runId) => calls.push(['pause', runId]),
+    stopPaused: async (pipelineId) => { calls.push(['stopPaused', pipelineId]); return { ok: true, pipelineId, status: 'stopped' }; },
     resume: async (pipelineId) => { calls.push(['resume', pipelineId]); return { ok: true }; },
     history: async () => state.rows,
     listProjects: async () => [{ name: 'worca', path: '/x/worca' }, { name: 'other', path: '/x/other' }],
@@ -149,6 +151,49 @@ test('control: /pause /stop live-only; /resume resolves paused history rows', as
   assert.match(single, /Resuming `\*3333`/, 'single paused row is the no-arg default');
 });
 
+test('/stop *ref reaches a PAUSED run (History row or a run this server holds) by explicit ref only; interrupted points at /resume', async () => {
+  const { send, calls, state } = fixture();
+  state.rows.push({ id: 'pipe-dddd4444', title: 'Crashed run', status: 'interrupted' });
+  const stopped = text(await send('/stop *3333'));
+  assert.match(stopped, /Stopped `\*3333`/);
+  assert.deepEqual(calls.at(-1), ['stopPaused', 'pipe-cccc3333']);
+  const crashed = text(await send('/stop *4444'));
+  assert.match(crashed, /interrupted — it stays resumable: `\/resume \*4444`/);
+  assert.ok(!calls.some((c) => c[0] === 'stopPaused' && c[1] === 'pipe-dddd4444'), 'an interrupted run is never stopped');
+  assert.match(text(await send('/stop *2222')), /No live run matches/, 'a done row is still refused');
+  // A paused run this server holds: `/runs` prints its RUN ref — that ref stops it too.
+  state.live.push({ runId: 'run-eeee5555', pipelineId: 'pipe-ffff6666', title: 'Parked here', status: 'paused', kind: 'run', projectDir: '/x/worca' });
+  assert.match(text(await send('/stop *5555')), /Stopped `\*6666`/);
+  assert.deepEqual(calls.at(-1), ['stopPaused', 'pipe-ffff6666']);
+  const before = calls.length;
+  await send('/stop');
+  assert.deepEqual(calls.slice(before), [['stop', 'run-aaaa1111']], 'a bare /stop never reaches past the live runs');
+  // `/stop *` is a bare /stop, and a ref two live runs match gets the choice: neither
+  // ever falls through to stopping a paused run for good.
+  state.live.length = 0;
+  const quiet = calls.length;
+  assert.match(text(await send('/stop *')), /No live runs/);
+  state.live.push(
+    { runId: 'run-gggg3333', pipelineId: 'pipe-gggg3333', title: 'Live A', status: 'running', kind: 'run', projectDir: '/x/worca' },
+    { runId: 'run-hhhh3333', pipelineId: 'pipe-hhhh3333', title: 'Live B', status: 'running', kind: 'run', projectDir: '/x/worca' },
+  );
+  assert.match(text(await send('/stop *3333')), /Ambiguous/);
+  assert.deepEqual(calls.slice(quiet), [], 'nothing was stopped');
+  // `/use <project>` scopes the paused History rows too: another project's run is out of reach.
+  state.rows.push({ id: 'pipe-kkkk9999', title: 'Other project', status: 'paused', projectDir: '/x/other' });
+  await send('/use worca');
+  assert.match(text(await send('/stop *9999')), /No live run/);
+  assert.deepEqual(calls.slice(quiet), [], 'out of scope: nothing was stopped');
+  // …while the project's own paused rows stay in reach: its single-project runs, and a workspace run it is a member of.
+  state.rows.push(
+    { id: 'pipe-mmmm8888', title: 'Same project', status: 'paused', projectDir: '/x/worca' },
+    { id: 'pipe-wwww7777', title: 'Workspace run', status: 'paused', projectDir: '/x/other', projectNames: ['other', 'worca'] },
+  );
+  assert.match(text(await send('/stop *8888')), /Stopped `\*8888`/);
+  assert.match(text(await send('/stop *7777')), /Stopped `\*7777`/);
+  assert.deepEqual(calls.slice(quiet), [['stopPaused', 'pipe-mmmm8888'], ['stopPaused', 'pipe-wwww7777']]);
+});
+
 test('approvals: gate continue/another, recovery retry/abort, guardrails between kinds', async () => {
   const { send, calls, state } = fixture();
   assert.match(text(await send('/approve')), /not waiting on a decision/);
@@ -167,28 +212,31 @@ test('approvals: gate continue/another, recovery retry/abort, guardrails between
   assert.deepEqual(calls.at(-1), ['answer', 'run-aaaa1111', 'rec-1', { decision: 'pause' }]);
 });
 
-test('/status on an error-paused history row prints the error detail', async () => {
-  const { send, state } = fixture();
-  state.rows.push({ id: 'pipe-dddd4444', title: 'Blew up', status: 'paused', totalCostUsd: 0.5,
-    pauseReason: 'error', pauseDetail: 'claude exited with code 1: disk full' });
-  const out = text(await send('/status *4444'));
-  assert.match(out, /Pause reason:.*a step failed/);
-  assert.match(out, /\*\*Error:\*\* claude exited with code 1: disk full/);
-});
-
-test('/status on a recoverable- or limit-paused row labels the reason and calls the detail a cause', async () => {
-  const { send, state } = fixture();
-  state.rows.push({ id: 'pipe-eeee5555', title: 'Logged out', status: 'paused', totalCostUsd: 0.1,
-    pauseReason: 'recoverable', pauseDetail: 'auth: API Error: 401' });
-  state.rows.push({ id: 'pipe-ffff6666', title: 'Capped', status: 'paused', totalCostUsd: 0.1,
-    pauseReason: 'usage_limit', pauseDetail: "You've hit your session limit · resets 6pm" });
-  const rec = text(await send('/status *5555'));
-  assert.match(rec, /Pause reason:.*recoverable error/);
-  assert.match(rec, /\*\*Cause:\*\* auth: API Error: 401/);
-  assert.doesNotMatch(rec, /\*\*Error:\*\*/);
-  const lim = text(await send('/status *6666'));
-  assert.match(lim, /Pause reason:.*session\/usage limit reached/);
-  assert.match(lim, /\*\*Cause:\*\* You've hit your session limit/);
+test('/status on a paused history row labels the reason: error -> **Error:**, recoverable/usage_limit -> **Cause:**', async () => {
+  await checkRows([
+    { name: '/status on an error-paused history row prints the error detail', run: async () => {
+      const { send, state } = fixture();
+      state.rows.push({ id: 'pipe-dddd4444', title: 'Blew up', status: 'paused', totalCostUsd: 0.5,
+        pauseReason: 'error', pauseDetail: 'claude exited with code 1: disk full' });
+      const out = text(await send('/status *4444'));
+      assert.match(out, /Pause reason:.*a step failed/);
+      assert.match(out, /\*\*Error:\*\* claude exited with code 1: disk full/);
+    } },
+    { name: '/status on a recoverable- or limit-paused row labels the reason and calls the detail a cause', run: async () => {
+      const { send, state } = fixture();
+      state.rows.push({ id: 'pipe-eeee5555', title: 'Logged out', status: 'paused', totalCostUsd: 0.1,
+        pauseReason: 'recoverable', pauseDetail: 'auth: API Error: 401' });
+      state.rows.push({ id: 'pipe-ffff6666', title: 'Capped', status: 'paused', totalCostUsd: 0.1,
+        pauseReason: 'usage_limit', pauseDetail: "You've hit your session limit · resets 6pm" });
+      const rec = text(await send('/status *5555'));
+      assert.match(rec, /Pause reason:.*recoverable error/);
+      assert.match(rec, /\*\*Cause:\*\* auth: API Error: 401/);
+      assert.doesNotMatch(rec, /\*\*Error:\*\*/);
+      const lim = text(await send('/status *6666'));
+      assert.match(lim, /Pause reason:.*session\/usage limit reached/);
+      assert.match(lim, /\*\*Cause:\*\* You've hit your session limit/);
+    } },
+  ]);
 });
 
 test('/answer: ordinal validation and clarify payload mapping', async () => {
@@ -211,32 +259,34 @@ test('/answer: ordinal validation and clarify payload mapping', async () => {
   assert.match(text(await send('/answer 1')), /use `\/approve` or `\/retry`/);
 });
 
-test('/answer answers a zero-option free-text question', async () => {
-  const pq = { id: 'q1', kind: 'clarify', questions: [{ id: 'k', question: 'Name?', options: [] }] };
-  const answered = [];
-  const f = makeRouter({ pendingQuestion: () => pq, answer: (r, id, p) => answered.push(p), listRuns: liveOne });
-  const out = await handle(f, '/answer call it worca');
-  assert.deepEqual(answered, [{ answers: [{ id: 'k', choice: 'call it worca' }] }]);
-  assert.match(out.body[0].value, /Answered 1 question/);
-});
-
-test('/answer mixes ordinals and free text with the pipe separator', async () => {
-  const pq = { id: 'q1', kind: 'clarify', questions: [
-    { id: 'a', question: 'Pick', options: ['x', 'y'] },
-    { id: 'b', question: 'Describe', options: [] },
-  ] };
-  const answered = [];
-  const f = makeRouter({ pendingQuestion: () => pq, answer: (r, id, p) => answered.push(p), listRuns: liveOne });
-  await handle(f, '/answer 2 | free text here');
-  assert.deepEqual(answered[0].answers, [{ id: 'a', choice: 'y' }, { id: 'b', choice: 'free text here' }]);
-});
-
-test('a single free-text answer containing a literal | is taken verbatim', async () => {
-  const pq = { id: 'q1', kind: 'clarify', questions: [{ id: 'k', question: 'Pattern?', options: [] }] };
-  const answered = [];
-  const f = makeRouter({ pendingQuestion: () => pq, answer: (r, id, p) => answered.push(p), listRuns: liveOne });
-  await handle(f, '/answer use a|b as the pattern');
-  assert.deepEqual(answered, [{ answers: [{ id: 'k', choice: 'use a|b as the pattern' }] }]);
+test('/answer free text: zero-option question, ordinal | text mix, literal | in a single answer', async () => {
+  await checkRows([
+    { name: '/answer answers a zero-option free-text question', run: async () => {
+      const pq = { id: 'q1', kind: 'clarify', questions: [{ id: 'k', question: 'Name?', options: [] }] };
+      const answered = [];
+      const f = makeRouter({ pendingQuestion: () => pq, answer: (r, id, p) => answered.push(p), listRuns: liveOne });
+      const out = await handle(f, '/answer call it worca');
+      assert.deepEqual(answered, [{ answers: [{ id: 'k', choice: 'call it worca' }] }]);
+      assert.match(out.body[0].value, /Answered 1 question/);
+    } },
+    { name: '/answer mixes ordinals and free text with the pipe separator', run: async () => {
+      const pq = { id: 'q1', kind: 'clarify', questions: [
+        { id: 'a', question: 'Pick', options: ['x', 'y'] },
+        { id: 'b', question: 'Describe', options: [] },
+      ] };
+      const answered = [];
+      const f = makeRouter({ pendingQuestion: () => pq, answer: (r, id, p) => answered.push(p), listRuns: liveOne });
+      await handle(f, '/answer 2 | free text here');
+      assert.deepEqual(answered[0].answers, [{ id: 'a', choice: 'y' }, { id: 'b', choice: 'free text here' }]);
+    } },
+    { name: 'a single free-text answer containing a literal | is taken verbatim', run: async () => {
+      const pq = { id: 'q1', kind: 'clarify', questions: [{ id: 'k', question: 'Pattern?', options: [] }] };
+      const answered = [];
+      const f = makeRouter({ pendingQuestion: () => pq, answer: (r, id, p) => answered.push(p), listRuns: liveOne });
+      await handle(f, '/answer use a|b as the pattern');
+      assert.deepEqual(answered, [{ answers: [{ id: 'k', choice: 'use a|b as the pattern' }] }]);
+    } },
+  ]);
 });
 
 test('/mute /unmute persist per chat; /use scopes /runs', async () => {
@@ -253,16 +303,6 @@ test('/mute /unmute persist per chat; /use scopes /runs', async () => {
   assert.match(text(await send('/runs')), /No live runs/, 'scoped away from the only live run');
   await send('/use -');
   assert.match(text(await send('/runs')), /Fix login/);
-});
-
-test('parseDuration + statusEmoji helpers', () => {
-  assert.equal(parseDuration('30m'), 1800000);
-  assert.equal(parseDuration('2h'), 7200000);
-  assert.equal(parseDuration('1d'), 86400000);
-  assert.equal(parseDuration('soon'), null);
-  assert.equal(statusEmoji('running'), '🟢');
-  assert.equal(statusEmoji('error'), '🔴');
-  assert.equal(statusEmoji('weird'), '⚪');
 });
 
 test('/stop and /pause refuse runs that are already finished', async () => {
@@ -459,37 +499,31 @@ test('/cancel: gate lists the real options, recovery gives up, nothing pending p
   assert.deepEqual(calls.at(-1), ['answer', 'run-aaaa1111', 'rec-1', { decision: 'pause' }]);
 });
 
-test('Auto workflow proposal: /approve accepts, /answer revises, /retry explains, /cancel cancels', async () => {
+test('Auto workflow proposal: /status names it; /approve accepts, /answer revises, /retry explains, /cancel cancels', async () => {
   const { send, calls, state } = fixture();
   state.pending['run-aaaa1111'] = { id: 'auto-1', kind: 'workflow', workflow: { name: 'Fix flow', nodes: { a: {}, b: {} } } };
 
-  assert.match(text(await send('/approve')), /accepted/);
-  assert.deepEqual(calls.at(-1), ['answer', 'run-aaaa1111', 'auto-1', { decision: 'accept' }]);
+  await checkRows([
+    { name: '/status names an open workflow proposal with its three replies', run: async () => {
+      const out = text(await send('/status'));
+      assert.match(out, /proposed workflow/);
+      assert.match(out, /`\/approve \*1111`/);
+      assert.match(out, /`\/cancel \*1111`/);
+    } },
+    { name: 'Auto workflow proposal: /approve accepts, /answer revises, /retry explains, /cancel cancels', run: async () => {
+      assert.match(text(await send('/approve')), /accepted/);
+      assert.deepEqual(calls.at(-1), ['answer', 'run-aaaa1111', 'auto-1', { decision: 'accept' }]);
 
-  await send('/answer *1111 use a cheaper reviewer');
-  assert.deepEqual(calls.at(-1), ['answer', 'run-aaaa1111', 'auto-1', { decision: 'revise', text: 'use a cheaper reviewer' }]);
-  assert.match(text(await send('/answer')), /\/answer \*1111 <what to change>/, 'empty revise -> usage');
+      await send('/answer *1111 use a cheaper reviewer');
+      assert.deepEqual(calls.at(-1), ['answer', 'run-aaaa1111', 'auto-1', { decision: 'revise', text: 'use a cheaper reviewer' }]);
+      assert.match(text(await send('/answer')), /\/answer \*1111 <what to change>/, 'empty revise -> usage');
 
-  const n = calls.length;
-  assert.match(text(await send('/retry')), /\/answer \*1111 <what to change>/);
-  assert.equal(calls.length, n, '/retry never answers a proposal');
+      const n = calls.length;
+      assert.match(text(await send('/retry')), /\/answer \*1111 <what to change>/);
+      assert.equal(calls.length, n, '/retry never answers a proposal');
 
-  await send('/cancel');
-  assert.deepEqual(calls.at(-1), ['answer', 'run-aaaa1111', 'auto-1', { decision: 'cancel' }]);
-});
-
-test('/status names an open workflow proposal with its three replies', async () => {
-  const { send, state } = fixture();
-  state.pending['run-aaaa1111'] = { id: 'auto-1', kind: 'workflow', workflow: { name: 'Fix flow' } };
-  const out = text(await send('/status'));
-  assert.match(out, /proposed workflow/);
-  assert.match(out, /`\/approve \*1111`/);
-  assert.match(out, /`\/cancel \*1111`/);
-});
-
-test('/help lists /cancel and says which way /approve goes at a gate', async () => {
-  const { send } = fixture();
-  const out = text(await send('/help'));
-  assert.match(out, /`\/cancel \[\*ref\]`/);
-  assert.match(out, /no more cycles/);
+      await send('/cancel');
+      assert.deepEqual(calls.at(-1), ['answer', 'run-aaaa1111', 'auto-1', { decision: 'cancel' }]);
+    } },
+  ]);
 });

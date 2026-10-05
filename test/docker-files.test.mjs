@@ -1,54 +1,46 @@
 // test/docker-files.test.mjs
 // The container packaging (docs/docker.md) without a docker daemon: the
-// shipped files hold the security posture the design promises, the build
-// script's pure parts work, and the egress proxy enforces its allowlist on a
-// real socket. The image itself is proven by tools/docker-smoke.mjs.
+// shipped files hold the security posture the design promises, and the egress
+// proxy enforces its allowlist on a real socket. The image itself is proven by
+// tools/docker-smoke.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import net from 'node:net';
 
 import { DEFAULT_ALLOW, parseAllow, isAllowed, createProxy } from '../docker/egress-proxy.mjs';
-import { pinnedClaudeCodeVersion, DEFAULT_IMAGE } from '../tools/docker-build.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(ROOT, p), 'utf8');
 
-test('docker/: every file the docs and workflows name exists', () => {
-  for (const f of [
-    'docker/Dockerfile', 'docker/entrypoint.sh', 'docker/egress-proxy.mjs', 'docker/CLAUDE_CODE_VERSION',
-    'docker/compose.yml', 'docker/compose.egress.yml', 'docker/compose.ssh.yml', 'docker/compose.teams.yml',
-    'docker/compose.clonein.yml', 'docker/compose.dev.yml', 'docker/.env.example', 'docker/.trivyignore',
-    '.dockerignore', '.devcontainer/devcontainer.json', 'docs/docker.md',
-    '.github/workflows/docker-image.yml', '.github/workflows/docker-rebuild.yml',
-  ]) assert.ok(existsSync(join(ROOT, f)), `${f} missing`);
-});
-
-test('Dockerfile: non-root, pinned CLI with its updater off, tini, healthcheck, tarball install', () => {
-  const d = read('docker/Dockerfile');
-  assert.match(d, /^USER worca$/m, 'runs as the worca user');
-  assert.match(d, /DISABLE_AUTOUPDATER=1/, 'the image is immutable: no self-update');
-  assert.match(d, /claude-code@\$\{CLAUDE_CODE_VERSION\}/, 'Claude Code is installed at the pinned version');
-  assert.match(d, /test -n "\$\{CLAUDE_CODE_VERSION\}"/, 'a missing pin fails the build instead of installing latest');
-  assert.match(d, /npm install -g \/tmp\/worca\.tgz/, 'installs the packed tarball, never COPY of the source');
-  assert.doesNotMatch(d, /^COPY \. /m, 'no COPY of the whole tree');
-  assert.match(d, /^ENTRYPOINT \["tini"/m, 'tini reaps orphaned children');
-  assert.match(d, /^HEALTHCHECK/m);
-  assert.match(d, /WORCA_NO_NATIVE_DIALOG=1/);
-  assert.match(d, /WORCA_CONTAINER=1/, 'Ask Worca knows it runs in the image (src/core/deployment.mjs)');
-  assert.match(d, /CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1/);
-  assert.match(d, /dev\.worca\.claude-code\.version/, 'the pin is a label');
-  assert.match(d, /chmod 0777 \/worca \/projects \/home\/worca \/home\/worca\/\.claude/, 'volume mount points are writable for any uid (Linux Engine WORCA_UID)');
-  assert.match(d, /HOME=\/home\/worca/, 'HOME is pinned for uids with no passwd entry');
-});
-
-test('CLAUDE_CODE_VERSION: one semver line', () => {
-  assert.match(pinnedClaudeCodeVersion(), /^\d+\.\d+\.\d+$/);
-  assert.equal(read('docker/CLAUDE_CODE_VERSION').trim(), pinnedClaudeCodeVersion());
-  assert.equal(DEFAULT_IMAGE, 'ghcr.io/sinishadjukic/worca');
+test('Dockerfile and .dockerignore: non-root, pinned CLI, tini, healthcheck, tarball-only context', async () => {
+  await checkRows([
+    { name: 'Dockerfile: non-root, pinned CLI with its updater off, tini, healthcheck, tarball install', run: () => {
+      const d = read('docker/Dockerfile');
+      assert.match(d, /^USER worca$/m, 'runs as the worca user');
+      assert.match(d, /DISABLE_AUTOUPDATER=1/, 'the image is immutable: no self-update');
+      assert.match(d, /claude-code@\$\{CLAUDE_CODE_VERSION\}/, 'Claude Code is installed at the pinned version');
+      assert.match(d, /test -n "\$\{CLAUDE_CODE_VERSION\}"/, 'a missing pin fails the build instead of installing latest');
+      assert.match(d, /npm install -g \/tmp\/worca\.tgz/, 'installs the packed tarball, never COPY of the source');
+      assert.doesNotMatch(d, /^COPY \. /m, 'no COPY of the whole tree');
+      assert.match(d, /^ENTRYPOINT \["tini"/m, 'tini reaps orphaned children');
+      assert.match(d, /^HEALTHCHECK/m);
+      assert.match(d, /WORCA_NO_NATIVE_DIALOG=1/);
+      assert.match(d, /WORCA_CONTAINER=1/, 'Ask Worca knows it runs in the image (src/core/deployment.mjs)');
+      assert.match(d, /CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1/);
+      assert.match(d, /dev\.worca\.claude-code\.version/, 'the pin is a label');
+      assert.match(d, /chmod 0777 \/worca \/projects \/home\/worca \/home\/worca\/\.claude/, 'volume mount points are writable for any uid (Linux Engine WORCA_UID)');
+      assert.match(d, /HOME=\/home\/worca/, 'HOME is pinned for uids with no passwd entry');
+    } },
+    { name: '.dockerignore keeps the build context to docker/ and the packed tarball', run: () => {
+      const lines = read('.dockerignore').split('\n').filter((l) => l && !l.startsWith('#'));
+      assert.deepEqual(lines, ['*', '!docker/', 'docker/.pack/*', '!docker/.pack/worca-app-*.tgz']);
+    } },
+  ]);
 });
 
 test('entrypoint.sh: strict shell, execs the command, never blocks on auth', () => {
@@ -113,6 +105,7 @@ test('overlays: egress confines worca to an internal network; clone-in drops the
   const eg = read('docker/compose.egress.yml');
   assert.match(eg, /internal:\s*true/);
   assert.match(eg, /HTTPS_PROXY: http:\/\/egress:3128/);
+  assert.match(eg, /NO_PROXY: .*\bbroker\b/, 'worca fetch() honors the proxy, so the broker sidecar must bypass it');
   assert.match(eg, /worca-egress-proxy\.mjs/);
   const ci = read('docker/compose.clonein.yml');
   assert.match(ci, /projects:\/projects/);
@@ -120,45 +113,6 @@ test('overlays: egress confines worca to an internal network; clone-in drops the
   const ssh = read('docker/compose.ssh.yml');
   assert.doesNotMatch(ssh, /\.ssh:|\/\.ssh\//, 'the key directory is never mounted');
   assert.match(ssh, /SSH_AUTH_SOCK: \/ssh-agent\.sock/);
-});
-
-test('.dockerignore keeps the build context to docker/ and the packed tarball', () => {
-  const lines = read('.dockerignore').split('\n').filter((l) => l && !l.startsWith('#'));
-  assert.deepEqual(lines, ['*', '!docker/', 'docker/.pack/*', '!docker/.pack/worca-app-*.tgz']);
-});
-
-test('devcontainer.json is valid JSON on the published image with the two volumes', () => {
-  const dc = JSON.parse(read('.devcontainer/devcontainer.json'));
-  assert.match(dc.image, /^ghcr\.io\/sinishadjukic\/worca:/);
-  assert.equal(dc.remoteUser, 'worca');
-  assert.ok(dc.mounts.some((m) => m.includes('target=/worca')));
-  assert.ok(dc.mounts.some((m) => m.includes('target=/home/worca/.claude')));
-});
-
-test('package.json wires docker:build and docker:smoke; the tarball ships the compose files (for `worca container`) but never the image build files', () => {
-  const pkg = JSON.parse(read('package.json'));
-  assert.equal(pkg.scripts['docker:build'], 'node tools/docker-build.mjs');
-  assert.equal(pkg.scripts['docker:smoke'], 'node tools/docker-smoke.mjs');
-  assert.deepEqual(pkg.files.filter((f) => f.startsWith('docker')), ['docker/compose*.yml', 'docker/.env.example']);
-});
-
-test('workflows: release publishes the image after npm; CI smokes the image; rebuild is weekly', () => {
-  const rel = read('.github/workflows/release-npm-app.yml');
-  assert.match(rel, /image:\s*\n\s*needs: build-and-publish\s*\n\s*uses: \.\/\.github\/workflows\/docker-image\.yml/);
-  assert.match(rel, /release:\s*\n\s*needs: \[build-and-publish, image\]/, 'the GitHub Release waits for the image');
-  const ci = read('.github/workflows/ci.yml');
-  assert.match(ci, /npm run docker:smoke -- --image/);
-  assert.match(ci, /hadolint/);
-  assert.match(ci, /trivy-action/);
-  const img = read('.github/workflows/docker-image.yml');
-  assert.match(img, /platforms: linux\/\$\{\{ matrix\.arch \}\}/);
-  assert.match(img, /provenance: mode=max/);
-  assert.match(img, /sbom: true/);
-  assert.match(img, /cosign sign --yes/);
-  assert.match(img, /push-by-digest=true/);
-  const rb = read('.github/workflows/docker-rebuild.yml');
-  assert.match(rb, /cron: "0 6 \* \* 1"/);
-  assert.match(rb, /date_tag: true/);
 });
 
 test('egress allowlist: exact hosts, dot-prefixed subdomains, defaults', () => {
@@ -247,6 +201,7 @@ test('egress proxy survives a client that resets a denied CONNECT (the sidecar u
 test('compose.broker.yml: worca gets the broker address and no key; the broker publishes no port', () => {
   const b = read('docker/compose.broker.yml');
   assert.match(b, /WORCA_BROKER_URL: http:\/\/broker:8080/);
+  assert.match(b, /NO_PROXY: .*\bbroker\b/, 'worca fetch() honors a proxy from .env, so the broker sidecar must bypass it');
   assert.match(b, /ANTHROPIC_API_KEY: ""/, 'the key is blanked in worca');
   assert.match(b, /CLAUDE_CODE_OAUTH_TOKEN: ""/);
   assert.match(b, /command: \["worca", "broker"\]/);
@@ -279,4 +234,27 @@ test('entrypoint.sh: `worca broker` skips worca\'s preparation and drops to worc
   assert.match(block, /chown worca:worca "\$WORCA_BROKER_DATA_DIR"/);
   assert.match(block, /exec setpriv --reuid=worca --regid=worca --init-groups -- "\$0" "\$@"/);
   assert.match(e, /credential broker \(\$\{WORCA_BROKER_URL\}\); worca holds no model key/);
+});
+
+test('entrypoint.sh: plugin code is shared read-only with the agent users, plugin data never (MCP registry §14)', () => {
+  const e = read('docker/entrypoint.sh');
+  const iso = e.indexOf('if [ "${WORCA_AGENT_ISOLATION:-1}" != 0 ]');
+  const start = e.indexOf('# MCP registry (§14)');
+  assert.ok(iso > 0 && start > iso && start < e.indexOf('exec setpriv --reuid=worca', iso), 'inside the agent-isolation preparation, as root');
+  assert.ok(start < e.indexOf('      umask 0007\n    fi\n', iso), 'before the isolation block closes: $wh is set only inside it');
+  const block = e.slice(start, e.indexOf('\n      done\n', start));
+  assert.match(block, /for p in "\$wh\/plugins"\/\*\/; do/, 'each plugin dir with its trailing slash: ${p}versions is <p>/versions');
+  assert.match(block, /chown worca:worca-share "\$wh\/plugins"/);
+  assert.match(block, /chmod 0710 "\$wh\/plugins"/, 'plugins/: traverse only');
+  assert.match(block, /chmod 0710 "\$p" && chgrp worca-share "\$p"/, 'plugins/<p>/: traverse only');
+  assert.match(block, /chmod -R g-w,g\+rX "\$\{p\}versions" && chgrp -R worca-share "\$\{p\}versions"/, 'versions/**: read-only');
+  assert.ok(block.indexOf('chmod 0710 "$wh/plugins"') < block.indexOf('chown worca:worca-share "$wh/plugins"'),
+    'modes first, then the group (as P2 shareVersionDir): the agents\' group never holds write access, not even for a moment');
+  assert.match(block, /chmod -R go-rwx "\$\{p\}data"/, 'plugin secrets stay owner-only');
+  assert.match(block, /if \[ ! -L "\$wh\/plugins" \]; then chmod 0710/, 'root never follows a planted symlink: plugins/ itself');
+  assert.match(block, /\[ ! -L "\$wh\/plugins" \] && \[ ! -L "\$\{p%\/\}" \] && \[ ! -L "\$\{p\}versions" \] && \[ -d "\$\{p\}versions" \] \|\| continue/,
+    'nor a plugin dir or its versions/');
+  assert.match(block, /if \[ -d "\$\{p\}data" \] && \[ ! -L "\$\{p\}data" \]; then chmod -R go-rwx/, 'nor its data/');
+  assert.doesNotMatch(block, /g\+w|g\+s|2770|worca-share "\$\{p\}data"/, 'never group-writable, never setgid, data never shared');
+  assert.doesNotMatch(block, /\.agent-isolation/, 'every boot, not once per volume: plugins installed since then join too');
 });

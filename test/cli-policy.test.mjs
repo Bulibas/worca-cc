@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { makeOrigin, cloneAs, useGitSandbox, git } from './helpers/metrics-git.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { addProject } from '../src/core/projects.mjs';
 import { projectKey } from '../src/core/store.mjs';
 import { writeTeamPolicyPrefs } from '../src/core/config.mjs';
@@ -45,29 +46,32 @@ before(async () => {
   await addProject({ name: 'gateway', path: dir });
 });
 
-test('help lists the subcommand; show without a policy exits 0', { skip }, async () => {
-  const h = await runCli(['policy', 'help']);
-  assert.equal(h.code, 0); assert.match(h.out, /worca policy show/); assert.match(h.out, /--past-team-cap/);
-  const top = await runCli(['help']);
-  assert.match(top.out, /policy <cmd>/);
-  const s = await runCli(['policy', 'show', '--project', dir]);
-  assert.equal(s.code, 0, s.err); assert.match(s.out, /no team policy/);
-  const j = await runCli(['policy', 'show', '--project', dir, '--json']);
-  assert.deepEqual(JSON.parse(j.out).policy, null);
-});
-
-test('init --here creates the branch; pull and show read it back', { skip }, async () => {
-  const i = await runCli(['policy', 'init', '--here', '--project', dir, '--title', 'Gateway policy']);
-  assert.equal(i.code, 0, i.err); assert.match(i.out, /gateway: created/); assert.match(i.out, /protect the worca-policy branch/);
-  assert.equal(git(bare, 'rev-list', '--count', POLICY_BRANCH), '1');
-  const doc = JSON.parse(git(bare, 'show', `${POLICY_BRANCH}:${POLICY_FILE}`));
-  assert.equal(doc.title, 'Gateway policy');
-  const p = await runCli(['policy', 'pull', '--project', dir]);
-  assert.equal(p.code, 0, p.err); assert.match(p.out, /gateway: policy @/);
-  const s = await runCli(['policy', 'show', '--project', dir]);
-  assert.equal(s.code, 0, s.err); assert.match(s.out, /team policy gateway/); assert.match(s.out, /sets no fields yet/);
-  const bad = await runCli(['policy', 'init', '--project', dir]);
-  assert.equal(bad.code, 2); assert.match(bad.err, /--here or --follow/);
+test('policy: help lists it, show without a policy exits 0, init --here creates the branch, pull and show read it back', { skip }, async () => {
+  await checkRows([
+    { name: 'help lists the subcommand; show without a policy exits 0', run: async () => {
+      const h = await runCli(['policy', 'help']);
+      assert.equal(h.code, 0); assert.match(h.out, /worca policy show/); assert.match(h.out, /--past-team-cap/);
+      const top = await runCli(['help']);
+      assert.match(top.out, /policy <cmd>/);
+      const s = await runCli(['policy', 'show', '--project', dir]);
+      assert.equal(s.code, 0, s.err); assert.match(s.out, /no team policy/);
+      const j = await runCli(['policy', 'show', '--project', dir, '--json']);
+      assert.deepEqual(JSON.parse(j.out).policy, null);
+    } },
+    { name: 'init --here creates the branch; pull and show read it back', run: async () => {
+      const i = await runCli(['policy', 'init', '--here', '--project', dir, '--title', 'Gateway policy']);
+      assert.equal(i.code, 0, i.err); assert.match(i.out, /gateway: created/); assert.match(i.out, /protect the worca-policy branch/);
+      assert.equal(git(bare, 'rev-list', '--count', POLICY_BRANCH), '1');
+      const doc = JSON.parse(git(bare, 'show', `${POLICY_BRANCH}:${POLICY_FILE}`));
+      assert.equal(doc.title, 'Gateway policy');
+      const p = await runCli(['policy', 'pull', '--project', dir]);
+      assert.equal(p.code, 0, p.err); assert.match(p.out, /gateway: policy @/);
+      const s = await runCli(['policy', 'show', '--project', dir]);
+      assert.equal(s.code, 0, s.err); assert.match(s.out, /team policy gateway/); assert.match(s.out, /sets no fields yet/);
+      const bad = await runCli(['policy', 'init', '--project', dir]);
+      assert.equal(bad.code, 2); assert.match(bad.err, /--here or --follow/);
+    } },
+  ]);
 });
 
 test('show renders the effective fold; setup lists the gaps and refuses to install without --install', { skip }, async () => {

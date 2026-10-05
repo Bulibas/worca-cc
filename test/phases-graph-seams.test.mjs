@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  mockMarkers, runOpts, siblingsBlock, diffInstruction,
+  mockMarkers, runOpts, diffInstruction,
   READ_WRITE_TOOLS, IMPLEMENTER_TOOLS, RESUME_HEADER,
 } from '../src/core/phases.mjs';
 
@@ -14,17 +14,6 @@ test('mockMarkers renders KEY: value lines, keeps 0, and drops empty values', ()
     mockMarkers({ MOCK_ROLE: 'refiner', MOCK_CYCLE: 2, MOCK_PRIOR: 0, MOCK_OUT: '', MOCK_JSON: null, MOCK_IN: undefined }),
     'MOCK_ROLE: refiner\nMOCK_CYCLE: 2\nMOCK_PRIOR: 0',
   );
-});
-
-test('siblingsBlock renders the shared-working-tree rules, and nothing when solo', () => {
-  assert.equal(siblingsBlock([]), '');
-  assert.equal(siblingsBlock(undefined), '');
-  const b = siblingsBlock([{ id: 'p1t2', title: 'Slice two', file: 'tasks/p1-t2.md' }]);
-  assert.ok(b.startsWith('\n## Parallel siblings — shared working tree\n\n'));
-  assert.ok(b.includes('1 other implementer(s) are editing THIS SAME working tree right now, each on its own task:'));
-  assert.ok(b.includes('- p1t2 "Slice two" (tasks/p1-t2.md)'));
-  assert.ok(b.includes('1. Edit ONLY the files your TASK file lists.'));
-  assert.ok(b.includes('4. No tree-wide git operations: no stash, no checkout --, no reset, no clean, no add, no commit.'));
 });
 
 test('diffInstruction: the checkpoint-ref arm names the ref, the bare arm does not', () => {

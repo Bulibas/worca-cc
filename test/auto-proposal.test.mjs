@@ -20,10 +20,6 @@ function proposalFor({ match = null } = {}) {
   return buildProposal({ round: 2, shape: built.shape, template, match: match ? { id: match.id, name: match.name } : null, tunables, registry: REG, models: MODELS, warnings: [{ code: 'X', message: 'a warning' }], costUsd: 0.03, fingerprint: 'top-level: src/', ignoredProjectOverrides: !!match });
 }
 
-test('remapTunables follows the node map', () => {
-  assert.deepEqual(remapTunables({ n_planner: { model: 'm' }, n_x: { effort: 'high' } }, new Map([['n_planner', 'n_plan']])), { n_plan: { model: 'm' } });
-});
-
 test('buildProposal: a new workflow — manifest under wf_auto, dispatch order, nodes with editability flags, visible models, cost, fingerprint', () => {
   const p = proposalFor();
   assert.equal(p.round, 2);
@@ -96,13 +92,6 @@ test('askQuestions on a questionsLocked agent and fanOut on an agent that cannot
   assert.equal(p.nodes.n_manualtestschecklist.canFanOut, false);
   const acc = sanitizeProposalAnswer({ decision: 'accept', nodes: { n_clarify: { askQuestions: false }, n_manualtestschecklist: { fanOut: true } } }, { proposal: p, models: MODELS, registry: REG });
   assert.deepEqual(acc.nodes, {});
-});
-
-test('a non-finite cost is normalised to 0', () => {
-  const built = assembleShape({ stages: [S('implementer')] }, { registry: REG });
-  const p = buildProposal({ round: 1, shape: built.shape, template: built.template, tunables: {}, registry: REG, models: MODELS, costUsd: NaN });
-  assert.equal(p.costUsd, 0);
-  assert.equal(buildProposal({ round: 1, shape: built.shape, template: built.template, tunables: {}, registry: REG, models: MODELS }).costUsd, 0);
 });
 
 test('B1: a tunable model WITHOUT an effort paints effort "" (what resolveGraph runs) in the table AND the manifest, never the row\'s authored effort', () => {

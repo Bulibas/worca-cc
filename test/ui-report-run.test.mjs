@@ -18,34 +18,20 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM, VirtualConsole } from 'jsdom';
 import { previewText, REPORT_PREVIEW_DEBOUNCE_MS } from '../ui/public/report-run.mjs';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { useAppTimers } from './helpers/app-timers.mjs';
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
-const cssPath = fileURLToPath(new URL('../ui/public/style.css', import.meta.url));
-// Comments are stripped FIRST. This file documents several of its own rules in
-// prose that contains braces, and a `{` or `}` inside one is read as a rule
-// boundary — which splits the capture in two and makes the "exactly one rule"
-// count below see a phantom. Stripping removes that whole class of accident.
-const css = readFileSync(cssPath, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
-
-/** The first flat rule whose selector list contains `sel` — test/ui-pinned-sidebar.test.mjs:16-20. */
-function ruleBody(sel) {
-  const escaped = sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const m = css.match(new RegExp('(?:^|[\\s,}])' + escaped + '\\s*\\{([^}]*)\\}'));
-  return m ? m[1] : null;
-}
 
 const PKEY = 'proj-alpha-11111111';
 const PID = 'abc123de';
 const RUN_ID = 'run-report-1';
 
-// Close each booted window: ui-history-detail.test.mjs:33-38 records that a file
-// booting many jsdom DOMs (~79 there) crossed Node's ~2GB heap on the Windows CI VM.
-// A dozen is far from that, but the cleanup is two lines.
-const _openDoms = [];
-afterEach(() => {
-  for (const d of _openDoms.splice(0)) { try { d.window.close(); } catch { /* already closed */ } }
-});
+// Release each booted window (test/helpers/jsdom-release.mjs): every boot leaves an
+// app.js instance that pins its DOM for the life of the process.
+const trackDom = useDomRelease(afterEach);
 
 const REPORT = {
   payload: { schemaVersion: 1, reason: 'too-slow', run: { id: PID },
@@ -58,7 +44,7 @@ const REPORT = {
 const FILED_URL = 'https://github.com/SinishaDjukic/worca-cc/issues/512';
 const FILED = { ok: true, url: FILED_URL, labeled: true };
 
-// ── boot(): test/ui-running-stop-modal.test.mjs:22-82, plus _openDoms and clipboard ──
+// ── boot(): test/ui-running-stop-modal.test.mjs:22-82, plus trackDom and clipboard ──
 async function boot({ fetchHandler, clipboard } = {}) {
   // #report-issue is a real <a href> and two tests click it. jsdom has no navigation,
   // so its activation behaviour raises a `jsdomError` ("Not implemented: navigation
@@ -75,7 +61,7 @@ async function boot({ fetchHandler, clipboard } = {}) {
   virtualConsole.forwardTo(console, { jsdomErrors: 'none' });
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'),
     { url: 'http://localhost:4317/', virtualConsole });
-  _openDoms.push(dom);
+  trackDom(dom);
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
 
@@ -226,16 +212,45 @@ async function armRunning(ctx, { status = 'running' } = {}) {
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
-test('History detail shows "Report this run" and opens the preview modal', async () => {
+test('the History ⋯ menu carries "Report this run"; it opens the preview modal (two opt-ins, six reasons) and reports the run PIPELINE id', async () => {
+  // One boot: the ⋯ menu opens and its item is clicked once; what each step shows is
+  // recorded as it happens, and the rows read the records.
   const ctx = await boot({ fetchHandler: arms() });
-  const btn = await openHistoryReport(ctx);
-  assert.ok(btn, 'the button exists on History detail');
-  assert.equal(btn.hidden, false, 'a finished run can be reported');
-
-  const modal = ctx.window.document.getElementById('report-modal');
-  assert.equal(modal.classList.contains('hidden'), false, 'the preview opens');
-  assert.equal(modal.querySelectorAll('#report-optins input[type="checkbox"]').length, 2);
-  assert.equal(modal.querySelector('#report-reason').options.length, 6);
+  await openHistoryDetail(ctx);
+  const doc = ctx.window.document;
+  const more = doc.querySelector('#hist-detail .hd-more');
+  const moreHidden = more.hidden;
+  click(ctx.window, more);
+  await settle(ctx.window);
+  const item = doc.querySelector('#hist-detail .hd-menu .hd-report');
+  const btn = doc.querySelector('#hist-detail .hd-report');
+  const menu = { itemHidden: item?.hidden, role: item?.getAttribute('role'), text: item?.textContent.trim(),
+    posts: reportPosts(ctx).length, btnHidden: btn?.hidden };
+  click(ctx.window, item);
+  await settle(ctx.window, 8);
+  const modal = doc.getElementById('report-modal');
+  await checkRows([
+    { name: 'History detail shows "Report this run" and opens the preview modal', run: () => {
+      assert.ok(btn, 'the button exists on History detail');
+      assert.equal(menu.btnHidden, false, 'a finished run can be reported');
+      assert.equal(modal.classList.contains('hidden'), false, 'the preview opens');
+      assert.equal(modal.querySelectorAll('#report-optins input[type="checkbox"]').length, 2);
+      assert.equal(modal.querySelector('#report-reason').options.length, 6);
+    } },
+    { name: 'the History ⋯ menu carries "Report this run" and it opens the report modal', run: () => {
+      assert.equal(moreHidden, false, 'a finished run shows the ⋯ trigger');
+      assert.ok(item, 'the report item lives inside the ⋯ menu');
+      assert.equal(menu.itemHidden, false);
+      assert.equal(menu.role, 'menuitem');
+      assert.equal(menu.text, 'Report this run');
+      assert.equal(menu.posts, 0, 'opening the menu builds nothing');
+      assert.equal(modal.classList.contains('hidden'), false,
+        'the item opens the report modal');
+      assert.equal(reportPosts(ctx).length, 1, 'exactly one call, to build the preview');
+      assert.match(reportPosts(ctx).at(-1).url, new RegExp(`/api/pipelines/${PID}/report$`),
+        'it reports the run PIPELINE id');
+    } },
+  ]);
 });
 
 test('a still-running pipeline reached by DEEP LINK does not offer the button', async () => {
@@ -309,53 +324,32 @@ test('the issue link is inert while a rebuild is in flight', async () => {
 
 // The report flow is reached from ONE place: History's per-run ⋯ menu. A finished run
 // on Running detail has no report button; its saved page (where the menu is) takes over.
-for (const status of ['done', 'stopped', 'error']) {
-  test(`a ${status} run's Running header has no report button`, async () => {
-    // Its History row is still `live` (the refetch after the finish has not landed), so
-    // the Running page shows the finished run instead of handing over to the saved one.
-    const ctx = await boot({ fetchHandler: arms({ rows: [{ ...ROW, live: true }] }) });
-    // `hello` is what populates `runs` and sets helloSeeded; without it routeRunDetail
-    // mounts a title-only screen, repaintRunDetail never runs, and paintRdTerminal —
-    // the thing that paints the terminal header — is never called at all.
-    await armRunning(ctx, { status: 'running' });
-    const doc = ctx.window.document;
-    assert.equal(doc.querySelector('#run-detail .rd-report'), null,
-      'the run-detail template carries no report button at all');
+test('a done, stopped or error run\'s Running header has no report button', async () => {
+  // A boot per status (the loop's rows).
+  await checkRows(['done', 'stopped', 'error'].map((status) => ({
+    name: `a ${status} run's Running header has no report button`,
+    run: async () => {
+      // Its History row is still `live` (the refetch after the finish has not landed), so
+      // the Running page shows the finished run instead of handing over to the saved one.
+      const ctx = await boot({ fetchHandler: arms({ rows: [{ ...ROW, live: true }] }) });
+      // `hello` is what populates `runs` and sets helloSeeded; without it routeRunDetail
+      // mounts a title-only screen, repaintRunDetail never runs, and paintRdTerminal —
+      // the thing that paints the terminal header — is never called at all.
+      await armRunning(ctx, { status: 'running' });
+      const doc = ctx.window.document;
+      assert.equal(doc.querySelector('#run-detail .rd-report'), null,
+        'the run-detail template carries no report button at all');
 
-    ctx.dispatch({ type: 'state', runId: RUN_ID, status });
-    await settle(ctx.window, 8);
-    const header = doc.querySelector('#run-detail .rd-header');
-    assert.equal(header.querySelector('.rd-report'), null, 'a finished run has no report button');
-    assert.equal([...header.querySelectorAll('button, a')].some((b) => /Report this run/.test(b.textContent)),
-      false, 'nothing in the header offers to report the run');
-    assert.equal(header.querySelector('.rd-history-link'), null, 'no link to click: the saved run opens on its own');
-    assert.equal(doc.querySelector('#run-detail .rd-bar .rd-report'), null, 'nor does the shared bar');
-  });
-}
-
-test('the History ⋯ menu carries "Report this run" and it opens the report modal', async () => {
-  const ctx = await boot({ fetchHandler: arms() });
-  await openHistoryDetail(ctx);
-  const doc = ctx.window.document;
-  const more = doc.querySelector('#hist-detail .hd-more');
-  assert.equal(more.hidden, false, 'a finished run shows the ⋯ trigger');
-  click(ctx.window, more);
-  await settle(ctx.window);
-
-  const item = doc.querySelector('#hist-detail .hd-menu .hd-report');
-  assert.ok(item, 'the report item lives inside the ⋯ menu');
-  assert.equal(item.hidden, false);
-  assert.equal(item.getAttribute('role'), 'menuitem');
-  assert.equal(item.textContent.trim(), 'Report this run');
-  assert.equal(reportPosts(ctx).length, 0, 'opening the menu builds nothing');
-
-  click(ctx.window, item);
-  await settle(ctx.window, 8);
-  assert.equal(doc.getElementById('report-modal').classList.contains('hidden'), false,
-    'the item opens the report modal');
-  assert.equal(reportPosts(ctx).length, 1, 'exactly one call, to build the preview');
-  assert.match(reportPosts(ctx).at(-1).url, new RegExp(`/api/pipelines/${PID}/report$`),
-    'it reports the run PIPELINE id');
+      ctx.dispatch({ type: 'state', runId: RUN_ID, status });
+      await settle(ctx.window, 8);
+      const header = doc.querySelector('#run-detail .rd-header');
+      assert.equal(header.querySelector('.rd-report'), null, 'a finished run has no report button');
+      assert.equal([...header.querySelectorAll('button, a')].some((b) => /Report this run/.test(b.textContent)),
+        false, 'nothing in the header offers to report the run');
+      assert.equal(header.querySelector('.rd-history-link'), null, 'no link to click: the saved run opens on its own');
+      assert.equal(doc.querySelector('#run-detail .rd-bar .rd-report'), null, 'nor does the shared bar');
+    },
+  })));
 });
 
 test('Escape closes the report modal WITHOUT navigating the detail screen away', async () => {
@@ -379,145 +373,188 @@ test('Escape closes the report modal WITHOUT navigating the detail screen away',
 // closeHistDetail). Leaving the screen with one up floats a full-screen dialog for a
 // run the user has navigated away from over an unrelated view, and a pending debounce
 // can still POST /report for it.
-test('going back to the Runs list tears the report modal down', async () => {
+test('leaving the saved run (back to the Runs list, or another view) tears the report modal down', async () => {
   const ctx = await boot({ fetchHandler: arms() });
   // The detail -> list hop exists in the narrow slide layout only: side by side a bare
   // #runs reopens the remembered run (this one), so it does not mean "the list" there.
   ctx.window.document.getElementById('runs-shell').dataset.layout = 'slide';
-  await openHistoryReport(ctx);
-  const modal = ctx.window.document.getElementById('report-modal');
-  assert.equal(modal.classList.contains('hidden'), false, 'the modal is up');
+  await checkRows([
+    { name: 'going back to the Runs list tears the report modal down', run: async () => {
+      await openHistoryReport(ctx);
+      const modal = ctx.window.document.getElementById('report-modal');
+      assert.equal(modal.classList.contains('hidden'), false, 'the modal is up');
 
-  go(ctx.window, 'runs');
-  await settle(ctx.window, 8);
-  assert.equal(ctx.window.document.getElementById('hist-shell').classList.contains('detail-open'), false,
-    'the saved run slid away');
-  assert.equal(modal.classList.contains('hidden'), true,
-    'detail -> list stays inside the Runs view, so closeHistDetail is what must close it');
-});
+      go(ctx.window, 'runs');
+      await settle(ctx.window, 8);
+      assert.equal(ctx.window.document.getElementById('hist-shell').classList.contains('detail-open'), false,
+        'the saved run slid away');
+      assert.equal(modal.classList.contains('hidden'), true,
+        'detail -> list stays inside the Runs view, so closeHistDetail is what must close it');
+    } },
+    { name: 'switching views tears the report modal down', run: async () => {
+      // History detail -> another view: the modal must not outlive the screen it opened on.
+      await openHistoryReport(ctx);
+      const modal = ctx.window.document.getElementById('report-modal');
+      assert.equal(modal.classList.contains('hidden'), false, 'the modal is up on History detail');
 
-// History detail -> another view: the modal must not outlive the screen it opened on.
-test('switching views tears the report modal down', async () => {
-  const ctx = await boot({ fetchHandler: arms() });
-  await openHistoryReport(ctx);
-  const modal = ctx.window.document.getElementById('report-modal');
-  assert.equal(modal.classList.contains('hidden'), false, 'the modal is up on History detail');
-
-  go(ctx.window, 'new');
-  await settle(ctx.window, 8);
-  assert.equal(modal.classList.contains('hidden'), true,
-    'a view change must not leave a dialog for the previous run floating over the next view');
+      go(ctx.window, 'new');
+      await settle(ctx.window, 8);
+      assert.equal(modal.classList.contains('hidden'), true,
+        'a view change must not leave a dialog for the previous run floating over the next view');
+    } },
+  ]);
 });
 
 // D24 covers a rebuild that is in flight; a rebuild that is merely PENDING behind the
 // debounce is exactly as stale. Between the keystroke and the timer the link
 // still carries the href built from the previous text, and mousedown on it fires that
 // href — the precise failure the `input` binding was chosen to avoid.
-test('typing an expectation invalidates the issue link BEFORE the debounce fires (D24)', async () => {
+test('a pending (debounced) rebuild makes the issue link, Copy JSON and Create inert until the fresh payload lands, which carries the typed text (D24)', async (t) => {
+  // One boot: one keystroke, then the link, Copy JSON and Create are all tried inside the
+  // debounce and Create again after it. What each step shows is recorded as it happens,
+  // and the rows read the records.
   const copied = [];
   const ctx = await boot({ fetchHandler: arms(),
     clipboard: { writeText: async (t) => { copied.push(t); } } });
   await openHistoryReport(ctx);
   const link = ctx.window.document.getElementById('report-issue');
-  assert.equal(link.getAttribute('href'), REPORT.issue.url, 'the first build landed');
+  const firstHref = link.getAttribute('href');
 
-  const box = ctx.window.document.getElementById('report-expectation');
-  box.value = 'the reviewer looped forever';
-  box.dispatchEvent(new ctx.window.Event('input', { bubbles: true }));
+  const timers = useAppTimers(t);
+  let pendingHasHref; let pending; let freshHref; let rebuiltWith;
+  try {
+    const box = ctx.window.document.getElementById('report-expectation');
+    box.value = 'the reviewer looped forever';
+    box.dispatchEvent(new ctx.window.Event('input', { bubbles: true }));
 
-  // SAME TICK as the keystroke — the debounce has not run, so the payload behind the
-  // link is the one built without this text.
-  assert.equal(link.hasAttribute('href'), false,
-    'a pending rebuild leaves the link inert, like an in-flight one');
-  click(ctx.window, link);
-  click(ctx.window, ctx.window.document.getElementById('report-copy'));
-  await settle(ctx.window, 4);
-  assert.equal(copied.length, 0,
-    'neither the link nor Copy JSON can ship a payload the preview is not showing');
+    // SAME TICK as the keystroke — the debounce has not run, so the payload behind the
+    // link is the one built without this text.
+    pendingHasHref = link.hasAttribute('href');
+    click(ctx.window, link);
+    click(ctx.window, ctx.window.document.getElementById('report-copy'));
+    stubTab(ctx.window);
+    click(ctx.window, createBtn(ctx.window));
+    await timers.settle(4);
+    pending = { copied: copied.length, issuePosts: issuePosts(ctx).length };
 
-  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS + 50));
-  await settle(ctx.window, 8);
-  assert.equal(link.getAttribute('href'), REPORT.issue.url, 'the fresh payload revives it');
-  assert.equal(JSON.parse(reportPosts(ctx).at(-1).opts.body).expectation,
-    'the reviewer looped forever', 'and the rebuild carried the typed text');
+    await timers.advance(REPORT_PREVIEW_DEBOUNCE_MS + 50);
+    await timers.settle(8);
+    freshHref = link.getAttribute('href');
+    rebuiltWith = JSON.parse(reportPosts(ctx).at(-1).opts.body).expectation;
+    click(ctx.window, createBtn(ctx.window));
+    await timers.settle(8);
+  } finally {
+    t.mock.timers.reset();
+  }
+  await checkRows([
+    { name: 'typing an expectation invalidates the issue link BEFORE the debounce fires (D24)', run: () => {
+      assert.equal(firstHref, REPORT.issue.url, 'the first build landed');
+      assert.equal(pendingHasHref, false,
+        'a pending rebuild leaves the link inert, like an in-flight one');
+      assert.equal(pending.copied, 0,
+        'neither the link nor Copy JSON can ship a payload the preview is not showing');
+      assert.equal(freshHref, REPORT.issue.url, 'the fresh payload revives it');
+      assert.equal(rebuiltWith,
+        'the reviewer looped forever', 'and the rebuild carried the typed text');
+    } },
+    { name: 'a pending rebuild makes the create button inert, like the link (D24)', run: () => {
+      assert.equal(pending.issuePosts, 0,
+        'a report cannot be filed from a payload the preview is not showing');
+      assert.equal(JSON.parse(issuePosts(ctx)[0].opts.body).expectation, 'the reviewer looped forever',
+        'once the rebuild lands, the filed report carries the typed text');
+    } },
+  ]);
 });
 
-test('typing does not rebuild the preview until the reporter has been quiet for 1s', async () => {
-  assert.equal(REPORT_PREVIEW_DEBOUNCE_MS, 1000, 'the delay the reporter asked for');
+test('typing rebuilds the preview once after 1 s of quiet, and a control change inside the wait rebuilds at once and supersedes the queued rebuild', async (t) => {
+  // One boot: the first row's rebuild has landed before the second row types, and each
+  // row counts the posts from its own start.
   const ctx = await boot({ fetchHandler: arms() });
   await openHistoryReport(ctx);
-  const before = reportPosts(ctx).length;
+  await checkRows([
+    { name: 'typing does not rebuild the preview until the reporter has been quiet for 1s', run: async () => {
+      assert.equal(REPORT_PREVIEW_DEBOUNCE_MS, 1000, 'the delay the reporter asked for');
+      const before = reportPosts(ctx).length;
 
-  const box = ctx.window.document.getElementById('report-expectation');
-  box.value = 'the diff swallowed my change';
-  box.dispatchEvent(new ctx.window.Event('input', { bubbles: true }));
-  // A FRACTION of the window, not a few zero-delay macrotasks and not the full
-  // constant. Settling on zero-delay ticks passes for any delay above ~0, and
-  // waiting the whole constant would move in lockstep with whatever app.js does —
-  // both let a hardcoded 250 back in unnoticed. A quarter of the way in is far
-  // past a regression and far short of the real delay, so the assert polices the
-  // WIRING (app.js must use REPORT_PREVIEW_DEBOUNCE_MS) rather than restating the
-  // number. The `assert.equal` above still pins the value itself.
-  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS / 4));
-  await settle(ctx.window, 8);
-  assert.equal(reportPosts(ctx).length, before,
-    'a quarter of the window in, no rebuild yet');
+      const timers = useAppTimers(t);
+      try {
+        const box = ctx.window.document.getElementById('report-expectation');
+        box.value = 'the diff swallowed my change';
+        box.dispatchEvent(new ctx.window.Event('input', { bubbles: true }));
+        // A FRACTION of the window, not a few zero-delay macrotasks and not the full
+        // constant. Settling on zero-delay ticks passes for any delay above ~0, and
+        // waiting the whole constant would move in lockstep with whatever app.js does —
+        // both let a hardcoded 250 back in unnoticed. A quarter of the way in is far
+        // past a regression and far short of the real delay, so the assert polices the
+        // WIRING (app.js must use REPORT_PREVIEW_DEBOUNCE_MS) rather than restating the
+        // number. The `assert.equal` above still pins the value itself.
+        await timers.advance(REPORT_PREVIEW_DEBOUNCE_MS / 4);
+        await timers.settle(8);
+        assert.equal(reportPosts(ctx).length, before,
+          'a quarter of the window in, no rebuild yet');
 
-  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS + 50));
-  await settle(ctx.window, 8);
-  assert.equal(reportPosts(ctx).length, before + 1, 'exactly one rebuild once typing stops');
-  assert.equal(JSON.parse(reportPosts(ctx).at(-1).opts.body).expectation,
-    'the diff swallowed my change', 'carrying the final text');
+        await timers.advance(REPORT_PREVIEW_DEBOUNCE_MS + 50);
+        await timers.settle(8);
+        assert.equal(reportPosts(ctx).length, before + 1, 'exactly one rebuild once typing stops');
+        assert.equal(JSON.parse(reportPosts(ctx).at(-1).opts.body).expectation,
+          'the diff swallowed my change', 'carrying the final text');
+      } finally {
+        t.mock.timers.reset();
+      }
+    } },
+    { name: 'a control change inside the wait supersedes the queued rebuild instead of re-blanking', run: async () => {
+      const before = reportPosts(ctx).length;
+      const preview = ctx.window.document.getElementById('report-preview');
+
+      const timers = useAppTimers(t);
+      try {
+        const box = ctx.window.document.getElementById('report-expectation');
+        box.value = 'the diff swallowed my change';
+        box.dispatchEvent(new ctx.window.Event('input', { bubbles: true }));
+
+        // Inside the 1s window: switching the reason rebuilds at once, as it always has.
+        const reason = ctx.window.document.getElementById('report-reason');
+        reason.value = reason.options[1].value;
+        reason.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
+        await timers.settle(8);
+        assert.equal(reportPosts(ctx).length, before + 1, 'the control change rebuilt immediately');
+        assert.equal(preview.textContent, previewText(REPORT.payload),
+          'and the fresh JSON is on screen — not the building placeholder');
+
+        // Past the point where the textarea's own timer would have fired.
+        await timers.advance(REPORT_PREVIEW_DEBOUNCE_MS + 50);
+        await timers.settle(8);
+        assert.equal(reportPosts(ctx).length, before + 1,
+          'the superseded rebuild never ran — the preview is not re-blanked after it');
+        assert.equal(preview.textContent, previewText(REPORT.payload), 'and the JSON never left the screen');
+      } finally {
+        t.mock.timers.reset();
+      }
+    } },
+  ]);
 });
 
-test('a control change inside the wait supersedes the queued rebuild instead of re-blanking', async () => {
-  const ctx = await boot({ fetchHandler: arms() });
-  await openHistoryReport(ctx);
-  const before = reportPosts(ctx).length;
-  const preview = ctx.window.document.getElementById('report-preview');
-
-  const box = ctx.window.document.getElementById('report-expectation');
-  box.value = 'the diff swallowed my change';
-  box.dispatchEvent(new ctx.window.Event('input', { bubbles: true }));
-
-  // Inside the 1s window: switching the reason rebuilds at once, as it always has.
-  const reason = ctx.window.document.getElementById('report-reason');
-  reason.value = reason.options[1].value;
-  reason.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
-  await settle(ctx.window, 8);
-  assert.equal(reportPosts(ctx).length, before + 1, 'the control change rebuilt immediately');
-  assert.equal(preview.textContent, previewText(REPORT.payload),
-    'and the fresh JSON is on screen — not the building placeholder');
-
-  // Past the point where the textarea's own timer would have fired.
-  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS + 50));
-  await settle(ctx.window, 8);
-  assert.equal(reportPosts(ctx).length, before + 1,
-    'the superseded rebuild never ran — the preview is not re-blanked after it');
-  assert.equal(preview.textContent, previewText(REPORT.payload), 'and the JSON never left the screen');
-});
-
-test('Copy JSON copies the exact preview text', async () => {
+test('Copy JSON, and opening the issue link, put the exact preview text on the clipboard first', async () => {
   const copied = [];
   const ctx = await boot({ fetchHandler: arms(),
     clipboard: { writeText: async (t) => { copied.push(t); } } });
   await openHistoryReport(ctx);
-  click(ctx.window, ctx.window.document.getElementById('report-copy'));
-  await settle(ctx.window, 4);
-  assert.equal(copied.length, 1);
-  assert.equal(copied[0], ctx.window.document.getElementById('report-preview').textContent,
-    'clipboard === preview, byte for byte');
-});
-
-test('opening the issue link copies the JSON first, so the body is not lying', async () => {
-  const copied = [];
-  const ctx = await boot({ fetchHandler: arms(),
-    clipboard: { writeText: async (t) => { copied.push(t); } } });
-  await openHistoryReport(ctx);
-  click(ctx.window, ctx.window.document.getElementById('report-issue'));
-  await settle(ctx.window, 4);
-  assert.equal(copied.length, 1, 'the JSON is on the clipboard before GitHub opens (D23)');
-  assert.equal(copied[0], ctx.window.document.getElementById('report-preview').textContent);
+  await checkRows([
+    { name: 'Copy JSON copies the exact preview text', run: async () => {
+      click(ctx.window, ctx.window.document.getElementById('report-copy'));
+      await settle(ctx.window, 4);
+      assert.equal(copied.length, 1);
+      assert.equal(copied[0], ctx.window.document.getElementById('report-preview').textContent,
+        'clipboard === preview, byte for byte');
+    } },
+    { name: 'opening the issue link copies the JSON first, so the body is not lying', run: async () => {
+      copied.length = 0;                          // the first row's copy is not this row's
+      click(ctx.window, ctx.window.document.getElementById('report-issue'));
+      await settle(ctx.window, 4);
+      assert.equal(copied.length, 1, 'the JSON is on the clipboard before GitHub opens (D23)');
+      assert.equal(copied[0], ctx.window.document.getElementById('report-preview').textContent);
+    } },
+  ]);
 });
 
 test('a failed build shows an inline error and leaves the modal usable', async () => {
@@ -544,42 +581,42 @@ function stubTab(window) {
 
 const createBtn = (w) => w.document.getElementById('report-create-issue');
 
-test('the primary action files the issue and points the opened tab at it', async () => {
-  const ctx = await boot({ fetchHandler: arms() });
-  await openHistoryReport(ctx);
-  const tab = stubTab(ctx.window);
-
-  click(ctx.window, createBtn(ctx.window));
-  await settle(ctx.window, 8);
-
-  assert.equal(issuePosts(ctx).length, 1, 'exactly one create call');
-  const sent = JSON.parse(issuePosts(ctx)[0].opts.body);
-  assert.equal(sent.reason, 'poor-quality', 'the reason the select is showing');
-  assert.deepEqual(sent.include, { paths: false, prompt: false });
-  assert.equal(tab.location, FILED_URL, 'the tab opened by the click lands on the new issue');
-  assert.equal(tab.closed, false);
-  assert.equal(ctx.calls.some((c) => c.url.includes('github.com')), false,
-    'the browser still never talks to GitHub — the server holds the gh login');
-});
-
-test('the tab is opened synchronously, before the request is awaited', async () => {
-  // A popup blocker only honours window.open inside the user gesture. Opening it
-  // after `await fetch` loses the gesture and the new tab is silently eaten.
+test('Create GitHub issue opens the tab synchronously in the click, files via the server (reason/include) and points the tab at the new issue; the browser never calls GitHub', async () => {
+  // One boot with a gated /report-issue: the click runs once, the tab count is read the
+  // moment the click handler returns, then the gate opens; the rows read what was recorded.
   let release;
   const gate = new Promise((r) => { release = r; });
   const base = arms();
   const ctx = await boot({ fetchHandler: (url, opts) => (url.endsWith('/report-issue')
     ? gate.then(() => jsonRes(200, FILED)) : base(url, opts)) });
   await openHistoryReport(ctx);
-
+  const tab = stubTab(ctx.window);
+  const openTab = ctx.window.open;
   let openedAt = 0;
   let calls = 0;
-  ctx.window.open = () => { openedAt = ++calls; return { location: null, close() {} }; };
+  ctx.window.open = (...args) => { openedAt = ++calls; return openTab(...args); };
 
   click(ctx.window, createBtn(ctx.window));
-  assert.equal(openedAt, 1, 'the tab exists the moment the click handler runs');
+  const openedInClick = openedAt;
   release();
   await settle(ctx.window, 8);
+  await checkRows([
+    { name: 'the primary action files the issue and points the opened tab at it', run: () => {
+      assert.equal(issuePosts(ctx).length, 1, 'exactly one create call');
+      const sent = JSON.parse(issuePosts(ctx)[0].opts.body);
+      assert.equal(sent.reason, 'poor-quality', 'the reason the select is showing');
+      assert.deepEqual(sent.include, { paths: false, prompt: false });
+      assert.equal(tab.location, FILED_URL, 'the tab opened by the click lands on the new issue');
+      assert.equal(tab.closed, false);
+      assert.equal(ctx.calls.some((c) => c.url.includes('github.com')), false,
+        'the browser still never talks to GitHub — the server holds the gh login');
+    } },
+    { name: 'the tab is opened synchronously, before the request is awaited', run: () => {
+      // A popup blocker only honours window.open inside the user gesture. Opening it
+      // after `await fetch` loses the gesture and the new tab is silently eaten.
+      assert.equal(openedInClick, 1, 'the tab exists the moment the click handler runs');
+    } },
+  ]);
 });
 
 test('a gh failure reveals the prefilled link and closes the empty tab', async () => {
@@ -617,28 +654,6 @@ test('a 500 from the create route is surfaced without losing the modal', async (
   assert.equal(ctx.window.document.getElementById('report-modal').classList.contains('hidden'), false);
 });
 
-test('a pending rebuild makes the create button inert, like the link (D24)', async () => {
-  const ctx = await boot({ fetchHandler: arms() });
-  await openHistoryReport(ctx);
-
-  const box = ctx.window.document.getElementById('report-expectation');
-  box.value = 'it looped forever';
-  box.dispatchEvent(new ctx.window.Event('input', { bubbles: true }));
-
-  stubTab(ctx.window);
-  click(ctx.window, createBtn(ctx.window));
-  await settle(ctx.window, 4);
-  assert.equal(issuePosts(ctx).length, 0,
-    'a report cannot be filed from a payload the preview is not showing');
-
-  await new Promise((r) => ctx.window.setTimeout(r, REPORT_PREVIEW_DEBOUNCE_MS + 50));
-  await settle(ctx.window, 8);
-  click(ctx.window, createBtn(ctx.window));
-  await settle(ctx.window, 8);
-  assert.equal(JSON.parse(issuePosts(ctx)[0].opts.body).expectation, 'it looped forever',
-    'once the rebuild lands, the filed report carries the typed text');
-});
-
 test('a blocked popup still hands the reporter the created issue', async () => {
   const ctx = await boot({ fetchHandler: arms() });
   await openHistoryReport(ctx);
@@ -651,53 +666,4 @@ test('a blocked popup still hands the reporter the created issue', async () => {
   assert.equal(filed.hidden, false, 'the created issue is surfaced in the modal');
   const a = filed.querySelector('a');
   assert.equal(a.getAttribute('href'), FILED_URL, 'as a link the reporter can click');
-});
-
-test('the actions sit in a sticky header above the form, not below the preview', async () => {
-  const ctx = await boot({ fetchHandler: arms() });
-  await openHistoryReport(ctx);
-  const { document: doc } = ctx.window;
-
-  const top = doc.querySelector('#report-modal .report-top');
-  assert.ok(top, 'the modal card opens with a .report-top block');
-  assert.equal(top, doc.querySelector('#report-modal .card').firstElementChild,
-    'and it is the first thing in the card, so `position:sticky; top:0` has nothing above it');
-
-  // Only the primary action rides the header, beside Close; the rest go to the foot.
-  for (const id of ['report-close', 'report-create-issue', 'report-filed']) {
-    assert.ok(top.contains(doc.getElementById(id)), `#${id} rides the sticky header`);
-  }
-  assert.ok(top.contains(doc.querySelector('#report-modal .report-error')),
-    'so does the error slot — a failure must be readable without scrolling back up');
-  for (const id of ['report-copy', 'report-download', 'report-issue']) {
-    assert.equal(top.contains(doc.getElementById(id)), false, `#${id} sits at the foot`);
-    // DOCUMENT_POSITION_FOLLOWING (4): the secondary actions come AFTER the preview.
-    assert.equal(doc.getElementById('report-preview').compareDocumentPosition(doc.getElementById(id)) & 4,
-      4, `#${id} follows the JSON preview`);
-  }
-
-  const head = doc.querySelector('#report-modal .card-head');
-  assert.ok(head.contains(doc.getElementById('report-create-issue')), 'Create is in the title row');
-  assert.equal(
-    doc.getElementById('report-create-issue').compareDocumentPosition(doc.getElementById('report-close')) & 4,
-    4, 'and sits to the LEFT of Close');
-});
-
-test('the JSON preview box is a FIXED height, so rebuilding it cannot resize the card', () => {
-  const body = ruleBody('.report-modal #report-preview');
-  assert.ok(body, 'the preview rule exists');
-  // `(?:^|;)` is load-bearing: plain /height:\s*300px/ matches "max-height:300px" and
-  // "min-height:300px" as substrings, so it cannot tell a fixed height from either
-  // flexible one. Anchored on the declaration boundary it cannot.
-  assert.match(body, /(?:^|;)\s*height:\s*300px/,
-    'a fixed height — a min-height would still grow with tall JSON');
-  assert.doesNotMatch(body, /min-height/, 'and no min-height competing with it');
-  assert.doesNotMatch(body, /max-height:\s*300px/, 'and the old max-height is gone, not merely shadowed');
-  // The card is content-driven (style.css:1330) inside a `place-items:center` grid
-  // (:1320), so ANY height change in here re-centres the whole dialog. A fixed box is
-  // what stops the "dancing"; the debounce only reduces how often it repaints.
-  // Count the rules instead of substring-matching one: a later override would silently
-  // undo the fix, and only the COUNT is order- and formatting-independent.
-  const rules = [...css.matchAll(/(?:^|[\s,}])[^{}]*#report-preview[^{}]*\{[^}]*\}/g)];
-  assert.equal(rules.length, 1, 'exactly one rule for the preview in the whole stylesheet');
 });

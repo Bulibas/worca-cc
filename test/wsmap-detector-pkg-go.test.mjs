@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeWorkspace, runDetector, keysOf, assertEvidence } from './helpers/wsmap-fixtures.mjs';
 import detector from '../src/core/workspace-map/detectors/pkg-go.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const WEB_MOD = `module github.com/acme/web/v2
 
@@ -37,31 +38,31 @@ before(async () => {
 after(() => ws.cleanup());
 const member = (k) => ws.members.find((m) => m.key === k);
 
-test('pkg-go: provides the module path; alias drops the /vN suffix', async () => {
+test('pkg-go (member web): module provide + alias, requires, replace targets', async () => {
   const r = await runDetector(detector, member('web'), ws.members);
-  assert.deepEqual(keysOf(r, 'pkg', 'provides'), ['go:example.com/fixture', 'go:github.com/acme/web/v2']);
-  assert.deepEqual(r.aliases.map((a) => a.value).sort(), ['web'], 'a testdata module never aliases the member');
-  assert.deepEqual(r.stack, ['go']);
-  assertEvidence(member('web'), r);
-});
-
-test('pkg-go: consumes direct requires (single + block, quoted), skips // indirect', async () => {
-  const r = await runDetector(detector, member('web'), ws.members);
-  assert.deepEqual(keysOf(r, 'pkg', 'consumes'), [
-    'go:github.com/acme/billing', 'go:github.com/acme/quoted', 'go:github.com/acme/shared', 'go:github.com/acme/tools', 'go:github.com/gin-gonic/gin',
+  await checkRows([
+    { name: 'pkg-go: provides the module path; alias drops the /vN suffix', run: () => {
+      assert.deepEqual(keysOf(r, 'pkg', 'provides'), ['go:example.com/fixture', 'go:github.com/acme/web/v2']);
+      assert.deepEqual(r.aliases.map((a) => a.value).sort(), ['web'], 'a testdata module never aliases the member');
+      assert.deepEqual(r.stack, ['go']);
+      assertEvidence(member('web'), r);
+    } },
+    { name: 'pkg-go: consumes direct requires (single + block, quoted), skips // indirect', run: () => {
+      assert.deepEqual(keysOf(r, 'pkg', 'consumes'), [
+        'go:github.com/acme/billing', 'go:github.com/acme/quoted', 'go:github.com/acme/shared', 'go:github.com/acme/tools', 'go:github.com/gin-gonic/gin',
+      ]);
+    } },
+    { name: 'pkg-go: replace => ../dir targets the member owning that dir (block and single form)', run: () => {
+      const shared = r.facts.find((f) => f.key === 'go:github.com/acme/shared');
+      assert.equal(shared.target, 'shared');
+      assert.equal(shared.line, 9, 'the require line is the evidence');
+      assert.equal(shared.detail, 'replace => ../shared');
+      const tools = r.facts.find((f) => f.key === 'go:github.com/acme/tools');
+      assert.deepEqual([tools.target, tools.line], ['tools', 17]);
+      assert.equal(r.facts.find((f) => f.key === 'go:github.com/acme/billing').target, undefined);
+      assert.ok(!r.facts.some((f) => f.key.includes('fork')));
+    } },
   ]);
-});
-
-test('pkg-go: replace => ../dir targets the member owning that dir (block and single form)', async () => {
-  const r = await runDetector(detector, member('web'), ws.members);
-  const shared = r.facts.find((f) => f.key === 'go:github.com/acme/shared');
-  assert.equal(shared.target, 'shared');
-  assert.equal(shared.line, 9, 'the require line is the evidence');
-  assert.equal(shared.detail, 'replace => ../shared');
-  const tools = r.facts.find((f) => f.key === 'go:github.com/acme/tools');
-  assert.deepEqual([tools.target, tools.line], ['tools', 17]);
-  assert.equal(r.facts.find((f) => f.key === 'go:github.com/acme/billing').target, undefined);
-  assert.ok(!r.facts.some((f) => f.key.includes('fork')));
 });
 
 test('pkg-go: testdata modules are facts marked test; a CRLF go.mod with a BOM parses', async () => {

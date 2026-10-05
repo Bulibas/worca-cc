@@ -8,11 +8,14 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { writePluginsLock, pluginCurrentDir } from '../src/core/plugins-lock.mjs';
 import { writePluginConfig } from '../src/core/plugin-config.mjs';
 import { mockSentMessages, clearMockSentMessages } from '../src/core/chat/channel-host.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 process.env.WORCA_MOCK = '1';
 useTempHome(after);
@@ -24,8 +27,14 @@ const SCHEMA = [
 ];
 
 let channelHost, chatActions, enqueueChatWork, runs, app, srv, base;
+let home, prevHome, prevProfile;
 
 before(async () => {
+  // settings.json lives under HOME, not WORCA_HOME: sandbox it before the
+  // server import so the /api/settings round-trip never touches the real file.
+  home = await mkdtemp(join(tmpdir(), 'worca-cc-chat-e2e-home-'));
+  prevHome = process.env.HOME; prevProfile = process.env.USERPROFILE;
+  process.env.HOME = home; process.env.USERPROFILE = home;
   const cur = pluginCurrentDir(NAME);
   mkdirSync(join(cur, 'channel'), { recursive: true });
   writeFileSync(join(cur, 'worca-cc-plugin.json'), JSON.stringify({
@@ -48,7 +57,12 @@ before(async () => {
   base = `http://127.0.0.1:${srv.address().port}`;
 });
 
-after(async () => { srv?.close(); await channelHost?.stop(); delete process.env.WORCA_MOCK; });
+after(async () => {
+  srv?.close(); await channelHost?.stop(); delete process.env.WORCA_MOCK;
+  if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+  if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
+  await rm(home, { recursive: true, force: true });
+});
 
 const lastReplyText = () => {
   const sent = mockSentMessages();
@@ -69,23 +83,6 @@ test('mock channel is connected; /help round-trips through the full pipeline', a
   const sent = mockSentMessages().at(-1);
   assert.equal(sent.plugin, NAME);
   assert.equal(sent.chatId, '42', 'reply goes to the originating chat');
-});
-
-test('allowlist enforced at the server seam: unlisted chat gets NO reply', async () => {
-  clearMockSentMessages();
-  await inject('/help', '666');
-  assert.equal(mockSentMessages().length, 0);
-});
-
-test('/api/chat/status reports the allow-list size and the last refused command', async () => {
-  await inject('/approve *zz', '666');
-  const body = await (await fetch(`${base}/api/chat/status`)).json();
-  const row = body.channels.find((c) => c.plugin === NAME && c.channelId === 'main');
-  assert.equal(row.commands.allowed, 1, 'allowedChatIds = "42"');
-  assert.equal(row.commands.lastRefused.chatId, '666');
-  assert.equal(row.commands.lastRefused.command, 'approve');
-  assert.ok(!Number.isNaN(Date.parse(row.commands.lastRefused.at)));
-  assert.equal(mockSentMessages().filter((m) => m.chatId === '666').length, 0, '666 is not a notify chat: still silent');
 });
 
 test('a live run is visible and a gate answered from chat clears pendingQuestion', async () => {
@@ -122,27 +119,46 @@ test('a live run is visible and a gate answered from chat clears pendingQuestion
   }
 });
 
-test('GET /api/chat/status lists channels; POST /api/chat/test needs notifyChatIds', async () => {
-  const status = await (await fetch(`${base}/api/chat/status`)).json();
-  assert.equal(status.channels.length, 1);
-  assert.equal(status.channels[0].plugin, NAME);
-  assert.equal(status.channels[0].state, 'connected');
+test('/api/chat/status: channels, allow-list size, last refused command; /api/chat/test needs notifyChatIds', async () => {
+  await checkRows([
+    { name: '/api/chat/status reports the allow-list size and the last refused command', run: async () => {
+      // allowlist enforced at the server seam: unlisted chat gets NO reply
+      clearMockSentMessages();
+      await inject('/help', '666');
+      assert.equal(mockSentMessages().length, 0);
 
-  // no notifyChatIds configured on the fixture -> caller error 400
-  const bad = await fetch(`${base}/api/chat/test`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ plugin: NAME, channelId: 'main' }),
-  });
-  assert.equal(bad.status, 400);
-  const missing = await fetch(`${base}/api/chat/test`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-  });
-  assert.equal(missing.status, 400);
+      await inject('/approve *zz', '666');
+      const body = await (await fetch(`${base}/api/chat/status`)).json();
+      const row = body.channels.find((c) => c.plugin === NAME && c.channelId === 'main');
+      assert.equal(row.commands.allowed, 1, 'allowedChatIds = "42"');
+      assert.equal(row.commands.lastRefused.chatId, '666');
+      assert.equal(row.commands.lastRefused.command, 'approve');
+      assert.ok(!Number.isNaN(Date.parse(row.commands.lastRefused.at)));
+      assert.equal(mockSentMessages().filter((m) => m.chatId === '666').length, 0, '666 is not a notify chat: still silent');
+    } },
+    { name: 'GET /api/chat/status lists channels; POST /api/chat/test needs notifyChatIds', run: async () => {
+      const status = await (await fetch(`${base}/api/chat/status`)).json();
+      assert.equal(status.channels.length, 1);
+      assert.equal(status.channels[0].plugin, NAME);
+      assert.equal(status.channels[0].state, 'connected');
+
+      // no notifyChatIds configured on the fixture -> caller error 400
+      const bad = await fetch(`${base}/api/chat/test`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plugin: NAME, channelId: 'main' }),
+      });
+      assert.equal(bad.status, 400);
+      const missing = await fetch(`${base}/api/chat/test`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      assert.equal(missing.status, 400);
+    } },
+  ]);
 });
 
 test('settings round-trip: chat prefs ride GET/POST /api/settings without clearing root', async () => {
   const before0 = await (await fetch(`${base}/api/settings`)).json();
-  assert.deepEqual(before0.chat.notify, { done: true, error: true, question: true, paused: true });
+  assert.deepEqual(before0.chat.notify, { done: true, error: true, question: true, paused: true, away: true });
   const posted = await (await fetch(`${base}/api/settings`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat: { notify: { question: false } } }),
@@ -152,11 +168,6 @@ test('settings round-trip: chat prefs ride GET/POST /api/settings without cleari
   const after1 = await (await fetch(`${base}/api/settings`)).json();
   assert.equal(after1.chat.notify.question, false);
   assert.equal(after1.root, before0.root, 'a chat-only POST must not clear root (legacy contract)');
-  // restore
-  await fetch(`${base}/api/settings`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat: { notify: { question: true } } }),
-  });
 });
 
 test('same-chat commands execute strictly in order (batched /use then /runs)', async () => {

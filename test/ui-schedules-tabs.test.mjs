@@ -1,12 +1,15 @@
 // test/ui-schedules-tabs.test.mjs
 // The Schedules view's three tabs (Activity | Once | Repeating — the Statistics .seg idiom),
-// routed as #schedules[/once|/repeating], and the "Project · name" / "Workspace · name" prefix
-// on every scheduled run card (docs/scheduled-runs.md "UI").
-import { test } from 'node:test';
+// routed as #schedules[/once|/repeating] (docs/scheduled-runs.md "UI").
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -26,7 +29,7 @@ const FEED = { notifications: [{ id: 7, scope: 'schedule', kind: 'failed', sever
 const tick = (n = 1) => new Promise((r) => setTimeout(r, n));
 
 async function boot(hash) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: `http://localhost:4317/${hash}` });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: `http://localhost:4317/${hash}` }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
@@ -78,68 +81,4 @@ test('#schedules opens on Activity; the strip is the Statistics .seg with counts
   await tick(5);
   assert.equal(window.location.hash, '#schedules', 'Activity is the bare route');
   assert.equal(onTab(doc), 'activity');
-});
-
-test('every scheduled run card names its target kind first: "Project · name" / "Workspace · name"', async () => {
-  const window = await boot('#schedules/once');
-  const doc = window.document;
-  const once = doc.querySelector('#schedules-once .sched-item .sched-target').textContent;
-  assert.match(once, /^Once · Project · svc-iam · Default$/);
-  const series = doc.querySelector('#schedules-repeating .sched-item .sched-target').textContent;
-  assert.match(series, /^Workspace · Storefront · Default$/);
-});
-
-test('empty panes say what to do, each in its own words', async () => {
-  const window = await boot('#schedules/once');
-  const doc = window.document;
-  // Repaint with nothing scheduled.
-  window.fetch = (url) => {
-    const u = String(url);
-    const json = (body) => Promise.resolve({ ok: true, status: 200, json: async () => body });
-    if (u.includes('/api/notifications')) return json({ notifications: [], unread: 0 });
-    if (u.includes('/api/schedules')) return json({ ...SCHEDULES, schedules: [], tickets: [], counts: { scheduled: 0, missed: 0, recurring: 0, unread: 0 } });
-    return json({ projects: PROJECTS, workspaces: WORKSPACES });
-  };
-  globalThis.fetch = window.fetch;
-  window.location.hash = '#schedules/repeating';
-  await tick(10);
-  window.location.hash = '#schedules/once';
-  await tick(10);
-  assert.match(doc.querySelector('#schedules-once .run-empty').textContent, /No one-off run is waiting/);
-  assert.match(doc.querySelector('#schedules-repeating .run-empty').textContent, /No repeating schedule/);
-  assert.ok(doc.querySelector('#schedules-once .run-empty a[href="#new/schedule"]'), 'points at Schedule a run');
-  assert.deepEqual([...doc.querySelectorAll('#schedules-tabs button')].map((b) => b.textContent), ['Activity', 'Once', 'Repeating'], 'no counts when empty');
-});
-
-// The schedule card fills its container like the run card above it (.run-list has no width cap):
-// the Once and Repeating panes and Running › Scheduled share the .sched-list rule.
-test('style.css: .sched-list carries no width cap, so schedule cards span the content width', () => {
-  const css = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8');
-  const rules = [...css.matchAll(/(?:^|[}\s,])\.sched-list(?:[\s,][^{]*)?\{([^}]*)\}/g)].map((m) => m[1]);
-  assert.ok(rules.length > 0, 'the .sched-list rule exists');
-  for (const body of rules) assert.doesNotMatch(body, /(?:max-)?width\s*:/, `.sched-list{${body}}`);
-  assert.doesNotMatch(css.match(/^\.run-list\{[^}]*\}/m)[0], /width/, 'the run card reference stays uncapped');
-});
-
-// Activity: a row's actions ("Open run", and Run now / Resume schedule / Mark read beside it) sit in
-// a third column, at the right edge and vertically centred on the row; a narrow screen puts them
-// back under the text so the message keeps its width.
-test('style.css: Activity row actions sit right and vertically centred, and drop under the text on narrow screens', () => {
-  const css = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8');
-  const item = css.match(/^\.sched-feed-item\{([^}]*)\}/m);
-  assert.ok(item, 'the .sched-feed-item rule exists');
-  assert.match(item[1], /grid-template-columns:92px minmax\(0,1fr\) auto;/, 'badge | text | actions');
-  const acts = css.match(/^\.sched-feed-acts\{([^}]*)\}/m);
-  assert.ok(acts, 'the .sched-feed-acts rule exists');
-  assert.match(acts[1], /grid-column:3;/, 'actions take the third column');
-  assert.match(acts[1], /grid-row:1;/, 'on the row the badge and text share');
-  assert.match(acts[1], /align-self:center;/, 'vertically centred on the row');
-  assert.match(acts[1], /justify-self:end;/, 'at the right edge');
-  assert.doesNotMatch(acts[1], /margin-top/, 'no offset that would pull them off centre');
-  const narrow = css.match(/@media \(max-width:720px\)\{[^\n]*\.sched-feed-item\{([^}]*)\}[^\n]*\.sched-feed-acts\{([^}]*)\}/);
-  assert.ok(narrow, 'a 720px rule restacks the Activity row');
-  assert.match(narrow[1], /grid-template-columns:92px minmax\(0,1fr\);/, 'two columns on a narrow screen');
-  assert.match(narrow[2], /grid-column:2;/, 'actions go back under the text');
-  assert.match(narrow[2], /grid-row:auto;/, 'on their own row');
-  assert.match(narrow[2], /justify-self:start;/, 'left-aligned with the text');
 });

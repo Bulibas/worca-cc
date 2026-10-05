@@ -1,5 +1,5 @@
-// test/graphify-count-persist.test.mjs  (structure copied from subagent-type-persist.test.mjs
-// for the sub_agents side and persist-roundtrip.test.mjs for the pipeline_steps side)
+// test/graphify-count-persist.test.mjs  (structure copied from the former subagent-type-persist
+// suite, now rows of subagent-persist.test.mjs, for the sub_agents side and persist-roundtrip.test.mjs for the pipeline_steps side)
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -8,37 +8,43 @@ import { join } from 'node:path';
 import { upsertSubAgent, listSubAgents, readPipeline } from '../src/core/artifacts.mjs';
 import { _resetForTests } from '../src/core/db.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const homes = [];
-beforeEach(async () => {
+async function freshHome() {
   const dir = await mkdtemp(join(tmpdir(), 'worca-cc-graphify-persist-'));
   homes.push(dir); _resetForTests(); process.env.WORCA_HOME = dir;
-});
+}
+beforeEach(freshHome);
 after(async () => {
   _resetForTests(); delete process.env.WORCA_HOME;
   await Promise.all(homes.map((d) => rm(d, { recursive: true, force: true })));
 });
 
-test('sub_agents.graphify_count round-trips as an integer; absent -> null', async () => {
-  const proj = await mkdtemp(join(tmpdir(), 'worca-cc-graphify-proj-'));
-  const { id: pid } = await seedPipeline(proj, { title: 'Run', status: 'running' });
+test('sub_agents.graphify_count round-trips, absent -> null, and survives a count-less update', async () => {
+  await checkRows([
+    { name: 'sub_agents.graphify_count round-trips as an integer; absent -> null', run: async () => {
+      const proj = await mkdtemp(join(tmpdir(), 'worca-cc-graphify-proj-'));
+      const { id: pid } = await seedPipeline(proj, { title: 'Run', status: 'running' });
 
-  upsertSubAgent(pid, { id: 'a1', label: 'AR sheet', nodeId: 'n1', stepIndex: 0, cycle: 1,
-    status: 'finished', startedAt: '2026-06-20T00:00:00Z', graphifyCount: 3 });
-  upsertSubAgent(pid, { id: 'a2', label: 'AR items', nodeId: 'n1', stepIndex: 0, cycle: 1,
-    status: 'finished', startedAt: '2026-06-20T00:00:01Z' }); // no graphify
+      upsertSubAgent(pid, { id: 'a1', label: 'AR sheet', nodeId: 'n1', stepIndex: 0, cycle: 1,
+        status: 'finished', startedAt: '2026-06-20T00:00:00Z', graphifyCount: 3 });
+      upsertSubAgent(pid, { id: 'a2', label: 'AR items', nodeId: 'n1', stepIndex: 0, cycle: 1,
+        status: 'finished', startedAt: '2026-06-20T00:00:01Z' }); // no graphify
 
-  const subs = listSubAgents(pid);
-  assert.equal(subs.find((s) => s.id === 'a1').graphifyCount, 3);
-  assert.equal(subs.find((s) => s.id === 'a2').graphifyCount, null, 'absent count surfaces as null');
-});
-
-test('a status-only update never nulls the COALESCE-guarded graphify_count', async () => {
-  const proj = await mkdtemp(join(tmpdir(), 'worca-cc-graphify-proj-'));
-  const { id: pid } = await seedPipeline(proj, { title: 'Run', status: 'running' });
-  upsertSubAgent(pid, { id: 'a1', status: 'running', startedAt: '2026-06-20T00:00:00Z', graphifyCount: 2 });
-  upsertSubAgent(pid, { id: 'a1', status: 'finished', finishedAt: '2026-06-20T00:00:09Z' }); // count-less finish
-  assert.equal(listSubAgents(pid)[0].graphifyCount, 2, 'count preserved across a count-less finish update');
+      const subs = listSubAgents(pid);
+      assert.equal(subs.find((s) => s.id === 'a1').graphifyCount, 3);
+      assert.equal(subs.find((s) => s.id === 'a2').graphifyCount, null, 'absent count surfaces as null');
+    } },
+    { name: 'a status-only update never nulls the COALESCE-guarded graphify_count', run: async () => {
+      await freshHome(); // the beforeEach home each of these tests had
+      const proj = await mkdtemp(join(tmpdir(), 'worca-cc-graphify-proj-'));
+      const { id: pid } = await seedPipeline(proj, { title: 'Run', status: 'running' });
+      upsertSubAgent(pid, { id: 'a1', status: 'running', startedAt: '2026-06-20T00:00:00Z', graphifyCount: 2 });
+      upsertSubAgent(pid, { id: 'a1', status: 'finished', finishedAt: '2026-06-20T00:00:09Z' }); // count-less finish
+      assert.equal(listSubAgents(pid)[0].graphifyCount, 2, 'count preserved across a count-less finish update');
+    } },
+  ]);
 });
 
 test("a step's graphify_count round-trips through writeState -> readPipeline; absent reads back as undefined", async () => {

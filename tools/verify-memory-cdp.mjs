@@ -98,7 +98,7 @@ log(`seeded 3 global + 1 project file · project ${project.key}`);
 // ---- chrome + cdp
 profile = await mkdtemp(path.join(tmpdir(), 'worca-mem-profile-'));
 chrome = spawn(CHROME, ['--headless=new', ...SANDBOX, `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`,
-  '--window-size=1280,900', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check',
+  '--window-size=1280,900', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check', '--use-mock-keychain',
   '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank'],
 { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...REAL_ENV } });
 // Keep Chrome's last stderr lines: when no DevTools target ever appears, its own
@@ -314,10 +314,11 @@ try {
   await until(`location.hash === '#projects/${project.key}'`, 'the Overview route');
   const ov = await ev(`(()=>{const d=document.querySelector('#proj-detail');return {
     tab:d.querySelector('.pd-tab.active').dataset.sec,
-    path:d.querySelector('.pd-ov-card-path .pd-ov-value').textContent,
+    path:d.querySelector('.pd-header .pd-path').textContent,
+    branchCard:!!d.querySelector('.pd-sec[data-sec="overview"]:not([hidden]) .pd-ov-card-branch'),
     memoryHidden:d.querySelector('.pd-sec[data-sec="memory"]').hidden};})()`);
-  check('7b', 'clicking Overview routes to #projects/<key>, lights its pill, hides the Memory section and shows the project path',
-    ov.tab === 'overview' && ov.path === project.path && ov.memoryHidden === true, ov);
+  check('7b', 'clicking Overview routes to #projects/<key>, lights its pill, hides the Memory section and shows the Overview cards under the project path',
+    ov.tab === 'overview' && ov.path === project.path && ov.branchCard === true && ov.memoryHidden === true, ov);
 
   // ---- (8) the picker's Memory scope row ------------------------------------
   await go('new');

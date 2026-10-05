@@ -1,10 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { directionsPromptBlock, runOpts } from '../src/core/phases.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
-test('directionsPromptBlock is "" without pending directions (prompt snapshots untouched)', () => {
-  assert.equal(directionsPromptBlock({}), '');
-  assert.equal(directionsPromptBlock({ directionsPending: [] }), '');
+test('directionsPromptBlock: "" with nothing pending; renders and names the file without a pipelineDir', async () => {
+  await checkRows([
+    { name: 'directionsPromptBlock is "" without pending directions (prompt snapshots untouched)', run: () => {
+      assert.equal(directionsPromptBlock({}), '');
+      assert.equal(directionsPromptBlock({ directionsPending: [] }), '');
+    } },
+    { name: 'with no pipelineDir the block still renders and still names the file', run: () => {
+      const block = directionsPromptBlock({
+        executionId: 'x:n_build:2',
+        directionsPending: [{ id: 'd1', ts: 't', source: 'ui', text: 'cut the roadmap' }],
+      });
+      assert.match(block, /directions\.ndjson/);
+      assert.match(block, /\*\*d1\*\*/);
+    } },
+  ]);
 });
 test('runOpts appends the block after the questions block', () => {
   const ctx = { projectDir: '/p', claudeOpts: {}, executionId: 'x:n_build:2',
@@ -28,13 +41,4 @@ test('the block names the ABSOLUTE directions.ndjson path, not "the pipeline dir
   });
   assert.match(block, /\/home\/u\/\.worca-cc\/store\/proj-abcd1234\/pipelines\/17-09-26-deck-96def123\/directions\.ndjson/);
   assert.doesNotMatch(block, /`directions\.ndjson` in the pipeline directory/);
-});
-
-test('with no pipelineDir the block still renders and still names the file', () => {
-  const block = directionsPromptBlock({
-    executionId: 'x:n_build:2',
-    directionsPending: [{ id: 'd1', ts: 't', source: 'ui', text: 'cut the roadmap' }],
-  });
-  assert.match(block, /directions\.ndjson/);
-  assert.match(block, /\*\*d1\*\*/);
 });

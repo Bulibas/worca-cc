@@ -1,10 +1,10 @@
 // test/ask-branch-tools.test.mjs
 // #527 Phase F: list_branches (fake deps: shape, redaction, row/byte caps, workspace fan-out),
 // list_projects.sync, get_run / get_run_progress baseSha + baseMoved, the real
-// defaultBranchDeps bundle over git, and the read-only pins.
+// defaultBranchDeps bundle over git. Its read-only pins are rows of ask-tools' write-free guard.
 import { test, after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +12,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { createAskTools, AskToolError } from '../src/core/ask/tools.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
 import { redactAskText } from '../src/core/ask/redact.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -39,47 +40,43 @@ const listResult = (projectKey, branches, o = {}) => ({ ok: true, projectKey, re
   fetchedAt: '2026-09-30T10:00:00.000Z', stale: false, total: branches.length, truncated: false, branches, ...o });
 
 // ── list_branches: fake deps ────────────────────────────────────────────────
-test('list_branches is inserted right after list_projects and ends with "Read-only."', () => {
-  const defs = createAskTools(baseDeps()).list();
-  assert.equal(defs[1].name, 'list_branches');
-  assert.match(defs[1].description, /Read-only\.$/);
-  assert.deepEqual(Object.keys(defs[1].inputSchema.properties), ['projectKey', 'workspaceId', 'fresh', 'pattern', 'limit']);
-});
-
-test('list_branches: local-only, remote-only and ahead/behind rows pass through; opts reach the dep', async () => {
-  const seen = [];
-  const tools = createAskTools(baseDeps({ branches: { async list(key, opts) {
-    seen.push({ key, opts });
-    return listResult(key, [
-      row('local-only', { hasRemote: false }),
-      row('remote-only', { hasLocal: false }),
-      row('both', { remoteSha: 'b'.repeat(40), ahead: 2, behind: 3 }),
-    ]);
-  } } }));
-  const out = await tools.call('list_branches', { projectKey: 'web-00000001', pattern: ' feat ', limit: 5 });
-  assert.deepEqual(seen, [{ key: 'web-00000001', opts: { fresh: true, pattern: 'feat', limit: 5 } }]);
-  assert.equal(out.projectKey, 'web-00000001');
-  assert.equal(out.remote, 'origin');
-  assert.equal(out.current, 'main');
-  assert.equal(out.stale, false);
-  assert.equal('fetchError' in out, false);
-  assert.deepEqual(out.branches.map((b) => [b.name, b.hasLocal, b.hasRemote, b.ahead, b.behind]),
-    [['local-only', true, false, 0, 0], ['remote-only', false, true, 0, 0], ['both', true, true, 2, 3]]);
-  assert.equal(out.branches[2].remoteSha, 'b'.repeat(40));
-  assert.equal('remoteSha' in out.branches[0], false);
-  await tools.call('list_branches', { projectKey: 'web-00000001', fresh: false });
-  assert.deepEqual(seen[1].opts, { fresh: false, pattern: null, limit: 100 });
-});
-
-test('list_branches: stale + fetchError and truncated pass through', async () => {
-  const tools = createAskTools(baseDeps({ branches: { async list(key) {
-    return listResult(key, [row('main')], { stale: true, fetchError: { kind: 'network', message: 'could not resolve host' }, total: 9, truncated: true });
-  } } }));
-  const out = await tools.call('list_branches', { projectKey: 'web-00000001' });
-  assert.equal(out.stale, true);
-  assert.deepEqual(out.fetchError, { kind: 'network', message: 'could not resolve host' });
-  assert.equal(out.total, 9);
-  assert.equal(out.truncated, true);
+test('list_branches pass-through: local/remote/ahead-behind rows, stale + fetchError, truncated; opts reach the dep', async () => {
+  await checkRows([
+    { name: 'list_branches: local-only, remote-only and ahead/behind rows pass through; opts reach the dep', run: async () => {
+      const seen = [];
+      const tools = createAskTools(baseDeps({ branches: { async list(key, opts) {
+        seen.push({ key, opts });
+        return listResult(key, [
+          row('local-only', { hasRemote: false }),
+          row('remote-only', { hasLocal: false }),
+          row('both', { remoteSha: 'b'.repeat(40), ahead: 2, behind: 3 }),
+        ]);
+      } } }));
+      const out = await tools.call('list_branches', { projectKey: 'web-00000001', pattern: ' feat ', limit: 5 });
+      assert.deepEqual(seen, [{ key: 'web-00000001', opts: { fresh: true, pattern: 'feat', limit: 5 } }]);
+      assert.equal(out.projectKey, 'web-00000001');
+      assert.equal(out.remote, 'origin');
+      assert.equal(out.current, 'main');
+      assert.equal(out.stale, false);
+      assert.equal('fetchError' in out, false);
+      assert.deepEqual(out.branches.map((b) => [b.name, b.hasLocal, b.hasRemote, b.ahead, b.behind]),
+        [['local-only', true, false, 0, 0], ['remote-only', false, true, 0, 0], ['both', true, true, 2, 3]]);
+      assert.equal(out.branches[2].remoteSha, 'b'.repeat(40));
+      assert.equal('remoteSha' in out.branches[0], false);
+      await tools.call('list_branches', { projectKey: 'web-00000001', fresh: false });
+      assert.deepEqual(seen[1].opts, { fresh: false, pattern: null, limit: 100 });
+    } },
+    { name: 'list_branches: stale + fetchError and truncated pass through', run: async () => {
+      const tools = createAskTools(baseDeps({ branches: { async list(key) {
+        return listResult(key, [row('main')], { stale: true, fetchError: { kind: 'network', message: 'could not resolve host' }, total: 9, truncated: true });
+      } } }));
+      const out = await tools.call('list_branches', { projectKey: 'web-00000001' });
+      assert.equal(out.stale, true);
+      assert.deepEqual(out.fetchError, { kind: 'network', message: 'could not resolve host' });
+      assert.equal(out.total, 9);
+      assert.equal(out.truncated, true);
+    } },
+  ]);
 });
 
 test('list_branches: names and subjects are redacted BEFORE the cut (tokens straddling 255 / 200)', async () => {
@@ -96,55 +93,61 @@ test('list_branches: names and subjects are redacted BEFORE the cut (tokens stra
   assert.ok(out.branches[1].subject.length <= 200);
 });
 
-test('list_branches: a failed member / project becomes {projectKey, error}', async () => {
-  const tools = createAskTools(baseDeps({ branches: { async list(key) { return { projectKey: key, ok: false, error: 'project folder is missing on disk' }; } } }));
-  assert.deepEqual(await tools.call('list_branches', { projectKey: 'web-00000001' }), { projectKey: 'web-00000001', error: 'project folder is missing on disk' });
+test('list_branches workspace fan-out: members[], a failed member becomes {projectKey,error}', async () => {
+  await checkRows([
+    { name: 'list_branches: a failed member / project becomes {projectKey, error}', run: async () => {
+      const tools = createAskTools(baseDeps({ branches: { async list(key) { return { projectKey: key, ok: false, error: 'project folder is missing on disk' }; } } }));
+      assert.deepEqual(await tools.call('list_branches', { projectKey: 'web-00000001' }), { projectKey: 'web-00000001', error: 'project folder is missing on disk' });
+    } },
+    { name: 'list_branches: workspace fan-out returns members[]', run: async () => {
+      const seen = [];
+      const tools = createAskTools(baseDeps({ branches: {
+        async list() { throw new Error('not used'); },
+        async listWorkspace(id, opts) {
+          seen.push({ id, opts });
+          return [listResult('web-00000001', [row('main')]), { projectKey: 'api-00000002', ok: false, error: 'project folder is missing on disk' }];
+        },
+      } }));
+      const out = await tools.call('list_branches', { workspaceId: 'wks-team-0000abcd' });
+      assert.equal(out.workspaceId, 'wks-team-0000abcd');
+      assert.deepEqual(seen, [{ id: 'wks-team-0000abcd', opts: { fresh: true, pattern: null, limit: 100 } }]);
+      assert.deepEqual(out.members.map((m) => m.projectKey), ['web-00000001', 'api-00000002']);
+      assert.deepEqual(out.members[0].branches.map((b) => b.name), ['main']);
+      assert.equal(out.members[1].error, 'project folder is missing on disk');
+    } },
+  ]);
 });
 
-test('list_branches: workspace fan-out returns members[]', async () => {
-  const seen = [];
-  const tools = createAskTools(baseDeps({ branches: {
-    async list() { throw new Error('not used'); },
-    async listWorkspace(id, opts) {
-      seen.push({ id, opts });
-      return [listResult('web-00000001', [row('main')]), { projectKey: 'api-00000002', ok: false, error: 'project folder is missing on disk' }];
-    },
-  } }));
-  const out = await tools.call('list_branches', { workspaceId: 'wks-team-0000abcd' });
-  assert.equal(out.workspaceId, 'wks-team-0000abcd');
-  assert.deepEqual(seen, [{ id: 'wks-team-0000abcd', opts: { fresh: true, pattern: null, limit: 100 } }]);
-  assert.deepEqual(out.members.map((m) => m.projectKey), ['web-00000001', 'api-00000002']);
-  assert.deepEqual(out.members[0].branches.map((b) => b.name), ['main']);
-  assert.equal(out.members[1].error, 'project folder is missing on disk');
-});
-
-test('list_branches: 40 members × 200 rows stay ≤ 200 rows in all and ≤ branchListMaxBytes', async () => {
-  let asked = null;
-  const tools = createAskTools(baseDeps({ branches: {
-    async list() { throw new Error('not used'); },
-    async listWorkspace(id, opts) {
-      asked = opts.limit;
-      return Array.from({ length: 40 }, (_, m) => listResult(`m${m}-00000000`,
-        Array.from({ length: 200 }, (__, i) => row(`feature/${m}-${i}`, { subject: 'x'.repeat(200) })), { total: 200 }));
-    },
-  } }));
-  const out = await tools.call('list_branches', { workspaceId: 'wks-big-0000abcd', limit: 999 });
-  assert.ok(asked <= 200, `listWorkspace got limit ${asked}`);
-  const rows = out.members.reduce((n, m) => n + m.branches.length, 0);
-  assert.ok(rows <= 200, `${rows} rows`);
-  const maxBytes = ASK_LIMITS.branchListMaxBytes || 60_000;
-  assert.ok(Buffer.byteLength(JSON.stringify(out.members), 'utf8') <= maxBytes);
-  assert.ok(out.members.every((m) => m.truncated === true), 'every member lost rows and says so');
-});
-
-test('list_branches: a single project is also capped to limit rows', async () => {
-  const tools = createAskTools(baseDeps({ branches: { async list(key) {
-    return listResult(key, Array.from({ length: 50 }, (_, i) => row(`b${i}`)));
-  } } }));
-  const out = await tools.call('list_branches', { projectKey: 'web-00000001', limit: 10 });
-  assert.equal(out.branches.length, 10);
-  assert.equal(out.truncated, true);
-  assert.deepEqual(out.branches.slice(0, 2).map((b) => b.name), ['b0', 'b1'], 'the newest (first) rows are kept');
+test('list_branches caps: 40 members × 200 rows stay ≤ 200 rows and ≤ branchListMaxBytes; a single project is capped to limit', async () => {
+  await checkRows([
+    { name: 'list_branches: 40 members × 200 rows stay ≤ 200 rows in all and ≤ branchListMaxBytes', run: async () => {
+      let asked = null;
+      const tools = createAskTools(baseDeps({ branches: {
+        async list() { throw new Error('not used'); },
+        async listWorkspace(id, opts) {
+          asked = opts.limit;
+          return Array.from({ length: 40 }, (_, m) => listResult(`m${m}-00000000`,
+            Array.from({ length: 200 }, (__, i) => row(`feature/${m}-${i}`, { subject: 'x'.repeat(200) })), { total: 200 }));
+        },
+      } }));
+      const out = await tools.call('list_branches', { workspaceId: 'wks-big-0000abcd', limit: 999 });
+      assert.ok(asked <= 200, `listWorkspace got limit ${asked}`);
+      const rows = out.members.reduce((n, m) => n + m.branches.length, 0);
+      assert.ok(rows <= 200, `${rows} rows`);
+      const maxBytes = ASK_LIMITS.branchListMaxBytes || 60_000;
+      assert.ok(Buffer.byteLength(JSON.stringify(out.members), 'utf8') <= maxBytes);
+      assert.ok(out.members.every((m) => m.truncated === true), 'every member lost rows and says so');
+    } },
+    { name: 'list_branches: a single project is also capped to limit rows', run: async () => {
+      const tools = createAskTools(baseDeps({ branches: { async list(key) {
+        return listResult(key, Array.from({ length: 50 }, (_, i) => row(`b${i}`)));
+      } } }));
+      const out = await tools.call('list_branches', { projectKey: 'web-00000001', limit: 10 });
+      assert.equal(out.branches.length, 10);
+      assert.equal(out.truncated, true);
+      assert.deepEqual(out.branches.slice(0, 2).map((b) => b.name), ['b0', 'b1'], 'the newest (first) rows are kept');
+    } },
+  ]);
 });
 
 test('list_branches: unavailable deps, missing scope and unknown targets are AskToolErrors', async () => {
@@ -181,32 +184,35 @@ const runDeps = (row, extra = {}) => baseDeps({
   ...extra,
 });
 
-test('get_run / get_run_progress: baseSha + baseMoved when recorded; the recorded remote wins', async () => {
-  const calls = [];
-  const branches = { async baseMoved(a) { calls.push(a); return { commits: 4, fetchedAt: '2026-09-30T10:00:00.000Z' }; } };
-  const r = runRow({ source: 'dev', feature: 'worca-cc/x', baseSha: 'c'.repeat(40), startRef: 'd'.repeat(40), sync: { remote: 'upstream' } });
-  const tools = createAskTools(runDeps(r, { branches }));
-  const run = await tools.call('get_run', { id: 'abcd1234' });
-  assert.equal(run.baseSha, 'c'.repeat(40));
-  assert.equal(run.startRef, 'd'.repeat(40));
-  assert.deepEqual(run.baseMoved, { commits: 4, fetchedAt: '2026-09-30T10:00:00.000Z' });
-  assert.deepEqual(calls[0], { projectDir: '/p/web', projectKey: 'web-00000001', source: 'dev', baseSha: 'c'.repeat(40), remote: 'upstream' });
-  const prog = await tools.call('get_run_progress', { runId: 'abcd1234' });
-  assert.equal(prog.baseSha, 'c'.repeat(40));
-  assert.deepEqual(prog.baseMoved, { commits: 4, fetchedAt: '2026-09-30T10:00:00.000Z' });
-});
-
-test('get_run without baseSha keeps its keys and never calls baseMoved', async () => {
-  let called = 0;
-  const r = runRow({ source: 'dev', feature: 'worca-cc/x' });
-  const plain = await createAskTools(runDeps(r)).call('get_run', { id: 'abcd1234' });
-  const tools = createAskTools(runDeps(r, { branches: { async baseMoved() { called += 1; return { commits: 1, fetchedAt: null }; } } }));
-  const out = await tools.call('get_run', { id: 'abcd1234' });
-  assert.deepEqual(Object.keys(out), Object.keys(plain));
-  assert.equal('baseSha' in out || 'baseMoved' in out, false);
-  const prog = await tools.call('get_run_progress', { runId: 'abcd1234' });
-  assert.equal('baseSha' in prog || 'baseMoved' in prog, false);
-  assert.equal(called, 0);
+test('get_run / get_run_progress: baseSha + baseMoved when recorded (remote wins); without baseSha the keys are unchanged and baseMoved is never called', async () => {
+  await checkRows([
+    { name: 'get_run / get_run_progress: baseSha + baseMoved when recorded; the recorded remote wins', run: async () => {
+      const calls = [];
+      const branches = { async baseMoved(a) { calls.push(a); return { commits: 4, fetchedAt: '2026-09-30T10:00:00.000Z' }; } };
+      const r = runRow({ source: 'dev', feature: 'worca-cc/x', baseSha: 'c'.repeat(40), startRef: 'd'.repeat(40), sync: { remote: 'upstream' } });
+      const tools = createAskTools(runDeps(r, { branches }));
+      const run = await tools.call('get_run', { id: 'abcd1234' });
+      assert.equal(run.baseSha, 'c'.repeat(40));
+      assert.equal(run.startRef, 'd'.repeat(40));
+      assert.deepEqual(run.baseMoved, { commits: 4, fetchedAt: '2026-09-30T10:00:00.000Z' });
+      assert.deepEqual(calls[0], { projectDir: '/p/web', projectKey: 'web-00000001', source: 'dev', baseSha: 'c'.repeat(40), remote: 'upstream' });
+      const prog = await tools.call('get_run_progress', { runId: 'abcd1234' });
+      assert.equal(prog.baseSha, 'c'.repeat(40));
+      assert.deepEqual(prog.baseMoved, { commits: 4, fetchedAt: '2026-09-30T10:00:00.000Z' });
+    } },
+    { name: 'get_run without baseSha keeps its keys and never calls baseMoved', run: async () => {
+      let called = 0;
+      const r = runRow({ source: 'dev', feature: 'worca-cc/x' });
+      const plain = await createAskTools(runDeps(r)).call('get_run', { id: 'abcd1234' });
+      const tools = createAskTools(runDeps(r, { branches: { async baseMoved() { called += 1; return { commits: 1, fetchedAt: null }; } } }));
+      const out = await tools.call('get_run', { id: 'abcd1234' });
+      assert.deepEqual(Object.keys(out), Object.keys(plain));
+      assert.equal('baseSha' in out || 'baseMoved' in out, false);
+      const prog = await tools.call('get_run_progress', { runId: 'abcd1234' });
+      assert.equal('baseSha' in prog || 'baseMoved' in prog, false);
+      assert.equal(called, 0);
+    } },
+  ]);
 });
 
 // ── open_worktree result fields ─────────────────────────────────────────────
@@ -218,16 +224,6 @@ test('open_worktree passes resolvedFrom / stale / fetchedAt through only when pr
   next = { ...base, resolvedFrom: 'feat', stale: true, fetchedAt: '2026-09-30T10:00:00.000Z', runId: null };
   assert.deepEqual(await tools.call('open_worktree', { projectKey: 'web-00000001', ref: 'feat' }),
     { ...base, resolvedFrom: 'feat', stale: true, fetchedAt: '2026-09-30T10:00:00.000Z' });
-});
-
-// ── read-only pins ──────────────────────────────────────────────────────────
-test('read-only pins: no write-tool set names list_branches; branch-deps never writes; mcp-stdio wires it', () => {
-  const events = readFileSync(new URL('../src/core/ask/events.mjs', import.meta.url), 'utf8');
-  for (const m of events.matchAll(/new Set\(\[([\s\S]*?)\]\)/g)) assert.ok(!m[1].includes('list_branches'), m[0]);
-  const deps = readFileSync(new URL('../src/core/ask/branch-deps.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(deps, /fastForward|ensureLocalBranch|syncBaseForRun|syncRepo|update-ref|merge/);
-  const stdio = readFileSync(new URL('../src/core/ask/mcp-stdio.mjs', import.meta.url), 'utf8');
-  assert.match(stdio, /createAskTools\(\{[\s\S]*?defaultBranchDeps/);
 });
 
 // ── defaultBranchDeps over real git ─────────────────────────────────────────

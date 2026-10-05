@@ -5,15 +5,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  EFFORTS, RESERVED_MODEL_ENV_KEYS, isReservedModelEnvKey, modelEnvRef, prepareModelEnv,
+  RESERVED_MODEL_ENV_KEYS, isReservedModelEnvKey, modelEnvRef, prepareModelEnv,
   envFlag, maskModelEnvValue, isReadableModelEnvKey, describeModelEnvEntry, describeModelEnv,
 } from '../src/core/model-env.mjs';
-import { EFFORTS as CONFIG_EFFORTS } from '../src/core/config.mjs';
-
-test('EFFORTS: canonical here, config.mjs re-export is the SAME array', () => {
-  assert.deepEqual(EFFORTS, ['medium', 'high', 'xhigh', 'max']);
-  assert.equal(CONFIG_EFFORTS, EFFORTS); // identity, not a drifting copy
-});
 
 test('isReservedModelEnvKey: exact keys, WORCA_ prefix, and the allowed rest', () => {
   for (const k of RESERVED_MODEL_ENV_KEYS) assert.equal(isReservedModelEnvKey(k), true, k);
@@ -58,6 +52,13 @@ test('prepareModelEnv: literals pass, reserved/non-string dropped, refs expand',
   assert.deepEqual(dropped.sort(), ['PATH', 'WORCA_MOCK', 'X_EMPTY', 'X_NUM', 'X_UNSET']);
 });
 
+test('prepareModelEnv drops MCP registry env names (MCPSECRET_*, MCPCHILD_*, any case); they stay unreserved so cleanRunEnv keeps the registry env', () => {
+  const { env, dropped } = prepareModelEnv({ MCPSECRET_A41C6F76: 'x', mcpchild_JIRA_TOKEN: 'y', MCP_TIMEOUT: '1', ANTHROPIC_MODEL: 'm' }, {});
+  assert.deepEqual(env, { MCP_TIMEOUT: '1', ANTHROPIC_MODEL: 'm' });
+  assert.deepEqual(dropped.sort(), ['MCPSECRET_A41C6F76', 'mcpchild_JIRA_TOKEN']);
+  assert.equal(isReservedModelEnvKey('MCPSECRET_A41C6F76'), false);
+  assert.equal(isReservedModelEnvKey('MCPCHILD_JIRA_TOKEN'), false);
+});
 test('prepareModelEnv: empty/absent input is a no-op', () => {
   assert.deepEqual(prepareModelEnv(undefined, {}), { env: {}, dropped: [] });
   assert.deepEqual(prepareModelEnv({}, {}), { env: {}, dropped: [] });

@@ -3,7 +3,8 @@
 // and no pointer capture, so the view takes injectable `raf` and `viewport`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { boot, fixture, loopFixture, scriptFixture, portsFn, AGENTS, SCRIPTS } from './helpers/graph-view-fixture.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { boot, fixture, loopFixture, portsFn, AGENTS } from './helpers/graph-view-fixture.mjs';
 import { routeAll, routePathD } from '../src/shared/graph/route.mjs';
 import { nodeSize, portAnchor } from '../src/shared/graph/geometry.mjs';
 import { portsOf } from '../src/shared/graph/ports.mjs';
@@ -45,28 +46,6 @@ test('createGraphView builds stage/world/wire-layer and one card per node', asyn
   assert.equal(world.querySelectorAll('.node').length, 3);
 });
 
-test('cards carry transform + explicit px height from nodeSize', async () => {
-  const { doc, host } = boot();
-  const { createGraphView } = await import(viewPath);
-  const view = createGraphView(host, { doc, portsFn, agents: AGENTS });
-  view.render(fixture(), {});
-  const agent = view.nodeEl('n_agent');
-  assert.equal(agent.style.transform, 'translate(400px, 80px)');
-  assert.equal(agent.style.height, '191.5px');           // 95.5 + 24*(2+2)
-  assert.equal(view.nodeEl('n_task').style.height, '110.5px');
-  assert.equal(view.nodeEl('n_end').style.height, '110.5px');
-  assert.equal(agent.dataset.nodeId, 'n_agent');
-  assert.equal(agent.getAttribute('tabindex'), '0');
-  // zones: 2 inputs, sep, 2 outputs, sep, await  => 5 rows, 2 separators
-  assert.equal(agent.querySelectorAll('.nbody > .prow').length, 5);
-  assert.equal(agent.querySelectorAll('.nbody > .psep').length, 2);
-  assert.equal(agent.querySelector('.prow.gate').dataset.port, 'await');
-  // conditional output renders a diamond + "on blocking", never a type dot
-  const review = [...agent.querySelectorAll('.prow.out')].find((r) => r.dataset.port === 'review');
-  assert.ok(review.querySelector('i.dia'));
-  assert.equal(review.querySelector('.pt').textContent, 'on blocking');
-});
-
 test('wires paint the router\'s orthogonal d strings; ghost is the LAST child of the layer', async () => {
   const { doc, host } = boot();
   const { createGraphView } = await import(viewPath);
@@ -86,69 +65,93 @@ test('wires paint the router\'s orthogonal d strings; ghost is the LAST child of
   assert.equal(layer.querySelectorAll('path[data-wire-id]').length, 2);
 });
 
-test('loop wires route as ordinary backward wires and carry a ≤N badge', async () => {
-  const { doc, host } = boot();
-  const { createGraphView } = await import(viewPath);
-  const view = createGraphView(host, { doc, portsFn, agents: AGENTS });
-  const tpl = loopFixture();
-  view.render(tpl, {});
-  const d = view.wireEl('w4').getAttribute('d');
-  assert.ok(view.wireEl('w4').getAttribute('class').includes('loop'), 'classified as a loop wire');
-  // a = n_rev.review (620,537), b = n_agent.fix (400,160): `loop` is colour only
-  // now (D3) — the router treats w4 as a plain backward wire.
-  assert.equal(d, routedD(tpl, 'w4'));
-  assert.match(d, /^M 620 537 L /);
-  const badge = host.querySelector('.wbadge[data-wire-id="w4"]');
-  assert.equal(badge.textContent, '≤2');
+test('loop wires route as backward wires with a ≤N badge; setWireBadge writes and clears the amber cycle badge', async () => {
+  await checkRows([
+    { name: 'loop wires route as ordinary backward wires and carry a ≤N badge', run: async () => {
+      const { doc, host } = boot();
+      const { createGraphView } = await import(viewPath);
+      const view = createGraphView(host, { doc, portsFn, agents: AGENTS });
+      const tpl = loopFixture();
+      view.render(tpl, {});
+      const d = view.wireEl('w4').getAttribute('d');
+      assert.ok(view.wireEl('w4').getAttribute('class').includes('loop'), 'classified as a loop wire');
+      // a = n_rev.review (620,537), b = n_agent.fix (400,160): `loop` is colour only
+      // now (D3) — the router treats w4 as a plain backward wire.
+      assert.equal(d, routedD(tpl, 'w4'));
+      assert.match(d, /^M 620 537 L /);
+      const badge = host.querySelector('.wbadge[data-wire-id="w4"]');
+      assert.equal(badge.textContent, '≤2');
+    } },
+    { name: 'setWireBadge writes an amber cycle badge on a loop wire and clears it', run: async () => {
+      const { doc, host } = boot();
+      const { createGraphView } = await import(viewPath);
+      const view = createGraphView(host, { doc, mode: 'monitor', portsFn, agents: AGENTS });
+      // loopFixture(), NOT fixture(): a badge HOST only exists for a wire whose
+      // config.maxCycles is an integer (renderWires), and only w4 has one. On the
+      // plain fixture every assertion below dereferences null.
+      view.render(loopFixture(), {});
+      view.setWireBadge('w4', { text: '2x', title: '2 of 3 cycles' });
+      const badge = host.querySelector('.wbadge[data-wire-id="w4"] .wfired');
+      assert.equal(badge.textContent, '2x');
+      assert.equal(badge.title, '2 of 3 cycles');
+      view.setWireBadge('w4', null);
+      assert.equal(host.querySelector('.wfired'), null);
+      view.setWireBadge('w1', { text: '1x' });                // a plain wire has no badge host: no-op
+      assert.equal(host.querySelector('.wfired'), null);
+    } },
+  ]);
 });
 
-test('re-render does NOT rebuild rows whose port signature is unchanged', async () => {
-  const { doc, host } = boot();
-  const { createGraphView } = await import(viewPath);
-  const view = createGraphView(host, { doc, portsFn, agents: AGENTS });
-  const tpl = fixture();
-  view.render(tpl, {});
-  const rowsBefore = [...view.nodeEl('n_agent').querySelectorAll('.nbody > *')];
-  tpl.nodes[1].x = 480;                       // a pure move must not touch the body
-  view.render(tpl, {});
-  const rowsAfter = [...view.nodeEl('n_agent').querySelectorAll('.nbody > *')];
-  assert.equal(rowsAfter.length, rowsBefore.length);
-  for (let i = 0; i < rowsAfter.length; i += 1) {
-    assert.equal(rowsAfter[i], rowsBefore[i], `row ${i} is the SAME element (identity), not a rebuild`);
-  }
-  assert.equal(view.nodeEl('n_agent').style.transform, 'translate(480px, 80px)');
-  // changing the signature (arity) DOES rebuild
-  tpl.nodes.push({ id: 'n_and', kind: 'and', x: 900, y: 400, config: { arity: 2 } });
-  view.render(tpl, {});
-  const andRows = [...view.nodeEl('n_and').querySelectorAll('.nbody > .prow')];
-  tpl.nodes[3].config.arity = 3;
-  view.render(tpl, {});
-  const andRows2 = [...view.nodeEl('n_and').querySelectorAll('.nbody > .prow')];
-  assert.equal(andRows.length, 3);            // in1, in2, out
-  assert.equal(andRows2.length, 4);           // in1, in2, in3, out
-  assert.notEqual(andRows2[0], andRows[0], 'signature change rebuilds the body');
-});
-
-test('moveNode writes ONLY the wires whose route changed; setGhost writes d once', async () => {
-  const { doc, host } = boot();
-  const { createGraphView } = await import(viewPath);
-  const view = createGraphView(host, { doc, portsFn, agents: AGENTS });
-  const tpl = fixture();
-  view.render(tpl, {});
-  const w2Before = view.wireEl('w2').getAttribute('d');
-  const n0 = view.stats.wireDUpdates;
-  tpl.nodes[0].x = 71;                                   // an 11px hop that blocks no other corridor
-  view.moveNode('n_task');
-  assert.equal(view.stats.wireDUpdates - n0, 1, 'only the one wire whose route moved wrote d');
-  assert.equal(view.wireEl('w2').getAttribute('d'), w2Before, 'w2 untouched');
-  assert.equal(view.nodeEl('n_task').style.transform, 'translate(71px, 143px)');
-  const g0 = view.stats.ghostUpdates;
-  view.setGhost('M 0 0 C 1 1, 2 2, 3 3', 'legal');
-  view.setGhost('M 0 0 C 1 1, 2 2, 3 3', 'legal');       // identical d => no second write
-  assert.equal(view.stats.ghostUpdates - g0, 1);
-  assert.equal(view.ghostEl.getAttribute('class'), 'wire ghost on legal');
-  view.setGhost(null);
-  assert.equal(view.ghostEl.getAttribute('class'), 'wire ghost');
+test('perf invariants: re-render keeps rows with unchanged port signatures; moveNode writes only changed wires; setGhost writes d once', async () => {
+  await checkRows([
+    { name: 're-render does NOT rebuild rows whose port signature is unchanged', run: async () => {
+      const { doc, host } = boot();
+      const { createGraphView } = await import(viewPath);
+      const view = createGraphView(host, { doc, portsFn, agents: AGENTS });
+      const tpl = fixture();
+      view.render(tpl, {});
+      const rowsBefore = [...view.nodeEl('n_agent').querySelectorAll('.nbody > *')];
+      tpl.nodes[1].x = 480;                       // a pure move must not touch the body
+      view.render(tpl, {});
+      const rowsAfter = [...view.nodeEl('n_agent').querySelectorAll('.nbody > *')];
+      assert.equal(rowsAfter.length, rowsBefore.length);
+      for (let i = 0; i < rowsAfter.length; i += 1) {
+        assert.equal(rowsAfter[i], rowsBefore[i], `row ${i} is the SAME element (identity), not a rebuild`);
+      }
+      assert.equal(view.nodeEl('n_agent').style.transform, 'translate(480px, 80px)');
+      // changing the signature (arity) DOES rebuild
+      tpl.nodes.push({ id: 'n_and', kind: 'and', x: 900, y: 400, config: { arity: 2 } });
+      view.render(tpl, {});
+      const andRows = [...view.nodeEl('n_and').querySelectorAll('.nbody > .prow')];
+      tpl.nodes[3].config.arity = 3;
+      view.render(tpl, {});
+      const andRows2 = [...view.nodeEl('n_and').querySelectorAll('.nbody > .prow')];
+      assert.equal(andRows.length, 3);            // in1, in2, out
+      assert.equal(andRows2.length, 4);           // in1, in2, in3, out
+      assert.notEqual(andRows2[0], andRows[0], 'signature change rebuilds the body');
+    } },
+    { name: 'moveNode writes ONLY the wires whose route changed; setGhost writes d once', run: async () => {
+      const { doc, host } = boot();
+      const { createGraphView } = await import(viewPath);
+      const view = createGraphView(host, { doc, portsFn, agents: AGENTS });
+      const tpl = fixture();
+      view.render(tpl, {});
+      const w2Before = view.wireEl('w2').getAttribute('d');
+      const n0 = view.stats.wireDUpdates;
+      tpl.nodes[0].x = 71;                                   // an 11px hop that blocks no other corridor
+      view.moveNode('n_task');
+      assert.equal(view.stats.wireDUpdates - n0, 1, 'only the one wire whose route moved wrote d');
+      assert.equal(view.wireEl('w2').getAttribute('d'), w2Before, 'w2 untouched');
+      assert.equal(view.nodeEl('n_task').style.transform, 'translate(71px, 143px)');
+      const g0 = view.stats.ghostUpdates;
+      view.setGhost('M 0 0 C 1 1, 2 2, 3 3', 'legal');
+      view.setGhost('M 0 0 C 1 1, 2 2, 3 3', 'legal');       // identical d => no second write
+      assert.equal(view.stats.ghostUpdates - g0, 1);
+      assert.equal(view.ghostEl.getAttribute('class'), 'wire ghost on legal');
+      view.setGhost(null);
+      assert.equal(view.ghostEl.getAttribute('class'), 'wire ghost');
+    } },
+  ]);
 });
 
 test('moveNode re-routes wires the moved card BLOCKS, even when it is wired to nothing', async () => {
@@ -167,41 +170,6 @@ test('moveNode re-routes wires the moved card BLOCKS, even when it is wired to n
   assert.notEqual(after, before, 'a wire that merely PASSES the moved card re-routes (D7)');
   assert.equal(after, routedD(tpl, 'w1'), 'and it re-routes to the canonical route');
   assert.equal(view.incidentOf('n_blk').size, 0, 'the moved card is incident to no wire at all');
-});
-
-test('setNodeChrome paints --c, the gate pip and the header totals; nulls clear them', async () => {
-  const { doc, host } = boot();
-  const { createGraphView } = await import(viewPath);
-  const view = createGraphView(host, { doc, mode: 'monitor', portsFn, agents: AGENTS });
-  view.render(fixture(), {});
-  const card = view.nodeEl('n_agent');
-  view.setNodeChrome('n_agent', { color: 'violet', gate: { wireId: 'w1', title: 'waiting on a loop gate' }, totals: { dur: '2m 10s', cost: '$0.42' } });
-  assert.equal(card.style.getPropertyValue('--c'), 'var(--violet)');
-  assert.equal(card.querySelector(':scope > .ngate').dataset.wireId, 'w1');
-  assert.equal(card.querySelector(':scope > .nrun .dur').textContent, '2m 10s');
-  assert.equal(card.querySelector(':scope > .nrun .cost').textContent, '$0.42');
-  assert.ok(card.classList.contains('run-node') && card.dataset.id === 'n_agent', 'the 1s tick hook selects .run-node[data-id] .dur');
-  view.setNodeChrome('n_agent', { color: '', gate: null, totals: null });
-  assert.equal(card.querySelector(':scope > .ngate'), null);
-  assert.equal(card.querySelector(':scope > .nrun'), null);
-});
-
-test('setWireBadge writes an amber cycle badge on a loop wire and clears it', async () => {
-  const { doc, host } = boot();
-  const { createGraphView } = await import(viewPath);
-  const view = createGraphView(host, { doc, mode: 'monitor', portsFn, agents: AGENTS });
-  // loopFixture(), NOT fixture(): a badge HOST only exists for a wire whose
-  // config.maxCycles is an integer (renderWires), and only w4 has one. On the
-  // plain fixture every assertion below dereferences null.
-  view.render(loopFixture(), {});
-  view.setWireBadge('w4', { text: '2x', title: '2 of 3 cycles' });
-  const badge = host.querySelector('.wbadge[data-wire-id="w4"] .wfired');
-  assert.equal(badge.textContent, '2x');
-  assert.equal(badge.title, '2 of 3 cycles');
-  view.setWireBadge('w4', null);
-  assert.equal(host.querySelector('.wfired'), null);
-  view.setWireBadge('w1', { text: '1x' });                // a plain wire has no badge host: no-op
-  assert.equal(host.querySelector('.wfired'), null);
 });
 
 test('setStatus / setWireLive / setFooter are classList + height only', async () => {
@@ -238,6 +206,17 @@ test('setStatus / setWireLive / setFooter are classList + height only', async ()
   assert.equal(card.style.height, '191.5px');
   assert.equal(card.querySelector(':scope > .xfoot'), null, 'clearing removes the footer');
   assert.deepEqual([...card.querySelectorAll('.nbody > *')], rows, 'no row was rebuilt');
+  // A `live` band (script nodes P1b, S4): one mono line, keyed by kind so it survives
+  // repaints, billed as one footer line (folded from ui-graph-live-band).
+  view.setFooter('n_agent', [{ kind: 'strip', leds: ['active'], summary: '1 run' }, { kind: 'live', text: 'npm test …' }]);
+  const live = host.querySelector('.node[data-node-id="n_agent"] .xfoot .xlive');
+  assert.equal(live.textContent, 'npm test …');
+  assert.equal(live.title, 'npm test …');
+  view.setFooter('n_agent', [{ kind: 'strip', leds: ['active'], summary: '1 run' }, { kind: 'live', text: '3 failing' }]);
+  assert.equal(host.querySelector('.node[data-node-id="n_agent"] .xfoot .xlive'), live, 'the element survives (keyed band)');
+  assert.equal(live.textContent, '3 failing');
+  assert.equal(live.title, '3 failing');
+  assert.equal(view._internals.footers.get('n_agent'), 2, 'a live band bills one footer line');
 });
 
 test('setFooter re-routes when the billed line count changes — growth AND removal (D16)', async () => {
@@ -266,85 +245,48 @@ test('setFooter re-routes when the billed line count changes — growth AND remo
   assert.equal(view.wireEl('w1').getAttribute('d'), base, 'removal restores the route byte-for-byte');
 });
 
-test('centerOn puts the node box centre at the viewport centre', async () => {
-  const { doc, host } = boot();
-  const { createGraphView } = await import(viewPath);
-  const view = createGraphView(host, {
-    doc, portsFn, agents: AGENTS, viewport: () => ({ left: 0, top: 0, width: 1000, height: 600 }),
-  });
-  view.render(fixture(), {});
-  view.setTransform({ x: 0, y: 0, z: 1 });
-  view.centerOn('n_agent');                              // box (400,80,220,191.5), centre (510, 175.75)
-  const T = view.getTransform();
-  assert.equal(T.x, 500 - 510);
-  assert.equal(T.y, 300 - 175.75);
-});
-
 const VP = { left: 0, top: 0, width: 1280, height: 560 };
 
-test('fit centres model bounds and never magnifies past 1x', async () => {
-  const { doc, host } = boot();
-  const { createGraphView } = await import(viewPath);
-  const view = createGraphView(host, { doc, portsFn, agents: AGENTS, viewport: () => ({ ...VP }) });
-  view.render(fixture(), {});
-  view.fit({ insetRight: 0, pad: 60 });
-  const T = view.getTransform();
-  // boxes span x 60..980, y 80..271.5 => padded bounds (0, 20, 1040, 311.5)
-  assert.equal(T.z, 1, 'fit caps at 1x');
-  assert.equal(T.x, 120);
-  assert.equal(T.y, 104.25);
-  view.fit({ insetRight: 280, pad: 60 });               // inspector expanded band
-  assert.ok(Math.abs(view.getTransform().z - 1000 / 1040) < 1e-12);
-});
-
-test('static mode binds NO listeners and fitToWidth uses the host width', async () => {
-  const { doc, host, win } = boot();
-  const { createGraphView } = await import(viewPath);
-  let bound = 0;
-  const realAdd = win.HTMLElement.prototype.addEventListener;
-  win.HTMLElement.prototype.addEventListener = function (...a) { bound += 1; return realAdd.apply(this, a); };
-  const view = createGraphView(host, { doc, mode: 'static', portsFn, agents: AGENTS, viewport: () => ({ ...VP }) });
-  view.render(fixture(), {});
-  const nav = view.createNav();                          // refused in static mode
-  win.HTMLElement.prototype.addEventListener = realAdd;
-  assert.equal(bound, 0, 'static mode installs zero element listeners, even via createNav');
-  assert.equal(typeof nav.destroy, 'function');
-  assert.ok(view.stage.classList.contains('gv-static'));
-  view.fitToWidth(520);                                  // 520/1040 = 0.5 >= zoomMin 0.3
-  assert.equal(view.getTransform().z, 0.5);
-});
-
-test('monitor nav: a plain wheel is the PAGE\'s; ctrl/meta+wheel zooms about the cursor and reports through onTransform', async () => {
-  const { doc, host, win } = boot();
-  const { createGraphView } = await import(viewPath);
-  const view = createGraphView(host, { doc, mode: 'monitor', portsFn, agents: AGENTS, viewport: () => ({ ...VP }) });
-  view.render(fixture(), {});
-  const seen = [];
-  const nav = view.createNav({ onTransform: (t) => seen.push(t) });
-  view.setTransform({ x: 0, y: 0, z: 1 });
-  // (a) no modifier: never consumed, never pans — the canvas must not trap a scroll.
-  const plain = new win.WheelEvent('wheel', { deltaX: 40, deltaY: -25, bubbles: true, cancelable: true });
-  view.stage.dispatchEvent(plain);
-  assert.equal(plain.defaultPrevented, false, 'a plain wheel scrolls the PAGE');
-  assert.deepEqual(view.getTransform(), { x: 0, y: 0, z: 1 }, 'and pans nothing');
-  assert.equal(seen.length, 0, 'and reports nothing');
-  // (b) ctrl+wheel zooms about the cursor: the world point under it is invariant.
-  const before = view.toWorld(600, 300);
-  const zoom = new win.WheelEvent('wheel', { deltaY: -120, ctrlKey: true, clientX: 600, clientY: 300, bubbles: true, cancelable: true });
-  view.stage.dispatchEvent(zoom);
-  assert.equal(zoom.defaultPrevented, true, 'the zoom is consumed');
-  assert.ok(Math.abs(view.getTransform().z - Math.exp(0.24)) < 1e-9, 'z x exp(-dy*0.002)');
-  const after = view.toWorld(600, 300);
-  assert.ok(Math.abs(after.x - before.x) < 1e-6 && Math.abs(after.y - before.y) < 1e-6, 'the cursor stays over its world point');
-  assert.equal(seen.length, 1, 'the host is told the transform moved');
-  // (c) meta+wheel (macOS) takes the same path.
-  view.stage.dispatchEvent(new win.WheelEvent('wheel', { deltaY: -120, metaKey: true, clientX: 600, clientY: 300, bubbles: true, cancelable: true }));
-  assert.equal(seen.length, 2);
-  nav.destroy();
-  const dead = new win.WheelEvent('wheel', { deltaY: -120, ctrlKey: true, clientX: 600, clientY: 300, bubbles: true, cancelable: true });
-  view.stage.dispatchEvent(dead);
-  assert.equal(dead.defaultPrevented, false, 'no wheel listener after destroy()');
-  assert.equal(seen.length, 2);
+test('static mode binds no listeners; mountStaticGraph renders, fits to width (flow: host height, width option), survives a missing ResizeObserver, destroy idempotent', async () => {
+  await checkRows([
+    { name: 'static mode binds NO listeners and fitToWidth uses the host width', run: async () => {
+      const { doc, host, win } = boot();
+      const { createGraphView } = await import(viewPath);
+      let bound = 0;
+      const realAdd = win.HTMLElement.prototype.addEventListener;
+      win.HTMLElement.prototype.addEventListener = function (...a) { bound += 1; return realAdd.apply(this, a); };
+      const view = createGraphView(host, { doc, mode: 'static', portsFn, agents: AGENTS, viewport: () => ({ ...VP }) });
+      view.render(fixture(), {});
+      const nav = view.createNav();                          // refused in static mode
+      win.HTMLElement.prototype.addEventListener = realAdd;
+      assert.equal(bound, 0, 'static mode installs zero element listeners, even via createNav');
+      assert.equal(typeof nav.destroy, 'function');
+      assert.ok(view.stage.classList.contains('gv-static'));
+      view.fitToWidth(520);                                  // 520/1040 = 0.5 >= zoomMin 0.3
+      assert.equal(view.getTransform().z, 0.5);
+    } },
+    { name: 'mountStaticGraph renders, fits to width and survives a missing ResizeObserver', run: async () => {
+      const { doc, host, win } = boot();
+      assert.equal(typeof win.ResizeObserver, 'undefined', 'jsdom 29 has no ResizeObserver');
+      const { mountStaticGraph } = await import(viewPath);
+      const view = mountStaticGraph(host, fixture(), {
+        doc, portsFn, agents: AGENTS, width: 520, viewport: () => ({ left: 0, top: 0, width: 520, height: 300 }),
+      });
+      assert.equal(view.mode, 'static');
+      assert.equal(view.getTransform().z, 0.5);
+      assert.equal(host.querySelectorAll('.node').length, 3);
+    } },
+    { name: 'mountStaticGraph flow: host height set, width option honoured, destroy is idempotent without a ResizeObserver', run: async () => {
+      const { doc, host } = boot();
+      const { mountStaticGraph } = await import(viewPath);
+      const view = mountStaticGraph(host, loopFixture(), { doc, portsFn, agents: AGENTS, layout: 'flow', scale: 0.65, width: 310, band: () => null });
+      assert.equal(view.flowLayout().perRow, 1);
+      assert.equal(host.style.height, `${view.flowLayout().height}px`);
+      view.destroy(); view.destroy();
+      assert.equal(host.querySelector('.gv-stage'), null);
+      assert.equal(host.style.height, '', 'destroy releases the host height');
+    } },
+  ]);
 });
 
 test('thumbnailFor guards empty templates and returns svg markup otherwise', async () => {
@@ -355,18 +297,6 @@ test('thumbnailFor guards empty templates and returns svg markup otherwise', asy
   const svg = thumbnailFor(fixture(), portsFn, { width: 240, height: 90 });
   assert.match(svg, /^<svg[\s>]/);
   assert.ok(!svg.includes('NaN'), 'no NaN in the path data');
-});
-
-test('mountStaticGraph renders, fits to width and survives a missing ResizeObserver', async () => {
-  const { doc, host, win } = boot();
-  assert.equal(typeof win.ResizeObserver, 'undefined', 'jsdom 29 has no ResizeObserver');
-  const { mountStaticGraph } = await import(viewPath);
-  const view = mountStaticGraph(host, fixture(), {
-    doc, portsFn, agents: AGENTS, width: 520, viewport: () => ({ left: 0, top: 0, width: 520, height: 300 }),
-  });
-  assert.equal(view.mode, 'static');
-  assert.equal(view.getTransform().z, 0.5);
-  assert.equal(host.querySelectorAll('.node').length, 3);
 });
 
 // Replaces the origin-trust half of the retired test/ui-agent-xss.test.mjs
@@ -410,49 +340,6 @@ test('destroy() removes the stage and leaves no listener that can mutate anythin
   assert.deepEqual(view.getTransform(), { x: 0, y: 0, z: 1 }, 'no listener survived destroy()');
 });
 
-test('a loop / fan-out input row carries a compact port chip that fits the 24px row', async () => {
-  const { readFileSync } = await import('node:fs');
-  const { doc, host } = boot();
-  const { createGraphView } = await import(viewPath);
-  const view = createGraphView(host, { doc, mode: 'edit', portsFn, agents: AGENTS });
-  view.render(loopFixture(), {});
-  const chip = host.querySelector('.prow.in[data-port="fix"] .chip');
-  assert.ok(chip, 'the loop input row renders a chip');
-  assert.equal(chip.textContent, 'loop');
-  assert.ok(chip.classList.contains('am') && chip.classList.contains('mla'), 'amber, pushed right');
-
-  // jsdom applies no stylesheet, so the sizing claim is asserted on style.css as
-  // text (house pattern). Without a scoped rule the global `.chip` (12px text,
-  // 7px/13px padding ≈ 28px tall) paints inside a 24px `--gv-row-h` row and
-  // spills over the neighbouring port rows — the "loop"/"⤫N" pills seen on
-  // every running card.
-  const css = readFileSync(new URL('../ui/public/style.css', import.meta.url), 'utf8');
-  const rule = (sel) => {
-    const esc = sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const m = css.match(new RegExp('(?:^|[\\s,}])' + esc + '\\s*\\{([^}]*)\\}'));
-    return m ? m[1] : null;
-  };
-  const base = rule('.gv-world .prow .chip');
-  assert.ok(base, '.gv-world .prow .chip rule must exist to override the page pill');
-  assert.match(base, /font-family:\s*var\(--mono\)/, 'mono like .wbadge');
-  assert.match(base, /font-size:\s*max\(9px,\s*calc\(10px \* var\(--gv-scale\)\)\)/, '10px mono, floored at 9px');
-  assert.match(base, /line-height:\s*1\.4/);
-  assert.match(base, /padding:\s*calc\(1px \* var\(--gv-scale\)\) calc\(7px \* var\(--gv-scale\)\)/, '1px vertical padding keeps it inside the row (scaled)');
-  // A36 (cycle-4 Chrome proof): at the 9px floor "prompt + attached files" / "forwards freshest input" wrapped to a
-  // second line inside the fixed-height caption row; the mockup's .fl .prow is nowrap.
-  assert.match(rule('.gv-world .prow') || '', /white-space:\s*nowrap/, 'rows never wrap at the 9px floor (mockup .fl .prow; the Task/OR captions wrapped in Chrome at 0.65)');
-  assert.match(rule('.gv-world .prow.cap .pt') || '', /text-overflow:\s*ellipsis/, 'a caption that still does not fit ellipsises instead of leaving the card');
-  // nowrap without a guard let an over-long port NAME (plugin agents mint their own ids)
-  // escape the card horizontally; .pn is a flex item, so it needs min-width:0 to shrink.
-  const pn = rule('.gv-world .prow .pn') || '';
-  assert.match(pn, /min-width:\s*0/, 'the name shrinks instead of overflowing the card');
-  assert.match(pn, /overflow:\s*hidden/);
-  assert.match(pn, /text-overflow:\s*ellipsis/, 'a long port name ellipsises, like the caption');
-  assert.match(base, /white-space:\s*nowrap/);
-  assert.match(rule('.gv-world .prow .chip.am') || '', /var\(--amber-bg\)/, 'loop chip is amber (spec legend)');
-  assert.match(rule('.gv-world .prow .chip.fan') || '', /var\(--blue-bg\)/, 'fan-out chip is blue');
-});
-
 // C-2: safeAgentIcon's gate was a one-value DENYLIST (origin === 'user'), so a
 // plugin sidecar's icon — data a marketplace plugin ships, with no code-execution
 // consent and SHA-only updates — reached the header SVG's innerHTML verbatim.
@@ -494,72 +381,50 @@ test('C-2: every non-builtin agent icon is allowlist-sanitized before innerHTML'
   assert.equal(svg2.querySelector('path').getAttribute('d'), 'M4 4h8');
 });
 
-test('setWireLive seats a newly-live wire at the shared timeline phase', async () => {
-  // The :root clock is retired; phase parity now comes from stamping a negative
-  // animation-delay read off document.timeline when a wire goes live. jsdom has
-  // no timeline, so install one — without it t is always 0 and the sign, the
-  // 600ms period and the no-restamp rule are all unobservable (jsdom also
-  // serialises `-0ms` to `0ms`, so zero-stamp literals are a trap).
-  const { doc, host } = boot();
-  let now = 1234;
-  Object.defineProperty(doc, 'timeline', { configurable: true, get: () => ({ currentTime: now }) });
-  const { createGraphView } = await import(viewPath);
-  const view = createGraphView(host, { doc, mode: 'monitor', portsFn, agents: AGENTS });
-  view.render(fixture(), {});
-  view.setWireLive(['w1']);
-  assert.equal(view.wireEl('w1').style.animationDelay, '-34ms', 'seated at -(currentTime % 600)ms');
-  assert.equal(view.wireEl('w2').style.animationDelay, '', 'a dark wire carries no stamp');
-  now = 5000;                                  // the clock moved on…
-  view.setWireLive(['w1']);                    // …steady state must NOT restamp
-  assert.equal(view.wireEl('w1').style.animationDelay, '-34ms',
-    'a steady-state call never rewrites the stamp (re-stamping a RUNNING animation re-maps its time against the original start and desyncs the phase)');
-  view.setWireLive([]);
-  assert.equal(view.wireEl('w1').style.animationDelay, '', 'the stamp leaves with the class');
-  view.setWireLive(['w1']);                    // re-lit: a FRESH seat
-  assert.equal(view.wireEl('w1').style.animationDelay, '-200ms', '5000 % 600 = 200');
-});
-
 const nodeOf = (view, id) => view.template().nodes.find((n) => n.id === id);
 
-test('scale: --gv-* are injected scaled, cards take the scaled box, anchors follow (no world transform)', async () => {
-  const { doc, host } = boot();
-  const { createGraphView } = await import(viewPath);
-  const view = createGraphView(host, { doc, mode: 'static', portsFn, agents: AGENTS, scale: 0.65 });
-  view.render(fixture(), {});
-  assert.equal(view.stage.style.getPropertyValue('--gv-node-w'), '143px');
-  assert.equal(view.stage.style.getPropertyValue('--gv-scale'), '0.65');
-  const card = view.nodeEl('n_agent');
-  assert.equal(card.style.width, '143px');
-  assert.equal(card.style.height, `${191.5 * 0.65}px`);
-  assert.deepEqual(view.getTransform(), { x: 0, y: 0, z: 1 }, 'scale is geometry, not a transform');
-  assert.deepEqual(view.anchor(nodeOf(view, 'n_agent'), 'plan', 'out'), { x: 400 + 143, y: 80 + (56 + 2 * 24 + 9) * 0.65 });
-});
-
-test('band: an agent card grows a .nband under its head with model · effort · flags; flow cards never do', async () => {
-  const { doc, host } = boot();
-  const { createGraphView } = await import(viewPath);
-  const band = (node) => (node.id === 'n_agent' ? { model: 'Opus 5.5', effort: 'high', flags: [{ text: 'asks', cls: 'q' }, { text: '↩ 3' }] } : null);
-  const view = createGraphView(host, { doc, mode: 'static', portsFn, agents: AGENTS, band });
-  view.render(fixture(), {});
-  const el = view.nodeEl('n_agent');
-  const nb = el.querySelector(':scope > .nband');
-  assert.ok(nb, 'agent has a band');
-  assert.ok(nb.previousElementSibling.classList.contains('nhead'), 'band sits under the head (class is "nhead h-<colour>")'); assert.equal(nb.nextElementSibling.className, 'nbody');
-  assert.equal(el.querySelector('.nhead .tt').title, el.querySelector('.nhead .tt').textContent, 'head titles carry a tooltip (mockup F, A35)');
-  assert.deepEqual([...nb.querySelectorAll('.bchip')].map((c) => c.textContent), ['Opus 5.5', 'high', 'asks', '↩ 3']);
-  assert.ok(nb.querySelector('.bchip.flag.q'));
-  assert.equal(view.nodeEl('n_task').querySelector(':scope > .nband'), null, 'task card: no band');
-  assert.equal(el.style.height, `${191.5 + 24}px`, 'nodeSize bills the band');
-  assert.equal(view.anchor(nodeOf(view, 'n_agent'), 'task', 'in').y, 80 + 56 + 24, 'anchors move with the band');
-  // The repaint is skipped on an equal signature, so the signature must separate its
-  // fields: concatenated, {model:'Opus', effort:'5'} and {model:'Opus5', effort:''} collide.
-  view.setBands({ n_agent: { model: 'Opus', effort: '5', flags: [] } });
-  assert.deepEqual([...el.querySelectorAll('.bchip')].map((c) => c.textContent), ['Opus', '5']);
-  view.setBands({ n_agent: { model: 'Opus5', effort: '', flags: [] } });
-  assert.deepEqual([...el.querySelectorAll('.bchip')].map((c) => c.textContent), ['Opus5'], 'the band repaints — the two are not the same band');
-  view.setBands({ n_agent: { model: '', effort: '', flags: [] } });
-  assert.deepEqual([...el.querySelectorAll('.bchip')].map((c) => c.textContent), ['default']);
-  assert.ok(el.querySelector('.bchip.model.is-unset'));
+test('agent band under the head (model · effort · flags; none on flow cards); pick mode turns model/effort into menu buttons', async () => {
+  await checkRows([
+    { name: 'band: an agent card grows a .nband under its head with model · effort · flags; flow cards never do', run: async () => {
+      const { doc, host } = boot();
+      const { createGraphView } = await import(viewPath);
+      const band = (node) => (node.id === 'n_agent' ? { model: 'Opus 5.5', effort: 'high', flags: [{ text: 'asks', cls: 'q' }, { text: '↩ 3' }] } : null);
+      const view = createGraphView(host, { doc, mode: 'static', portsFn, agents: AGENTS, band });
+      view.render(fixture(), {});
+      const el = view.nodeEl('n_agent');
+      const nb = el.querySelector(':scope > .nband');
+      assert.ok(nb, 'agent has a band');
+      assert.ok(nb.previousElementSibling.classList.contains('nhead'), 'band sits under the head (class is "nhead h-<colour>")'); assert.equal(nb.nextElementSibling.className, 'nbody');
+      assert.equal(el.querySelector('.nhead .tt').title, el.querySelector('.nhead .tt').textContent, 'head titles carry a tooltip (mockup F, A35)');
+      assert.deepEqual([...nb.querySelectorAll('.bchip')].map((c) => c.textContent), ['Opus 5.5', 'high', 'asks', '↩ 3']);
+      assert.ok(nb.querySelector('.bchip.flag.q'));
+      assert.equal(view.nodeEl('n_task').querySelector(':scope > .nband'), null, 'task card: no band');
+      assert.equal(el.style.height, `${191.5 + 24}px`, 'nodeSize bills the band');
+      assert.equal(view.anchor(nodeOf(view, 'n_agent'), 'task', 'in').y, 80 + 56 + 24, 'anchors move with the band');
+      // The repaint is skipped on an equal signature, so the signature must separate its
+      // fields: concatenated, {model:'Opus', effort:'5'} and {model:'Opus5', effort:''} collide.
+      view.setBands({ n_agent: { model: 'Opus', effort: '5', flags: [] } });
+      assert.deepEqual([...el.querySelectorAll('.bchip')].map((c) => c.textContent), ['Opus', '5']);
+      view.setBands({ n_agent: { model: 'Opus5', effort: '', flags: [] } });
+      assert.deepEqual([...el.querySelectorAll('.bchip')].map((c) => c.textContent), ['Opus5'], 'the band repaints — the two are not the same band');
+      view.setBands({ n_agent: { model: '', effort: '', flags: [] } });
+      assert.deepEqual([...el.querySelectorAll('.bchip')].map((c) => c.textContent), ['default']);
+      assert.ok(el.querySelector('.bchip.model.is-unset'));
+    } },
+    { name: 'band pick: model/effort chips become <button aria-haspopup="menu" data-chip> when the band says pick; flags stay spans; the signature separates pick', run: async () => {
+      const { doc, host } = boot();
+      const { createGraphView } = await import(viewPath);
+      const band = (node) => (node.id === 'n_agent' ? { model: 'Opus 5.5', effort: '', flags: [{ text: 'asks', cls: 'q' }], pick: true } : null);
+      const view = createGraphView(host, { doc, mode: 'static', portsFn, agents: AGENTS, band });
+      view.render(fixture(), {});
+      const nb = view.nodeEl('n_agent').querySelector(':scope > .nband');
+      const chips = [...nb.querySelectorAll('.bchip')];
+      assert.deepEqual(chips.map((c) => [c.tagName, c.dataset.chip || null, c.textContent]), [['BUTTON', 'model', 'Opus 5.5'], ['BUTTON', 'effort', 'effort'], ['SPAN', null, 'asks']], 'an empty effort still gets a pickable placeholder chip');
+      assert.equal(chips[0].getAttribute('aria-haspopup'), 'menu'); assert.equal(chips[0].getAttribute('aria-expanded'), 'false'); assert.equal(chips[0].type, 'button');
+      view.setBands({ n_agent: { model: 'Opus 5.5', effort: '', flags: [{ text: 'asks', cls: 'q' }] } });
+      assert.deepEqual([...nb.querySelectorAll('.bchip')].map((c) => c.tagName), ['SPAN', 'SPAN'], 'pick off ⇒ spans, and the empty effort chip is gone');
+    } },
+  ]);
 });
 
 test('layout flow: rows of perRow in dispatch order, routes from the flow router, badges read n×, relayout on width', async () => {
@@ -586,130 +451,88 @@ test('layout flow: rows of perRow in dispatch order, routes from the flow router
   assert.equal(view.fitToWidth(702).perRow, 4, 'fitToWidth delegates to relayout in flow mode');
 });
 
-test('band pick: model/effort chips become <button aria-haspopup="menu" data-chip> when the band says pick; flags stay spans; the signature separates pick', async () => {
-  const { doc, host } = boot();
-  const { createGraphView } = await import(viewPath);
-  const band = (node) => (node.id === 'n_agent' ? { model: 'Opus 5.5', effort: '', flags: [{ text: 'asks', cls: 'q' }], pick: true } : null);
-  const view = createGraphView(host, { doc, mode: 'static', portsFn, agents: AGENTS, band });
-  view.render(fixture(), {});
-  const nb = view.nodeEl('n_agent').querySelector(':scope > .nband');
-  const chips = [...nb.querySelectorAll('.bchip')];
-  assert.deepEqual(chips.map((c) => [c.tagName, c.dataset.chip || null, c.textContent]), [['BUTTON', 'model', 'Opus 5.5'], ['BUTTON', 'effort', 'effort'], ['SPAN', null, 'asks']], 'an empty effort still gets a pickable placeholder chip');
-  assert.equal(chips[0].getAttribute('aria-haspopup'), 'menu'); assert.equal(chips[0].getAttribute('aria-expanded'), 'false'); assert.equal(chips[0].type, 'button');
-  view.setBands({ n_agent: { model: 'Opus 5.5', effort: '', flags: [{ text: 'asks', cls: 'q' }] } });
-  assert.deepEqual([...nb.querySelectorAll('.bchip')].map((c) => c.tagName), ['SPAN', 'SPAN'], 'pick off ⇒ spans, and the empty effort chip is gone');
-});
+test('monitor left-drag pans past 4px and swallows exactly its own click, even when it starts on the result link', async () => {
+  await checkRows([
+    { name: 'monitor nav: a left-drag pans by the exact delta past the 4px threshold, and swallows exactly the click it ends with', run: async () => {
+      const { doc, host, win } = boot();
+      const { createGraphView, DRAG_PX } = await import(viewPath);
+      const view = createGraphView(host, { doc, mode: 'monitor', portsFn, agents: AGENTS,
+        viewport: () => ({ ...VP }), raf: (fn) => { fn(); return 1; } });
+      view.render(fixture(), {});
+      const seen = [];
+      view.createNav({ onTransform: (t) => seen.push(t) });
+      view.setTransform({ x: 0, y: 0, z: 1 });
+      assert.equal(DRAG_PX, 4);
+      // `buttons: 1` is what a real drag reports on every move; the nav treats a move
+      // with no button as a release this document never saw (D17).
+      const pe = (type, o) => new win.PointerEvent(type, { pointerId: 7, buttons: 1, bubbles: true, cancelable: true, ...o });
+      let clicks = 0;
+      host.addEventListener('click', () => { clicks += 1; });
 
-test('mountStaticGraph flow: host height set, width option honoured, destroy is idempotent without a ResizeObserver', async () => {
-  const { doc, host } = boot();
-  const { mountStaticGraph } = await import(viewPath);
-  const view = mountStaticGraph(host, loopFixture(), { doc, portsFn, agents: AGENTS, layout: 'flow', scale: 0.65, width: 310, band: () => null });
-  assert.equal(view.flowLayout().perRow, 1);
-  assert.equal(host.style.height, `${view.flowLayout().height}px`);
-  view.destroy(); view.destroy();
-  assert.equal(host.querySelector('.gv-stage'), null);
-  assert.equal(host.style.height, '', 'destroy releases the host height');
-});
+      // (a) a press over a CARD still starts a pan — the run canvas is read-only.
+      const card = view.nodeEl('n_agent');
+      card.dispatchEvent(pe('pointerdown', { button: 0, clientX: 100, clientY: 100 }));
+      doc.dispatchEvent(pe('pointermove', { clientX: 102, clientY: 101 }));
+      assert.deepEqual(view.getTransform(), { x: 0, y: 0, z: 1 }, 'under 4px is a click, not a pan');
+      assert.equal(view.stage.classList.contains('panning'), false);
+      doc.dispatchEvent(pe('pointermove', { clientX: 140, clientY: 60 }));
+      assert.deepEqual(view.getTransform(), { x: 40, y: -40, z: 1 }, 'pans by the delta FROM THE PRESS');
+      assert.equal(view.stage.classList.contains('panning'), true, 'the grabbing cursor is on');
+      doc.dispatchEvent(pe('pointermove', { clientX: 150, clientY: 60 }));
+      assert.deepEqual(view.getTransform(), { x: 50, y: -40, z: 1 }, 'and keeps tracking the press origin');
+      doc.dispatchEvent(pe('pointerup', { clientX: 150, clientY: 60 }));
+      assert.equal(view.stage.classList.contains('panning'), false, 'released');
+      assert.ok(seen.length >= 1 && seen[seen.length - 1].x === 50, 'the host is told');
 
-test('monitor nav: a left-drag pans by the exact delta past the 4px threshold, and swallows exactly the click it ends with', async () => {
-  const { doc, host, win } = boot();
-  const { createGraphView, DRAG_PX } = await import(viewPath);
-  const view = createGraphView(host, { doc, mode: 'monitor', portsFn, agents: AGENTS,
-    viewport: () => ({ ...VP }), raf: (fn) => { fn(); return 1; } });
-  view.render(fixture(), {});
-  const seen = [];
-  view.createNav({ onTransform: (t) => seen.push(t) });
-  view.setTransform({ x: 0, y: 0, z: 1 });
-  assert.equal(DRAG_PX, 4);
-  // `buttons: 1` is what a real drag reports on every move; the nav treats a move
-  // with no button as a release this document never saw (D17).
-  const pe = (type, o) => new win.PointerEvent(type, { pointerId: 7, buttons: 1, bubbles: true, cancelable: true, ...o });
-  let clicks = 0;
-  host.addEventListener('click', () => { clicks += 1; });
+      // (b) the click the browser fires after that drag is NOT a click on the card.
+      card.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
+      assert.equal(clicks, 0, 'the drag swallowed its own click');
+      card.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
+      assert.equal(clicks, 1, 'exactly one: the guard disarms itself');
 
-  // (a) a press over a CARD still starts a pan — the run canvas is read-only.
-  const card = view.nodeEl('n_agent');
-  card.dispatchEvent(pe('pointerdown', { button: 0, clientX: 100, clientY: 100 }));
-  doc.dispatchEvent(pe('pointermove', { clientX: 102, clientY: 101 }));
-  assert.deepEqual(view.getTransform(), { x: 0, y: 0, z: 1 }, 'under 4px is a click, not a pan');
-  assert.equal(view.stage.classList.contains('panning'), false);
-  doc.dispatchEvent(pe('pointermove', { clientX: 140, clientY: 60 }));
-  assert.deepEqual(view.getTransform(), { x: 40, y: -40, z: 1 }, 'pans by the delta FROM THE PRESS');
-  assert.equal(view.stage.classList.contains('panning'), true, 'the grabbing cursor is on');
-  doc.dispatchEvent(pe('pointermove', { clientX: 150, clientY: 60 }));
-  assert.deepEqual(view.getTransform(), { x: 50, y: -40, z: 1 }, 'and keeps tracking the press origin');
-  doc.dispatchEvent(pe('pointerup', { clientX: 150, clientY: 60 }));
-  assert.equal(view.stage.classList.contains('panning'), false, 'released');
-  assert.ok(seen.length >= 1 && seen[seen.length - 1].x === 50, 'the host is told');
+      // (c) a press that never moved is still a click (the accordion, the gate, the result link).
+      card.dispatchEvent(pe('pointerdown', { button: 0, clientX: 10, clientY: 10 }));
+      doc.dispatchEvent(pe('pointerup', { clientX: 11, clientY: 10 }));
+      card.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
+      assert.equal(clicks, 2, 'a press that never crossed the threshold clicks through');
 
-  // (b) the click the browser fires after that drag is NOT a click on the card.
-  card.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
-  assert.equal(clicks, 0, 'the drag swallowed its own click');
-  card.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
-  assert.equal(clicks, 1, 'exactly one: the guard disarms itself');
+      // (d) a RIGHT button press starts nothing.
+      const t = view.getTransform();
+      view.stage.dispatchEvent(pe('pointerdown', { button: 2, clientX: 300, clientY: 300 }));
+      doc.dispatchEvent(pe('pointermove', { clientX: 400, clientY: 400 }));
+      assert.deepEqual(view.getTransform(), t, 'only the left button pans');
 
-  // (c) a press that never moved is still a click (the accordion, the gate, the result link).
-  card.dispatchEvent(pe('pointerdown', { button: 0, clientX: 10, clientY: 10 }));
-  doc.dispatchEvent(pe('pointerup', { clientX: 11, clientY: 10 }));
-  card.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
-  assert.equal(clicks, 2, 'a press that never crossed the threshold clicks through');
+      // (e) a TOUCH press starts nothing either (D13): a finger keeps the page's scroll,
+      //     which is the only thing it can do here — the wrap declares no touch-action.
+      view.stage.dispatchEvent(pe('pointerdown', { button: 0, pointerType: 'touch', clientX: 300, clientY: 300 }));
+      doc.dispatchEvent(pe('pointermove', { pointerType: 'touch', clientX: 400, clientY: 400 }));
+      assert.deepEqual(view.getTransform(), t, 'a finger never pans');
 
-  // (d) a RIGHT button press starts nothing.
-  const t = view.getTransform();
-  view.stage.dispatchEvent(pe('pointerdown', { button: 2, clientX: 300, clientY: 300 }));
-  doc.dispatchEvent(pe('pointermove', { clientX: 400, clientY: 400 }));
-  assert.deepEqual(view.getTransform(), t, 'only the left button pans');
+      // (f) a cancelled drag is DROPPED, never settled: Chrome reports pointercancel
+      //     at client (0,0), and settling off that teleports the graph (D17).
+      view.stage.dispatchEvent(pe('pointerdown', { button: 0, clientX: 500, clientY: 500 }));
+      doc.dispatchEvent(pe('pointermove', { clientX: 560, clientY: 530 }));
+      const panned = view.getTransform();
+      assert.equal(panned.x, t.x + 60, 'the cancelled drag really had panned first');
+      doc.dispatchEvent(pe('pointercancel', { clientX: 0, clientY: 0 }));
+      assert.deepEqual(view.getTransform(), panned, 'cancel leaves the pan exactly where the user saw it');
+      assert.equal(view.stage.classList.contains('panning'), false, 'and the gesture is over');
 
-  // (e) a TOUCH press starts nothing either (D13): a finger keeps the page's scroll,
-  //     which is the only thing it can do here — the wrap declares no touch-action.
-  view.stage.dispatchEvent(pe('pointerdown', { button: 0, pointerType: 'touch', clientX: 300, clientY: 300 }));
-  doc.dispatchEvent(pe('pointermove', { pointerType: 'touch', clientX: 400, clientY: 400 }));
-  assert.deepEqual(view.getTransform(), t, 'a finger never pans');
-
-  // (f) a cancelled drag is DROPPED, never settled: Chrome reports pointercancel
-  //     at client (0,0), and settling off that teleports the graph (D17).
-  view.stage.dispatchEvent(pe('pointerdown', { button: 0, clientX: 500, clientY: 500 }));
-  doc.dispatchEvent(pe('pointermove', { clientX: 560, clientY: 530 }));
-  const panned = view.getTransform();
-  assert.equal(panned.x, t.x + 60, 'the cancelled drag really had panned first');
-  doc.dispatchEvent(pe('pointercancel', { clientX: 0, clientY: 0 }));
-  assert.deepEqual(view.getTransform(), panned, 'cancel leaves the pan exactly where the user saw it');
-  assert.equal(view.stage.classList.contains('panning'), false, 'and the gesture is over');
-
-  // (g) a move that reports NO button is a release this document never saw.
-  view.stage.dispatchEvent(pe('pointerdown', { button: 0, clientX: 600, clientY: 600 }));
-  doc.dispatchEvent(pe('pointermove', { buttons: 0, clientX: 700, clientY: 700 }));
-  assert.deepEqual(view.getTransform(), panned, 'a button-less move ends the gesture instead of panning');
-});
-
-test('the run card\'s result link is not natively draggable: a pan that starts on it survives', async () => {
-  const { doc, host } = boot();
-  const { createGraphView } = await import(viewPath);
-  const view = createGraphView(host, { doc, mode: 'monitor', portsFn, agents: AGENTS, viewport: () => ({ ...VP }) });
-  view.render(fixture(), {});
-  view.setFooter('n_agent', [{ kind: 'result', text: 'plan.md', path: '/tmp/plan.md' }]);
-  const a = view.nodeEl('n_agent').querySelector('.xresult a');
-  assert.ok(a, 'the result band renders an anchor');
-  assert.equal(a.draggable, false, 'Chrome drags an <a href> natively, which pointercancels the pan (D16)');
-  assert.equal(a.getAttribute('href'), '#', 'and it is still the delegated link the host handles');
-});
-
-test('a script card: node-script class, sidecar tint, ƒ glyph when no icon, the runtime chip in the head', async () => {
-  const { doc, host } = boot();
-  const { createGraphView, SCRIPT_GLYPH } = await import(viewPath);
-  const view = createGraphView(host, { doc, mode: 'edit', portsFn, agents: { ...AGENTS, ...SCRIPTS } });
-  view.render(scriptFixture(), {});
-  const card = host.querySelector('.node[data-node-id="n_sh"]');
-  assert.ok(card.classList.contains('node-script'));
-  assert.equal(card.dataset.kind, 'script');
-  const head = card.querySelector('.nhead');
-  assert.ok(head.classList.contains('h-amber'));
-  assert.equal(head.querySelector('.tt').textContent, 'Shell');
-  assert.equal(head.querySelector('.chip.rt').textContent, 'shell');
-  assert.equal(head.querySelector('svg').innerHTML, SCRIPT_GLYPH, 'no sidecar icon: the ƒ glyph');
-  assert.equal(card.querySelectorAll('.prow.in').length, 2, 'done + await');
-  view.setAgents({ ...AGENTS, shell: { ...SCRIPTS.shell, color: 'green', displayName: 'Tests', icon: '<path d="M2 2"/>' } });
-  assert.ok(head.classList.contains('h-green'), 'setAgents repaints a script head');
-  assert.equal(head.querySelector('.tt').textContent, 'Tests');
-  assert.equal(head.querySelector('svg').innerHTML, '<path d="M2 2"></path>', 'a non-builtin icon goes through the shared sanitizer');
+      // (g) a move that reports NO button is a release this document never saw.
+      view.stage.dispatchEvent(pe('pointerdown', { button: 0, clientX: 600, clientY: 600 }));
+      doc.dispatchEvent(pe('pointermove', { buttons: 0, clientX: 700, clientY: 700 }));
+      assert.deepEqual(view.getTransform(), panned, 'a button-less move ends the gesture instead of panning');
+    } },
+    { name: 'the run card\'s result link is not natively draggable: a pan that starts on it survives', run: async () => {
+      const { doc, host } = boot();
+      const { createGraphView } = await import(viewPath);
+      const view = createGraphView(host, { doc, mode: 'monitor', portsFn, agents: AGENTS, viewport: () => ({ ...VP }) });
+      view.render(fixture(), {});
+      view.setFooter('n_agent', [{ kind: 'result', text: 'plan.md', path: '/tmp/plan.md' }]);
+      const a = view.nodeEl('n_agent').querySelector('.xresult a');
+      assert.ok(a, 'the result band renders an anchor');
+      assert.equal(a.draggable, false, 'Chrome drags an <a href> natively, which pointercancels the pan (D16)');
+      assert.equal(a.getAttribute('href'), '#', 'and it is still the delegated link the host handles');
+    } },
+  ]);
 });

@@ -1,11 +1,16 @@
 // test/ui-folder-browser.test.mjs
 // JSDOM tests for the add-project Browse button: native-dialog happy path and
 // the in-app folder-browser modal fallback.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -23,7 +28,7 @@ const click = (window, node) => node.dispatchEvent(new window.Event('click', { b
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = WSStub;
@@ -53,37 +58,40 @@ function openAddForm(window) {
   sel.dispatchEvent(new window.Event('change', { bubbles: true }));
 }
 
-test('Browse fills the path (and an empty name) from the native dialog', async () => {
-  const { window } = await boot({
-    fetchHandler: (u, opts) => {
-      if (u.endsWith('/api/fs/pick-folder') && opts.method === 'POST') {
-        return Promise.resolve({ ok: true, status: 200, json: async () => ({ status: 'picked', path: '/Users/me/dev/my-app' }) });
-      }
-      return null;
-    },
-  });
-  openAddForm(window);
-  const doc = window.document;
-  click(window, doc.querySelector('#newProjectBrowse'));
-  await tick(); await tick();
-  assert.equal(doc.querySelector('#newProjectPath').value, '/Users/me/dev/my-app');
-  assert.equal(doc.querySelector('#newProjectName').value, 'my-app', 'empty name prefilled from basename');
-  assert.ok(doc.querySelector('#folder-browser').classList.contains('hidden'), 'modal stays closed');
-});
-
-test('a typed name is not overwritten by the picker', async () => {
-  const { window } = await boot({
-    fetchHandler: (u, opts) => (u.endsWith('/api/fs/pick-folder') && opts.method === 'POST'
-      ? Promise.resolve({ ok: true, status: 200, json: async () => ({ status: 'picked', path: '/srv/code' }) })
-      : null),
-  });
-  openAddForm(window);
-  const doc = window.document;
-  doc.querySelector('#newProjectName').value = 'Custom';
-  click(window, doc.querySelector('#newProjectBrowse'));
-  await tick(); await tick();
-  assert.equal(doc.querySelector('#newProjectName').value, 'Custom');
-  assert.equal(doc.querySelector('#newProjectPath').value, '/srv/code');
+test('Browse fills the path and an empty name from the native dialog, never overwriting a typed name', async () => {
+  await checkRows([
+    { name: 'Browse fills the path (and an empty name) from the native dialog', run: async () => {
+      const { window } = await boot({
+        fetchHandler: (u, opts) => {
+          if (u.endsWith('/api/fs/pick-folder') && opts.method === 'POST') {
+            return Promise.resolve({ ok: true, status: 200, json: async () => ({ status: 'picked', path: '/Users/me/dev/my-app' }) });
+          }
+          return null;
+        },
+      });
+      openAddForm(window);
+      const doc = window.document;
+      click(window, doc.querySelector('#newProjectBrowse'));
+      await tick(); await tick();
+      assert.equal(doc.querySelector('#newProjectPath').value, '/Users/me/dev/my-app');
+      assert.equal(doc.querySelector('#newProjectName').value, 'my-app', 'empty name prefilled from basename');
+      assert.ok(doc.querySelector('#folder-browser').classList.contains('hidden'), 'modal stays closed');
+    } },
+    { name: 'a typed name is not overwritten by the picker', run: async () => {
+      const { window } = await boot({
+        fetchHandler: (u, opts) => (u.endsWith('/api/fs/pick-folder') && opts.method === 'POST'
+          ? Promise.resolve({ ok: true, status: 200, json: async () => ({ status: 'picked', path: '/srv/code' }) })
+          : null),
+      });
+      openAddForm(window);
+      const doc = window.document;
+      doc.querySelector('#newProjectName').value = 'Custom';
+      click(window, doc.querySelector('#newProjectBrowse'));
+      await tick(); await tick();
+      assert.equal(doc.querySelector('#newProjectName').value, 'Custom');
+      assert.equal(doc.querySelector('#newProjectPath').value, '/srv/code');
+    } },
+  ]);
 });
 
 test('unsupported dialog opens the modal; navigating + Select fills the field', async () => {
@@ -154,87 +162,70 @@ const dirsHandler = (status) => (u, opts) => {
   return null;
 };
 
-test('Browse asks the native dialog for multiple selections', async () => {
+test('Browse asks the native dialog for multiple selections; a 2-folder pick hides the inline form and opens the review', async () => {
   let sent = null;
-  const { window } = await boot({ fetchHandler: dirsHandler((opts) => { sent = JSON.parse(opts.body || '{}'); return { status: 'canceled' }; }) });
-  openAddForm(window);
-  click(window, window.document.querySelector('#newProjectBrowse'));
-  await tick(); await tick();
-  assert.deepEqual(sent, { purpose: 'project', multiple: true });
-});
-
-test('native multi-pick of 2 folders hides the inline form and opens the review list', async () => {
-  const { window } = await boot({ fetchHandler: dirsHandler({ status: 'picked', path: '/home/me/a', paths: ['/home/me/a', '/home/me/dev/b'] }) });
+  const { window } = await boot({ fetchHandler: dirsHandler((opts) => {
+    sent = JSON.parse(opts.body || '{}');
+    return { status: 'picked', path: '/home/me/a', paths: ['/home/me/a', '/home/me/dev/b'] };
+  }) });
   openAddForm(window);
   const doc = window.document;
   click(window, doc.querySelector('#newProjectBrowse'));
   await tick(); await tick();
-  assert.ok(doc.querySelector('#add-project').classList.contains('hidden'), 'inline form hidden');
-  assert.ok(!doc.querySelector('#project-bulk-modal').classList.contains('hidden'), 'review list open');
-  const names = [...doc.querySelectorAll('#proj-bulk-list .pb-name')].map((i) => i.value);
-  assert.deepEqual(names, ['a', 'b'], 'names default to the folder basename');
+  await checkRows([
+    { name: 'Browse asks the native dialog for multiple selections', run: () => {
+      assert.deepEqual(sent, { purpose: 'project', multiple: true });
+    } },
+    { name: 'native multi-pick of 2 folders hides the inline form and opens the review list', run: () => {
+      assert.ok(doc.querySelector('#add-project').classList.contains('hidden'), 'inline form hidden');
+      assert.ok(!doc.querySelector('#project-bulk-modal').classList.contains('hidden'), 'review list open');
+      const names = [...doc.querySelectorAll('#proj-bulk-list .pb-name')].map((i) => i.value);
+      assert.deepEqual(names, ['a', 'b'], 'names default to the folder basename');
+    } },
+  ]);
 });
 
-test('unsupported dialog: the folder browser opens in multi mode; ticks survive navigation; Add N selected opens the review', async () => {
-  const { window } = await boot({ fetchHandler: dirsHandler({ status: 'unsupported' }) });
-  openAddForm(window);
-  const doc = window.document;
-  click(window, doc.querySelector('#newProjectBrowse'));
-  await tick(); await tick(); await tick();
-  assert.equal(doc.querySelector('#folderBrowserTitle').textContent, 'Select folders');
-  const many = doc.querySelector('#folderSelectMany');
-  assert.ok(!many.classList.contains('hidden'));
-  assert.equal(many.disabled, true, 'nothing ticked yet');
-  const pickA = doc.querySelector('#folderList .folder-pick');
-  pickA.checked = true; pickA.dispatchEvent(new window.Event('change', { bubbles: true }));
-  const dev = [...doc.querySelectorAll('#folderList .folder-item')].find((b) => b.textContent === 'dev');
-  click(window, dev);
-  await tick(); await tick();
-  const pickB = doc.querySelector('#folderList .folder-pick');
-  pickB.checked = true; pickB.dispatchEvent(new window.Event('change', { bubbles: true }));
-  assert.equal(doc.querySelector('#folderPickCount').textContent, '2 folders selected');
-  assert.equal(many.textContent, 'Add 2 selected');
-  click(window, many);
-  await tick();
-  assert.ok(doc.querySelector('#folder-browser').classList.contains('hidden'));
-  const paths = [...doc.querySelectorAll('#proj-bulk-list .pb-row')].map((r) => r.dataset.path);
-  assert.deepEqual(paths, ['/home/me/a', '/home/me/dev/b']);
-});
-
-test('one ticked folder fills the inline form instead of opening the review', async () => {
-  const { window } = await boot({ fetchHandler: dirsHandler({ status: 'unsupported' }) });
-  openAddForm(window);
-  const doc = window.document;
-  click(window, doc.querySelector('#newProjectBrowse'));
-  await tick(); await tick(); await tick();
-  const pick = doc.querySelector('#folderList .folder-pick');
-  pick.checked = true; pick.dispatchEvent(new window.Event('change', { bubbles: true }));
-  click(window, doc.querySelector('#folderSelectMany'));
-  await tick();
-  assert.equal(doc.querySelector('#newProjectPath').value, '/home/me/a');
-  assert.ok(doc.querySelector('#project-bulk-modal').classList.contains('hidden'));
-});
-
-test('Several folders… opens Worca\'s browser in multi mode without asking the native dialog', async () => {
-  let asked = 0;
-  const { window } = await boot({ fetchHandler: dirsHandler(() => { asked += 1; return { status: 'picked', path: '/x' }; }) });
-  openAddForm(window);
-  const doc = window.document;
-  click(window, doc.querySelector('#newProjectBrowseMany'));
-  await tick(); await tick(); await tick();
-  assert.equal(asked, 0);
-  assert.ok(!doc.querySelector('#folder-browser').classList.contains('hidden'));
-  assert.ok(doc.querySelector('#folderList .folder-pick'), 'checkboxes rendered');
-});
-
-test('a single-mode opener (Settings/export) gets no checkboxes and no Add-selected button', async () => {
-  const { window } = await boot({ fetchHandler: dirsHandler({ status: 'unsupported' }) });
-  const doc = window.document;
-  await window.__projects.openFolderBrowser('', () => {});
-  await tick();
-  assert.equal(doc.querySelector('#folderList .folder-pick'), null);
-  assert.ok(doc.querySelector('#folderSelectMany').classList.contains('hidden'));
-  assert.equal(doc.querySelector('#folderBrowserTitle').textContent, 'Select a folder');
+test('unsupported dialog: multi-mode browser keeps ticks across navigation; Add N opens the review, one tick fills the inline form', async () => {
+  await checkRows([
+    { name: 'unsupported dialog: the folder browser opens in multi mode; ticks survive navigation; Add N selected opens the review', run: async () => {
+      const { window } = await boot({ fetchHandler: dirsHandler({ status: 'unsupported' }) });
+      openAddForm(window);
+      const doc = window.document;
+      click(window, doc.querySelector('#newProjectBrowse'));
+      await tick(); await tick(); await tick();
+      assert.equal(doc.querySelector('#folderBrowserTitle').textContent, 'Select folders');
+      const many = doc.querySelector('#folderSelectMany');
+      assert.ok(!many.classList.contains('hidden'));
+      assert.equal(many.disabled, true, 'nothing ticked yet');
+      const pickA = doc.querySelector('#folderList .folder-pick');
+      pickA.checked = true; pickA.dispatchEvent(new window.Event('change', { bubbles: true }));
+      const dev = [...doc.querySelectorAll('#folderList .folder-item')].find((b) => b.textContent === 'dev');
+      click(window, dev);
+      await tick(); await tick();
+      const pickB = doc.querySelector('#folderList .folder-pick');
+      pickB.checked = true; pickB.dispatchEvent(new window.Event('change', { bubbles: true }));
+      assert.equal(doc.querySelector('#folderPickCount').textContent, '2 folders selected');
+      assert.equal(many.textContent, 'Add 2 selected');
+      click(window, many);
+      await tick();
+      assert.ok(doc.querySelector('#folder-browser').classList.contains('hidden'));
+      const paths = [...doc.querySelectorAll('#proj-bulk-list .pb-row')].map((r) => r.dataset.path);
+      assert.deepEqual(paths, ['/home/me/a', '/home/me/dev/b']);
+    } },
+    { name: 'one ticked folder fills the inline form instead of opening the review', run: async () => {
+      const { window } = await boot({ fetchHandler: dirsHandler({ status: 'unsupported' }) });
+      openAddForm(window);
+      const doc = window.document;
+      click(window, doc.querySelector('#newProjectBrowse'));
+      await tick(); await tick(); await tick();
+      const pick = doc.querySelector('#folderList .folder-pick');
+      pick.checked = true; pick.dispatchEvent(new window.Event('change', { bubbles: true }));
+      click(window, doc.querySelector('#folderSelectMany'));
+      await tick();
+      assert.equal(doc.querySelector('#newProjectPath').value, '/home/me/a');
+      assert.ok(doc.querySelector('#project-bulk-modal').classList.contains('hidden'));
+    } },
+  ]);
 });
 
 test('bulk add from New Pipeline selects the first added project in the dropdown', async () => {

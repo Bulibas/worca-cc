@@ -10,6 +10,7 @@ import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { readPipelineForResume, reconcileStaleRunning } from '../src/core/artifacts.mjs';
 import { writeGraphWorkflow } from '../src/core/workflows.mjs';
 import { getDb } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 process.env.WORCA_RECOVERY_BACKOFF_MS = '0'; // no real waiting in tests
@@ -158,39 +159,42 @@ test('auto: a shared-pool 429 retries with logged waits, then pauses naming the 
   assert.match(res.detail || '', /not worca's max-concurrent/);
 });
 
-test('auto: auth error pauses immediately — a 7s backoff cannot re-login', async () => {
-  const dir = gitDir();
-  let calls = 0;
-  const logs = [];
-  const alwaysAuth = async () => { calls++; throw AUTH_ERR(); };
-  const orch = createOrchestrator({
-    projectDir: dir, prompt: 'demo', auto: true, claude: { mock: true },
-    runners: { producer: alwaysAuth, verifier: okVerifier },
-  });
-  orch.on('log', (l) => logs.push(l));
-  const res = await orch.run();
-  assert.equal(res.status, 'paused', JSON.stringify(res));
-  assert.equal(res.reason, 'recoverable');
-  assert.match(res.detail || '', /^auth: .*401/);
-  assert.equal(calls, 1, 'auth is NOT retried — it pauses on the first hit');
-  // The class survives into the run log (a warn, not the error-level failure line).
-  assert.ok(logs.some((l) => l.level === 'warn' && /recoverable auth error — pausing/.test(l.text)), JSON.stringify(logs.map((l) => [l.level, l.text])));
-  assert.ok(!logs.some((l) => l.level === 'error'), 'a recoverable pause is not logged as a failure');
-});
-
-test('auto: quota error pauses immediately — retrying cannot top up the balance', async () => {
-  const dir = gitDir();
-  let calls = 0;
-  const alwaysQuota = async () => { calls++; throw QUOTA_ERR(); };
-  const orch = createOrchestrator({
-    projectDir: dir, prompt: 'demo', auto: true, claude: { mock: true },
-    runners: { producer: alwaysQuota, verifier: okVerifier },
-  });
-  const res = await orch.run();
-  assert.equal(res.status, 'paused');
-  assert.equal(res.reason, 'recoverable');
-  assert.match(res.detail || '', /^quota: .*credit balance/i);
-  assert.equal(calls, 1, 'quota is NOT retried — it pauses on the first hit');
+test('auto: auth and quota errors pause immediately (one call, reason recoverable, class in the detail; auth logs a warn, never an error)', async () => {
+  await checkRows([
+    { name: 'auto: auth error pauses immediately — a 7s backoff cannot re-login', run: async () => {
+      const dir = gitDir();
+      let calls = 0;
+      const logs = [];
+      const alwaysAuth = async () => { calls++; throw AUTH_ERR(); };
+      const orch = createOrchestrator({
+        projectDir: dir, prompt: 'demo', auto: true, claude: { mock: true },
+        runners: { producer: alwaysAuth, verifier: okVerifier },
+      });
+      orch.on('log', (l) => logs.push(l));
+      const res = await orch.run();
+      assert.equal(res.status, 'paused', JSON.stringify(res));
+      assert.equal(res.reason, 'recoverable');
+      assert.match(res.detail || '', /^auth: .*401/);
+      assert.equal(calls, 1, 'auth is NOT retried — it pauses on the first hit');
+      // The class survives into the run log (a warn, not the error-level failure line).
+      assert.ok(logs.some((l) => l.level === 'warn' && /recoverable auth error — pausing/.test(l.text)), JSON.stringify(logs.map((l) => [l.level, l.text])));
+      assert.ok(!logs.some((l) => l.level === 'error'), 'a recoverable pause is not logged as a failure');
+    } },
+    { name: 'auto: quota error pauses immediately — retrying cannot top up the balance', run: async () => {
+      const dir = gitDir();
+      let calls = 0;
+      const alwaysQuota = async () => { calls++; throw QUOTA_ERR(); };
+      const orch = createOrchestrator({
+        projectDir: dir, prompt: 'demo', auto: true, claude: { mock: true },
+        runners: { producer: alwaysQuota, verifier: okVerifier },
+      });
+      const res = await orch.run();
+      assert.equal(res.status, 'paused');
+      assert.equal(res.reason, 'recoverable');
+      assert.match(res.detail || '', /^quota: .*credit balance/i);
+      assert.equal(calls, 1, 'quota is NOT retried — it pauses on the first hit');
+    } },
+  ]);
 });
 
 test('auto: a network-paused run resumes to done once the outage clears', async () => {
@@ -431,7 +435,9 @@ test('serialized gate: two DISTINCT classes never open two prompts at once', asy
 
 const okVerifierF5 = async () => ({ status: 'ok', issues: [], review: { issues: [] }, summary: '' });
 
-test('done row has NULL resume_point (incremental writes cleared by done arm)', async () => {
+// ONE done run (both former tests started with exactly this run); the done-row check runs
+// before the crash is forged.
+test('a done row has NULL resume_point; crash -> reconcile -> resume continues from saved boundary to done', async () => {
   const dir = gitDir();
   const orch = createOrchestrator({
     projectDir: dir, prompt: 'demo', auto: true, claude: { mock: true },
@@ -439,55 +445,57 @@ test('done row has NULL resume_point (incremental writes cleared by done arm)', 
   });
   const res = await orch.run();
   assert.equal(res.status, 'done');
-  const saved = readPipelineForResume(orch.state.id);
-  assert.equal(saved.resumePoint, null, 'done row must have NULL resume_point');
-});
+  await checkRows([
+    { name: 'done row has NULL resume_point (incremental writes cleared by done arm)', run: () => {
+      const saved = readPipelineForResume(orch.state.id);
+      assert.equal(saved.resumePoint, null, 'done row must have NULL resume_point');
+    } },
+    { name: 'crash -> reconcile -> resume continues from saved boundary to done', run: async () => {
+      const id = orch.state.id;
+      // A finished run has NULL owner columns, cleared by finally (folded from the deleted
+      // orchestrator-heartbeat test).
+      const cols = getDb().prepare('SELECT owner_pid, owner_host, heartbeat_at FROM pipelines WHERE id = ?').get(id);
+      assert.equal(cols.owner_pid, null);
+      assert.equal(cols.owner_host, null);
+      assert.equal(cols.heartbeat_at, null);
+      const pDir = orch.state.pipelineDir;
 
-test('crash -> reconcile -> resume continues from saved boundary to done', async () => {
-  const dir = gitDir();
-  const orch = createOrchestrator({
-    projectDir: dir, prompt: 'demo', auto: true, claude: { mock: true },
-    runners: { producer: okVerifierF5, verifier: okVerifierF5 },
-  });
-  const res = await orch.run();
-  assert.equal(res.status, 'done');
-  const id = orch.state.id;
-  const pDir = orch.state.pipelineDir;
-
-  // Forge a "crash": flip the finished row back to running with a dead PID and a
-  // synthetic v2 point carrying the run's own frozen manifest and an EMPTY
-  // scheduler snapshot, so the resume replays the graph from the start (safe for
-  // a mock runner). The manifest is what the graph engine rehydrates from.
-  const point = {
-    version: 2, snapshot: null, manifest: orch.getState().stepper,
-    nodes: [], planVersion: 0, stepModels: null, workflowId: 'wf_default',
-    checkpointRef: null, pipelineDir: pDir, pausedAt: new Date().toISOString(),
-  };
-  // Re-create the worktree dir so resume()'s existsSync check passes: in a real crash
-  // the worktree was never torn down, but our test ran to completion (teardown ran).
-  const savedRow = getDb().prepare('SELECT branch FROM pipelines WHERE id = ?').get(id);
-  const branchInfo = savedRow?.branch ? JSON.parse(savedRow.branch) : null;
-  if (branchInfo?.worktreeDir) mkdirSync(branchInfo.worktreeDir, { recursive: true });
-  getDb().prepare(
-    `UPDATE pipelines SET status='running', owner_pid=?, owner_host=?, heartbeat_at=?,
+      // Forge a "crash": flip the finished row back to running with a dead PID and a
+      // synthetic v2 point carrying the run's own frozen manifest and an EMPTY
+      // scheduler snapshot, so the resume replays the graph from the start (safe for
+      // a mock runner). The manifest is what the graph engine rehydrates from.
+      const point = {
+        version: 2, snapshot: null, manifest: orch.getState().stepper,
+        nodes: [], planVersion: 0, stepModels: null, workflowId: 'wf_default',
+        checkpointRef: null, pipelineDir: pDir, pausedAt: new Date().toISOString(),
+      };
+      // Re-create the worktree dir so resume()'s existsSync check passes: in a real crash
+      // the worktree was never torn down, but our test ran to completion (teardown ran).
+      const savedRow = getDb().prepare('SELECT branch FROM pipelines WHERE id = ?').get(id);
+      const branchInfo = savedRow?.branch ? JSON.parse(savedRow.branch) : null;
+      if (branchInfo?.worktreeDir) mkdirSync(branchInfo.worktreeDir, { recursive: true });
+      getDb().prepare(
+        `UPDATE pipelines SET status='running', owner_pid=?, owner_host=?, heartbeat_at=?,
      resume_point=? WHERE id=?`,
-  ).run(2 ** 31 - 1, hostname(), new Date().toISOString(), JSON.stringify(point), id);
+      ).run(2 ** 31 - 1, hostname(), new Date().toISOString(), JSON.stringify(point), id);
 
-  // Reconcile: dead PID on THIS host → row flipped to 'interrupted', resume_point preserved.
-  const rec = reconcileStaleRunning({ host: hostname() });
-  assert.ok(rec.ids.includes(id), 'reaper must flip the row');
-  const after = readPipelineForResume(id);
-  assert.equal(after.row.status, 'interrupted');
-  assert.ok(after.resumePoint, 'resume_point preserved across reclassify');
-  assert.equal(after.resumePoint.version, 2);
-  assert.equal(after.resumePoint.manifest.version, 2, 'the frozen manifest survived the reclassify');
+      // Reconcile: dead PID on THIS host → row flipped to 'interrupted', resume_point preserved.
+      const rec = reconcileStaleRunning({ host: hostname() });
+      assert.ok(rec.ids.includes(id), 'reaper must flip the row');
+      const after = readPipelineForResume(id);
+      assert.equal(after.row.status, 'interrupted');
+      assert.ok(after.resumePoint, 'resume_point preserved across reclassify');
+      assert.equal(after.resumePoint.version, 2);
+      assert.equal(after.resumePoint.manifest.version, 2, 'the frozen manifest survived the reclassify');
 
-  // Resume (requires Feature 6 widening to accept 'interrupted').
-  const orch2 = createOrchestrator({
-    projectDir: dir, prompt: 'demo', auto: true, claude: { mock: true },
-    runners: { producer: okVerifierF5, verifier: okVerifierF5 },
-    resume: after,
-  });
-  const res2 = await orch2.resume();
-  assert.equal(res2.status, 'done');
+      // Resume (requires Feature 6 widening to accept 'interrupted').
+      const orch2 = createOrchestrator({
+        projectDir: dir, prompt: 'demo', auto: true, claude: { mock: true },
+        runners: { producer: okVerifierF5, verifier: okVerifierF5 },
+        resume: after,
+      });
+      const res2 = await orch2.resume();
+      assert.equal(res2.status, 'done');
+    } },
+  ]);
 });

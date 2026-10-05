@@ -10,6 +10,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { getDb } from '../src/core/db.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { checkRows } from './helpers/rows.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, '..', 'src', 'cli', 'worca-cc.mjs');
@@ -68,55 +69,61 @@ test('empty store: a friendly line, exit 0', async () => {
   assert.match(r.stdout, /No pipeline runs yet/);
 });
 
-test('list across projects, newest first, plain (non-TTY) output', async () => {
-  insertPipeline({ id: 'aaa10001', projectKey: 'proj-a', title: 'older done run', status: 'done', minutesAgo: 120, costUsd: 1.5, activeMs: 63_000, branch: JSON.stringify({ source: 'dev', feature: 'worca-cc/older-aaa10001' }) });
-  insertPipeline({ id: 'aaa10002', projectKey: 'proj-a', title: 'paused run\nsecond line', status: 'paused', minutesAgo: 30, resumePoint: JSON.stringify({ pauseReason: 'error', pauseDetail: 'sourceBranch is not a valid ref: "main"' }) });
-  insertPipeline({ id: 'bbb20001', projectKey: 'proj-b', title: 'running run', status: 'running', minutesAgo: 5, startedBy: 'alice' });
-  const r = await run(['runs']);
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /ID\s+STATUS\s+STARTED\s+PROJECT\s+TITLE/, 'a header row leads the table');
-  const ids = r.stdout.split('\n').filter((l) => /^\s{2}[0-9a-f]{8} {2}/.test(l)).map((l) => l.trim().slice(0, 8));
-  assert.deepEqual(ids, ['bbb20001', 'aaa10002', 'aaa10001'], 'newest first');
-  assert.match(r.stdout, /bbb20001\s+running/);
-  assert.match(r.stdout, /aaa10002\s+paused \(error\)/, 'the pause reason reads with the status');
-  assert.doesNotMatch(r.stdout, /\x1b\[/, 'non-TTY output carries no ANSI escapes');
+test('list across projects newest first (plain, non-TTY) and as --json wire entries', async () => {
+  await checkRows([
+    { name: 'list across projects, newest first, plain (non-TTY) output', run: async () => {
+      insertPipeline({ id: 'aaa10001', projectKey: 'proj-a', title: 'older done run', status: 'done', minutesAgo: 120, costUsd: 1.5, activeMs: 63_000, branch: JSON.stringify({ source: 'dev', feature: 'worca-cc/older-aaa10001' }) });
+      insertPipeline({ id: 'aaa10002', projectKey: 'proj-a', title: 'paused run\nsecond line', status: 'paused', minutesAgo: 30, resumePoint: JSON.stringify({ pauseReason: 'error', pauseDetail: 'sourceBranch is not a valid ref: "main"' }) });
+      insertPipeline({ id: 'bbb20001', projectKey: 'proj-b', title: 'running run', status: 'running', minutesAgo: 5, startedBy: 'alice' });
+      const r = await run(['runs']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /ID\s+STATUS\s+STARTED\s+PROJECT\s+TITLE/, 'a header row leads the table');
+      const ids = r.stdout.split('\n').filter((l) => /^\s{2}[0-9a-f]{8} {2}/.test(l)).map((l) => l.trim().slice(0, 8));
+      assert.deepEqual(ids, ['bbb20001', 'aaa10002', 'aaa10001'], 'newest first');
+      assert.match(r.stdout, /bbb20001\s+running/);
+      assert.match(r.stdout, /aaa10002\s+paused \(error\)/, 'the pause reason reads with the status');
+      assert.doesNotMatch(r.stdout, /\x1b\[/, 'non-TTY output carries no ANSI escapes');
+    } },
+    { name: '--json list: the wire entries, parseable', run: async () => {
+      const r = await run(['runs', '--json']);
+      assert.equal(r.code, 0, r.stderr);
+      const runs = JSON.parse(r.stdout);
+      assert.equal(runs.length, 3);
+      const paused = runs.find((x) => x.id === 'aaa10002');
+      assert.equal(paused.status, 'paused');
+      assert.equal(paused.pauseReason, 'error');
+      assert.equal(paused.pauseDetail, 'sourceBranch is not a valid ref: "main"');
+      assert.equal(paused.projectKey, 'proj-a');
+      assert.equal(paused.totalCostUsd, null, 'no cost recorded reads as null, the wire convention');
+    } },
+  ]);
 });
 
-test('--status filters on the stored status vocabulary', async () => {
-  const r = await run(['runs', '--status', 'paused']);
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /aaa10002/);
-  assert.doesNotMatch(r.stdout, /aaa10001/);
-  assert.doesNotMatch(r.stdout, /bbb20001/);
-  const bad = await run(['runs', '--status', 'failed']);
-  assert.equal(bad.code, 2);
-  assert.match(bad.stderr, /--status must be one of/);
-  const bare = await run(['runs', '--status']);
-  assert.equal(bare.code, 2);
-  assert.match(bare.stderr, /--status needs a value/);
-});
-
-test('--project filters by name or key', async () => {
-  const r = await run(['runs', '--project', 'proj-b']);
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /bbb20001/);
-  assert.doesNotMatch(r.stdout, /aaa10001/);
-  const none = await run(['runs', '--project', 'no-such-project']);
-  assert.equal(none.code, 0);
-  assert.match(none.stdout, /No runs match the given filters/);
-});
-
-test('--json list: the wire entries, parseable', async () => {
-  const r = await run(['runs', '--json']);
-  assert.equal(r.code, 0, r.stderr);
-  const runs = JSON.parse(r.stdout);
-  assert.equal(runs.length, 3);
-  const paused = runs.find((x) => x.id === 'aaa10002');
-  assert.equal(paused.status, 'paused');
-  assert.equal(paused.pauseReason, 'error');
-  assert.equal(paused.pauseDetail, 'sourceBranch is not a valid ref: "main"');
-  assert.equal(paused.projectKey, 'proj-a');
-  assert.equal(paused.totalCostUsd, null, 'no cost recorded reads as null, the wire convention');
+test('--status and --project filter the list; bad/missing --status values exit 2', async () => {
+  await checkRows([
+    { name: '--status filters on the stored status vocabulary', run: async () => {
+      const r = await run(['runs', '--status', 'paused']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /aaa10002/);
+      assert.doesNotMatch(r.stdout, /aaa10001/);
+      assert.doesNotMatch(r.stdout, /bbb20001/);
+      const bad = await run(['runs', '--status', 'failed']);
+      assert.equal(bad.code, 2);
+      assert.match(bad.stderr, /--status must be one of/);
+      const bare = await run(['runs', '--status']);
+      assert.equal(bare.code, 2);
+      assert.match(bare.stderr, /--status needs a value/);
+    } },
+    { name: '--project filters by name or key', run: async () => {
+      const r = await run(['runs', '--project', 'proj-b']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /bbb20001/);
+      assert.doesNotMatch(r.stdout, /aaa10001/);
+      const none = await run(['runs', '--project', 'no-such-project']);
+      assert.equal(none.code, 0);
+      assert.match(none.stdout, /No runs match the given filters/);
+    } },
+  ]);
 });
 
 test('detail by full id and by unique prefix', async () => {
@@ -149,34 +156,28 @@ test('detail by full id and by unique prefix', async () => {
   assert.equal(d.loopDeliveries, null);
 });
 
-test('ambiguous prefix refuses and names the matches count', async () => {
-  const r = await run(['runs', 'aaa1']);
-  assert.equal(r.code, 2);
-  assert.match(r.stderr, /matches 2 runs — use a longer id/);
-});
-
-test('unknown verb/id: one combined error, never a silent list', async () => {
-  const r = await run(['runs', 'lst']);
-  assert.equal(r.code, 2);
-  assert.match(r.stderr, /no run matches "lst", and "lst" is not a known verb either/);
-  assert.doesNotMatch(r.stdout, /bbb20001/, 'the list must not print as a side effect');
-  // ...but through `show` the message stays about the run only.
-  const s = await run(['runs', 'show', 'zzzz9999']);
-  assert.equal(s.code, 2);
-  assert.match(s.stderr, /no run matches "zzzz9999"/);
-  assert.doesNotMatch(s.stderr, /not a known verb/);
-});
-
-test('unknown options fail with usage', async () => {
-  const r = await run(['runs', '--watch']);
-  assert.equal(r.code, 2);
-  assert.match(r.stderr, /unknown option/);
-});
-
-test('help prints the group usage', async () => {
-  for (const args of [['runs', 'help'], ['runs', '-h']]) {
-    const r = await run(args);
-    assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stdout, /worca runs — list and inspect pipeline runs/);
-  }
+test('refusals: ambiguous prefix (match count), unknown verb/id (one combined error, never a silent list), unknown option — all exit 2', async () => {
+  await checkRows([
+    { name: 'ambiguous prefix refuses and names the matches count', run: async () => {
+      const r = await run(['runs', 'aaa1']);
+      assert.equal(r.code, 2);
+      assert.match(r.stderr, /matches 2 runs — use a longer id/);
+    } },
+    { name: 'unknown verb/id: one combined error, never a silent list', run: async () => {
+      const r = await run(['runs', 'lst']);
+      assert.equal(r.code, 2);
+      assert.match(r.stderr, /no run matches "lst", and "lst" is not a known verb either/);
+      assert.doesNotMatch(r.stdout, /bbb20001/, 'the list must not print as a side effect');
+      // ...but through `show` the message stays about the run only.
+      const s = await run(['runs', 'show', 'zzzz9999']);
+      assert.equal(s.code, 2);
+      assert.match(s.stderr, /no run matches "zzzz9999"/);
+      assert.doesNotMatch(s.stderr, /not a known verb/);
+    } },
+    { name: 'unknown options fail with usage', run: async () => {
+      const r = await run(['runs', '--watch']);
+      assert.equal(r.code, 2);
+      assert.match(r.stderr, /unknown option/);
+    } },
+  ]);
 });

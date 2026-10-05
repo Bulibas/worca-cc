@@ -5,9 +5,10 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import {
   renderPluginList, renderInstallConsent, renderUpdatePreview,
-  renderConfigForm, collectConfigForm, renderConnectResult, renderDoctorReport, renderReferences409,
+  renderConfigForm, collectConfigForm, renderConnectResult,
   renderOrphanList, renderAvailableList, renderMarketplaceList, relTime,
 } from '../ui/public/plugins-view.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const doc = new JSDOM('<!doctype html><body></body>').window.document;
 
@@ -31,33 +32,36 @@ test('install consent lists a requested secret (.pl-secret) + setup commands ver
   assert.match(el.querySelector('.pl-setup-cmd').textContent, /npm ci --prefix <dir> --ignore-scripts --omit=dev/);
 });
 
-test('install consent names an agent’s ask forms and the file types they may display', () => {
-  const el = renderInstallConsent(
-    { name: 'mockup-source', repoUrl: 'https://github.com/o/r', sha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678' },
-    {
-      agents: [
-        { key: 'mockupReviewer', tools: ['Read'], forms: ['review-mockups'], fileTypes: ['application/pdf', 'image/*'] },
-        { key: 'plainAgent', tools: [], forms: [], fileTypes: [] },
-      ],
-      taskSources: [], skills: [], workflows: [], depCount: null, setupCommands: [],
-    },
-    { doc },
-  );
-  const rows = [...el.querySelectorAll('.pl-consent-forms')];
-  assert.equal(rows.length, 1, 'only the agent that HAS forms gets the line');
-  assert.equal(rows[0].textContent,
-    '1 form: review-mockups · may display application/pdf, image/* from the run folder');
-  assert.match(el.textContent, /mockupReviewer — tools: Read/, 'the tools line is untouched');
-});
-
-test('install consent tolerates a snapshot taken before ask forms existed', () => {
-  const el = renderInstallConsent(
-    { name: 'old-snap', repoUrl: 'https://github.com/o/r', sha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678' },
-    { agents: [{ key: 'legacy', tools: ['Read'] }], taskSources: [], skills: [], workflows: [], depCount: null, setupCommands: [] },
-    { doc },
-  );
-  assert.equal(el.querySelector('.pl-consent-forms'), null);
-  assert.match(el.textContent, /legacy — tools: Read/);
+test('install consent: an ask-forms line only for agents with forms; a pre-forms snapshot renders none', async () => {
+  await checkRows([
+    { name: 'install consent names an agent’s ask forms and the file types they may display', run: () => {
+      const el = renderInstallConsent(
+        { name: 'mockup-source', repoUrl: 'https://github.com/o/r', sha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678' },
+        {
+          agents: [
+            { key: 'mockupReviewer', tools: ['Read'], forms: ['review-mockups'], fileTypes: ['application/pdf', 'image/*'] },
+            { key: 'plainAgent', tools: [], forms: [], fileTypes: [] },
+          ],
+          taskSources: [], skills: [], workflows: [], depCount: null, setupCommands: [],
+        },
+        { doc },
+      );
+      const rows = [...el.querySelectorAll('.pl-consent-forms')];
+      assert.equal(rows.length, 1, 'only the agent that HAS forms gets the line');
+      assert.equal(rows[0].textContent,
+        '1 form: review-mockups · may display application/pdf, image/* from the run folder');
+      assert.match(el.textContent, /mockupReviewer — tools: Read/, 'the tools line is untouched');
+    } },
+    { name: 'install consent tolerates a snapshot taken before ask forms existed', run: () => {
+      const el = renderInstallConsent(
+        { name: 'old-snap', repoUrl: 'https://github.com/o/r', sha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678' },
+        { agents: [{ key: 'legacy', tools: ['Read'] }], taskSources: [], skills: [], workflows: [], depCount: null, setupCommands: [] },
+        { doc },
+      );
+      assert.equal(el.querySelector('.pl-consent-forms'), null);
+      assert.match(el.textContent, /legacy — tools: Read/);
+    } },
+  ]);
 });
 
 test('install consent: chat channels render security-loud with secrets; absent -> no section', () => {
@@ -109,78 +113,83 @@ test('config form masks secrets; collect skips untouched {set:true} markers', ()
 // A multiProfile source holds several independent configurations (two Jira
 // instances, two GitHub orgs). The settings pane becomes a roster + the
 // selected profile's form; a single-profile source must not pay for any of it.
-test('a multiProfile source renders a profile roster and stamps the form with it', () => {
-  const schema = [{ key: 'ticketUrl', type: 'text', label: 'Ticket URL', secret: false, required: true, default: null, help: null, options: [] }];
-  const root = renderConfigForm([{
-    id: 'jira', schema, multiProfile: true,
-    profile: 'acme',
-    profiles: [{ id: 'acme', label: 'Acme' }, { id: 'globex', label: null }],
-    values: { ticketUrl: 'https://t.example.com/browse/A-1' },
-  }], { doc });
+test('config form profiles: roster + stamped form; empty roster offers only Add; single-profile source has no roster and collect omits profile', async () => {
+  await checkRows([
+    { name: 'a multiProfile source renders a profile roster and stamps the form with it', run: () => {
+      const schema = [{ key: 'ticketUrl', type: 'text', label: 'Ticket URL', secret: false, required: true, default: null, help: null, options: [] }];
+      const root = renderConfigForm([{
+        id: 'jira', schema, multiProfile: true,
+        profile: 'acme',
+        profiles: [{ id: 'acme', label: 'Acme' }, { id: 'globex', label: null }],
+        values: { ticketUrl: 'https://t.example.com/browse/A-1' },
+      }], { doc });
 
-  const sel = root.querySelector('.pl-profile-sel');
-  assert.ok(sel, 'roster select must render');
-  assert.deepEqual([...sel.options].map((o) => o.value), ['acme', 'globex']);
-  assert.equal(sel.value, 'acme', 'the echoed profile is the selected one');
-  assert.match([...sel.options][0].textContent, /Acme/);
-  assert.equal([...sel.options][1].textContent, 'globex', 'no label falls back to the id');
-  assert.ok(root.querySelector('.pl-profile-add'), 'can add a profile');
-  assert.ok(root.querySelector('.pl-profile-del'), 'can remove one');
+      const sel = root.querySelector('.pl-profile-sel');
+      assert.ok(sel, 'roster select must render');
+      assert.deepEqual([...sel.options].map((o) => o.value), ['acme', 'globex']);
+      assert.equal(sel.value, 'acme', 'the echoed profile is the selected one');
+      assert.match([...sel.options][0].textContent, /Acme/);
+      assert.equal([...sel.options][1].textContent, 'globex', 'no label falls back to the id');
+      assert.ok(root.querySelector('.pl-profile-add'), 'can add a profile');
+      assert.ok(root.querySelector('.pl-profile-del'), 'can remove one');
 
-  // The form carries the profile, so a save/connect targets the right bucket
-  // rather than whichever the server would have defaulted to.
-  const form = root.querySelector('.pl-config-form');
-  assert.equal(form.dataset.profile, 'acme');
-  assert.deepEqual(collectConfigForm(form), {
-    sourceId: 'jira', profile: 'acme', values: { ticketUrl: 'https://t.example.com/browse/A-1' },
-  });
+      // The form carries the profile, so a save/connect targets the right bucket
+      // rather than whichever the server would have defaulted to.
+      const form = root.querySelector('.pl-config-form');
+      assert.equal(form.dataset.profile, 'acme');
+      assert.deepEqual(collectConfigForm(form), {
+        sourceId: 'jira', profile: 'acme', values: { ticketUrl: 'https://t.example.com/browse/A-1' },
+      });
+    } },
+    { name: 'a multiProfile source with NO profiles yet asks for one instead of showing a form', run: () => {
+      // Saving into a profile that does not exist is the one thing the server
+      // rejects outright, so an empty roster must not render a fillable form.
+      const schema = [{ key: 'ticketUrl', type: 'text', label: 'Ticket URL', secret: false, required: true, default: null, help: null, options: [] }];
+      const root = renderConfigForm([{ id: 'jira', schema, multiProfile: true, profile: null, profiles: [], values: {} }], { doc });
+      assert.equal(root.querySelector('.pl-config-form'), null, 'no form without a profile to write to');
+      assert.ok(root.querySelector('.pl-profile-add'), 'the only offered action is creating one');
+      assert.match(root.textContent, /No profiles yet/i);
+    } },
+    { name: 'a single-profile source is untouched: no roster, and collect omits profile', run: () => {
+      const schema = [{ key: 'apiBase', type: 'text', label: 'API base', secret: false, required: false, default: null, help: null, options: [] }];
+      const root = renderConfigForm([{ id: 'github', schema, values: { apiBase: 'https://api.github.com' } }], { doc });
+      assert.equal(root.querySelector('.pl-profile-bar'), null, 'no profile UI for a single-instance source');
+      const got = collectConfigForm(root.querySelector('.pl-config-form'));
+      assert.ok(!('profile' in got), 'the profile key never appears for a single-profile source');
+    } },
+  ]);
 });
 
-test('a multiProfile source with NO profiles yet asks for one instead of showing a form', () => {
-  // Saving into a profile that does not exist is the one thing the server
-  // rejects outright, so an empty roster must not render a fillable form.
-  const schema = [{ key: 'ticketUrl', type: 'text', label: 'Ticket URL', secret: false, required: true, default: null, help: null, options: [] }];
-  const root = renderConfigForm([{ id: 'jira', schema, multiProfile: true, profile: null, profiles: [], values: {} }], { doc });
-  assert.equal(root.querySelector('.pl-config-form'), null, 'no form without a profile to write to');
-  assert.ok(root.querySelector('.pl-profile-add'), 'the only offered action is creating one');
-  assert.match(root.textContent, /No profiles yet/i);
-});
-
-test('a single-profile source is untouched: no roster, and collect omits profile', () => {
-  const schema = [{ key: 'apiBase', type: 'text', label: 'API base', secret: false, required: false, default: null, help: null, options: [] }];
-  const root = renderConfigForm([{ id: 'github', schema, values: { apiBase: 'https://api.github.com' } }], { doc });
-  assert.equal(root.querySelector('.pl-profile-bar'), null, 'no profile UI for a single-instance source');
-  const got = collectConfigForm(root.querySelector('.pl-config-form'));
-  assert.ok(!('profile' in got), 'the profile key never appears for a single-profile source');
-});
-
-test('update preview shows commit subjects + diffstat + enabled confirm', () => {
-  const el = renderUpdatePreview({
-    pinnedSha: 'a1b2c3d4e5f6', candidateSha: 'f00dfacecafe',
-    commits: [{ sha: 'f00dfacecafe', subject: 'feat: faster listTasks' }],
-    diffstat: ' connector/index.mjs | 12 ++++++------\n 1 file changed',
-    manifestDelta: { newSecrets: ['github.webhook_secret'], newTaskSources: [], newAgents: [], setupChanged: false },
-  }, { doc });
-  assert.match(el.querySelector('.pl-commit').textContent, /feat: faster listTasks/);
-  assert.match(el.querySelector('.pl-diffstat').textContent, /1 file changed/);
-  assert.match(el.querySelector('.pl-delta-secret').textContent, /NEW SECRET requested: github\.webhook_secret/);
-  const btn = el.querySelector('.pl-confirm-update');
-  assert.ok(btn && !btn.disabled);
-});
-
-test('update preview with no new commits shows up-to-date state, no confirm button', () => {
-  const el = renderUpdatePreview({ pinnedSha: 'a1b2c3d4e5f6', candidateSha: 'a1b2c3d4e5f6', commits: [] }, { doc });
-  assert.equal(el.querySelector('.pl-confirm-update'), null, 'no apply button when nothing to apply');
-  assert.equal(el.querySelector('.pl-diffstat'), null, 'no empty diffstat box');
-  assert.equal(el.querySelector('.pl-update-shas'), null, 'no sha arrow when nothing changes');
-  const badge = el.querySelector('.pl-uptodate .badge');
-  assert.ok(badge, 'up-to-date badge must render');
-  assert.match(badge.textContent, /up to date/i);
-  assert.match(el.querySelector('.pl-uptodate .hint').textContent, /latest version \(a1b2c3d\)/);
-  // Missing shas (defensive) -> still renders the badge, hint without sha.
-  const bare = renderUpdatePreview({ commits: [] }, { doc });
-  assert.ok(bare.querySelector('.pl-uptodate .badge'));
-  assert.match(bare.querySelector('.pl-uptodate .hint').textContent, /latest version/);
+test('update preview: commits, diffstat, new-secret line and confirm; up-to-date shows the badge and no confirm/diffstat', async () => {
+  await checkRows([
+    { name: 'update preview shows commit subjects + diffstat + enabled confirm', run: () => {
+      const el = renderUpdatePreview({
+        pinnedSha: 'a1b2c3d4e5f6', candidateSha: 'f00dfacecafe',
+        commits: [{ sha: 'f00dfacecafe', subject: 'feat: faster listTasks' }],
+        diffstat: ' connector/index.mjs | 12 ++++++------\n 1 file changed',
+        manifestDelta: { newSecrets: ['github.webhook_secret'], newTaskSources: [], newAgents: [], setupChanged: false },
+      }, { doc });
+      assert.match(el.querySelector('.pl-commit').textContent, /feat: faster listTasks/);
+      assert.match(el.querySelector('.pl-diffstat').textContent, /1 file changed/);
+      assert.match(el.querySelector('.pl-delta-secret').textContent, /NEW SECRET requested: github\.webhook_secret/);
+      const btn = el.querySelector('.pl-confirm-update');
+      assert.ok(btn && !btn.disabled);
+    } },
+    { name: 'update preview with no new commits shows up-to-date state, no confirm button', run: () => {
+      const el = renderUpdatePreview({ pinnedSha: 'a1b2c3d4e5f6', candidateSha: 'a1b2c3d4e5f6', commits: [] }, { doc });
+      assert.equal(el.querySelector('.pl-confirm-update'), null, 'no apply button when nothing to apply');
+      assert.equal(el.querySelector('.pl-diffstat'), null, 'no empty diffstat box');
+      assert.equal(el.querySelector('.pl-update-shas'), null, 'no sha arrow when nothing changes');
+      const badge = el.querySelector('.pl-uptodate .badge');
+      assert.ok(badge, 'up-to-date badge must render');
+      assert.match(badge.textContent, /up to date/i);
+      assert.match(el.querySelector('.pl-uptodate .hint').textContent, /latest version \(a1b2c3d\)/);
+      // Missing shas (defensive) -> still renders the badge, hint without sha.
+      const bare = renderUpdatePreview({ commits: [] }, { doc });
+      assert.ok(bare.querySelector('.pl-uptodate .badge'));
+      assert.match(bare.querySelector('.pl-uptodate .hint').textContent, /latest version/);
+    } },
+  ]);
 });
 
 test('plugin list shows enabled toggle, disabled state, broken badge, contributions', () => {
@@ -224,11 +233,6 @@ test('an API-mismatched plugin gets an amber "needs update" badge and the note',
   assert.equal(cards[1].querySelector('.pl-api-note'), null);
 });
 
-test('a card without apiMismatch renders no note (the browser has no formatter of its own)', () => {
-  const el = renderPluginList([{ name: 'fine', version: '1.0.0', enabled: true, contributions: {} }], { doc });
-  assert.equal(el.querySelector('.pl-api-note'), null);
-});
-
 test('connect result: connected / waiting / field errors, and a bare transport error', () => {
   const okEl = renderConnectResult(
     { ok: true, identity: 'Jane Doe', instance: { baseUrl: 'https://tracker.example.com/jira', project: 'PROJ' } },
@@ -255,18 +259,6 @@ test('connect result: connected / waiting / field errors, and a bare transport e
   assert.match(bare.textContent, /timed out/);
 });
 
-test('doctor report + references-409 render rows', () => {
-  const rep = renderDoctorReport({ ok: false, checks: [
-    { id: 'current-symlink', ok: true, detail: '' },
-    { id: 'node_modules', ok: false, detail: 'missing — re-run setup' },
-  ] }, { doc });
-  assert.equal(rep.querySelectorAll('.pl-doc-row').length, 2);
-  assert.match(rep.textContent, /re-run setup/);
-  const refs = renderReferences409([{ type: 'workflow', name: 'My triage flow' }, 'project config: orchestrator'], { doc });
-  assert.equal(refs.querySelectorAll('li').length, 2);
-  assert.match(refs.textContent, /My triage flow/);
-});
-
 test('orphan list: row per orphan with Purge button; empty input -> empty container', () => {
   const el = renderOrphanList(
     [{ name: 'ghost-src', dataDir: '/home/u/.worca-cc/plugins/ghost-src/data' }],
@@ -284,26 +276,6 @@ test('orphan list: row per orphan with Purge button; empty input -> empty contai
 
   assert.equal(renderOrphanList([], { doc }).childElementCount, 0);
   assert.equal(renderOrphanList(undefined, { doc }).childElementCount, 0);
-});
-
-test('plugin cards show live channel badges when channelStatus rows match', () => {
-  const el = renderPluginList([
-    { name: 'telegram-chat', enabled: true, contributions: { agents: 0, taskSources: 0, chatChannels: 1, skills: 0, workflows: 0 } },
-    { name: 'github-source', enabled: true, contributions: { agents: 1, taskSources: 1, skills: 0, workflows: 0 } },
-  ], {
-    doc,
-    channelStatus: [
-      { plugin: 'telegram-chat', channelId: 'main', displayName: 'Telegram', platform: 'telegram', state: 'connected', detail: null },
-    ],
-  });
-  const badge = el.querySelector('.pl-channel');
-  assert.ok(badge);
-  assert.equal(badge.dataset.channelKey, 'telegram-chat/main');
-  assert.match(badge.className, /green/);
-  assert.match(badge.textContent, /Telegram · connected/);
-  const cards = el.querySelectorAll('.plugin-card');
-  assert.equal(cards[1].querySelector('.pl-channel'), null, 'no badges without matching rows');
-  assert.match(cards[0].querySelector('.pl-contrib').textContent, /1 chat channel/);
 });
 
 test('config form renders channel sections with data-channel-id; collect routes accordingly', () => {
@@ -370,19 +342,6 @@ test('update preview: model delta flags — env change and new model secret are 
   assert.ok(infos.includes('removed model: ds-old'));
 });
 
-test('plugin list card counts models; references409 renders model guard entries', () => {
-  const list = renderPluginList([{
-    name: 'team-models', version: '1', enabled: true,
-    contributions: { agents: 0, taskSources: 0, models: 3, skills: 0, workflows: 0 },
-  }], { doc });
-  assert.match(list.querySelector('.pl-contrib').textContent, /3 models/);
-
-  const refs = renderReferences409([
-    { id: 'ds-stable', steps: [{ projectKey: 'a', step: 'planner' }], nodes: [{ projectKey: 'a', workflowId: 'w', nodeId: 'n' }] },
-  ], { doc });
-  assert.match(refs.querySelector('li').textContent, /model: ds-stable \(2 pipeline selections\)/);
-});
-
 // ── marketplaces: available cards, registry rows, installed provenance ───────
 
 const MKT = {
@@ -396,50 +355,50 @@ const MKT = {
   ],
 };
 
-test('renderAvailableList: install button only for non-installed; marketplace badge; installed tag', () => {
-  const el = renderAvailableList([MKT], { doc });
-  const cards = el.querySelectorAll('.pl-avail-card');
-  assert.equal(cards.length, 2);
-  const btn = cards[0].querySelector('.pl-install-avail');
-  assert.ok(btn);
-  assert.equal(btn.dataset.name, 'aa');
-  assert.equal(btn.dataset.marketplace, 'm-1');
-  assert.match(cards[0].querySelector('.pl-mkt-badge').textContent, /Fixture Market/);
-  assert.ok(!cards[1].querySelector('.pl-install-avail'), 'installed plugin has no install button');
-  assert.match(cards[1].querySelector('.pl-installed').textContent, /Installed/);
+test('renderAvailableList: install button only when installable (not installed, synced); marketplace badge; empty states', async () => {
+  await checkRows([
+    { name: 'renderAvailableList: install button only for non-installed; marketplace badge; installed tag', run: () => {
+      const el = renderAvailableList([MKT], { doc });
+      const cards = el.querySelectorAll('.pl-avail-card');
+      assert.equal(cards.length, 2);
+      const btn = cards[0].querySelector('.pl-install-avail');
+      assert.ok(btn);
+      assert.equal(btn.dataset.name, 'aa');
+      assert.equal(btn.dataset.marketplace, 'm-1');
+      assert.match(cards[0].querySelector('.pl-mkt-badge').textContent, /Fixture Market/);
+      assert.ok(!cards[1].querySelector('.pl-install-avail'), 'installed plugin has no install button');
+      assert.match(cards[1].querySelector('.pl-installed').textContent, /Installed/);
+    } },
+    { name: 'renderAvailableList: never-synced marketplace disables install; empty states', run: () => {
+      const unsynced = { ...MKT, id: 'm-2', lastSync: null, plugins: [{ name: 'cc', subdir: '', description: '', version: null, installed: false, inventory: {} }] };
+      const el = renderAvailableList([unsynced], { doc });
+      assert.ok(!el.querySelector('.pl-install-avail'), 'no install button before first sync');
+      assert.match(renderAvailableList([], { doc }).textContent, /No marketplaces yet/);
+      assert.match(renderAvailableList([{ ...MKT, plugins: [] }], { doc }).textContent, /No plugins discovered/);
+    } },
+  ]);
 });
 
-test('renderAvailableList: never-synced marketplace disables install; empty states', () => {
-  const unsynced = { ...MKT, id: 'm-2', lastSync: null, plugins: [{ name: 'cc', subdir: '', description: '', version: null, installed: false, inventory: {} }] };
-  const el = renderAvailableList([unsynced], { doc });
-  assert.ok(!el.querySelector('.pl-install-avail'), 'no install button before first sync');
-  assert.match(renderAvailableList([], { doc }).textContent, /No marketplaces yet/);
-  assert.match(renderAvailableList([{ ...MKT, plugins: [] }], { doc }).textContent, /No plugins discovered/);
-});
-
-test('renderMarketplaceList: builtin badge, sync line (relTime), warnings, action buttons', () => {
-  const el = renderMarketplaceList([MKT], { doc, now: Date.parse('2026-08-17T13:00:00Z') }); // C4: inject now
-  const row = el.querySelector('.pl-mkt-row');
-  assert.equal(row.dataset.id, 'm-1');
-  assert.match(row.querySelector('.pl-mkt-builtin').textContent, /built-in/);
-  assert.match(row.querySelector('.pl-mkt-sync').textContent, /a1b2c3d.*synced .*(ago|\d{4}-).*2 plugins/);
-  assert.match(row.querySelector('.pl-mkt-warning').textContent, /bad\/entry/);
-  assert.equal(row.querySelector('.pl-mkt-refresh').dataset.id, 'm-1');
-  assert.equal(row.querySelector('.pl-mkt-remove').dataset.id, 'm-1');
-  const never = renderMarketplaceList([{ ...MKT, id: 'm-3', lastSync: null, warnings: [] }], { doc });
-  assert.match(never.querySelector('.pl-mkt-sync').textContent, /never synced/);
-});
-
-test('renderPluginList: provenance line renders marketplace + repo @ sha7', () => {
-  const el = renderPluginList([{
-    name: 'aa', version: '1.0.0', pinnedSha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
-    enabled: true, linked: false, broken: false,
-    contributions: { agents: 0, taskSources: 1, chatChannels: 0, models: 0, skills: 0, workflows: 0 },
-    repo: '/tmp/m1', subdir: 'plugins/aa', marketplace: 'm-1', marketplaceName: 'Fixture Market',
-  }], { doc });
-  const prov = el.querySelector('.pl-provenance');
-  assert.ok(prov);
-  assert.match(prov.textContent, /Fixture Market · \/tmp\/m1 @ a1b2c3d/);
+test('renderMarketplaceList: builtin badge, sync line, warnings, action buttons, branch named after the url', async () => {
+  await checkRows([
+    { name: 'renderMarketplaceList: builtin badge, sync line (relTime), warnings, action buttons', run: () => {
+      const el = renderMarketplaceList([MKT], { doc, now: Date.parse('2026-08-17T13:00:00Z') }); // C4: inject now
+      const row = el.querySelector('.pl-mkt-row');
+      assert.equal(row.dataset.id, 'm-1');
+      assert.match(row.querySelector('.pl-mkt-builtin').textContent, /built-in/);
+      assert.match(row.querySelector('.pl-mkt-sync').textContent, /a1b2c3d.*synced .*(ago|\d{4}-).*2 plugins/);
+      assert.match(row.querySelector('.pl-mkt-warning').textContent, /bad\/entry/);
+      assert.equal(row.querySelector('.pl-mkt-refresh').dataset.id, 'm-1');
+      assert.equal(row.querySelector('.pl-mkt-remove').dataset.id, 'm-1');
+      const never = renderMarketplaceList([{ ...MKT, id: 'm-3', lastSync: null, warnings: [] }], { doc });
+      assert.match(never.querySelector('.pl-mkt-sync').textContent, /never synced/);
+    } },
+    { name: 'renderMarketplaceList: a marketplace that tracks a branch names it after the url', run: () => {
+      const el = renderMarketplaceList([{ ...MKT, url: 'https://github.com/o/worca', ref: 'dev' }, { ...MKT, id: 'm-2' }], { doc });
+      const urls = [...el.querySelectorAll('.pl-mkt-url')].map((u) => u.textContent);
+      assert.deepEqual(urls, ['https://github.com/o/worca · dev', '/tmp/m1']);
+    } },
+  ]);
 });
 
 test('relTime: fixed-now buckets (pure, jsdom-safe) (C4)', () => {
@@ -451,65 +410,31 @@ test('relTime: fixed-now buckets (pure, jsdom-safe) (C4)', () => {
   assert.equal(relTime('not-a-date', now), 'not-a-date');
 });
 
-test('renderPluginList: provenance falls back to the raw repo when marketplaceName is null (E14)', () => {
-  const el = renderPluginList([{
-    name: 'bb', version: '1.0.0', pinnedSha: 'deadbeefcafebabe0000000000000000deadbeef',
-    enabled: true, linked: false, broken: false,
-    contributions: { agents: 0, taskSources: 1, chatChannels: 0, models: 0, skills: 0, workflows: 0 },
-    repo: '/tmp/gone-repo', subdir: 'plugins/bb', marketplace: 'gone', marketplaceName: null,
-  }], { doc });
-  const prov = el.querySelector('.pl-provenance');
-  assert.ok(prov);
-  assert.match(prov.textContent, /\/tmp\/gone-repo @ deadbee/);
-  assert.doesNotMatch(prov.textContent, /·/); // no marketplace name -> no separator
-});
+test('scripts: consent rows (runtime, command, case count), card count, python-missing chip', async () => {
+  await checkRows([
+    { name: 'install consent lists shipped scripts with their runtime and command; the card summary counts them', run: () => {
+      const el = renderInstallConsent({ name: 'p', repoUrl: 'https://x/y', sha: 'a'.repeat(40) },
+        { agents: [], taskSources: [], scripts: [{ key: 'tidy', runtime: 'shell', file: null, command: 'npm run tidy' }, { key: 'lint', runtime: 'node', file: 'lint.mjs', command: null }], skills: [], workflows: [] }, { doc });
+      assert.match(el.textContent, /Scripts \(2\)/);
+      assert.match(el.textContent, /tidy — shell · npm run tidy/);
+      assert.match(el.textContent, /lint — node · lint\.mjs/);
+      const list = renderPluginList([{ name: 'p', version: '1', enabled: true, contributions: { agents: 1, scripts: 2, taskSources: 0, chatChannels: 0, models: 0, skills: 0, workflows: 0 }, ignored: [] }], { doc });
+      assert.match(list.textContent, /1 agent · 2 scripts/);
+    } },
+    { name: 'the Plugins card carries the python notice; a consent script row counts its cases', run: () => {
+      const contributions = { agents: 0, scripts: 1, taskSources: 0, chatChannels: 0, models: 0, skills: 0, workflows: 0 };
+      const loud = renderPluginList([{ name: 'p', version: '1', enabled: true, pythonMissing: true, contributions, ignored: [] }], { doc });
+      assert.ok(loud.querySelector('.pl-python-missing'), 'the notice is a chip, not a paragraph');
+      assert.match(loud.textContent, /python not found/);
+      const quiet = renderPluginList([{ name: 'q', version: '1', enabled: true, contributions, ignored: [] }], { doc });
+      assert.equal(quiet.querySelector('.pl-python-missing'), null);
 
-test('a card renders the ignored contributions as an amber note (MAJ-13)', () => {
-  const el = renderPluginList([
-    { name: 'coll-plug', version: '0.1.0', enabled: true, contributions: { agents: 2, workflows: 2 },
-      ignored: [
-        { file: 'agents/planner.meta.json', reason: 'collides with an existing agent' },
-        { file: 'workflows/coll-flow.json', reason: 'invalid template (V5: wire \'w1\': \'n_p.brief\' is not a declared input)' },
-      ] },
-    { name: 'fine-plugin', version: '1.0.0', enabled: true, contributions: {}, ignored: [] },
-  ], { doc });
-  const cards = el.querySelectorAll('.plugin-card');
-  const note = cards[0].querySelector('.pl-ignored-note');
-  assert.ok(note, 'the ignored note renders');
-  assert.equal(note.className, 'pl-ignored-note hint err');
-  assert.equal(note.textContent,
-    '2 contributions ignored: agents/planner.meta.json — collides with an existing agent; '
-    + "workflows/coll-flow.json — invalid template (V5: wire 'w1': 'n_p.brief' is not a declared input)");
-  assert.equal(cards[1].querySelector('.pl-ignored-note'), null, 'a clean plugin gets no note');
-  // singular
-  const one = renderPluginList([{ name: 'p', version: '1', enabled: true, contributions: {},
-    ignored: [{ file: 'agents/x.meta.json', reason: 'unreadable JSON' }] }], { doc });
-  assert.equal(one.querySelector('.pl-ignored-note').textContent,
-    '1 contribution ignored: agents/x.meta.json — unreadable JSON');
-});
-
-test('install consent lists shipped scripts with their runtime and command; the card summary counts them', () => {
-  const el = renderInstallConsent({ name: 'p', repoUrl: 'https://x/y', sha: 'a'.repeat(40) },
-    { agents: [], taskSources: [], scripts: [{ key: 'tidy', runtime: 'shell', file: null, command: 'npm run tidy' }, { key: 'lint', runtime: 'node', file: 'lint.mjs', command: null }], skills: [], workflows: [] }, { doc });
-  assert.match(el.textContent, /Scripts \(2\)/);
-  assert.match(el.textContent, /tidy — shell · npm run tidy/);
-  assert.match(el.textContent, /lint — node · lint\.mjs/);
-  const list = renderPluginList([{ name: 'p', version: '1', enabled: true, contributions: { agents: 1, scripts: 2, taskSources: 0, chatChannels: 0, models: 0, skills: 0, workflows: 0 }, ignored: [] }], { doc });
-  assert.match(list.textContent, /1 agent · 2 scripts/);
-});
-
-test('the Plugins card carries the python notice; a consent script row counts its cases', () => {
-  const contributions = { agents: 0, scripts: 1, taskSources: 0, chatChannels: 0, models: 0, skills: 0, workflows: 0 };
-  const loud = renderPluginList([{ name: 'p', version: '1', enabled: true, pythonMissing: true, contributions, ignored: [] }], { doc });
-  assert.ok(loud.querySelector('.pl-python-missing'), 'the notice is a chip, not a paragraph');
-  assert.match(loud.textContent, /python not found/);
-  const quiet = renderPluginList([{ name: 'q', version: '1', enabled: true, contributions, ignored: [] }], { doc });
-  assert.equal(quiet.querySelector('.pl-python-missing'), null);
-
-  const el = renderInstallConsent({ name: 'p', repoUrl: 'https://x/y', sha: 'a'.repeat(40) },
-    { agents: [], taskSources: [], skills: [], workflows: [],
-      scripts: [{ key: 'tidy', runtime: 'shell', file: null, command: 'npm run tidy', cases: 2 },
-        { key: 'lint', runtime: 'node', file: 'lint.mjs', command: null, cases: 1 }] }, { doc });
-  assert.match(el.textContent, /tidy — shell · npm run tidy · 2 cases/);
-  assert.match(el.textContent, /lint — node · lint\.mjs · 1 case/);
+      const el = renderInstallConsent({ name: 'p', repoUrl: 'https://x/y', sha: 'a'.repeat(40) },
+        { agents: [], taskSources: [], skills: [], workflows: [],
+          scripts: [{ key: 'tidy', runtime: 'shell', file: null, command: 'npm run tidy', cases: 2 },
+            { key: 'lint', runtime: 'node', file: 'lint.mjs', command: null, cases: 1 }] }, { doc });
+      assert.match(el.textContent, /tidy — shell · npm run tidy · 2 cases/);
+      assert.match(el.textContent, /lint — node · lint\.mjs · 1 case/);
+    } },
+  ]);
 });

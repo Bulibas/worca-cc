@@ -19,6 +19,7 @@ import { mkdir, rm, realpath, readdir, rename, stat } from 'node:fs/promises';
 import { basename, join, resolve, sep } from 'node:path';
 
 import { slugify } from './artifacts.mjs';
+import { clearStaleIndexLock } from './git-lock.mjs';
 // settings.mjs is a leaf (node builtins only), so importing the §10 flag reader here
 // adds no dependency on the DB layer — worktree.mjs stays DB-free.
 import { runRootMode } from './settings.mjs';
@@ -419,31 +420,40 @@ export function runGitCapture(cwd, args, { signal, timeoutMs = SLOW_GIT_TIMEOUT_
  * name. A clean tree is SUCCESS with `file: null` (nothing to save is not a
  * failure — discard after a manual commit relies on it). A git failure returns
  * without removing anything so the checkout stays authoritative.
+ * When a stale index lock had to be removed first, every result after that carries
+ * `clearedLock: { path, ageMs }` so the caller can leave a trace of it.
  */
 export async function snapshotWorktreePatch(worktreeDir, outFile) {
   if (!worktreeDir || !outFile) {
     return { ok: false, step: 'path', message: 'worktreeDir and outFile are required' };
   }
-  const add = await git(worktreeDir, ['add', '-A'], { timeout: SLOW_GIT_TIMEOUT_MS });
+  let add = await git(worktreeDir, ['add', '-A'], { timeout: SLOW_GIT_TIMEOUT_MS });
+  // A leftover lock from a killed git is the usual reason a retained run's commit failed;
+  // without this, discard and delete could never save the work once it is stale.
+  const clearedLock = add.ok ? null : await clearStaleIndexLock(worktreeDir);
+  if (clearedLock) {
+    add = await git(worktreeDir, ['add', '-A'], { timeout: SLOW_GIT_TIMEOUT_MS });
+  }
+  const done = (res) => (clearedLock ? { ...res, clearedLock } : res);
   if (!add.ok) {
-    return { ok: false, step: 'add', message: add.stderr.trim() || `exit ${add.code}`, fromStderr: !!add.stderr.trim() };
+    return done({ ok: false, step: 'add', message: add.stderr.trim() || `exit ${add.code}`, fromStderr: !!add.stderr.trim() });
   }
   const part = `${outFile}.part`;
   const diff = await git(worktreeDir, ['diff', '--binary', `--output=${part}`, 'HEAD', '--'],
     { timeout: SLOW_GIT_TIMEOUT_MS });
   if (!diff.ok) {
     await rm(part, { force: true }).catch(() => {});
-    return { ok: false, step: 'diff', message: diff.stderr.trim() || `exit ${diff.code}`, fromStderr: !!diff.stderr.trim() };
+    return done({ ok: false, step: 'diff', message: diff.stderr.trim() || `exit ${diff.code}`, fromStderr: !!diff.stderr.trim() });
   }
   let bytes = 0;
   try { bytes = (await stat(part)).size; } catch { /* treated as empty below */ }
   if (!bytes) {
     // Nothing uncommitted: a 0-byte "recovery patch" on disk would be a lie.
     await rm(part, { force: true }).catch(() => {});
-    return { ok: true, file: null, bytes: 0 };
+    return done({ ok: true, file: null, bytes: 0 });
   }
   await rename(part, outFile);
-  return { ok: true, file: outFile, bytes };
+  return done({ ok: true, file: outFile, bytes });
 }
 
 function firstLine(text) {

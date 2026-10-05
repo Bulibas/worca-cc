@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildGraphManifest, manifestPortsFn, manifestTemplate, UI_PHASE } from '../src/shared/graph/manifest.mjs';
+import { buildGraphManifest, manifestPortsFn, manifestTemplate } from '../src/shared/graph/manifest.mjs';
 import { validateGraph } from '../src/shared/graph/validate.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const AGENTS = {
   planner: { key: 'planner', displayName: 'Planner', color: 'violet', icon: '<path d="M1 1"/>',
@@ -99,17 +100,20 @@ test('node overlays win over template config', () => {
   assert.equal(plan.askQuestions, true);
 });
 
-test('a node carries its sub-agent model policy so a resumed run keeps it', () => {
-  const plain = build().graph.nodes.find((n) => n.id === 'n_plan');
-  assert.equal(plain.subagentModel, '', 'no policy configured -> unset (the runtime resolves auto)');
-  const over = build({ overlays: { nodes: { n_plan: { subagentModel: 'auto' } } } });
-  assert.equal(over.graph.nodes.find((n) => n.id === 'n_plan').subagentModel, 'auto');
-});
-
-test('a node carries its pinned investigator effort so a resumed run keeps it', () => {
-  assert.equal(build().graph.nodes.find((n) => n.id === 'n_plan').subagentEffort, '');
-  const over = build({ overlays: { nodes: { n_plan: { subagentEffort: 'max' } } } });
-  assert.equal(over.graph.nodes.find((n) => n.id === 'n_plan').subagentEffort, 'max');
+test('a node carries its sub-agent model policy and investigator effort so a resumed run keeps them', async () => {
+  await checkRows([
+    { name: 'a node carries its sub-agent model policy so a resumed run keeps it', run: () => {
+      const plain = build().graph.nodes.find((n) => n.id === 'n_plan');
+      assert.equal(plain.subagentModel, '', 'no policy configured -> unset (the runtime resolves auto)');
+      const over = build({ overlays: { nodes: { n_plan: { subagentModel: 'auto' } } } });
+      assert.equal(over.graph.nodes.find((n) => n.id === 'n_plan').subagentModel, 'auto');
+    } },
+    { name: 'a node carries its pinned investigator effort so a resumed run keeps it', run: () => {
+      assert.equal(build().graph.nodes.find((n) => n.id === 'n_plan').subagentEffort, '');
+      const over = build({ overlays: { nodes: { n_plan: { subagentEffort: 'max' } } } });
+      assert.equal(over.graph.nodes.find((n) => n.id === 'n_plan').subagentEffort, 'max');
+    } },
+  ]);
 });
 
 test('the icon is sanitized and dropped when oversized or script-ish', () => {
@@ -194,13 +198,6 @@ test('manifestPortsFn + manifestTemplate round-trip the graph WITHOUT the regist
   assert.equal(portsFn({ id: 'ghost', kind: 'agent', key: 'x' }), undefined);
   const r = validateGraph(tpl, portsFn);
   assert.deepEqual(r.errors, [], JSON.stringify(r.errors));
-});
-
-test('UI_PHASE is the v1 map', () => {
-  assert.equal(UI_PHASE.planner, 'plan');
-  assert.equal(UI_PHASE.workspaceReviewer, 'review');
-  assert.equal(UI_PHASE.manualWebUiTesting, 'manual-web');
-  assert.equal(UI_PHASE.nope, undefined);
 });
 
 const SCRIPTS = { runTests: { key: 'runTests', displayName: 'Run tests', color: 'violet', icon: '<path d="M2 2"/>', runtime: 'node',

@@ -265,8 +265,18 @@ Access.
   named emails, and use one deployment per person or per set of credentials, never one per project.
 - Scope the secrets: a fine-grained `GH_TOKEN`, a spend limit on an Anthropic API key, and worca's
   per-run cost caps.
+- **One MCP registry and one MCP secrets file per instance** ([mcp-servers.md](mcp-servers.md)):
+  every allowed person edits the same sets and can replace, never read, their secrets, and every
+  person's runs and chats use them. Per-person sets are not supported.
 - To share one deployment as a team without sharing a model key, run the
   [credential broker](credential-broker.md) in multi mode: each person saves their own keys on
   its key page, agents never hold a key, and costs are charged to whoever caused them.
 - Desktop features act on the server: the folder picker becomes a text field
   (`WORCA_NO_NATIVE_DIALOG=1`).
+- [Actions](actions.md) are refused (`403 ACTIONS_DISABLED`) unless the server starts with
+  `WORCA_ACTIONS_REMOTE=1`. Check out, Discard, Copy command and editing the actions config keep
+  working; a saved command runs only once actions are on. With agent isolation
+  on, callers inside the box (which could be an agent) can never run or edit actions. Enabling
+  actions means the branch's code, which agents wrote, runs as the server user whenever a person
+  clicks Run. That is the point of the feature, but know it before you turn it on.
+- The [terminal](terminal.md) is refused (403 TERMINAL_DISABLED) unless the server starts with WORCA_TERMINAL_REMOTE=1. Enabling it lets anyone signed in run commands as the server user. With agent isolation on, callers inside the box can never use it. It also requires the page's Origin to match the Host exactly, so a proxy in front of Worca must forward Host unchanged.

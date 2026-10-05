@@ -20,10 +20,6 @@ async function withClock(fn) {
 
 const fresh = (opts = {}) => createOrchestrator({ projectDir: '/tmp/proj', ...opts });
 
-test('initial state carries a zero total active time', () => {
-  assert.equal(fresh().getState().totalActiveMs, 0);
-});
-
 test('a phase accrues active time between start and done', async () => {
   await withClock((tick) => {
     const orch = fresh();

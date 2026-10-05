@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { cardAlertOf } from './helpers/feedback.mjs';
 
 // Workspace runs: one PR per AFFECTED member repo. The saved-run detail header's
 // per-repo list and the workspace Ship-it dialog (per-repo rows, sequential POSTs,
@@ -311,7 +312,7 @@ test('partial failure: per-repo error, success kept, retry re-POSTs ONLY the fai
   assert.equal(apiRow.querySelector('.shipit-repo-pick').disabled, true, 'an opened repo is done');
   assert.match(webRow.querySelector('.shipit-repo-status').textContent, /Could not open PR: git push failed: denied/);
   assert.equal(modal.querySelector('.shipit-ok').textContent, 'Retry 1 failed');
-  assert.match(modal.querySelector('.shipit-err').textContent, /1 of 2 pull requests could not be opened/);
+  assert.match(cardAlertOf(modal.querySelector('.shipit-card')).detail, /1 of 2 pull requests could not be opened/);
   assert.equal(crossPosts(ctx).length, 1, 'cross-linked after the round that opened api');
   assert.equal(hdRepos(ctx.window).querySelector('.hd-pr-repo-link').href, 'https://x/api-00000001/pull/1', 'header in step');
 

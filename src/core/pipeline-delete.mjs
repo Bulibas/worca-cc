@@ -19,15 +19,16 @@ import { join, isAbsolute } from 'node:path';
 
 import { projectKey, projectStorePath } from './store.mjs';
 import {
-  listArtifacts, readPipelineByKey, persistPrState, retainedWorkFor,
+  listArtifacts, readPipelineByKey, persistPrState, retainedWorkFor, checkoutRecordsFor,
   recordArtifact, appendAudit, findRunDir, readMemberPrStates, persistMemberPrState,
 } from './artifacts.mjs';
 import { workspaceMembers } from './workspace-prs.mjs';
 import { worcaHome } from './projects.mjs';
 import { getDb, tx } from './db.mjs';
 import { removeWorktree, snapshotWorktreePatch } from './worktree.mjs';
+import { staleIndexLockNote } from './git-lock.mjs';
 import {
-  rmGuarded, readRunManifest, rescueModifiedMounts, scanStrayEntries, copyRunManifestTo,
+  rmGuarded, readRunManifest, rescueModifiedMounts, scanStrayEntries, copyRunManifestTo, RETAIN_REASONS,
 } from './run-manifest.mjs';
 import { branchExists, hasGh, findPrForBranch } from './git-info.mjs';
 import { retainedWorkPatchName } from './results.mjs';
@@ -141,6 +142,7 @@ export async function archivePipeline({ projectDir = null, key = null, workspace
   if (retainedWorkFor(row)) {
     throw err('cannot archive while retained uncommitted work exists; recover it or discard the worktree first', 'RETAINED_WORKTREE');
   }
+  if (checkoutRecordsFor(row)) throw err('cannot archive while the run is checked out; discard the checkout first', 'RETAINED_WORKTREE');
   // The run root is the one thing archive destroys that can still hold retained
   // checkouts (detached members live at runs/<id>/repos/<key>). Resolve it ONCE,
   // here, for the guards below AND the 2b) removal further down.
@@ -171,6 +173,9 @@ export async function archivePipeline({ projectDir = null, key = null, workspace
     const guardManifest = await readRunManifest(runRoot);
     const members = Array.isArray(guardManifest?.retain?.members) ? guardManifest.retain.members : [];
     if (members.some((m) => m?.worktreeDir && existsSync(m.worktreeDir))) {
+      if (guardManifest.retain.reason === RETAIN_REASONS.CHECKOUT) {
+        throw err('cannot archive while the run is checked out; discard the checkout first', 'RETAINED_WORKTREE');
+      }
       throw err('cannot archive while retained uncommitted work exists; recover it or discard the worktree first', 'RETAINED_WORKTREE');
     }
   }
@@ -294,6 +299,49 @@ export async function archivePipeline({ projectDir = null, key = null, workspace
 }
 
 /**
+ * The inverse of archivePipeline: clear a soft-deleted row's `archived_at` so the run
+ * is listed (and chain-gated) again. Nothing on disk comes back — the archive contract
+ * reclaimed the run dir, the branch and the artifacts, so a restored run is a read-only
+ * record with a working PR link and its audit timeline — never resumable (its resume
+ * point is cleared; a paused row comes back interrupted). Mirrors the archive preamble
+ * (same store-key resolution, same lookupRow, same guards) so the two routes stay
+ * symmetrical.
+ * @param {{ projectDir?:string, key?:string, workspaceKey?:string, id:string }} args
+ * @returns {Promise<null | { ok, id, restored, warnings } | { ok, id, alreadyActive, warnings }>}
+ *          null => no pipeline with that id (404). Throws err(code:'RUNNING') for the
+ *          defensive active-status guard (an archived run cannot be live, so this only
+ *          fires on a corrupt row — the HTTP route refuses live runs earlier anyway).
+ *          An active (never-archived, or already restored) row short-circuits to
+ *          { alreadyActive: true } — idempotent, like archive's alreadyArchived.
+ */
+export async function restorePipeline({ projectDir = null, key = null, workspaceKey = null, id } = {}) {
+  if (!id || typeof id !== 'string') throw err('id is required', 'BAD_REQUEST');
+
+  const storeKey = workspaceKey
+    ? `workspaces/${workspaceKey}`
+    : (key || (projectDir ? projectKey(projectDir) : null));
+  if (!storeKey) throw err('projectKey, projectDir or workspaceKey is required', 'BAD_REQUEST');
+
+  const row = lookupRow(storeKey, id);
+  if (!row) return null;
+  if (ACTIVE.has(String(row.status || '').toLowerCase())) {
+    throw err('cannot restore a running pipeline', 'RUNNING');
+  }
+  if (!row.archived_at) {
+    return { ok: true, id: row.id, alreadyActive: true, warnings: [] };
+  }
+  // Archive reclaimed the run dir a resume runs out of, so the resume point is dead
+  // weight: drop it, and a PAUSED row becomes interrupted (the db.mjs v2-upgrade idiom;
+  // Statistics buckets the two together). Left paused it would sit in Needs you for
+  // good, offering a Resume that can only fail.
+  const wasPaused = String(row.status || '').toLowerCase() === 'paused';
+  tx(() => {
+    getDb().prepare(`UPDATE pipelines SET archived_at = NULL, resume_point = NULL${wasPaused ? ", status = 'interrupted'" : ''} WHERE id = ?`).run(row.id);
+  });
+  return { ok: true, id: row.id, restored: true, ...(wasPaused ? { wasPaused: true } : {}), warnings: [] };
+}
+
+/**
  * Explicitly reclaim worktrees retained after a teardown commit failure while
  * preserving the pipeline row and artifact directory. Every live checkout is
  * snapshotted first; any snapshot failure aborts before removal.
@@ -352,9 +400,11 @@ export async function discardRetainedWorktrees({ projectDir = null, key = null, 
   // workspace, without ever holding a whole patch in memory.
   await mkdir(runDir, { recursive: true });
   const patches = [];
+  const lockNotes = [];
   for (const target of targets) {
     const name = retainedWorkPatchName(state.target === 'workspace' ? (target.projectKey || 'member') : null);
     const snap = await snapshotWorktreePatch(target.worktreeDir, join(runDir, name));
+    if (snap.clearedLock) lockNotes.push(staleIndexLockNote(snap.clearedLock));
     if (!snap.ok) {
       throw err(
         `cannot save recovery patch for ${target.projectKey || target.worktreeDir}: git ${snap.step} failed: ${snap.message}`,
@@ -369,7 +419,7 @@ export async function discardRetainedWorktrees({ projectDir = null, key = null, 
 
   const report = {
     ok: true, id: row.id, discarded: false, remaining: 0, worktrees: [], patches,
-    runRoot: null, warnings: [],
+    runRoot: null, warnings: lockNotes,
   };
   if (existsSync(runRoot)) {
     const manifest = await readRunManifest(runRoot);

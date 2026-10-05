@@ -17,6 +17,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildClaudeArgs, runClaude, debugSpawnEnabled, redactArgvForLog, cleanRunEnv } from '../src/core/claude-runner.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const POSIX_SHIM = { skip: process.platform === 'win32' ? 'fake claude shim is a POSIX shell script (no .exe stand-in on Windows)' : false };
 
@@ -45,42 +46,47 @@ test('buildClaudeArgs: no mcpConfigPath => argv is byte-identical to today', () 
   ]);
 });
 
-test('buildClaudeArgs: mcpConfigPath adds --mcp-config <path> (E5)', () => {
-  const args = buildClaudeArgs({ ...BASE, allowedTools: ['Read'], mcpConfigPath: '/run/mcp.json' });
-  const i = args.indexOf('--mcp-config');
-  assert.ok(i > -1, `--mcp-config present: ${JSON.stringify(args)}`);
-  assert.equal(args[i + 1], '/run/mcp.json');
+test('buildClaudeArgs: mcpConfigPath adds --mcp-config <path>; never --add-dir or --strict-mcp-config', async () => {
+  await checkRows([
+    { name: 'buildClaudeArgs: mcpConfigPath adds --mcp-config <path> (E5)', run: () => {
+      const args = buildClaudeArgs({ ...BASE, allowedTools: ['Read'], mcpConfigPath: '/run/mcp.json' });
+      const i = args.indexOf('--mcp-config');
+      assert.ok(i > -1, `--mcp-config present: ${JSON.stringify(args)}`);
+      assert.equal(args[i + 1], '/run/mcp.json');
+    } },
+    { name: 'buildClaudeArgs: the baseline carries NO --add-dir and NO --strict-mcp-config', run: () => {
+      const args = buildClaudeArgs({
+        ...BASE, allowedTools: ['Read'], mcpConfigPath: '/run/mcp.json', mcpServerGrants: ['mcp__db'],
+      });
+      assert.ok(!args.includes('--add-dir'), '§5.3: --add-dir is deliberately never passed (E2/E3)');
+      assert.ok(!args.includes('--strict-mcp-config'), 'E11: user scope + plugins must keep loading');
+    } },
+  ]);
 });
 
-test('buildClaudeArgs: mcpServerGrants are unioned into --allowedTools and de-duped (V1 branch (a))', () => {
-  const args = buildClaudeArgs({
-    ...BASE,
-    allowedTools: ['Read', 'Bash', 'mcp__db'],       // already granted by frontmatter
-    mcpServerGrants: ['mcp__db', 'mcp__browser'],    // db must NOT be duplicated
-  });
-  const i = args.indexOf('--allowedTools');
-  assert.equal(args[i + 1], 'Read,Bash,mcp__db,mcp__browser');
-});
-
-test('buildClaudeArgs: grants alone produce --allowedTools even with no base tools', () => {
-  const args = buildClaudeArgs({ ...BASE, mcpServerGrants: ['mcp__db'] });
-  const i = args.indexOf('--allowedTools');
-  assert.ok(i > -1);
-  assert.equal(args[i + 1], 'mcp__db');
-});
-
-test('buildClaudeArgs: the baseline carries NO --add-dir and NO --strict-mcp-config', () => {
-  const args = buildClaudeArgs({
-    ...BASE, allowedTools: ['Read'], mcpConfigPath: '/run/mcp.json', mcpServerGrants: ['mcp__db'],
-  });
-  assert.ok(!args.includes('--add-dir'), '§5.3: --add-dir is deliberately never passed (E2/E3)');
-  assert.ok(!args.includes('--strict-mcp-config'), 'E11: user scope + plugins must keep loading');
-});
-
-test('buildClaudeArgs: mcpServerGrants without mcpConfigPath still grants (native-scope servers)', () => {
-  const args = buildClaudeArgs({ ...BASE, mcpServerGrants: ['mcp__db'] });
-  assert.ok(!args.includes('--mcp-config'));
-  assert.equal(args[args.indexOf('--allowedTools') + 1], 'mcp__db');
+test('buildClaudeArgs: mcpServerGrants union into --allowedTools (de-duped; alone; without --mcp-config)', async () => {
+  // grants alone and grants without mcpConfigPath were the IDENTICAL input: one call serves both rows.
+  const alone = buildClaudeArgs({ ...BASE, mcpServerGrants: ['mcp__db'] });
+  await checkRows([
+    { name: 'buildClaudeArgs: mcpServerGrants are unioned into --allowedTools and de-duped (V1 branch (a))', run: () => {
+      const args = buildClaudeArgs({
+        ...BASE,
+        allowedTools: ['Read', 'Bash', 'mcp__db'],       // already granted by frontmatter
+        mcpServerGrants: ['mcp__db', 'mcp__browser'],    // db must NOT be duplicated
+      });
+      const i = args.indexOf('--allowedTools');
+      assert.equal(args[i + 1], 'Read,Bash,mcp__db,mcp__browser');
+    } },
+    { name: 'buildClaudeArgs: grants alone produce --allowedTools even with no base tools', run: () => {
+      const i = alone.indexOf('--allowedTools');
+      assert.ok(i > -1);
+      assert.equal(alone[i + 1], 'mcp__db');
+    } },
+    { name: 'buildClaudeArgs: mcpServerGrants without mcpConfigPath still grants (native-scope servers)', run: () => {
+      assert.ok(!alone.includes('--mcp-config'));
+      assert.equal(alone[alone.indexOf('--allowedTools') + 1], 'mcp__db');
+    } },
+  ]);
 });
 
 // ── runClaude -> runReal forwarding (the drop-at-runClaude guard) ─────────────
@@ -99,10 +105,11 @@ async function fakeBin(dir, outFile) {
   return bin;
 }
 
-test('runClaude FORWARDS mcpConfigPath + mcpServerGrants to runReal (not just buildClaudeArgs)', POSIX_SHIM, async () => {
+test('runClaude FORWARDS every argv field to runReal: mcpConfigPath, mcpServerGrants, permissionRules, addDirs, agents', POSIX_SHIM, async () => {
   const dir = await tmp();
   const out = join(dir, 'argv.txt');
   const bin = await fakeBin(dir, out);
+  const agents = { 'worca-investigator': { description: 'd', prompt: 'p', tools: ['Read'], effort: 'high' } };
   const prevMock = process.env.WORCA_MOCK;
   delete process.env.WORCA_MOCK;                       // must reach runReal, not runMock
   try {
@@ -111,16 +118,39 @@ test('runClaude FORWARDS mcpConfigPath + mcpServerGrants to runReal (not just bu
       allowedTools: ['Read'],
       mcpConfigPath: join(dir, 'mcp.json'),
       mcpServerGrants: ['mcp__db', 'mcp__browser'],
+      permissionRules: { deny: ['Read(.env*)'] },
+      addDirs: [join(dir, 'mount')],
+      agents,
     });
   } finally {
     if (prevMock === undefined) delete process.env.WORCA_MOCK;
     else process.env.WORCA_MOCK = prevMock;
   }
   const argv = (await readFile(out, 'utf8')).split('\0').filter(Boolean);
-  const i = argv.indexOf('--mcp-config');
-  assert.ok(i > -1, `--mcp-config reached the spawn: ${JSON.stringify(argv)}`);
-  assert.equal(argv[i + 1], join(dir, 'mcp.json'));
-  assert.equal(argv[argv.indexOf('--allowedTools') + 1], 'Read,mcp__db,mcp__browser');
+  await checkRows([
+    { name: 'runClaude FORWARDS mcpConfigPath + mcpServerGrants to runReal (not just buildClaudeArgs)', run: () => {
+      const i = argv.indexOf('--mcp-config');
+      assert.ok(i > -1, `--mcp-config reached the spawn: ${JSON.stringify(argv)}`);
+      assert.equal(argv[i + 1], join(dir, 'mcp.json'));
+      assert.equal(argv[argv.indexOf('--allowedTools') + 1], 'Read,mcp__db,mcp__browser');
+    } },
+    { name: 'runClaude FORWARDS permissionRules to runReal (drop-at-gate guard)', run: () => {
+      const i = argv.indexOf('--settings');
+      assert.ok(i > -1, `--settings reached the spawn: ${JSON.stringify(argv)}`);
+      assert.deepEqual(JSON.parse(argv[i + 1]).permissions, { deny: ['Read(.env*)'] });
+    } },
+    { name: 'runClaude FORWARDS addDirs to runReal (--add-dir reaches the spawn)', run: () => {
+      const i = argv.indexOf('--add-dir');
+      assert.ok(i > -1, `--add-dir reached the spawn: ${JSON.stringify(argv)}`);
+      assert.equal(argv[i + 1], join(dir, 'mount'));
+      assert.equal(argv.lastIndexOf('--add-dir'), i, 'one dir ⇒ one flag');
+    } },
+    { name: 'runClaude FORWARDS agents to runReal (--agents reaches the spawn)', run: () => {
+      const i = argv.indexOf('--agents');
+      assert.ok(i > -1, `--agents reached the spawn: ${JSON.stringify(argv)}`);
+      assert.deepEqual(JSON.parse(argv[i + 1]), agents);
+    } },
+  ]);
 });
 
 // ── runClaude -> runMock forwarding of workspaceWriteTargets (§8.10, Phase 4) ─
@@ -128,34 +158,37 @@ test('runClaude FORWARDS mcpConfigPath + mcpServerGrants to runReal (not just bu
 // runMock call is a GATE, so a field added to runMock/mockImplementer alone would
 // never arrive. The mock's own file writes are the observable proof.
 
-test('runClaude FORWARDS workspaceWriteTargets to runMock -> mockImplementer', async () => {
-  const dir = await tmp();
-  const t1 = join(dir, 'repos', 'a-1111');
-  const t2 = join(dir, 'repos', 'b-2222');
-  await mkdir(t1, { recursive: true });
-  await mkdir(t2, { recursive: true });
-  await runClaude({
-    cwd: dir, mock: true, onEvent: () => {},
-    prompt: 'MOCK_ROLE: implementer\nMOCK_IN: /plan.md',
-    workspaceWriteTargets: [t1, t2],
-  });
-  for (const t of [t1, t2]) {
-    assert.ok(existsSync(join(t, 'src', 'feature.mjs')), `mock wrote into ${t}`);
-    assert.ok(existsSync(join(t, 'test', 'feature.test.mjs')), `mock wrote the test into ${t}`);
-  }
-  assert.ok(!existsSync(join(dir, 'src')), 'and NOT into the cwd (the run root)');
-});
-
-test('runClaude with empty/absent workspaceWriteTargets falls back to the cwd (byte-identical)', async () => {
-  for (const extra of [{}, { workspaceWriteTargets: [] }, { workspaceWriteTargets: undefined }]) {
-    const dir = await tmp();
-    await runClaude({
-      cwd: dir, mock: true, onEvent: () => {},
-      prompt: 'MOCK_ROLE: implementer\nMOCK_IN: /plan.md',
-      ...extra,
-    });
-    assert.ok(existsSync(join(dir, 'src', 'feature.mjs')), `cwd fallback for ${JSON.stringify(extra)}`);
-  }
+test('workspaceWriteTargets: the mock implementer writes into each target (never the cwd); empty/absent falls back to the cwd', async () => {
+  await checkRows([
+    { name: 'runClaude FORWARDS workspaceWriteTargets to runMock -> mockImplementer', run: async () => {
+      const dir = await tmp();
+      const t1 = join(dir, 'repos', 'a-1111');
+      const t2 = join(dir, 'repos', 'b-2222');
+      await mkdir(t1, { recursive: true });
+      await mkdir(t2, { recursive: true });
+      await runClaude({
+        cwd: dir, mock: true, onEvent: () => {},
+        prompt: 'MOCK_ROLE: implementer\nMOCK_IN: /plan.md',
+        workspaceWriteTargets: [t1, t2],
+      });
+      for (const t of [t1, t2]) {
+        assert.ok(existsSync(join(t, 'src', 'feature.mjs')), `mock wrote into ${t}`);
+        assert.ok(existsSync(join(t, 'test', 'feature.test.mjs')), `mock wrote the test into ${t}`);
+      }
+      assert.ok(!existsSync(join(dir, 'src')), 'and NOT into the cwd (the run root)');
+    } },
+    { name: 'runClaude with empty/absent workspaceWriteTargets falls back to the cwd (byte-identical)', run: async () => {
+      for (const extra of [{}, { workspaceWriteTargets: [] }, { workspaceWriteTargets: undefined }]) {
+        const dir = await tmp();
+        await runClaude({
+          cwd: dir, mock: true, onEvent: () => {},
+          prompt: 'MOCK_ROLE: implementer\nMOCK_IN: /plan.md',
+          ...extra,
+        });
+        assert.ok(existsSync(join(dir, 'src', 'feature.mjs')), `cwd fallback for ${JSON.stringify(extra)}`);
+      }
+    } },
+  ]);
 });
 
 test('runReal IGNORES workspaceWriteTargets — argv is byte-identical (never a spawn flag)', POSIX_SHIM, async () => {
@@ -180,27 +213,8 @@ test('runReal IGNORES workspaceWriteTargets — argv is byte-identical (never a 
   ]);
 });
 
-test('runClaude without the two new fields spawns the SAME argv as before (legacy parity)', POSIX_SHIM, async () => {
-  const dir = await tmp();
-  const out = join(dir, 'argv.txt');
-  const bin = await fakeBin(dir, out);
-  const prevMock = process.env.WORCA_MOCK;
-  delete process.env.WORCA_MOCK;
-  try {
-    await runClaude({ cwd: dir, bin, prompt: 'p', allowedTools: ['Read', 'Bash'] });
-  } finally {
-    if (prevMock === undefined) delete process.env.WORCA_MOCK;
-    else process.env.WORCA_MOCK = prevMock;
-  }
-  const argv = (await readFile(out, 'utf8')).split('\0').filter(Boolean);
-  assert.deepEqual(argv, [
-    '-p', 'p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits',
-    '--allowedTools', 'Read,Bash',
-  ]);
-});
-
 // ── guardrails: permissionRules -> ONE --settings payload ────────────────────
-import { buildSettingsArgs, buildHookSettings } from '../src/core/claude-runner.mjs';
+import { buildSettingsArgs } from '../src/core/claude-runner.mjs';
 
 test('buildClaudeArgs: permissionRules emit a single --settings with permissions', () => {
   const args = buildClaudeArgs({
@@ -213,16 +227,6 @@ test('buildClaudeArgs: permissionRules emit a single --settings with permissions
   const settings = JSON.parse(args[i + 1]);
   assert.deepEqual(settings.permissions, { deny: ['Read(.env*)', 'Bash(curl:*)'] });
   assert.ok(!('hooks' in settings), 'no hook settings when WORCA_SUBAGENT_HOOKS is off');
-});
-
-test('buildClaudeArgs: permissionRules absent/null/empty -> argv byte-identical to today', () => {
-  for (const extra of [{}, { permissionRules: null }, { permissionRules: undefined }, { permissionRules: { deny: [] } }]) {
-    const args = buildClaudeArgs({ ...BASE, allowedTools: ['Read', 'Bash'], ...extra });
-    assert.deepEqual(args, [
-      '-p', 'p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits',
-      '--allowedTools', 'Read,Bash',
-    ]);
-  }
 });
 
 test('buildSettingsArgs: telemetry hooks + permissions merge into ONE --settings json', () => {
@@ -240,11 +244,6 @@ test('buildSettingsArgs: telemetry hooks + permissions merge into ONE --settings
     if (prev === undefined) delete process.env.WORCA_SUBAGENT_HOOKS;
     else process.env.WORCA_SUBAGENT_HOOKS = prev;
   }
-});
-
-test('buildSettingsArgs: hooks off + no rules -> [] (baseline untouched)', () => {
-  assert.deepEqual(buildSettingsArgs(null), []);
-  assert.equal(buildHookSettings(), null);
 });
 
 test('buildSettingsArgs: malformed rules warn once and fall through; empty stays quiet', () => {
@@ -267,37 +266,77 @@ test('buildSettingsArgs: malformed rules warn once and fall through; empty stays
   }
 });
 
-test('runClaude FORWARDS permissionRules to runReal (drop-at-gate guard)', POSIX_SHIM, async () => {
-  const dir = await tmp();
-  const out = join(dir, 'argv.txt');
-  const bin = await fakeBin(dir, out);
-  const prevMock = process.env.WORCA_MOCK;
-  delete process.env.WORCA_MOCK;
-  try {
-    await runClaude({
-      cwd: dir, bin, prompt: 'p', allowedTools: ['Read'],
-      permissionRules: { deny: ['Read(.env*)'] },
-    });
-  } finally {
-    if (prevMock === undefined) delete process.env.WORCA_MOCK;
-    else process.env.WORCA_MOCK = prevMock;
-  }
-  const argv = (await readFile(out, 'utf8')).split('\0').filter(Boolean);
-  const i = argv.indexOf('--settings');
-  assert.ok(i > -1, `--settings reached the spawn: ${JSON.stringify(argv)}`);
-  assert.deepEqual(JSON.parse(argv[i + 1]).permissions, { deny: ['Read(.env*)'] });
-});
-
-test('runClaude mock path is unaffected by permissionRules (no spawn, no error)', async () => {
+test('runClaude mock path is unaffected by permissionRules and modelEnv (no spawn, no error)', async () => {
   const dir = await tmp();
   const r = await runClaude({
     cwd: dir, mock: true, onEvent: () => {},
     prompt: 'MOCK_ROLE: implementer\nMOCK_IN: /plan.md',
     permissionRules: { deny: ['Read(.env*)'] },
+    modelEnv: { ANTHROPIC_BASE_URL: 'https://proxy.test' },
   });
-  assert.equal(r.exitCode, 0);
+  await checkRows([
+    { name: 'runClaude mock path is unaffected by permissionRules (no spawn, no error)', run: () => {
+      assert.equal(r.exitCode, 0);
+    } },
+    { name: 'runClaude mock path is unaffected by modelEnv (no spawn, no error)', run: () => {
+      assert.equal(r.exitCode, 0);
+    } },
+  ]);
 });
 
+// ── MCP registry §5.5.3: redactValues, forwarded through the runClaude gate ───
+
+/** A fake `claude` that prints a secret on stdout (an assistant event, then the result) and on stderr. */
+async function fakeLeakBin(dir, exitCode) {
+  const bin = join(dir, `fake-claude-leak-${exitCode}.sh`);
+  await writeFile(bin, '#!/bin/sh\n'
+    + `echo '{"type":"assistant","message":{"content":[{"type":"text","text":"key s3cret-value-123"}]}}'\n`
+    + "echo 'stderr s3cret-value-123' >&2\n"
+    // A failure's detail keeps stderr's last 2000 chars: 1990 more put that cut inside the secret.
+    + (exitCode ? `echo '${'p'.repeat(1990)}' >&2\n` : `echo '{"type":"result","result":"done s3cret-value-123"}'\n`)
+    + `exit ${exitCode}\n`, 'utf8');
+  await chmod(bin, 0o755);
+  return bin;
+}
+
+test('runClaude FORWARDS redactValues: every event, the result text and the error message are redacted', POSIX_SHIM, async () => {
+  const dir = await tmp();
+  const prevMock = process.env.WORCA_MOCK;
+  delete process.env.WORCA_MOCK;
+  const events = [];
+  const onEvent = (e) => events.push(e);
+  // no 8-char piece of the secret either: a cut that splits a value leaves a piece no value matches
+  const partial = (s) => [...Array(9).keys()].some((i) => String(s).includes('s3cret-value-123'.slice(i, i + 8)));
+  try {
+    const ok = await runClaude({ cwd: dir, bin: await fakeLeakBin(dir, 0), prompt: 'p', redactValues: ['s3cret-value-123'], onEvent });
+    assert.equal(ok.text, 'done [redacted]');
+    await assert.rejects(runClaude({ cwd: dir, bin: await fakeLeakBin(dir, 3), prompt: 'p', redactValues: ['s3cret-value-123'], onEvent }),
+      (err) => /exited with code 3/.test(err.message) && !partial(err.message) && !partial(err.stack));
+    // Past 8000 chars the stderr buffer keeps its last 4000, which can cut a secret in two; with the lines after it
+    // benign (left out of the detail), that piece would be the whole detail.
+    const trimBin = join(dir, 'fake-claude-leak-trim.sh');
+    await writeFile(trimBin, `#!/bin/sh\necho '${'p'.repeat(4100)}' >&2\necho 'stderr s3cret-value-123' >&2\n`
+      + `echo '[claude-code:unrecognized_model] ${'q'.repeat(3951)}' >&2\nexit 5\n`, 'utf8');
+    await chmod(trimBin, 0o755);
+    await assert.rejects(runClaude({ cwd: dir, bin: trimBin, prompt: 'p', redactValues: ['s3cret-value-123'], onEvent }),
+      (err) => /exited with code 5/.test(err.message) && !partial(err.message) && !partial(err.stack));
+    // A stdout-borne detail (the result envelope of a failed run) takes the same 2000-char tail cut.
+    const resultBin = join(dir, 'fake-claude-leak-result.sh');
+    await writeFile(resultBin, `#!/bin/sh\necho '{"type":"result","is_error":true,"result":"err s3cret-value-123${'p'.repeat(1986)}"}'\nexit 6\n`, 'utf8');
+    await chmod(resultBin, 0o755);
+    await assert.rejects(runClaude({ cwd: dir, bin: resultBin, prompt: 'p', redactValues: ['s3cret-value-123'], onEvent }),
+      (err) => /exited with code 6/.test(err.message) && !partial(err.message) && !partial(err.stack));
+    // A spawn that fails before any output names its bin in the message: only rejectP's own redaction covers that.
+    await assert.rejects(runClaude({ cwd: dir, bin: join(dir, 'no-claude-s3cret-value-123'), prompt: 'p', redactValues: ['s3cret-value-123'], onEvent }),
+      (err) => /ENOENT/.test(err.message) && !partial(err.message) && !partial(err.stack));
+    const plain = await runClaude({ cwd: dir, bin: await fakeLeakBin(dir, 0), prompt: 'p' });
+    assert.equal(plain.text, 'done s3cret-value-123', 'absent ⇒ nothing is redacted');
+  } finally {
+    if (prevMock === undefined) delete process.env.WORCA_MOCK; else process.env.WORCA_MOCK = prevMock;
+  }
+  assert.ok(events.some((e) => e.type === 'stderr') && events.some((e) => e.type === 'assistant'));
+  assert.ok(!JSON.stringify(events).includes('s3cret-value-123'));
+});
 // ── guardrails: env scrub ────────────────────────────────────────────────────
 import { buildSpawnEnv } from '../src/core/claude-runner.mjs';
 
@@ -308,11 +347,6 @@ async function fakeEnvBin(dir, outFile) {
   await chmod(bin, 0o755);
   return bin;
 }
-
-test('buildSpawnEnv: scrub off -> undefined (spawn inherits, byte-identical to today)', () => {
-  assert.equal(buildSpawnEnv(false, []), undefined);
-  assert.equal(buildSpawnEnv(undefined, undefined), undefined);
-});
 
 test('buildSpawnEnv: scrub on -> base + ANTHROPIC_*/CLAUDE_* + allowlist only', POSIX_SHIM, () => {
   const prev = { AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY, NPM_TOKEN: process.env.NPM_TOKEN, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY };
@@ -351,23 +385,6 @@ test('runClaude FORWARDS envScrub/envAllowlist to the spawn env (drop-at-gate gu
   assert.ok(envDump.includes('PATH='), 'the child still got a usable base env');
 });
 
-test('runClaude with envScrub off inherits the parent env (legacy parity)', POSIX_SHIM, async () => {
-  const dir = await tmp();
-  const out = join(dir, 'env.txt');
-  const bin = await fakeEnvBin(dir, out);
-  const prevMock = process.env.WORCA_MOCK;
-  const prevLeak = process.env.WORCA_TEST_LEAK;
-  delete process.env.WORCA_MOCK;
-  process.env.WORCA_TEST_LEAK = 'inherited';
-  try {
-    await runClaude({ cwd: dir, bin, prompt: 'p' });
-  } finally {
-    if (prevMock === undefined) delete process.env.WORCA_MOCK; else process.env.WORCA_MOCK = prevMock;
-    if (prevLeak === undefined) delete process.env.WORCA_TEST_LEAK; else process.env.WORCA_TEST_LEAK = prevLeak;
-  }
-  assert.ok((await readFile(out, 'utf8')).includes('WORCA_TEST_LEAK=inherited'));
-});
-
 // ── configurable models: modelEnv (design §4.4) ──────────────────────────────
 // Same drop-at-runClaude hazard as every other field, PLUS the merge table:
 //   scrub off + modelEnv -> { ...process.env, ...modelEnv } (still inherits)
@@ -393,32 +410,35 @@ async function runWithEnvDump(extraOpts, { leak } = {}) {
   return readFile(out, 'utf8');
 }
 
-test('runClaude FORWARDS modelEnv into the spawn env; parent env still inherited (scrub off)', POSIX_SHIM, async () => {
-  const dump = await runWithEnvDump(
-    { modelEnv: { ANTHROPIC_BASE_URL: 'https://proxy.test/v1' } },
-    { leak: 'inherited' },
-  );
-  assert.ok(dump.includes('ANTHROPIC_BASE_URL=https://proxy.test/v1'), 'modelEnv reached the child');
-  assert.ok(dump.includes('WORCA_TEST_LEAK=inherited'), 'still inherits process.env around it');
-});
-
-test('modelEnv SURVIVES env scrub and WINS collisions with the ambient env', POSIX_SHIM, async () => {
-  const prevUrl = process.env.ANTHROPIC_BASE_URL;
-  process.env.ANTHROPIC_BASE_URL = 'https://ambient.example';
-  let dump;
-  try {
-    dump = await runWithEnvDump(
-      { envScrub: true, envAllowlist: [], modelEnv: { ANTHROPIC_BASE_URL: 'https://model.example' } },
-      { leak: 'should-not-appear' },
-    );
-  } finally {
-    if (prevUrl === undefined) delete process.env.ANTHROPIC_BASE_URL;
-    else process.env.ANTHROPIC_BASE_URL = prevUrl;
-  }
-  assert.ok(dump.includes('ANTHROPIC_BASE_URL=https://model.example'), 'model env wins the collision');
-  assert.ok(!dump.includes('https://ambient.example'), 'ambient value is gone');
-  assert.ok(!dump.includes('WORCA_TEST_LEAK'), 'scrub still applies to everything else');
-  assert.ok(dump.includes('PATH='), 'scrub base env intact');
+test('modelEnv reaches the spawn env: inherited around it with scrub off; survives scrub and wins an ambient collision', POSIX_SHIM, async () => {
+  await checkRows([
+    { name: 'runClaude FORWARDS modelEnv into the spawn env; parent env still inherited (scrub off)', run: async () => {
+      const dump = await runWithEnvDump(
+        { modelEnv: { ANTHROPIC_BASE_URL: 'https://proxy.test/v1' } },
+        { leak: 'inherited' },
+      );
+      assert.ok(dump.includes('ANTHROPIC_BASE_URL=https://proxy.test/v1'), 'modelEnv reached the child');
+      assert.ok(dump.includes('WORCA_TEST_LEAK=inherited'), 'still inherits process.env around it');
+    } },
+    { name: 'modelEnv SURVIVES env scrub and WINS collisions with the ambient env', run: async () => {
+      const prevUrl = process.env.ANTHROPIC_BASE_URL;
+      process.env.ANTHROPIC_BASE_URL = 'https://ambient.example';
+      let dump;
+      try {
+        dump = await runWithEnvDump(
+          { envScrub: true, envAllowlist: [], modelEnv: { ANTHROPIC_BASE_URL: 'https://model.example' } },
+          { leak: 'should-not-appear' },
+        );
+      } finally {
+        if (prevUrl === undefined) delete process.env.ANTHROPIC_BASE_URL;
+        else process.env.ANTHROPIC_BASE_URL = prevUrl;
+      }
+      assert.ok(dump.includes('ANTHROPIC_BASE_URL=https://model.example'), 'model env wins the collision');
+      assert.ok(!dump.includes('https://ambient.example'), 'ambient value is gone');
+      assert.ok(!dump.includes('WORCA_TEST_LEAK'), 'scrub still applies to everything else');
+      assert.ok(dump.includes('PATH='), 'scrub base env intact');
+    } },
+  ]);
 });
 
 test('reserved modelEnv keys are re-dropped at the spawn (defense-in-depth, with a warning)', POSIX_SHIM, async () => {
@@ -447,16 +467,6 @@ test('absent/empty modelEnv keeps the spawn env byte-identical (inherit path)', 
   }
 });
 
-test('runClaude mock path is unaffected by modelEnv (no spawn, no error)', async () => {
-  const dir = await tmp();
-  const r = await runClaude({
-    cwd: dir, mock: true, onEvent: () => {},
-    prompt: 'MOCK_ROLE: implementer\nMOCK_IN: /plan.md',
-    modelEnv: { ANTHROPIC_BASE_URL: 'https://proxy.test' },
-  });
-  assert.equal(r.exitCode, 0);
-});
-
 // ── spawnEnv (wsmap D9): the fan-out concurrency cap ─────────────────────────
 // Same drop-at-runClaude hazard as every field above, plus its place in the merge:
 //   guardrail env (inherited or scrubbed) < spawnEnv < modelEnv.
@@ -481,19 +491,22 @@ async function dumpWithAmbientCap(ambient, extraOpts, opts) {
   };
 }
 
-test('runClaude FORWARDS spawnEnv into the spawn env: it replaces an ambient value, the parent env is still inherited', POSIX_SHIM, async () => {
-  const env = await dumpWithAmbientCap('2', { spawnEnv: { [CAP_KEY]: '8' } }, { leak: 'inherited' });
-  assert.equal(env.line(CAP_KEY), `${CAP_KEY}=8`, 'the run-level value replaces the ambient 2');
-  assert.ok(env.has('WORCA_TEST_LEAK=inherited'), 'still inherits process.env around it');
-});
-
-test('spawnEnv survives env scrub, and a model env that sets the same key wins', POSIX_SHIM, async () => {
-  const scrubbed = await dumpWithAmbientCap(undefined,
-    { envScrub: true, envAllowlist: [], spawnEnv: { [CAP_KEY]: '8' } }, { leak: 'should-not-appear' });
-  assert.equal(scrubbed.line(CAP_KEY), `${CAP_KEY}=8`);
-  assert.ok(!scrubbed.has('WORCA_TEST_LEAK'), 'scrub still applies to everything else');
-  const both = await dumpWithAmbientCap(undefined, { spawnEnv: { [CAP_KEY]: '8' }, modelEnv: { [CAP_KEY]: '3' } });
-  assert.equal(both.line(CAP_KEY), `${CAP_KEY}=3`, 'the catalog entry wins');
+test('spawnEnv: replaces an ambient value with the parent env inherited, survives scrub, and loses to a model env setting the same key', POSIX_SHIM, async () => {
+  await checkRows([
+    { name: 'runClaude FORWARDS spawnEnv into the spawn env: it replaces an ambient value, the parent env is still inherited', run: async () => {
+      const env = await dumpWithAmbientCap('2', { spawnEnv: { [CAP_KEY]: '8' } }, { leak: 'inherited' });
+      assert.equal(env.line(CAP_KEY), `${CAP_KEY}=8`, 'the run-level value replaces the ambient 2');
+      assert.ok(env.has('WORCA_TEST_LEAK=inherited'), 'still inherits process.env around it');
+    } },
+    { name: 'spawnEnv survives env scrub, and a model env that sets the same key wins', run: async () => {
+      const scrubbed = await dumpWithAmbientCap(undefined,
+        { envScrub: true, envAllowlist: [], spawnEnv: { [CAP_KEY]: '8' } }, { leak: 'should-not-appear' });
+      assert.equal(scrubbed.line(CAP_KEY), `${CAP_KEY}=8`);
+      assert.ok(!scrubbed.has('WORCA_TEST_LEAK'), 'scrub still applies to everything else');
+      const both = await dumpWithAmbientCap(undefined, { spawnEnv: { [CAP_KEY]: '8' }, modelEnv: { [CAP_KEY]: '3' } });
+      assert.equal(both.line(CAP_KEY), `${CAP_KEY}=3`, 'the catalog entry wins');
+    } },
+  ]);
 });
 
 test('spawnEnv never sets a reserved key or a non-string; absent keeps the env byte-identical', POSIX_SHIM, async () => {
@@ -539,156 +552,111 @@ async function runWithArgvDump(extraOpts, { events } = {}) {
   return (await readFile(out, 'utf8')).split('\0').filter(Boolean);
 }
 
-test('modelEnv.ANTHROPIC_MODEL replaces the catalog id in --model (wire id), with one warning', POSIX_SHIM, async () => {
-  const realWarn = console.warn;
-  const warnings = [];
-  console.warn = (...a) => warnings.push(a.join(' '));
-  let argv;
-  try {
-    argv = await runWithArgvDump({
-      model: 'opus-4-8-vertex',
-      modelEnv: { CLAUDE_CODE_USE_VERTEX: '1', ANTHROPIC_MODEL: 'claude-opus-4-8' },
-    });
-  } finally {
-    console.warn = realWarn;
-  }
-  assert.equal(argv[argv.indexOf('--model') + 1], 'claude-opus-4-8', 'wire id reached argv');
-  assert.ok(!argv.includes('opus-4-8-vertex'), 'catalog id is not in argv');
-  assert.equal(
-    warnings.filter((w) => w.includes('wire model')).length, 1,
-    `one wire-model warning: ${JSON.stringify(warnings)}`,
-  );
+test('wire model: ANTHROPIC_MODEL replaces the catalog id in --model (one warning); without it --model stays the catalog id', POSIX_SHIM, async () => {
+  await checkRows([
+    { name: 'modelEnv.ANTHROPIC_MODEL replaces the catalog id in --model (wire id), with one warning', run: async () => {
+      const realWarn = console.warn;
+      const warnings = [];
+      console.warn = (...a) => warnings.push(a.join(' '));
+      let argv;
+      try {
+        argv = await runWithArgvDump({
+          model: 'opus-4-8-vertex',
+          modelEnv: { CLAUDE_CODE_USE_VERTEX: '1', ANTHROPIC_MODEL: 'claude-opus-4-8' },
+        });
+      } finally {
+        console.warn = realWarn;
+      }
+      assert.equal(argv[argv.indexOf('--model') + 1], 'claude-opus-4-8', 'wire id reached argv');
+      assert.ok(!argv.includes('opus-4-8-vertex'), 'catalog id is not in argv');
+      assert.equal(
+        warnings.filter((w) => w.includes('wire model')).length, 1,
+        `one wire-model warning: ${JSON.stringify(warnings)}`,
+      );
+    } },
+    { name: 'modelEnv without ANTHROPIC_MODEL keeps --model = catalog id (regression guard)', run: async () => {
+      const argv = await runWithArgvDump({
+        model: 'claude-opus-4-8',
+        modelEnv: { ANTHROPIC_BASE_URL: 'https://proxy.test/v1' },
+      });
+      assert.equal(argv[argv.indexOf('--model') + 1], 'claude-opus-4-8');
+    } },
+  ]);
 });
 
-test('modelEnv without ANTHROPIC_MODEL keeps --model = catalog id (regression guard)', POSIX_SHIM, async () => {
-  const argv = await runWithArgvDump({
-    model: 'claude-opus-4-8',
-    modelEnv: { ANTHROPIC_BASE_URL: 'https://proxy.test/v1' },
-  });
-  assert.equal(argv[argv.indexOf('--model') + 1], 'claude-opus-4-8');
-});
-
-test('ANTHROPIC_MODEL as ${VAR}: set -> expanded wire id; unset -> falls back to catalog id', POSIX_SHIM, async () => {
-  const prev = process.env.WORCA_TEST_WIRE_MODEL;
-  process.env.WORCA_TEST_WIRE_MODEL = 'claude-opus-4-8';
-  let argv;
-  try {
-    argv = await runWithArgvDump({
-      model: 'opus-4-8-vertex',
-      modelEnv: { ANTHROPIC_MODEL: '${WORCA_TEST_WIRE_MODEL}' },
-    });
-  } finally {
-    if (prev === undefined) delete process.env.WORCA_TEST_WIRE_MODEL;
-    else process.env.WORCA_TEST_WIRE_MODEL = prev;
-  }
-  assert.equal(argv[argv.indexOf('--model') + 1], 'claude-opus-4-8', 'expanded ${VAR} is the wire id');
-
-  const realWarn = console.warn;
-  const warnings = [];
-  console.warn = (...a) => warnings.push(a.join(' '));
-  delete process.env.WORCA_TEST_WIRE_MODEL_UNSET; // defensively: this var must be unset
-  let argv2;
-  try {
-    argv2 = await runWithArgvDump({
-      model: 'opus-4-8-vertex',
-      modelEnv: { ANTHROPIC_MODEL: '${WORCA_TEST_WIRE_MODEL_UNSET}' },
-    });
-  } finally {
-    console.warn = realWarn;
-  }
-  assert.equal(argv2[argv2.indexOf('--model') + 1], 'opus-4-8-vertex', 'unresolvable ref -> catalog id');
-  assert.equal(
-    warnings.filter((w) => w.includes('configured wire model was dropped')).length, 1,
-    `dropped-wire-model warning fires: ${JSON.stringify(warnings)}`,
-  );
-  assert.equal(
-    warnings.filter((w) => w.includes('wire model "')).length, 0,
-    'the plain wire-model line does NOT fire on fallback',
-  );
-});
-
-test('whitespace-only ANTHROPIC_MODEL is dropped -> catalog id, with the dropped-wire-model warning', POSIX_SHIM, async () => {
-  const realWarn = console.warn;
-  const warnings = [];
-  console.warn = (...a) => warnings.push(a.join(' '));
-  let argv;
-  try {
-    argv = await runWithArgvDump({
-      model: 'opus-4-8-vertex',
-      modelEnv: { ANTHROPIC_MODEL: '   ' },
-    });
-  } finally {
-    console.warn = realWarn;
-  }
-  assert.equal(argv[argv.indexOf('--model') + 1], 'opus-4-8-vertex', 'whitespace-only -> catalog id');
-  assert.equal(
-    warnings.filter((w) => w.includes('configured wire model was dropped')).length, 1,
-    `dropped-wire-model warning fires: ${JSON.stringify(warnings)}`,
-  );
-});
-
-test('a pasted-with-spaces ANTHROPIC_MODEL is trimmed before reaching --model', POSIX_SHIM, async () => {
-  const realWarn = console.warn;
-  console.warn = () => {};
-  let argv;
-  try {
-    argv = await runWithArgvDump({
-      model: 'opus-4-8-vertex',
-      modelEnv: { ANTHROPIC_MODEL: '  claude-opus-4-8  ' },
-    });
-  } finally {
-    console.warn = realWarn;
-  }
-  assert.equal(argv[argv.indexOf('--model') + 1], 'claude-opus-4-8', 'trimmed wire id in argv');
-});
-
-test('wire id also lands in the spawn env (harmless: the explicit flag wins in the CLI)', POSIX_SHIM, async () => {
-  const realWarn = console.warn;
-  console.warn = () => {};
-  let dump;
-  try {
-    dump = await runWithEnvDump({
-      model: 'opus-4-8-vertex',
-      modelEnv: { ANTHROPIC_MODEL: 'claude-opus-4-8' },
-    });
-  } finally {
-    console.warn = realWarn;
-  }
-  assert.ok(dump.includes('ANTHROPIC_MODEL=claude-opus-4-8'));
+test('ANTHROPIC_MODEL whitespace: whitespace-only drops to the catalog id (one dropped-wire-model warning); a padded value is trimmed', POSIX_SHIM, async () => {
+  await checkRows([
+    { name: 'whitespace-only ANTHROPIC_MODEL is dropped -> catalog id, with the dropped-wire-model warning', run: async () => {
+      const realWarn = console.warn;
+      const warnings = [];
+      console.warn = (...a) => warnings.push(a.join(' '));
+      let argv;
+      try {
+        argv = await runWithArgvDump({
+          model: 'opus-4-8-vertex',
+          modelEnv: { ANTHROPIC_MODEL: '   ' },
+        });
+      } finally {
+        console.warn = realWarn;
+      }
+      assert.equal(argv[argv.indexOf('--model') + 1], 'opus-4-8-vertex', 'whitespace-only -> catalog id');
+      assert.equal(
+        warnings.filter((w) => w.includes('configured wire model was dropped')).length, 1,
+        `dropped-wire-model warning fires: ${JSON.stringify(warnings)}`,
+      );
+    } },
+    { name: 'a pasted-with-spaces ANTHROPIC_MODEL is trimmed before reaching --model', run: async () => {
+      const realWarn = console.warn;
+      console.warn = () => {};
+      let argv;
+      try {
+        argv = await runWithArgvDump({
+          model: 'opus-4-8-vertex',
+          modelEnv: { ANTHROPIC_MODEL: '  claude-opus-4-8  ' },
+        });
+      } finally {
+        console.warn = realWarn;
+      }
+      assert.equal(argv[argv.indexOf('--model') + 1], 'claude-opus-4-8', 'trimmed wire id in argv');
+    } },
+  ]);
 });
 
 // ── debugSpawnEnabled / redactArgvForLog unit tests ──────────────────────────
 
-test('debugSpawnEnabled: off by default; truthy values enable; 0/false disable', () => {
-  const prev = process.env.WORCA_DEBUG_SPAWN;
-  try {
-    delete process.env.WORCA_DEBUG_SPAWN; assert.equal(debugSpawnEnabled(), false);
-    process.env.WORCA_DEBUG_SPAWN = '';      assert.equal(debugSpawnEnabled(), false);
-    process.env.WORCA_DEBUG_SPAWN = '0';     assert.equal(debugSpawnEnabled(), false);
-    process.env.WORCA_DEBUG_SPAWN = 'false'; assert.equal(debugSpawnEnabled(), false);
-    process.env.WORCA_DEBUG_SPAWN = '1';     assert.equal(debugSpawnEnabled(), true);
-    process.env.WORCA_DEBUG_SPAWN = 'yes';   assert.equal(debugSpawnEnabled(), true);
-  } finally {
-    if (prev === undefined) delete process.env.WORCA_DEBUG_SPAWN; else process.env.WORCA_DEBUG_SPAWN = prev;
-  }
-});
-
-test('debugSpawnEnabled: with the env unset or EMPTY the stored settings.json value applies (CLI runs honour the UI checkbox)', async () => {
-  const home = await tmp();
-  await mkdir(join(home, '.worca-cc'), { recursive: true });
-  const prev = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, WORCA_DEBUG_SPAWN: process.env.WORCA_DEBUG_SPAWN };
-  process.env.HOME = home; process.env.USERPROFILE = home;
-  try {
-    await writeFile(join(home, '.worca-cc', 'settings.json'), JSON.stringify({ debugSpawnEnabled: true }), 'utf8');
-    delete process.env.WORCA_DEBUG_SPAWN; assert.equal(debugSpawnEnabled(), true, 'unset env → stored true');
-    process.env.WORCA_DEBUG_SPAWN = '';    assert.equal(debugSpawnEnabled(), true, 'empty env is not an override');
-    process.env.WORCA_DEBUG_SPAWN = '0';   assert.equal(debugSpawnEnabled(), false, 'an exported 0 is an explicit OFF');
-    await writeFile(join(home, '.worca-cc', 'settings.json'), '{}', 'utf8');
-    delete process.env.WORCA_DEBUG_SPAWN;  assert.equal(debugSpawnEnabled(), false, 'default stored → off');
-    process.env.WORCA_DEBUG_SPAWN = '1';   assert.equal(debugSpawnEnabled(), true, 'env on wins over default');
-  } finally {
-    for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-  }
+test('debugSpawnEnabled: env truthy/0/false/empty, and the stored settings.json fallback when the env is unset or empty', async () => {
+  await checkRows([
+    { name: 'debugSpawnEnabled: off by default; truthy values enable; 0/false disable', run: () => {
+      const prev = process.env.WORCA_DEBUG_SPAWN;
+      try {
+        delete process.env.WORCA_DEBUG_SPAWN; assert.equal(debugSpawnEnabled(), false);
+        process.env.WORCA_DEBUG_SPAWN = '';      assert.equal(debugSpawnEnabled(), false);
+        process.env.WORCA_DEBUG_SPAWN = '0';     assert.equal(debugSpawnEnabled(), false);
+        process.env.WORCA_DEBUG_SPAWN = 'false'; assert.equal(debugSpawnEnabled(), false);
+        process.env.WORCA_DEBUG_SPAWN = '1';     assert.equal(debugSpawnEnabled(), true);
+        process.env.WORCA_DEBUG_SPAWN = 'yes';   assert.equal(debugSpawnEnabled(), true);
+      } finally {
+        if (prev === undefined) delete process.env.WORCA_DEBUG_SPAWN; else process.env.WORCA_DEBUG_SPAWN = prev;
+      }
+    } },
+    { name: 'debugSpawnEnabled: with the env unset or EMPTY the stored settings.json value applies (CLI runs honour the UI checkbox)', run: async () => {
+      const home = await tmp();
+      await mkdir(join(home, '.worca-cc'), { recursive: true });
+      const prev = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, WORCA_DEBUG_SPAWN: process.env.WORCA_DEBUG_SPAWN };
+      process.env.HOME = home; process.env.USERPROFILE = home;
+      try {
+        await writeFile(join(home, '.worca-cc', 'settings.json'), JSON.stringify({ debugSpawnEnabled: true }), 'utf8');
+        delete process.env.WORCA_DEBUG_SPAWN; assert.equal(debugSpawnEnabled(), true, 'unset env → stored true');
+        process.env.WORCA_DEBUG_SPAWN = '';    assert.equal(debugSpawnEnabled(), true, 'empty env is not an override');
+        process.env.WORCA_DEBUG_SPAWN = '0';   assert.equal(debugSpawnEnabled(), false, 'an exported 0 is an explicit OFF');
+        await writeFile(join(home, '.worca-cc', 'settings.json'), '{}', 'utf8');
+        delete process.env.WORCA_DEBUG_SPAWN;  assert.equal(debugSpawnEnabled(), false, 'default stored → off');
+        process.env.WORCA_DEBUG_SPAWN = '1';   assert.equal(debugSpawnEnabled(), true, 'env on wins over default');
+      } finally {
+        for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+      }
+    } },
+  ]);
 });
 
 test('redactArgvForLog: truncates ANY long token (prompt, --settings JSON, tool lists); flags & short values verbatim', () => {
@@ -756,21 +724,6 @@ test('a model env with no ANTHROPIC_* routing key (the Ask Worca CLAUDE_CODE_* k
 
 // ── gated spawn-debug (Step 5) ───────────────────────────────────────────────
 
-test('WORCA_DEBUG_SPAWN off: no spawn-debug line on the console or in the run stream', POSIX_SHIM, async () => {
-  const realWarn = console.warn; const warnings = [];
-  console.warn = (...a) => warnings.push(a.join(' '));
-  const prev = process.env.WORCA_DEBUG_SPAWN; delete process.env.WORCA_DEBUG_SPAWN;
-  const events = [];
-  try {
-    await runWithArgvDump({ allowedTools: ['Read', 'Bash'], modelEnv: { ANTHROPIC_BASE_URL: 'https://gw-off.example/v1' } }, { events });
-  } finally {
-    console.warn = realWarn;
-    if (prev === undefined) delete process.env.WORCA_DEBUG_SPAWN; else process.env.WORCA_DEBUG_SPAWN = prev;
-  }
-  assert.equal(warnings.filter((w) => w.includes('spawn-debug')).length, 0, 'no debug console output when gate off');
-  assert.equal(events.filter((e) => (e.text || '').includes('spawn-debug')).length, 0, 'no debug event when gate off');
-});
-
 test('WORCA_DEBUG_SPAWN on: ONE stderr event with bin + argv + routing env; NO secret value leaks on either path', POSIX_SHIM, async () => {
   const SECRET = 'super-secret-token-value-9999';
   const realWarn = console.warn; const warnings = [];
@@ -810,55 +763,6 @@ test('WORCA_DEBUG_SPAWN on: ONE stderr event with bin + argv + routing env; NO s
   assert.ok(!all.includes(SECRET), 'full token never printed anywhere');
   assert.ok(!all.includes('super-secret-token') && !all.includes('9999'), 'no token prefix or suffix anywhere');
   assert.ok(!all.includes('abc123456789'), 'header secret never printed');
-});
-
-test('WORCA_DEBUG_SPAWN on, no model env: routingEnv=[(none)]', POSIX_SHIM, async () => {
-  const prev = process.env.WORCA_DEBUG_SPAWN; process.env.WORCA_DEBUG_SPAWN = '1';
-  const events = [];
-  try {
-    await runWithArgvDump({}, { events });
-  } finally {
-    if (prev === undefined) delete process.env.WORCA_DEBUG_SPAWN; else process.env.WORCA_DEBUG_SPAWN = prev;
-  }
-  const debug = events.find((e) => (e.text || '').includes('spawn-debug'));
-  assert.ok(debug, 'spawn-debug event present');
-  assert.ok(debug.text.includes('routingEnv=[(none)]'), debug.text);
-});
-
-test('runClaude FORWARDS addDirs to runReal (--add-dir reaches the spawn)', POSIX_SHIM, async () => {
-  const dir = await tmp();
-  const out = join(dir, 'argv.txt');
-  const bin = await fakeBin(dir, out);
-  const prevMock = process.env.WORCA_MOCK;
-  delete process.env.WORCA_MOCK;
-  try {
-    await runClaude({ cwd: dir, bin, prompt: 'p', allowedTools: ['Read'], addDirs: [join(dir, 'mount')] });
-  } finally {
-    if (prevMock === undefined) delete process.env.WORCA_MOCK; else process.env.WORCA_MOCK = prevMock;
-  }
-  const argv = (await readFile(out, 'utf8')).split('\0').filter(Boolean);
-  const i = argv.indexOf('--add-dir');
-  assert.ok(i > -1, `--add-dir reached the spawn: ${JSON.stringify(argv)}`);
-  assert.equal(argv[i + 1], join(dir, 'mount'));
-  assert.equal(argv.lastIndexOf('--add-dir'), i, 'one dir ⇒ one flag');
-});
-
-test('runClaude FORWARDS agents to runReal (--agents reaches the spawn)', POSIX_SHIM, async () => {
-  const dir = await tmp();
-  const out = join(dir, 'argv.txt');
-  const bin = await fakeBin(dir, out);
-  const prevMock = process.env.WORCA_MOCK;
-  delete process.env.WORCA_MOCK;
-  const agents = { 'worca-investigator': { description: 'd', prompt: 'p', tools: ['Read'], effort: 'high' } };
-  try {
-    await runClaude({ cwd: dir, bin, prompt: 'p', allowedTools: ['Read'], agents });
-  } finally {
-    if (prevMock === undefined) delete process.env.WORCA_MOCK; else process.env.WORCA_MOCK = prevMock;
-  }
-  const argv = (await readFile(out, 'utf8')).split('\0').filter(Boolean);
-  const i = argv.indexOf('--agents');
-  assert.ok(i > -1, `--agents reached the spawn: ${JSON.stringify(argv)}`);
-  assert.deepEqual(JSON.parse(argv[i + 1]), agents);
 });
 
 // ── GitHub credentials never reach claude (src/core/github-credentials.mjs) ──

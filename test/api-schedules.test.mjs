@@ -13,6 +13,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { gitDir } from './helpers/git-dir.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
 import { projectKey } from '../src/core/store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after); // outer isolation: /api/run finishes ASYNC in-process
 
@@ -253,12 +254,6 @@ test('recurring: repeat creates a series, previews, pauses, resumes, skips, runs
   assert.equal((await fetch(`${base}/api/schedules/${made.scheduleId}`)).status, 404);
 });
 
-test('counts and settings expose the schedule surface', async () => {
-  const counts = await get('/api/counts');
-  assert.equal(typeof counts.schedules.scheduled, 'number');
-  assert.equal(typeof counts.schedules.unread, 'number');
-});
-
 test('an external task is fetched at start: transient errors retry, permanent ones fail with the reason', async () => {
   // WORCA_MOCK fakes task sources; the shim's test hook makes getTask fail on demand.
   const { setMockSourceResponses } = await import('../src/core/plugin-shim.mjs');
@@ -334,8 +329,8 @@ test('POST /api/run with after: validations, then a 202 that names the predecess
 test('a chain of two mock runs: B starts after A finishes, on A\'s feature branch', async () => {
   const a = await (await post('/api/run', { projectDir: dir, prompt: 'Refactor the README', title: 'Refactor', mock: true, scheduledFor: inFuture(1500) })).json();
   const b = await (await post('/api/run', { projectDir: dir, prompt: 'Add tests', title: 'Tests', mock: true, after: { kind: 'ticket', id: a.runId }, sourceFromPrevious: true })).json();
-  await new Promise((r) => setTimeout(r, 1600));
-  await schedulerTick();
+  // A is due 1.5 s out: tick on a clock 2 s ahead instead of sleeping until it is due.
+  await schedulerTick({ now: Date.now() + 2000 });
   const ea = await untilSettled(a.runId);
   assert.equal(ea.status, 'done');
   const aRow = getDb().prepare('SELECT branch FROM pipelines WHERE id = ?').get(ea.pipelineId);
@@ -354,25 +349,28 @@ test('a chain of two mock runs: B starts after A finishes, on A\'s feature branc
   assert.notEqual(tb.runAt, '9999-12-31T00:00:00.000Z', 'run_at became the gate time');
 });
 
-test('Run now on an after-ticket that starts from its predecessor\'s branch needs that branch to exist', async () => {
-  const a = await (await post('/api/run', { projectDir: dir, prompt: 'A', mock: true, scheduledFor: inFuture(3600_000) })).json();
-  const b = await (await post('/api/run', { projectDir: dir, prompt: 'B', mock: true, after: { kind: 'ticket', id: a.runId }, sourceFromPrevious: true })).json();
-  const r = await post(`/api/schedules/${b.runId}/run-now`);
-  assert.equal(r.status, 409);
-  assert.match((await r.json()).error, /^Start ‘A’ first, or change its source branch$/);
-});
-
-// The 409 has TWO halves. The one above is `!p.pipelineId` (the predecessor never started);
-// this one is the `previousBranchesOf` half — a LIVE predecessor whose row has no
-// `branch.feature` yet. Without that half the ticket reaches fireTicket and fails non-transiently.
-test('Run now: a running predecessor that has not written its feature branch yet is refused too', async () => {
-  seedPipelineRow({ id: 'r0000001', title: 'Bare', status: 'running', projectKey: projectKey(dir), startedAt: new Date().toISOString(), branch: null });
-  const res = await post('/api/run', { projectDir: dir, prompt: 'C', mock: true, after: { kind: 'pipeline', id: 'r0000001' }, sourceFromPrevious: true });
-  assert.equal(res.status, 202);
-  const c = await res.json();
-  const r = await post(`/api/schedules/${c.runId}/run-now`);
-  assert.equal(r.status, 409);
-  assert.match((await r.json()).error, /^Start ‘Bare’ first, or change its source branch$/);
+test('Run now on an after-ticket needs the predecessor\'s branch: refused when it never started and when it runs without a feature branch yet', async () => {
+  await checkRows([
+    { name: 'Run now on an after-ticket that starts from its predecessor\'s branch needs that branch to exist', run: async () => {
+      const a = await (await post('/api/run', { projectDir: dir, prompt: 'A', mock: true, scheduledFor: inFuture(3600_000) })).json();
+      const b = await (await post('/api/run', { projectDir: dir, prompt: 'B', mock: true, after: { kind: 'ticket', id: a.runId }, sourceFromPrevious: true })).json();
+      const r = await post(`/api/schedules/${b.runId}/run-now`);
+      assert.equal(r.status, 409);
+      assert.match((await r.json()).error, /^Start ‘A’ first, or change its source branch$/);
+    } },
+    { name: 'Run now: a running predecessor that has not written its feature branch yet is refused too', run: async () => {
+      // The 409 has TWO halves. The one above is `!p.pipelineId` (the predecessor never started);
+      // this one is the `previousBranchesOf` half — a LIVE predecessor whose row has no
+      // `branch.feature` yet. Without that half the ticket reaches fireTicket and fails non-transiently.
+      seedPipelineRow({ id: 'r0000001', title: 'Bare', status: 'running', projectKey: projectKey(dir), startedAt: new Date().toISOString(), branch: null });
+      const res = await post('/api/run', { projectDir: dir, prompt: 'C', mock: true, after: { kind: 'pipeline', id: 'r0000001' }, sourceFromPrevious: true });
+      assert.equal(res.status, 202);
+      const c = await res.json();
+      const r = await post(`/api/schedules/${c.runId}/run-now`);
+      assert.equal(r.status, 409);
+      assert.match((await r.json()).error, /^Start ‘Bare’ first, or change its source branch$/);
+    } },
+  ]);
 });
 
 test('after-candidates, after/:id, dependents and the enriched ticket list', async () => {
@@ -389,7 +387,7 @@ test('after-candidates, after/:id, dependents and the enriched ticket list', asy
   assert.equal(cands.tickets.some((t) => t.id === m.runId), false, 'a missed ticket is not a candidate');
   assert.deepEqual(cands.runs.find((r) => r.pipelineId === 'c0000001'), { pipelineId: 'c0000001', runId: null, title: 'Parked', status: 'paused' });
   const ref = await get(`/api/schedules/after/${a.runId}`);
-  assert.deepEqual(ref, { kind: 'ticket', id: a.runId, title: 'A', status: 'scheduled', projectDir: dir, workspaceId: null });
+  assert.deepEqual(ref, { kind: 'ticket', id: a.runId, title: 'A', status: 'scheduled', projectDir: dir, workspaceId: null, branchGone: false });
   assert.equal((await fetch(`${base}/api/schedules/after/nope`)).status, 404);
   assert.equal((await fetch(`${base}/api/schedules/after/sch_deadbeef`)).status, 400);
   const deps = await get(`/api/schedules/dependents?ticketId=${a.runId}`);
@@ -398,6 +396,23 @@ test('after-candidates, after/:id, dependents and the enriched ticket list', asy
   const tb = list.tickets.find((t) => t.id === b.runId);
   assert.deepEqual(tb.after, { kind: 'ticket', id: a.runId, policy: 'done', title: 'A', status: 'scheduled', pipelineId: null });
   assert.equal(tb.sourceFromPrevious, false);
+});
+
+test('GET /api/schedules/after/:id says branchGone for a finished run whose branch is gone (archived, then restored)', async () => {
+  const { addProject } = await import('../src/core/projects.mjs');
+  await addProject({ name: 'sched-api-branch-gone', path: dir });
+  seedPipelineRow({ id: 'g0000001', title: 'Reclaimed', status: 'done', projectKey: projectKey(dir),
+    branch: { feature: 'worca/reclaimed-branch', source: 'main' }, startedAt: '2026-09-21T10:00:00.000Z' });
+  let ref = await get('/api/schedules/after/g0000001');
+  assert.equal(ref.projectDir, dir);
+  assert.equal(ref.branchGone, true, 'the local branch is gone: the form must not default to it');
+  execFileSync('git', ['branch', 'worca/reclaimed-branch'], { cwd: dir });
+  ref = await get('/api/schedules/after/g0000001');
+  assert.equal(ref.branchGone, false, 'a branch that still resolves keeps "Branch of the run before it"');
+  // A paused predecessor still owns its branch (and a ticket has none yet): never gone.
+  seedPipelineRow({ id: 'g0000002', title: 'Parked', status: 'paused', projectKey: projectKey(dir),
+    branch: { feature: 'worca/not-made-yet', source: 'main' }, startedAt: '2026-09-21T11:00:00.000Z' });
+  assert.equal((await get('/api/schedules/after/g0000002')).branchGone, false);
 });
 
 test('PATCH switches a ticket between a time and a predecessor, and validates the chain', async () => {

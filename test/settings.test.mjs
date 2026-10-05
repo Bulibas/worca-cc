@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { worcaHome } from '../src/core/projects.mjs';
 import { getWorcaRoot, setWorcaRoot, settingsFile, defaultRoot, pythonPath, setPythonPath, assertPythonPathInput } from '../src/core/settings.mjs';
 import { _resetForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Sandbox BOTH the home (so settingsFile + defaultRoot resolve into a temp dir)
 // and clear WORCA_HOME so the settings file is actually consulted. The whole
@@ -37,45 +38,44 @@ async function withSandbox(fn) {
   }
 }
 
-test('default: no settings, no env -> homedir base', async () => {
+// One sandbox, the tiers in order: each row starts from what the row before left.
+test('worcaHome precedence: WORCA_HOME env → settings.json root → home default; an empty root resets', async () => {
   await withSandbox(async (home) => {
-    assert.equal(getWorcaRoot(), '');
-    assert.equal(defaultRoot(), home);
-    assert.equal(worcaHome(), join(home, '.worca-cc'));
-  });
-});
-
-test('settings.json root wins over the home default', async () => {
-  await withSandbox(async () => {
-    const target = await mkdtemp(join(tmpdir(), 'worca-cc-target-'));
-    await setWorcaRoot(target);
-    assert.equal(getWorcaRoot(), target);
-    assert.equal(worcaHome(), join(target, '.worca-cc'));
-    await rm(target, { recursive: true, force: true });
-  });
-});
-
-test('WORCA_HOME env wins over settings.json', async () => {
-  await withSandbox(async () => {
-    const target = await mkdtemp(join(tmpdir(), 'worca-cc-target2-'));
-    await setWorcaRoot(target);
-    const envBase = await mkdtemp(join(tmpdir(), 'worca-cc-env-'));
-    process.env.WORCA_HOME = envBase;
-    assert.equal(worcaHome(), join(envBase, '.worca-cc'), 'env beats settings');
-    delete process.env.WORCA_HOME;
-    await rm(target, { recursive: true, force: true });
-    await rm(envBase, { recursive: true, force: true });
-  });
-});
-
-test('reset (empty root) falls back to the home default', async () => {
-  await withSandbox(async (home) => {
-    const target = await mkdtemp(join(tmpdir(), 'worca-cc-target3-'));
-    await setWorcaRoot(target);
-    await setWorcaRoot('');           // reset
-    assert.equal(getWorcaRoot(), '');
-    assert.equal(worcaHome(), join(home, '.worca-cc'));
-    await rm(target, { recursive: true, force: true });
+    await checkRows([
+      { name: 'default: no settings, no env -> homedir base', run: () => {
+        assert.equal(getWorcaRoot(), '');
+        assert.equal(defaultRoot(), home);
+        assert.equal(worcaHome(), join(home, '.worca-cc'));
+      } },
+      { name: 'settings.json root wins over the home default', run: async () => {
+        const target = await mkdtemp(join(tmpdir(), 'worca-cc-target-'));
+        await setWorcaRoot(target);
+        assert.equal(getWorcaRoot(), target);
+        assert.equal(worcaHome(), join(target, '.worca-cc'));
+        await rm(target, { recursive: true, force: true });
+      } },
+      { name: 'WORCA_HOME env wins over settings.json', run: async () => {
+        const target = await mkdtemp(join(tmpdir(), 'worca-cc-target2-'));
+        await setWorcaRoot(target);
+        const envBase = await mkdtemp(join(tmpdir(), 'worca-cc-env-'));
+        process.env.WORCA_HOME = envBase;
+        try {
+          assert.equal(worcaHome(), join(envBase, '.worca-cc'), 'env beats settings');
+        } finally {
+          delete process.env.WORCA_HOME;
+          await rm(target, { recursive: true, force: true });
+          await rm(envBase, { recursive: true, force: true });
+        }
+      } },
+      { name: 'reset (empty root) falls back to the home default', run: async () => {
+        const target = await mkdtemp(join(tmpdir(), 'worca-cc-target3-'));
+        await setWorcaRoot(target);
+        await setWorcaRoot('');           // reset
+        assert.equal(getWorcaRoot(), '');
+        assert.equal(worcaHome(), join(home, '.worca-cc'));
+        await rm(target, { recursive: true, force: true });
+      } },
+    ]);
   });
 });
 

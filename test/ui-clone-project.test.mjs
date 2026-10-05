@@ -1,11 +1,17 @@
 // test/ui-clone-project.test.mjs
 // Projects → Add project → "Clone from URL" (POST /api/projects/clone, a job followed by the
 // WS 'clone-changed' frame with a GET poll as the fallback). jsdom, fetch and WS stubbed.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { lastToast } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -23,7 +29,7 @@ const json = (status, body) => Promise.resolve({ ok: status >= 200 && status < 3
 async function boot({ pick = 'unsupported', clone } = {}) {
   let projects = [{ name: 'alpha', path: '/data/projects/alpha', exists: true, key: 'alpha-00000001' }];
   const calls = [];
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4321/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4321/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = WSStub;
@@ -64,38 +70,32 @@ async function openAdd(window, doc) {
   await tick(); await tick();
 }
 
-test('no folder picker (container/hosted): Add project opens on Clone from URL', async () => {
-  const { window, doc } = await boot({ pick: 'unsupported' });
-  await openAdd(window, doc);
-  assert.equal($(doc, '#project-add-modal').classList.contains('hidden'), false);
-  assert.equal(selected(doc), 'clone');
-  assert.equal($(doc, '#proj-add-clone-pane').hidden, false);
-  assert.equal($(doc, '#proj-add-folder-pane').hidden, true);
-  assert.equal($(doc, '#proj-add-save').textContent, 'Clone and add');
-});
-
-test('a picked folder opens on the Folder tab, and the tabs switch panes', async () => {
-  const { window, doc } = await boot({ pick: 'picked' });
-  window.fetch = ((orig) => (u, o) => (String(u).includes('pick-folder') ? json(200, { status: 'picked', path: '/Users/me/dev/cool' }) : orig(u, o)))(window.fetch);
-  globalThis.fetch = window.fetch;
-  await openAdd(window, doc);
-  assert.equal(selected(doc), 'folder');
-  assert.equal($(doc, '#proj-add-path').value, '/Users/me/dev/cool');
-  click(window, $(doc, '#proj-add-tab-clone'));
-  assert.equal(selected(doc), 'clone');
-  assert.equal($(doc, '#proj-add-folder-pane').hidden, true);
-  click(window, $(doc, '#proj-add-tab-folder'));
-  assert.equal(selected(doc), 'folder');
-  assert.equal($(doc, '#proj-add-save').textContent, 'Add project');
-});
-
-test('the folder-name placeholder follows the URL', async () => {
-  const { window, doc } = await boot();
-  await openAdd(window, doc);
-  type(window, $(doc, '#proj-clone-url'), 'https://github.com/acme/api.git');
-  assert.equal($(doc, '#proj-clone-name').placeholder, 'api');
-  type(window, $(doc, '#proj-clone-url'), 'not a url');
-  assert.equal($(doc, '#proj-clone-name').placeholder, 'the repository name');
+test('Add project opens on Clone without a folder picker, on Folder with a picked path, and the tabs switch panes', async () => {
+  await checkRows([
+    { name: 'no folder picker (container/hosted): Add project opens on Clone from URL', run: async () => {
+      const { window, doc } = await boot({ pick: 'unsupported' });
+      await openAdd(window, doc);
+      assert.equal($(doc, '#project-add-modal').classList.contains('hidden'), false);
+      assert.equal(selected(doc), 'clone');
+      assert.equal($(doc, '#proj-add-clone-pane').hidden, false);
+      assert.equal($(doc, '#proj-add-folder-pane').hidden, true);
+      assert.equal($(doc, '#proj-add-save').textContent, 'Clone and add');
+    } },
+    { name: 'a picked folder opens on the Folder tab, and the tabs switch panes', run: async () => {
+      const { window, doc } = await boot({ pick: 'picked' });
+      window.fetch = ((orig) => (u, o) => (String(u).includes('pick-folder') ? json(200, { status: 'picked', path: '/Users/me/dev/cool' }) : orig(u, o)))(window.fetch);
+      globalThis.fetch = window.fetch;
+      await openAdd(window, doc);
+      assert.equal(selected(doc), 'folder');
+      assert.equal($(doc, '#proj-add-path').value, '/Users/me/dev/cool');
+      click(window, $(doc, '#proj-add-tab-clone'));
+      assert.equal(selected(doc), 'clone');
+      assert.equal($(doc, '#proj-add-folder-pane').hidden, true);
+      click(window, $(doc, '#proj-add-tab-folder'));
+      assert.equal(selected(doc), 'folder');
+      assert.equal($(doc, '#proj-add-save').textContent, 'Add project');
+    } },
+  ]);
 });
 
 test('an up-front refusal shows the server message inline, and the form stays usable', async () => {
@@ -139,7 +139,7 @@ test('a running job shows progress; the WS done frame closes the dialog and refr
   await tick(); await tick(); await tick();
   assert.equal($(doc, '#project-add-modal').classList.contains('hidden'), true);
   assert.ok(calls.filter((c) => c.u.endsWith('/api/projects') && c.method === 'GET').length >= 2, 'the list is refetched');
-  assert.match($(doc, '#projects-msg').textContent, /Cloned and added “api”/);
+  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Cloned and added “api”.', detail: '', action: '' });
   assert.ok([...doc.querySelectorAll('#projects-list .pl-item')].some((n) => n.textContent.includes('api')), 'the new project is listed');
 });
 

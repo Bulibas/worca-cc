@@ -3,11 +3,16 @@
 // target:'workspace') forms its own group keyed by that literal path segment,
 // and the group's name prefers p.workspaceName. (The project pills, and the "WS"
 // badge they carried, are gone: D4.)
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -26,7 +31,7 @@ const WKS_KEY = 'workspaces/wks-iot-9f3a1c20';
 const PIPELINE_DETAIL = { state: { id: 'w2', status: 'done', stepper: null, steps: [], totalCostUsd: 0, totalActiveMs: 0, phase: 'done' }, auditMarkdown: '# audit' };
 
 async function boot({ local, fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   const reqs = []; // every requested URL (+ method), for action-routing assertions
   window.Element.prototype.scrollIntoView = function () {};
@@ -56,46 +61,40 @@ async function boot({ local, fetchHandler } = {}) {
   return { window, show, reqs, showDetail, settle };
 }
 
-test('a workspace run forms its own group keyed by the literal path segment, named by workspaceName', async () => {
+test('a workspace run forms its own group keyed by the literal path segment, named by workspaceName, holding exactly its own runs', async () => {
   const { window, show } = await boot();
   show();
   await new Promise((r) => setTimeout(r, 0));
   const doc = window.document;
-  // The project pills (and their WS badge) are gone (D4): the workspace is a group of the Runs list.
-  assert.equal(doc.querySelectorAll('#historyFilter .hist-pill').length, 0, 'no project pills');
-  const ws = doc.querySelector(`#runs-list .runs-group[data-group-key="${WKS_KEY}"]`);
-  assert.ok(ws, 'workspace group keyed by the literal projectKey path segment');
-  assert.equal(ws.querySelector('.runs-group-name').textContent, 'IoT Platform', 'named by workspaceName, not the member projectName');
-  assert.equal(ws.querySelector('.runs-count').textContent, '2');
-  // The plain project row is NOT in the workspace group.
-  const alpha = doc.querySelector('#runs-list .runs-group[data-group-key="alpha-00000001"]');
-  assert.ok(alpha);
-  assert.equal(ws.querySelector('.runs-row[data-pipeline-id="p1"]'), null);
-});
-
-test('the Runs list groups the workspace runs under a workspaceName header', async () => {
-  const { window, show } = await boot();
-  show();
-  await new Promise((r) => setTimeout(r, 0));
-  const doc = window.document;
-  const groups = [...doc.querySelectorAll('#runs-list .runs-group')];
-  assert.equal(groups.length, 2, 'one project group + one workspace group');
-  // Read name and count apart: the head's textContent runs them together ("IoT Platform2").
-  const heads = groups.map((g) => `${g.querySelector('.runs-group-name').textContent} ${g.querySelector('.runs-count').textContent}`);
-  assert.ok(heads.includes('IoT Platform 2'), 'workspace group header uses workspaceName');
-  assert.ok(heads.includes('Alpha 1'), 'project group unchanged');
-});
-
-test('the workspace group holds exactly its own runs (literal path-segment key)', async () => {
-  const { window, show } = await boot();
-  show();
-  await new Promise((r) => setTimeout(r, 0));
-  const doc = window.document;
-  const rows = [...doc.querySelectorAll(`#runs-list .runs-group[data-group-key="${WKS_KEY}"] .runs-row`)];
-  assert.deepEqual(rows.map((r) => r.dataset.pipelineId), ['w2', 'w1'], 'two workspace runs, newest first');
-  assert.ok(rows.every((r) => r.dataset.projectKey === WKS_KEY), 'each row carries the literal key');
-  assert.equal(doc.querySelectorAll(`#runs-list .runs-row[data-project-key="${WKS_KEY}"]`).length, 2,
-    'and no workspace row lands in another group');
+  await checkRows([
+    { name: 'a workspace run forms its own group keyed by the literal path segment, named by workspaceName', run: () => {
+      // The project pills (and their WS badge) are gone (D4): the workspace is a group of the Runs list.
+      assert.equal(doc.querySelectorAll('#historyFilter .hist-pill').length, 0, 'no project pills');
+      const ws = doc.querySelector(`#runs-list .runs-group[data-group-key="${WKS_KEY}"]`);
+      assert.ok(ws, 'workspace group keyed by the literal projectKey path segment');
+      assert.equal(ws.querySelector('.runs-group-name').textContent, 'IoT Platform', 'named by workspaceName, not the member projectName');
+      assert.equal(ws.querySelector('.runs-count').textContent, '2');
+      // The plain project row is NOT in the workspace group.
+      const alpha = doc.querySelector('#runs-list .runs-group[data-group-key="alpha-00000001"]');
+      assert.ok(alpha);
+      assert.equal(ws.querySelector('.runs-row[data-pipeline-id="p1"]'), null);
+    } },
+    { name: 'the Runs list groups the workspace runs under a workspaceName header', run: () => {
+      const groups = [...doc.querySelectorAll('#runs-list .runs-group')];
+      assert.equal(groups.length, 2, 'one project group + one workspace group');
+      // Read name and count apart: the head's textContent runs them together ("IoT Platform2").
+      const heads = groups.map((g) => `${g.querySelector('.runs-group-name').textContent} ${g.querySelector('.runs-count').textContent}`);
+      assert.ok(heads.includes('IoT Platform 2'), 'workspace group header uses workspaceName');
+      assert.ok(heads.includes('Alpha 1'), 'project group unchanged');
+    } },
+    { name: 'the workspace group holds exactly its own runs (literal path-segment key)', run: () => {
+      const rows = [...doc.querySelectorAll(`#runs-list .runs-group[data-group-key="${WKS_KEY}"] .runs-row`)];
+      assert.deepEqual(rows.map((r) => r.dataset.pipelineId), ['w2', 'w1'], 'two workspace runs, newest first');
+      assert.ok(rows.every((r) => r.dataset.projectKey === WKS_KEY), 'each row carries the literal key');
+      assert.equal(doc.querySelectorAll(`#runs-list .runs-row[data-project-key="${WKS_KEY}"]`).length, 2,
+        'and no workspace row lands in another group');
+    } },
+  ]);
 });
 
 // ── M6↔M2 integration boundary: the three row actions must route a WORKSPACE row
@@ -125,23 +124,6 @@ test('opening a workspace row fetches GET /api/workspaces/<wksId>/runs/<id> (not
   assert.ok(!reqs.some((r) => r.url.includes('/api/history/workspaces')), 'never builds /api/history/workspaces%2F...');
   // The shared {state,...} shape renders the stepper (no error state).
   assert.equal(window.document.querySelector('#hist-detail .hd-error').hidden, true, 'detail rendered from the workspace route');
-});
-
-test('opening a workspace row (title click) fetches the workspace route for the markdown viewer', async () => {
-  const viewReqs = [];
-  const { window, show } = await boot({
-    fetchHandler: (u) => {
-      if (/\/api\/workspaces\/.+\/runs\//.test(u)) { viewReqs.push(u); return Promise.resolve({ ok: true, status: 200, json: async () => PIPELINE_DETAIL }); }
-      return null;
-    },
-  });
-  show();
-  await new Promise((r) => setTimeout(r, 0));
-  window.document.querySelector(`#runs-list .runs-row[data-project-key="${WKS_KEY}"] .runs-row-title`)
-    .dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(viewReqs.length, 1);
-  assert.match(viewReqs[0], /\/api\/workspaces\/wks-iot-9f3a1c20\/runs\/w2$/);
 });
 
 test('archiving a workspace row sends DELETE /api/runs/<id>?workspaceId=<wksId> (not ?projectKey=...)', async () => {

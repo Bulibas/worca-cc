@@ -70,12 +70,14 @@ function valueFlag(rest, name) {
 }
 
 /**
- * `<id or prefix>` -> the one pipelines row, straight from the DB (the
+ * `<id or prefix>` -> the one pipelines row id, straight from the DB (the
  * resolveAfterId idiom: LIKE with escaped metacharacters, capped at 21 so the
  * ambiguity count stays exact). `unknownVerb` only changes the not-found
  * message: a bare `worca runs lst` must not read as "your runs are gone".
+ * Exported for sibling verbs that accept the same refs (#531 logs, #513
+ * stop/pause).
  */
-function resolveRunRef(ref, fail, { unknownVerb = false } = {}) {
+export function resolveRunRef(ref, fail, { unknownVerb = false } = {}) {
   const q = String(ref || '').trim();
   if (!q) fail('an id is required (see: worca runs list)');
   const hits = getDb().prepare(

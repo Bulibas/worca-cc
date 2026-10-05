@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createAccessVerifier, normalizeTeamDomain } from '../src/core/cf-access.mjs';
 import { TEAM, AUD, makeAccessKey, signAccessJwt, certsFetch } from './helpers/access-jwt.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const keyA = makeAccessKey('kid-a');
 const keyB = makeAccessKey('kid-b');
@@ -17,14 +18,17 @@ function setup({ keys = [keyA], clock } = {}) {
   return { verify, fetchImpl, ref };
 }
 
-test('accepts a valid token and returns the identity', async () => {
-  const { verify } = setup();
-  assert.deepEqual(await verify(signAccessJwt(keyA)), { email: 'me@example.com', sub: 'user-1' });
-});
-
-test('accepts a string aud as well as an array', async () => {
-  const { verify } = setup();
-  assert.ok(await verify(signAccessJwt(keyA, { aud: AUD })));
+test('accepts a valid token (array or string aud) and returns the identity', async () => {
+  await checkRows([
+    { name: 'accepts a valid token and returns the identity', run: async () => {
+      const { verify } = setup();
+      assert.deepEqual(await verify(signAccessJwt(keyA)), { email: 'me@example.com', sub: 'user-1' });
+    } },
+    { name: 'accepts a string aud as well as an array', run: async () => {
+      const { verify } = setup();
+      assert.ok(await verify(signAccessJwt(keyA, { aud: AUD })));
+    } },
+  ]);
 });
 
 test('rejects wrong aud, wrong issuer, expired and not-yet-valid tokens', async () => {

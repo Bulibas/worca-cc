@@ -13,6 +13,7 @@
 
 import { formatInstant, formatCountdown } from '../../src/shared/schedule/recurrence.mjs';
 import { openScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
+import { splitMessage } from './feedback.mjs';
 
 const ICON = {
   clock: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7.5V12l3 2"></path></svg>',
@@ -81,14 +82,19 @@ export const SCHEDULE_TABS = ['activity', 'once', 'repeating'];
  * @param {HTMLElement} o.repeatingHost  the Repeating pane (series)
  * @param {HTMLElement} [o.subEl]   the topbar sub line
  * @param {HTMLElement} [o.msgEl]   a .form-msg line for action errors
- * @param {object} o.deps  { confirmModal, targetLabel(item), workflowLabel(id), onCounts(counts), openRun(item), route(tab) }
+ * @param {object} o.deps  { confirmModal, targetLabel(item), workflowLabel(id), onCounts(counts), openRun(item), route(tab), notify(o) }
  */
 export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repeatingHost, subEl = null, msgEl = null, deps }) {
   const tz = browserTimeZone();
   const model = { schedules: [], tickets: [], counts: {}, defaults: { graceMin: 360, ifMissed: 'run', maxFailures: 3 }, feed: [], filter: 'all', loaded: false, tab: 'activity' };
   let timer = null;
 
-  const say = (text, kind = '') => { if (msgEl) { msgEl.textContent = text || ''; msgEl.className = `form-msg${kind ? ` ${kind}` : ''}`; } };
+  // #555: an action's result is a toast through deps.notify; 'err-inline' (what load()/loadFeed() report) stays on msgEl.
+  const say = (text, kind = '') => {
+    if (kind && kind !== 'err-inline' && text && deps.notify) { deps.notify({ tone: kind, ...splitMessage(text) }); text = ''; kind = ''; }
+    if (kind === 'err-inline') kind = 'err';
+    if (msgEl) { msgEl.textContent = text || ''; msgEl.className = `form-msg${kind ? ` ${kind}` : ''}`; }
+  };
   const when = (iso) => formatInstant(Date.parse(iso), tz);
   const countdown = (iso) => formatCountdown(Date.parse(iso) - Date.now());
 
@@ -175,7 +181,7 @@ export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repea
         const out = await api('POST', `/api/schedules/${t.id}/run-now`);
         if (out.status === 'failed') throw new Error(out.failReason || 'The run could not be started.');
         if (out.status === 'fired' && deps.openRun) deps.openRun(out.resume ? { runId: out.runId, pipelineId: out.pipelineId } : { runId: out.runId });
-      }));
+      }, 'Run started'));
       acts.append(runNow);
       if (!t.scheduleId) {
         const move = h('button', { type: 'button', class: 'btn btn-mini', text: chained ? 'Change…' : (missed ? 'Reschedule' : 'Change time') });
@@ -185,7 +191,7 @@ export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repea
             initial: chained ? { after: t.after, afterPolicy: t.after.policy } : { scheduledFor: t.runAt, ifMissed: t.ifMissed, graceMin: t.graceMin },
             candidates: () => api('GET', `/api/schedules/after-candidates?${t.workspaceId ? `workspaceId=${encodeURIComponent(t.workspaceId)}` : `projectDir=${encodeURIComponent(t.projectDir || '')}`}`),
           });
-          if (res) act(() => api('PATCH', `/api/schedules/${t.id}`, res));
+          if (res) act(() => api('PATCH', `/api/schedules/${t.id}`, res), 'Schedule changed');
         });
         const cancel = h('button', { type: 'button', class: 'btn btn-danger btn-mini', text: missed ? 'Dismiss' : 'Cancel' });
         cancel.addEventListener('click', async () => {
@@ -206,7 +212,7 @@ export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repea
             cancel.disabled = false;
             if (!(await deps.confirmModal({ title: 'Cancel scheduled run', message: `Cancel “${t.title || 'this run'}”?\nIt will not start. Nothing has run yet, so there is nothing to clean up.${note}`, confirmLabel: 'Cancel run' }))) return;
           }
-          act(() => api('DELETE', `/api/schedules/${t.id}`));
+          act(() => api('DELETE', `/api/schedules/${t.id}`), 'Schedule cancelled');
         });
         acts.append(move, cancel);
       }
@@ -239,7 +245,7 @@ export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repea
     const statusWord = ended ? 'Ended' : streakPause ? `Paused after ${s.failureStreak} failure${s.failureStreak === 1 ? '' : 's'}` : paused ? 'Paused' : 'Active';
     const family = ended ? 'grey' : paused ? 'amber' : 'green';
     const sw = h('div', { class: `switch${s.status === 'active' ? ' on' : ''}`, role: 'switch', tabindex: ended ? '-1' : '0', 'aria-checked': s.status === 'active' ? 'true' : 'false', 'aria-label': paused ? 'Resume this schedule' : 'Pause this schedule', title: paused ? 'Resume' : 'Pause' });
-    const toggle = () => { if (!ended) act(() => api('POST', `/api/schedules/${s.id}/${paused ? 'resume' : 'pause'}`)); };
+    const toggle = () => { if (!ended) act(() => api('POST', `/api/schedules/${s.id}/${paused ? 'resume' : 'pause'}`), paused ? 'Resumed' : 'Paused'); };
     sw.addEventListener('click', toggle);
     sw.addEventListener('keydown', (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(); } });
 
@@ -250,20 +256,20 @@ export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repea
         const out = await api('POST', `/api/schedules/${s.id}/run-now`);
         if (out.status === 'failed') throw new Error(out.failReason || 'The run could not be started.');
         if (out.status === 'fired' && deps.openRun) deps.openRun({ runId: out.runId });
-      }));
+      }, 'Run started'));
       const skip = h('button', { type: 'button', class: 'btn btn-mini', text: 'Skip next', hidden: paused });
-      skip.addEventListener('click', () => act(() => api('POST', `/api/schedules/${s.id}/skip-next`)));
+      skip.addEventListener('click', () => act(() => api('POST', `/api/schedules/${s.id}/skip-next`), 'Next run skipped'));
       const edit = h('button', { type: 'button', class: 'btn btn-mini', text: 'Edit' });
       edit.addEventListener('click', async () => {
         const res = await openScheduleSheet({ mode: 'series', runTitle: s.title || '', defaults: model.defaults, initial: { rule: s.rule, overlap: s.overlap, maxFailures: s.maxFailures, ifMissed: s.ifMissed, graceMin: s.graceMin } });
-        if (res) act(() => api('PATCH', `/api/schedules/${s.id}`, { rule: res.repeat.rule, overlap: res.repeat.overlap, maxFailures: res.repeat.maxFailures, ifMissed: res.ifMissed, graceMin: res.graceMin }));
+        if (res) act(() => api('PATCH', `/api/schedules/${s.id}`, { rule: res.repeat.rule, overlap: res.repeat.overlap, maxFailures: res.repeat.maxFailures, ifMissed: res.ifMissed, graceMin: res.graceMin }), 'Schedule changed');
       });
       acts.append(runNow, skip, edit);
     }
     const del = h('button', { type: 'button', class: 'btn btn-danger btn-mini', text: 'Delete' });
     del.addEventListener('click', async () => {
       if (!(await deps.confirmModal({ title: 'Delete schedule', message: `Delete “${s.title || 'this schedule'}”?\nIt stops repeating. Runs it already started stay in Runs.`, confirmLabel: 'Delete schedule' }))) return;
-      act(() => api('DELETE', `/api/schedules/${s.id}`));
+      act(() => api('DELETE', `/api/schedules/${s.id}`), 'Schedule deleted');
     });
     acts.append(del);
 
@@ -342,12 +348,12 @@ export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repea
     const acts = h('div', { class: 'sched-feed-acts' });
     if (!n.resolvedAt && n.kind === 'missed' && ticket && ticket.status === 'missed') {
       const b = h('button', { type: 'button', class: 'btn btn-mini', text: 'Run now' });
-      b.addEventListener('click', () => act(() => api('POST', `/api/schedules/${ticket.id}/run-now`)));
+      b.addEventListener('click', () => act(() => api('POST', `/api/schedules/${ticket.id}/run-now`), 'Run started'));
       acts.append(b);
     }
     if (!n.resolvedAt && n.kind === 'paused' && series && series.status === 'paused') {
       const b = h('button', { type: 'button', class: 'btn btn-mini', text: 'Resume schedule' });
-      b.addEventListener('click', () => act(() => api('POST', `/api/schedules/${series.id}/resume`)));
+      b.addEventListener('click', () => act(() => api('POST', `/api/schedules/${series.id}/resume`), 'Resumed'));
       acts.append(b);
     }
     if (n.pipelineId && deps.openRun) {
@@ -400,7 +406,7 @@ export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repea
       model.counts = { ...model.counts, unread: data.unread || 0 };
       deps.onCounts?.(model.counts);
       if (feedHost.isConnected) { paintFeed(); paintTabs(); }
-    } catch (err) { say(err.message, 'err'); }
+    } catch (err) { say(err.message, 'err-inline'); }
   }
 
   async function load() {
@@ -414,7 +420,7 @@ export function createSchedulesView({ tabsHost = null, feedHost, onceHost, repea
       model.loaded = true;
       deps.onCounts?.(model.counts);
       paintList();
-    } catch (err) { say(err.message, 'err'); }
+    } catch (err) { say(err.message, 'err-inline'); }
     await loadFeed();
   }
 

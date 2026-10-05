@@ -135,6 +135,12 @@
           <!-- Who this browser is signed in as (GET /api/whoami). Filled only behind an
                identity proxy or an operator-set name; a local install never shows it. -->
           <div class="side-who" id="side-who" hidden><span class="side-who-label">Signed in as</span> <span class="side-who-name"></span></div>
+          <!-- "I'm here | I'm away" (app.js#paintSideAway): the lit side is what applies right now, the
+               away hours included (wording §3.8). Pause stays in Settings › Away mode. -->
+          <div id="side-away"></div>
+          <!-- Running actions (issue #529): its own mount, since paintBudget replaces #side-spend's children.
+               Not level-gated: it shows only while a service runs, and it must stay stoppable. -->
+          <div id="side-actions" class="side-actions" hidden aria-label="Running actions"></div>
           <div id="side-spend"></div>
         </div>
       </aside>
@@ -304,41 +310,45 @@
                   <div id="extrasPills" class="extras-pills" hidden></div>
                 </div>
 
-                <!-- Branch pair: one decision (from → into), so one compact row. -->
-                <div class="field-grid-2 branch-pair" id="branch-fields" data-min-level="advanced">
-                  <div class="field field-compact">
-                    <label for="sourceBranch">Source branch</label>
-                    <div class="select-wrap" id="sourceBranchWrap">
-                      <select id="sourceBranch" class="select"></select>
-                    </div>
-                    <!-- Workspace mode: one source-branch dropdown per member project. -->
-                    <div class="ws-source-branches hidden" id="ws-source-branches"></div>
-                    <div class="switch-row ws-src-prev hidden" id="ws-source-previous-row">
-                      <div class="switch" id="ws-source-previous" role="switch" tabindex="0" aria-checked="false" aria-label="Branch off the run before it"></div>
-                      <span class="txt">Branch off the run before it</span>
-                    </div>
-                    <!-- Sync before run (#527): status pill, Sync, Auto-sync — one left-aligned row. -->
-                    <div class="sync-row" id="sync-row" hidden>
-                      <button type="button" class="sync-pill grey" id="sync-pill" aria-haspopup="dialog">
-                        <span class="sdot" aria-hidden="true"></span><span class="sync-pill-txt">Checking…</span>
-                        <svg class="chev" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                      </button>
-                      <button type="button" class="btn btn-mini sync-btn" id="sync-btn">
-                        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5V5h-2.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                        <span>Sync</span>
-                      </button>
-                      <label class="switch-row sync-auto" id="sync-auto-row">
-                        <input id="syncAuto" class="sw-input" type="checkbox" checked>
-                        <span class="switch switch-sm"></span><span class="txt">Auto-sync</span>
-                      </label>
-                    </div>
+                <!-- Branches (design v3): one table for a project or a workspace — a project
+                     run is the same table with one row. One choice (where the code comes from),
+                     then each row says in words what the run will get. -->
+                <div class="field field-compact branches" id="branch-fields" data-min-level="advanced">
+                  <div class="branches-head">
+                    <span class="branches-title" id="branches-title">Branches</span>
+                    <span class="branches-ctx" id="branches-ctx"></span>
+                    <span class="branches-mode" id="branches-mode-wrap" hidden>
+                      <span class="branches-mode-label" id="branches-mode-label">Use branches from</span>
+                      <span class="seg seg-sm" id="branches-mode" role="group" aria-labelledby="branches-mode-label">
+                        <button type="button" data-mode="origin" aria-pressed="true" class="on" id="branches-mode-origin">Origin · latest</button>
+                        <button type="button" data-mode="local" aria-pressed="false" id="branches-mode-local">Local copy</button>
+                      </span>
+                    </span>
                   </div>
-
-                  <div class="field field-compact">
-                    <label for="featureBranch">Feature branch <span class="opt">(optional)</span></label>
+                  <div class="branch-table" id="branch-table" role="table" aria-labelledby="branches-title">
+                    <div class="bt-head" role="row">
+                      <span role="columnheader">Project</span><span role="columnheader">Start from</span><span role="columnheader">What the run gets</span>
+                    </div>
+                    <!-- Project mode: the one row. Workspace mode hides it and fills #ws-source-branches. -->
+                    <div class="bt-row" id="bt-project-row" role="row">
+                      <span class="bt-name" id="bt-project-name" role="cell"></span>
+                      <div class="select-wrap" id="sourceBranchWrap" role="cell">
+                        <select id="sourceBranch" class="select" aria-labelledby="bt-project-name"></select>
+                      </div>
+                      <div class="bt-outcome" id="bt-project-outcome" role="cell"></div>
+                    </div>
+                    <div class="ws-source-branches hidden" id="ws-source-branches" role="rowgroup"></div>
+                  </div>
+                  <div class="switch-row ws-src-prev hidden" id="ws-source-previous-row">
+                    <div class="switch" id="ws-source-previous" role="switch" tabindex="0" aria-checked="false" aria-label="Branch off the run before it"></div>
+                    <span class="txt">Branch off the run before it</span>
+                  </div>
+                  <div class="branches-new">
+                    <label for="featureBranch">New branch <span class="opt">(optional)</span></label>
                     <input id="featureBranch" class="input" type="text" placeholder="e.g. feat/rate-limiter" spellcheck="false" />
-                    <small class="hint">Leave empty and Worca will propose one.</small>
+                    <small class="hint" id="featureBranchHint">Leave empty and Worca will propose one.</small>
                   </div>
+                  <small class="hint err" id="branches-blocked" hidden></small>
                 </div>
 
                 <!-- Advanced: how the run is executed, as opposed to what it runs.
@@ -381,6 +391,14 @@
                       <span class="txt">Human in the loop — Auto shows its proposal, clarifies, and agents may ask</span>
                     </label>
                     <small class="hint" id="hitlHint">Off: the proposal is accepted as proposed, no clarify card, no agent questions. A loop that runs out of cycles, a recovery prompt, a cost cap or an error still pause the run.</small>
+                    <!-- Away mode per-run mark (src/core/night/*): worca may answer this run's
+                         questions while you are away (Settings › Away mode sets when and how). -->
+                    <label class="switch-row" id="night-row">
+                      <input id="nightMode" class="sw-input" type="checkbox">
+                      <span class="switch"></span>
+                      <span class="txt">Mark this run: worca may answer for me</span>
+                    </label>
+                    <small class="hint" id="nightModeHint"></small>
 
                     <!-- Guardrails picker (built-ins + named sets; the selection IS the
                          run's policy, applied uniformly to every member). app.js populates
@@ -394,6 +412,18 @@
                         </select>
                       </div>
                       <small class="hint" id="guardrailsHint">Applies to every agent this run spawns. Permissive = no restrictions (the legacy default).</small>
+                    </div>
+
+                    <!-- MCP servers (MCP registry §6.2, D16): the registry copies this run starts, opted out
+                         per membership. app.js#paintMcpRuns fills it from POST /api/mcp/preview; hidden while
+                         the target resolves to no membership. -->
+                    <div class="field" id="mcpRunsField" hidden>
+                      <span class="label" id="mcpRunsHead">MCP servers</span>
+                      <details class="mcp-runs" id="mcpRuns">
+                        <summary class="select" id="mcpRunsLabel" aria-labelledby="mcpRunsHead mcpRunsLabel"></summary>
+                        <div id="mcpRunsPop"></div>
+                      </details>
+                      <small class="hint">Names are before any <code>_w</code> rename, which is decided at run start.</small>
                     </div>
 
                   </div>
@@ -421,7 +451,7 @@
                 <div class="hint err" id="newBlockedNote" hidden></div>
                 <!-- OpenRouter free requests left today vs what a run here takes (openrouter-free-view.mjs). -->
                 <div class="hint warn" id="newFreeNote" hidden></div>
-                <div class="actions" style="justify-content:flex-end">
+                <div class="actions" style="justify-content:flex-end" data-card-actions>
                   <!-- A time picked BEFORE the task (Schedules › Schedule a run, or Change… here):
                        it waits on the form and Start run becomes Schedule. -->
                   <div class="ask-card-sched new-sched" id="new-sched" hidden>
@@ -486,6 +516,13 @@
                       <button type="button" role="menuitemradio" data-group-by="date" aria-checked="false">Group by date</button>
                     </div>
                   </span>
+                  <!-- Archived runs (issue #575): the soft-deleted list, restore included. Advanced
+                       (docs/ui-levels.md). A header toggle, not a fifth chip: it swaps the list's
+                       source rather than narrowing it, and the chip row has no room at the pane's floor. -->
+                  <button type="button" class="runs-search-btn runs-archived-btn" id="runs-archived-btn" data-min-level="advanced"
+                          aria-label="Archived runs" title="Archived runs" aria-pressed="false">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="5" rx="1.5"></rect><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"></path><path d="M10 13h4"></path></svg>
+                  </button>
                   <button type="button" class="runs-search-btn" id="runs-search-btn" aria-label="Search runs"
                           aria-expanded="false" aria-controls="runs-search-row">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M16 16l4.5 4.5"></path></svg>
@@ -544,8 +581,13 @@
                 <!-- The run's name: the glance's headline carries its state. -->
                 <span class="rd-bar-mid"><span class="rd-bar-title"></span></span>
                 <span class="rd-bar-end">
-                  <!-- Chain a run after this one while it is still going (the list card's old schedule-after button).
-                       Once it ends, the terminal CTA "Start a follow-up run" takes over (paintRdTerminal). -->
+                  <!-- Away mode on this run (POST /api/run/night); hidden once the run is over. -->
+                  <label class="rd-night-wrap" hidden><span class="txt">Away mode on this run</span>
+                    <select class="rd-night select input-mini" aria-label="Away mode on this run"></select>
+                    <span class="rd-night-pill" aria-live="polite"></span></label>
+                  <!-- Chain a run after this one (the list card's old schedule-after button): "Schedule a run
+                       after this" while it goes, "Start a follow-up run" once it ends (paintRdHeader). The
+                       saved run's bar carries the same button (.hd-after). -->
                   <button type="button" class="rd-after" data-min-level="advanced" title="Schedule a run after this" aria-label="Schedule a run after this" hidden>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h12"></path><path d="M13 6l6 6-6 6"></path></svg>
                     <span class="rd-btn-label">Run after</span>
@@ -570,6 +612,10 @@
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
                     <span class="rd-btn-label">Stop</span>
                   </button>
+                  <!-- Opens the terminal pane in this page's folder (docs/terminal.md); app.js wires every .term-opener. -->
+                  <button type="button" class="term-opener btn-ghost" aria-label="Open the terminal" aria-expanded="false" title="Terminal (Ctrl+`)">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2.5"></rect><path d="M7.5 9.5l3 2.5-3 2.5"></path><path d="M13 15h3.5"></path></svg>
+                  </button>
                 </span>
               </div>
               <!-- Inline error slot for failed actions, under the bar so the graph or a tab
@@ -578,10 +624,12 @@
 
               <section class="rd-glance" aria-label="Run status">
                 <div class="rd-now">
-                  <!-- The run's name is the page title; the bar shows it only once this scrolls away. -->
+                  <!-- The run's name is the page title; the bar shows it only once this scrolls away.
+                       The meta line's text is its first node (paintPageHead); the feature branch chip
+                       copies the name, like the Details header's (paintPageBranch). -->
                   <header class="rd-page-head">
                     <h1 class="rd-page-title" tabindex="-1"></h1>
-                    <p class="rd-page-meta"></p>
+                    <p class="rd-page-meta"><button type="button" class="rd-page-branch" hidden data-min-level="advanced" aria-label="Copy branch name"><span class="rd-page-branch-name"></span><svg class="ico-copy" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2.5"></rect><path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5" stroke-linecap="round"></path></svg><svg class="ico-check" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M4 12.5l5.5 5.5L20 6.5" stroke-linecap="round" stroke-linejoin="round"></path></svg></button></p>
                   </header>
                 </div>
                 <div class="rd-sheet">
@@ -607,8 +655,14 @@
                   </div>
                   <!-- Time · Cost · Changes, in every state (the time ticks while live). -->
                   <div class="rd-facts"></div>
+                  <!-- Away mode's answers on this run, at the top where they are seen: how many, how many to
+                       check, and a jump to the first one to check (paintAwayAnswers). -->
+                  <div class="rd-away-note" hidden><span class="rd-away-note-text"></span><button type="button" class="btn btn-ghost btn-mini rd-away-jump">See the answers</button></div>
                   <div class="rd-nowlist"></div>
                   <div class="rd-result" hidden></div>
+                  <!-- The pull request button: one node for the screen's life, outside the result
+                       (rebuilt), so its loading placeholder can morph into it (paintPrCta). -->
+                  <div class="rd-pr-slot" hidden></div>
                 </div>
                 <!-- The Live view panel. The clip lets the narrow layout open its height while the
                      graph host keeps its final size (no fit chasing a growing box). It is `inert`:
@@ -625,6 +679,9 @@
                   <h3 class="rd-ask-head"></h3>
                   <div class="qpanel hidden"></div>
                 </div>
+                <!-- What Away mode answered on this run, under the run card: one group per ask, one row
+                     per answer; a row opens its reason, Check marks the ones worca was not sure of. -->
+                <section class="rd-night-sec" hidden><h3 class="rd-night-h">Answered for you<span class="rd-night-count"></span></h3><div class="rd-night-asks"></div></section>
               </section>
 
               <section class="rd-details" hidden aria-label="Run details">
@@ -633,6 +690,7 @@
                     <h2 class="rd-title"></h2>
                     <span class="auto-badge" hidden></span>
                     <span class="rd-status pill-run"><span class="pdot"></span><span class="rd-status-word"></span></span>
+                    <span class="act-pill-slot"></span>
                   </div>
                   <div class="rd-meta mono"></div>
                   <div class="rd-row3">
@@ -675,7 +733,44 @@
                   Run
                 </button>
                 <span class="rd-bar-mid"><span class="rd-bar-title"></span></span>
-                <span class="rd-bar-end"></span>
+                <!-- The run page bar's controls, in its order and with its look (style.css shares their
+                     rules): Run after, the Resume split, Pause, Stop. History's own class names, so
+                     setupHdActions, paintHdAfter, paintHdLive and resumePipeline's busy label reach them. -->
+                <span class="rd-bar-end">
+                  <button type="button" class="hd-after" data-min-level="advanced" title="Schedule a run after this" aria-label="Schedule a run after this" hidden>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h12"></path><path d="M13 6l6 6-6 6"></path></svg>
+                    <span class="hd-btn-label">Run after</span>
+                  </button>
+                  <!-- The label lives in its own span: the busy state ("Resuming…") swaps ONLY that
+                       node, so the inline SVG survives and the error path can restore the word.
+                       Split Resume: paused + interrupted runs, or the pipeline's live run once it
+                       pauses (paintHdLive); the caret opens the schedule-resume menu, gated at Advanced. -->
+                  <div class="btn-split mini hd-resume-split" hidden>
+                    <button type="button" class="hd-resume" hidden>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
+                      <span class="hd-btn-label">Resume</span>
+                    </button>
+                    <button type="button" class="btn-split-more hd-resume-more" data-min-level="advanced" aria-haspopup="menu" aria-expanded="false" title="Schedule the resume" aria-label="Schedule the resume">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+                    </button>
+                    <div class="btn-split-menu hd-resume-menu" role="menu" hidden>
+                      <button type="button" role="menuitem" class="hd-resume-at-item"><b>Resume at…</b><small>Schedule the resume</small></button>
+                    </div>
+                  </div>
+                  <!-- Pause and Stop act on the pipeline's live run, while this tab knows one (paintHdLive). -->
+                  <button type="button" class="hd-pause" hidden>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.5"></rect><rect x="14" y="5" width="4" height="14" rx="1.5"></rect></svg>
+                    <span class="hd-btn-label">Pause</span>
+                  </button>
+                  <button type="button" class="hd-stop" hidden>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
+                    <span class="hd-btn-label">Stop</span>
+                  </button>
+                  <!-- Opens the terminal pane in this page's folder (docs/terminal.md); app.js wires every .term-opener. -->
+                  <button type="button" class="term-opener btn-ghost" aria-label="Open the terminal" aria-expanded="false" title="Terminal (Ctrl+`)">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2.5"></rect><path d="M7.5 9.5l3 2.5-3 2.5"></path><path d="M13 15h3.5"></path></svg>
+                  </button>
+                </span>
               </div>
               <!-- The inline error sits under the shared bar so both modes show it (a load
                    failure, an archive failure); writers resolve it with screen.querySelector. -->
@@ -684,7 +779,7 @@
                 <div class="rd-now">
                   <header class="rd-page-head">
                     <h1 class="rd-page-title" tabindex="-1"></h1>
-                    <p class="rd-page-meta"></p>
+                    <p class="rd-page-meta"><button type="button" class="rd-page-branch" hidden data-min-level="advanced" aria-label="Copy branch name"><span class="rd-page-branch-name"></span><svg class="ico-copy" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2.5"></rect><path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5" stroke-linecap="round"></path></svg><svg class="ico-check" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M4 12.5l5.5 5.5L20 6.5" stroke-linecap="round" stroke-linejoin="round"></path></svg></button></p>
                   </header>
                 </div>
                 <div class="rd-sheet">
@@ -700,9 +795,17 @@
                     <button type="button" class="hist-discard btn-ghost" hidden>Discard worktree</button>
                   </div>
                   <div class="rd-facts"></div>
+                  <!-- Away mode's answers on this run, at the top where they are seen: how many, how many to
+                       check, and a jump to the first one to check (paintAwayAnswers). -->
+                  <div class="rd-away-note" hidden><span class="rd-away-note-text"></span><button type="button" class="btn btn-ghost btn-mini rd-away-jump">See the answers</button></div>
                   <div class="rd-nowlist"></div>
                   <div class="rd-result hd-result"></div>
+                  <!-- The pull request button, mirrored from the Details header: one node, outside
+                       the result paintHdGlance rebuilds on every paint (paintPrCta). -->
+                  <div class="rd-pr-slot" hidden></div>
                 </div>
+                <!-- What Away mode answered on this run (GET /api/night-decisions), as on the run page. -->
+                <section class="rd-night-sec hd-night-sec" hidden><h3 class="rd-night-h">Answered for you<span class="rd-night-count"></span></h3><div class="rd-night-asks"></div></section>
               </section>
               <section class="rd-details hd-details" hidden aria-label="Run details">
               <header class="hd-header">
@@ -711,8 +814,8 @@
                   <span class="auto-badge" hidden></span>
                   <span class="hist-merge" hidden data-min-level="expert"></span>
                   <button type="button" class="hd-pr" hidden data-min-level="advanced">Create PR</button>
+                  <span class="act-pill-slot"></span>
                   <a class="hd-pr-link" hidden data-min-level="advanced" target="_blank" rel="noopener"></a>
-                  <button type="button" class="hd-after btn-ghost" hidden data-min-level="advanced">Schedule a run after this</button>
                 </div>
                 <!-- Workspace runs: one line per member repo (View PR / Merged / No changes).
                      Painted by paintHdPr; never shown for a single-project run. -->
@@ -743,23 +846,9 @@
                        outranks the UA [hidden] rule either way. -->
                   <span class="hd-copied">Copied</span>
                   <span class="hd-spacer"></span>
-                  <!-- The label lives in its own span: the busy states ("Resuming…" /
-                       "Archiving…") swap ONLY that node, so the inline SVG survives and
-                       the error path can restore the word. -->
-                  <!-- Split Resume (History detail): the ghost Resume keeps its look; the caret opens
-                       the schedule-resume menu. Gated at Advanced like .hd-more-wrap. -->
-                  <div class="btn-split mini hd-resume-split" hidden>
-                    <button type="button" class="hd-resume btn-ghost" hidden>
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"></path></svg>
-                      <span class="hd-btn-label">Resume</span>
-                    </button>
-                    <button type="button" class="btn-split-more hd-resume-more" data-min-level="advanced" aria-haspopup="menu" aria-expanded="false" title="Schedule the resume" aria-label="Schedule the resume">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
-                    </button>
-                    <div class="btn-split-menu hd-resume-menu" role="menu" hidden>
-                      <button type="button" role="menuitem" class="hd-resume-at-item"><b>Resume at…</b><small>Schedule the resume</small></button>
-                    </div>
-                  </div>
+                  <!-- The label lives in its own span: the busy state ("Archiving…") swaps
+                       ONLY that node, so the inline SVG survives and the error path can
+                       restore the word. -->
                   <!-- Archive and Report live behind one ⋯ trigger, but keep their own
                        classes: every gate, the busy-label swap and hdSetArchiveGate all
                        address them directly, and only their PLACEMENT moved here.
@@ -775,6 +864,10 @@
                       <button type="button" class="hd-archive" role="menuitem" hidden>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
                         <span class="hd-btn-label">Archive</span>
+                      </button>
+                      <button type="button" class="hd-restore" role="menuitem" hidden>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v4h4"></path><path d="M12 8v4l3 2"></path></svg>
+                        <span class="hd-btn-label">Restore</span>
                       </button>
                       <button type="button" class="hd-report" role="menuitem" hidden>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path><path d="M12 9v4.5"></path><path d="M12 17h.01"></path></svg>
@@ -1096,8 +1189,7 @@
                   <h1>Projects</h1>
                   <div class="sub">Registered projects. Open one for its details and memory; add a folder or remove one from the list — files on disk and run history are never touched.</div>
                 </div>
-                <div class="topbar-actions"><button class="btn btn-mini" id="projects-sync-all" type="button">Sync all</button>
-                <button type="button" id="project-add-btn" class="btn btn-primary btn-mini">
+                <div class="topbar-actions"><button type="button" id="project-add-btn" class="btn btn-primary btn-mini">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
                   Add project
                 </button>
@@ -1120,8 +1212,12 @@
                     Back
                   </button>
                   <h1 class="pd-title"></h1>
+                  <!-- Opens the terminal pane in this page's folder (docs/terminal.md); app.js wires every .term-opener. -->
+                  <button type="button" class="term-opener btn-ghost" aria-label="Open the terminal" aria-expanded="false" title="Terminal (Ctrl+`)">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2.5"></rect><path d="M7.5 9.5l3 2.5-3 2.5"></path><path d="M13 15h3.5"></path></svg>
+                  </button>
                 </div>
-                <div class="pd-meta mono"><span class="pd-path"></span></div>
+                <div class="pd-meta mono"><span class="pd-path"></span><button type="button" class="pd-path-copy" aria-label="Copy path" title="Copy path"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8.5" y="8.5" width="11" height="11" rx="2"></rect><path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5"></path></svg></button></div>
                 <div class="pd-actions">
                   <button type="button" class="pd-new btn-ghost">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
@@ -1314,8 +1410,8 @@
              .hidden back on it at every navigation. The tab rides in the hash
              param (#settings/<tab>, #settings/guardrails/<id>) — parseHash splits
              on the FIRST '/' only, so the view stays 'settings'.
-             NOTE: the routed-view census in test/ui-shell.test.mjs counts the
-             literal routing attribute name, so never spell it out in a comment. -->
+             NOTE: the routed-view census (test/ui-boot.test.mjs) counts DOM
+             elements, not the literal routing attribute name in this source. -->
         <section class="view hidden" data-view="settings">
           <div class="seg settings-tabs" id="settings-tabs" role="group" aria-label="Settings section">
             <!-- Ordered by mode (Simple, Advanced, Expert) so each mode sees a gap-free prefix of the
@@ -1326,9 +1422,11 @@
             <button type="button" data-tab="guardrails" data-min-level="advanced" aria-pressed="false">Guardrails</button>
             <button type="button" data-tab="memory" data-min-level="advanced" aria-pressed="false">Memory</button>
             <button type="button" data-tab="plugins" data-min-level="advanced" aria-pressed="false">Plugins</button>
+            <button type="button" data-tab="mcp" data-min-level="advanced" aria-pressed="false">MCP servers</button>
             <button type="button" data-tab="models" data-min-level="expert" aria-pressed="false">Models</button>
             <button type="button" data-tab="providers" data-min-level="expert" aria-pressed="false">Providers</button>
           </div>
+          <p id="settingsLoadMsg" class="form-msg err settings-load-msg" role="alert" hidden></p>
 
           <section class="settings-pane" data-tab="general">
             <div class="topbar">
@@ -1352,7 +1450,6 @@
                 <button type="button" data-theme-mode="light" aria-pressed="false">Light</button>
                 <button type="button" data-theme-mode="dark" aria-pressed="false">Dark</button>
               </div>
-              <small class="hint" id="themeMsg"></small>
             </section>
 
             <!-- Credential broker (docs/credential-broker.md): shown only when worca runs with one. -->
@@ -1402,7 +1499,7 @@
                     the old root is left in place.
                   </span></button>
                 </div>
-                <input id="settingsRoot" class="input" type="text" placeholder="" spellcheck="false" autocomplete="off" />
+                <input id="settingsRoot" data-setting="root" class="input" type="text" placeholder="" spellcheck="false" autocomplete="off" />
               </div>
               <div class="field">
                 <div class="label-row">
@@ -1413,7 +1510,7 @@
                   </span></button>
                 </div>
                 <div class="path-row">
-                  <input id="settingsProjectsRoot" class="input" type="text" placeholder="" spellcheck="false" autocomplete="off" />
+                  <input id="settingsProjectsRoot" data-setting="projectsRoot" class="input" type="text" placeholder="" spellcheck="false" autocomplete="off" />
                   <button type="button" id="settingsProjectsRootBrowse" class="btn btn-ghost btn-mini" title="Pick the projects root folder">Browse&hellip;</button>
                 </div>
               </div>
@@ -1443,14 +1540,13 @@
                 </div>
               </div>
               <div class="field">
-                <label class="check-row" for="debugSpawnEnabled"><input id="debugSpawnEnabled" type="checkbox" /> Log claude spawn details (binary, argv, routing env)</label>
+                <label class="check-row" for="debugSpawnEnabled"><input id="debugSpawnEnabled" data-setting="debugSpawnEnabled" type="checkbox" /> Log claude spawn details (binary, argv, routing env)</label>
               </div>
               <small class="hint" id="debugSpawnEnvNote"></small>
               <div class="add-project-actions" style="margin-top:14px">
                 <button type="button" id="debugSpawnReset" class="btn btn-ghost btn-mini">Reset to default</button>
                 <button type="button" id="debugSpawnSave" class="btn btn-primary btn-mini">Save</button>
               </div>
-              <small class="hint" id="debugSpawnMsg"></small>
             </section>
 
             <!-- Getting started: the checklist's Hide is undone here. Only the checklist —
@@ -1467,7 +1563,7 @@
               <small class="hint" id="gsSettingsMsg"></small>
             </section>
 
-            <!-- About: intentionally no info-tip and no .hint (test/ui-settings-tooltips.test.mjs pins both). -->
+            <!-- About: intentionally no info-tip and no .hint (no longer tested; keep both out by hand). -->
             <section class="card settings-card" id="about-card" data-min-level="simple">
               <div class="label-row">
                 <h2>About</h2>
@@ -1534,7 +1630,7 @@
                     Pause a pipeline when its estimated cost reaches this amount. Leave empty for no limit.
                   </span></button>
                 </div>
-                <input id="budgetPerPipeline" class="input" type="number" min="0" step="0.01" inputmode="decimal" placeholder="No limit" autocomplete="off" />
+                <input id="budgetPerPipeline" data-setting="pipelineCostLimitUsd" class="input" type="number" min="0" step="0.01" inputmode="decimal" placeholder="No limit" autocomplete="off" />
               </div>
               <div class="field">
                 <div class="label-row">
@@ -1544,7 +1640,7 @@
                     Leave empty for no limit.
                   </span></button>
                 </div>
-                <input id="budgetTotal" class="input" type="number" min="0" step="0.01" inputmode="decimal" placeholder="No limit" autocomplete="off" />
+                <input id="budgetTotal" data-setting="totalCostLimitUsd" class="input" type="number" min="0" step="0.01" inputmode="decimal" placeholder="No limit" autocomplete="off" />
               </div>
               <div class="field">
                 <div class="label-row">
@@ -1554,7 +1650,7 @@
                   </span></button>
                 </div>
                 <div class="select-wrap">
-                  <select id="budgetResetPeriod" class="select">
+                  <select id="budgetResetPeriod" data-setting="costLimitResetPeriod" class="select">
                     <option value="weekly">Weekly &mdash; resets Monday 00:00</option>
                     <option value="monthly">Monthly &mdash; resets on the 1st, 00:00</option>
                   </select>
@@ -1564,13 +1660,32 @@
                 <div class="label-row">
                   <label for="budgetHumanRate">Developer rate (USD/h)</label>
                 </div>
-                <input id="budgetHumanRate" class="input" type="number" min="0" step="1" inputmode="decimal" placeholder="35" autocomplete="off" />
+                <input id="budgetHumanRate" data-setting="humanRateUsdPerHour" class="input" type="number" min="0" step="1" inputmode="decimal" placeholder="35" autocomplete="off" />
               </div>
               <div class="add-project-actions" style="margin-top:14px">
                 <button type="button" id="budgetReset" class="btn btn-ghost btn-mini">Clear limits</button>
                 <button type="button" id="budgetSave" class="btn btn-primary btn-mini">Save</button>
               </div>
               <small class="hint" id="budgetMsg"></small>
+            </section>
+
+            <!-- Away mode (src/core/night/*): the user layer of the Away mode config, rendered by
+                 night-mode-form.mjs with its live summary, plus the status buttons (nightModeToggle). -->
+            <section class="card settings-card" id="night-settings-card" data-min-level="advanced">
+              <div class="card-head">
+                <div class="label-row">
+                  <h2>Away mode</h2>
+                  <button type="button" class="info-tip" aria-label="About Away mode">i<span class="tip-content hidden">
+                    While you're away, worca answers the questions your runs are waiting on. You can see every answer and why it was chosen. When worca isn't sure, it marks the answer "please check" and keeps going. When the run ends, it tells you how many answers to check.
+                  </span></button>
+                </div>
+              </div>
+              <div class="away-status" id="awayStatus" role="group" aria-label="Away mode status"></div>
+              <div id="night-mode-host"></div>
+              <div class="add-project-actions" style="margin-top:14px">
+                <button type="button" id="nightModeReset" class="btn btn-ghost btn-mini">Use defaults</button>
+                <button type="button" id="nightModeSave" class="btn btn-primary btn-mini">Save</button>
+              </div>
             </section>
 
             <!-- Scheduled runs: the defaults a NEW schedule inherits. Each schedule keeps
@@ -1586,7 +1701,7 @@
                 </div>
               </div>
               <label class="switch-row" id="syncDefBeforeRunRow">
-                <input id="syncDefBeforeRun" class="sw-input" type="checkbox" checked>
+                <input id="syncDefBeforeRun" data-setting="sync.beforeRun" class="sw-input" type="checkbox" checked>
                 <span class="switch"></span><span class="txt">Sync the source branch before each run</span>
               </label>
               <div class="field-grid-2" style="margin-top:14px">
@@ -1598,7 +1713,7 @@
                     </span></button>
                   </div>
                   <div class="select-wrap">
-                    <select id="syncDefOnDiverged" class="select">
+                    <select id="syncDefOnDiverged" data-setting="sync.onDiverged" class="select">
                       <option value="ask">Ask me</option>
                       <option value="origin">Start from origin</option>
                       <option value="fail">Don't run</option>
@@ -1607,13 +1722,13 @@
                 </div>
                 <div class="field">
                   <label for="syncDefRemote">Remote</label>
-                  <input id="syncDefRemote" class="input" type="text" placeholder="origin" spellcheck="false" autocomplete="off" />
+                  <input id="syncDefRemote" data-setting="sync.remote" class="input" type="text" placeholder="origin" spellcheck="false" autocomplete="off" />
                 </div>
               </div>
               <div class="field">
                 <label for="syncDefRefresh">Check remotes in the background</label>
                 <div class="select-wrap">
-                  <select id="syncDefRefresh" class="select">
+                  <select id="syncDefRefresh" data-setting="sync.refreshMinutes" class="select">
                     <option value="0">Off</option>
                     <option value="5">Every 5 minutes</option>
                     <option value="10">Every 10 minutes</option>
@@ -1626,7 +1741,6 @@
                 <button type="button" id="syncDefaultsReset" class="btn btn-ghost btn-mini">Use defaults</button>
                 <button type="button" id="syncDefaultsSave" class="btn btn-primary btn-mini">Save</button>
               </div>
-              <small class="hint" id="syncDefaultsMsg"></small>
             </section>
 
             <section class="card settings-card" id="schedule-settings-card" data-min-level="advanced">
@@ -1642,7 +1756,7 @@
                 <div class="field">
                   <label for="schedIfMissed">If Worca is not running at that time</label>
                   <div class="select-wrap">
-                    <select id="schedIfMissed" class="select">
+                    <select id="schedIfMissed" data-setting="schedule.ifMissed" class="select">
                       <option value="run">Start it late</option>
                       <option value="skip">Skip it</option>
                     </select>
@@ -1651,7 +1765,7 @@
                 <div class="field">
                   <label for="schedGraceMin">At most this late</label>
                   <div class="select-wrap">
-                    <select id="schedGraceMin" class="select">
+                    <select id="schedGraceMin" data-setting="schedule.graceMin" class="select">
                       <option value="30">30 minutes</option>
                       <option value="60">1 hour</option>
                       <option value="120">2 hours</option>
@@ -1669,13 +1783,53 @@
                     A run that could not start, a missed slot, or a run that ended in an error each count. A successful run resets the count. 0 never pauses a schedule. Every failure is reported in Schedules either way.
                   </span></button>
                 </div>
-                <input id="schedMaxFailures" class="input" type="number" min="0" max="100" step="1" inputmode="numeric" placeholder="3" autocomplete="off" />
+                <input id="schedMaxFailures" data-setting="schedule.maxFailures" class="input" type="number" min="0" max="100" step="1" inputmode="numeric" placeholder="3" autocomplete="off" />
               </div>
               <div class="add-project-actions" style="margin-top:14px">
                 <button type="button" id="schedDefaultsReset" class="btn btn-ghost btn-mini">Use defaults</button>
                 <button type="button" id="schedDefaultsSave" class="btn btn-primary btn-mini">Save</button>
               </div>
-              <small class="hint" id="schedDefaultsMsg"></small>
+            </section>
+
+            <!-- Actions (issue #529): keep policy for finished-run checkouts, the port range for
+                 automatic port variables, editor/terminal overrides and the checkout cap. -->
+            <section class="card settings-card" id="actions-settings-card" data-min-level="advanced">
+              <div class="card-head"><div class="label-row"><h2>Actions</h2>
+                <button type="button" class="info-tip" aria-label="About actions">i<span class="tip-content hidden">
+                  Check out a finished run and run its project's actions from Worca. Actions are off on hosted
+                  deployments unless an administrator enables them.
+                </span></button></div></div>
+              <div class="field"><label for="act-keep">Keep checkouts</label><div class="select-wrap"><select id="act-keep" data-setting="actions.keep" class="select">
+                <option value="never">Re-create on demand</option><option value="on-success">Keep after a successful run</option>
+                <option value="until-pr">Keep until the PR is merged or closed</option></select></div></div>
+              <div class="field act-port-range"><label for="act-port-low">Ports for automatic port variables</label>
+                <input id="act-port-low" data-setting="actions.portLow actions.portRange" class="input" type="number" min="1024" max="65535" placeholder="4400" aria-label="Low port"> –
+                <input id="act-port-high" data-setting="actions.portHigh actions.portRange" class="input" type="number" min="1024" max="65535" placeholder="4499" aria-label="High port"></div>
+              <div class="field act-launcher" data-launcher="editor">
+                <div class="label-row"><label for="act-editor">Editor</label>
+                  <button type="button" class="info-tip" aria-label="About the editor command">i<span class="tip-content hidden" id="act-editor-tip">
+                    The command that opens a folder in your IDE or code editor, as you would type it in a terminal. Leave it blank to use the one Worca detects. {folder} marks where the checkout folder goes; without it, the folder is added at the end.
+                  </span></button></div>
+                <div class="act-launcher-row">
+                  <input id="act-editor" data-setting="actions.editor" class="input mono" placeholder="Detected automatically" aria-describedby="act-editor-note" autocomplete="off" spellcheck="false">
+                  <div class="select-wrap act-choose-wrap" data-dirty-ignore><select id="act-editor-choose" class="select" aria-label="Pick an installed editor, or browse for one"><option value="">Pick an app</option></select></div>
+                  <button type="button" class="btn btn-ghost btn-mini act-try" id="act-editor-try">Try</button>
+                </div>
+                <small class="hint act-hint" id="act-editor-note"></small></div>
+              <div class="field act-launcher" data-launcher="terminal">
+                <div class="label-row"><label for="act-terminal">Terminal</label>
+                  <button type="button" class="info-tip" aria-label="About the terminal command">i<span class="tip-content hidden" id="act-terminal-tip">
+                    The command that opens a terminal in a folder, as you would type it in a terminal. Leave it blank to use the one Worca detects. {folder} marks where the checkout folder goes; without it, the folder is added at the end.
+                  </span></button></div>
+                <div class="act-launcher-row">
+                  <input id="act-terminal" data-setting="actions.terminal" class="input mono" placeholder="Detected automatically" aria-describedby="act-terminal-note" autocomplete="off" spellcheck="false">
+                  <div class="select-wrap act-choose-wrap" data-dirty-ignore><select id="act-terminal-choose" class="select" aria-label="Pick an installed terminal, or browse for one"><option value="">Pick an app</option></select></div>
+                  <button type="button" class="btn btn-ghost btn-mini act-try" id="act-terminal-try">Try</button>
+                </div>
+                <small class="hint act-hint" id="act-terminal-note"></small></div>
+              <div class="field"><label for="act-max">Keep at most</label><input id="act-max" data-setting="actions.maxCheckouts" class="input" type="number" min="1" max="100" placeholder="No limit"> checkouts (oldest removed first)</div>
+              <div class="add-project-actions"><button type="button" class="btn btn-ghost btn-mini" id="act-reset">Reset</button>
+                <button type="button" class="btn btn-primary btn-mini" id="act-save">Save</button></div>
             </section>
 
             <section class="card settings-card" id="ws-scan-models-card" data-min-level="advanced">
@@ -1692,21 +1846,21 @@
               <div class="mem-model-row">
                 <div class="field">
                   <div class="label-row"><label for="wsScanModel">Scan agent</label></div>
-                  <select id="wsScanModel" class="select" aria-label="Scan agent model"></select>
+                  <select id="wsScanModel" class="select" data-setting="workspaceScan.scanModel" aria-label="Scan agent model"></select>
                 </div>
                 <div class="field">
                   <div class="label-row"><label for="wsScanEffort">Effort</label></div>
-                  <select id="wsScanEffort" class="select" aria-label="Scan agent effort"></select>
+                  <select id="wsScanEffort" class="select" data-setting="workspaceScan.scanEffort" aria-label="Scan agent effort"></select>
                 </div>
               </div>
               <div class="mem-model-row" style="margin-top:12px">
                 <div class="field">
                   <div class="label-row"><label for="wsAgentModel">Project agents</label></div>
-                  <select id="wsAgentModel" class="select" aria-label="Project agents model"></select>
+                  <select id="wsAgentModel" class="select" data-setting="workspaceScan.agentModel" aria-label="Project agents model"></select>
                 </div>
                 <div class="field">
                   <div class="label-row"><label for="wsAgentEffort">Effort</label></div>
-                  <select id="wsAgentEffort" class="select" aria-label="Project agents effort"></select>
+                  <select id="wsAgentEffort" class="select" data-setting="workspaceScan.agentEffort" aria-label="Project agents effort"></select>
                 </div>
               </div>
               <small class="hint" id="wsScanModelsNote"></small>
@@ -1714,7 +1868,6 @@
                 <button type="button" id="wsScanModelsReset" class="btn btn-ghost btn-mini">Use default</button>
                 <button type="button" id="wsScanModelsSave" class="btn btn-primary btn-mini">Save</button>
               </div>
-              <small class="hint" id="wsScanModelsMsg"></small>
             </section>
 
             <!-- Chat notifications (chat-connectivity-design.md §4.8): which run
@@ -1728,7 +1881,6 @@
               <div class="add-project-actions" style="margin-top:14px">
                 <button id="chatSettingsSave" class="btn btn-primary btn-mini" type="button">Save</button>
               </div>
-              <small class="hint" id="chatSettingsMsg"></small>
             </section>
           </section>
           <!-- /pane runs -->
@@ -1763,7 +1915,7 @@
                     Maximum assistant/tool turns one chat message may use (1&ndash;500). Leave empty to restore the default of 400.
                   </span></button>
                 </div>
-                <input id="askMaxTurns" class="input" type="number" min="1" max="500" step="1" inputmode="numeric" placeholder="400" autocomplete="off" />
+                <input id="askMaxTurns" data-setting="askMaxTurns" class="input" type="number" min="1" max="500" step="1" inputmode="numeric" placeholder="400" autocomplete="off" />
               </div>
               <div class="field">
                 <div class="label-row">
@@ -1772,8 +1924,8 @@
                     There is no cap by default. Untick No cap and enter an amount (0.1&ndash;100) to turn the guard on: a chat turn then stops when its estimated cost reaches it. Leaving the amount empty, or pressing Use defaults, means no cap.
                   </span></button>
                 </div>
-                <input id="askMaxBudgetUsd" class="input" type="number" min="0.1" max="100" step="0.1" inputmode="decimal" placeholder="No cap" autocomplete="off" />
-                <label class="check-row" for="askNoCap"><input id="askNoCap" type="checkbox" /> No cap</label>
+                <input id="askMaxBudgetUsd" data-setting="askMaxBudgetUsd" class="input" type="number" min="0.1" max="100" step="0.1" inputmode="decimal" placeholder="No cap" autocomplete="off" />
+                <label class="check-row" for="askNoCap"><input id="askNoCap" data-setting="askMaxBudgetUsd" type="checkbox" /> No cap</label>
               </div>
               <!-- Scripts workbench W20: the chat's save_script / test_script switch. Body
                    rendered by chat-settings-view.mjs; saved with this card's Save button. -->
@@ -1781,11 +1933,13 @@
               <!-- Ask web access (off by default): rendered by chat-settings-view.mjs; saved with this
                    card's Save button, and only when one of its fields was touched. -->
               <div class="field" id="ask-web-host"></div>
+              <!-- MCP servers (docs/mcp-servers.md): the General set in one line, painted by mcp-view.mjs; the
+                   Edit General set link opens Settings › MCP servers under the level banner. -->
+              <div class="field" id="ask-mcp-host"></div>
               <div class="add-project-actions" style="margin-top:14px">
                 <button type="button" id="askLimitsReset" class="btn btn-ghost btn-mini">Use defaults</button>
                 <button type="button" id="askLimitsSave" class="btn btn-primary btn-mini">Save</button>
               </div>
-              <small class="hint" id="askLimitsMsg"></small>
               <!-- Chat history: the counts paint with the view; the button opens a
                    danger confirm quoting FRESH counts, then DELETE /api/ask/threads. -->
               <div class="field" style="margin-top:14px">
@@ -1829,20 +1983,20 @@
               </div>
             </div>
             <!-- Settings › Memory: the model + effort EVERY Memory defragment run uses (memory-defrag-model.mjs).
-                 Expert, like the health card's Defragment. No ⓘ and empty hints: the settings-view census
-                 (test/ui-settings-tooltips.test.mjs) pins both. A plain .card like the health card, NOT a
-                 .settings-card: that census (About last) counts the Settings cards. -->
+                 Expert, like the health card's Defragment. No ⓘ and empty hints, as in the Settings view
+                 (no longer tested; keep both out by hand). A plain .card like the health card, NOT a
+                 .settings-card: the Settings card set (About last) stays the General cards only. -->
             <section class="card mem-model-card" id="mem-defrag-model-card" data-min-level="expert">
               <div class="label-row"><h2>Defragment model</h2></div>
               <p class="mem-model-text">The model every Memory defragment run uses — from the Defragment button, New pipeline, an Ask Worca card or the CLI. A model named when the run starts (<code>worca --model</code>) still wins.</p>
               <div class="mem-model-row">
                 <div class="field">
                   <div class="label-row"><label for="memDefragModel">Model</label></div>
-                  <select id="memDefragModel" class="select" aria-label="Defragment model"></select>
+                  <select id="memDefragModel" class="select" data-setting="memoryDefrag.model" aria-label="Defragment model"></select>
                 </div>
                 <div class="field">
                   <div class="label-row"><label for="memDefragEffort">Effort</label></div>
-                  <select id="memDefragEffort" class="select" aria-label="Defragment effort"></select>
+                  <select id="memDefragEffort" class="select" data-setting="memoryDefrag.effort" aria-label="Defragment effort"></select>
                 </div>
               </div>
               <small class="hint" id="memDefragModelNote"></small>
@@ -1887,6 +2041,10 @@
           </section>
           <!-- /pane plugins -->
 
+          <!-- ===== TAB: MCP SERVERS (docs/mcp-servers.md) — painted whole by mcp-view.mjs ===== -->
+          <section class="settings-pane hidden" data-tab="mcp"></section>
+          <!-- /pane mcp -->
+
           <!-- ===== TAB: MODELS (was the top-level Models view) ===== -->
           <section class="settings-pane hidden" data-tab="models">
             <div class="topbar">
@@ -1928,7 +2086,7 @@
                   <div class="label-row">
                     <label for="titleModel">Model</label>
                   </div>
-                  <select id="titleModel" class="select" aria-label="Title model"></select>
+                  <select id="titleModel" class="select" data-setting="titleModel" aria-label="Title model"></select>
                 </div>
                 <small class="hint" id="titleModelEnvNote"></small>
                 <div class="add-project-actions" style="margin-top:14px">
@@ -1955,7 +2113,7 @@
                 </div>
                 <div class="field">
                   <div class="label-row"><label for="autoModel">Model</label></div>
-                  <select id="autoModel" class="select" aria-label="Auto workflow model"></select>
+                  <select id="autoModel" class="select" data-setting="autoWorkflowModel" aria-label="Auto workflow model"></select>
                 </div>
                 <small class="hint" id="autoModelEnvNote"></small>
                 <div class="add-project-actions" style="margin-top:14px">
@@ -1981,7 +2139,7 @@
                 </div>
                 <div class="field">
                   <div class="label-row"><label for="prDescModel">Model</label></div>
-                  <select id="prDescModel" class="select" aria-label="PR description model"></select>
+                  <select id="prDescModel" class="select" data-setting="prDescriptionModel" aria-label="PR description model"></select>
                 </div>
                 <small class="hint" id="prDescModelNote"></small>
                 <div class="add-project-actions" style="margin-top:14px">
@@ -2348,11 +2506,8 @@
           </div>
           <div class="shipit-desc-err hint err" hidden></div>
         </div>
-        <!-- `hint err`, not `err`: style.css has no standalone .err rule, only
-             .hint.err (:284). .hint sets display:block, so .shipit-err ships an
-             explicit [hidden] twin. -->
-        <div class="shipit-err hint err" hidden></div>
-        <div class="shipit-actions">
+        <div class="shipit-try" hidden data-min-level="advanced" aria-label="Try it first"></div>
+        <div class="shipit-actions" data-card-actions>
           <button type="button" class="shipit-cancel btn-ghost">Cancel</button>
           <button type="button" class="shipit-ok">Open pull request</button>
         </div>
@@ -2435,17 +2590,12 @@
     <div id="stop-modal" class="viewer-modal hidden" role="dialog" aria-modal="true" aria-labelledby="stop-title">
       <div class="card stop-card">
         <h2 id="stop-title" class="stop-title">Stop this pipeline?</h2>
-        <p class="stop-body">Agents in flight are cancelled at their next checkpoint. The run is kept in Runs as stopped; its worktree and branch stay in place so you can resume from there.</p>
+        <p class="stop-body">A stopped run can't be resumed. Its work so far stays on its branch.</p>
         <div class="stop-ident">
           <div class="stop-ident-title"></div>
           <div class="stop-ident-branch" hidden></div>
         </div>
-        <!-- `hint err`, not `err`: style.css has no standalone .err rule, only
-             .hint.err (:286). .hint (:285) sets display:block, so .stop-err ships
-             an explicit [hidden] twin in the stylesheet — same as .shipit-err
-             (base :1891, [hidden] :1896). -->
-        <div class="stop-err hint err" hidden></div>
-        <div class="stop-actions">
+        <div class="stop-actions" data-card-actions>
           <button type="button" class="stop-cancel">Keep running</button>
           <button type="button" class="stop-confirm">Stop pipeline</button>
         </div>
@@ -2514,7 +2664,7 @@
         <p class="hint">Untick a folder to leave it out. Names default to the folder name.</p>
         <ul id="proj-bulk-list" class="proj-bulk-list"></ul>
         <small class="hint" id="proj-bulk-msg" aria-live="polite"></small>
-        <div class="confirm-actions">
+        <div class="confirm-actions" data-card-actions>
           <button type="button" id="proj-bulk-save" class="btn btn-primary btn-mini">Add projects</button>
         </div>
       </div>
@@ -2531,6 +2681,10 @@
         <div class="confirm-actions" id="plugin-modal-actions"></div>
       </div>
     </div>
+
+    <!-- Action results (#555, ui/public/feedback.mjs): bottom-right toasts, at most 3.
+         Polite region; an error toast carries role="alert" itself. Never takes focus. -->
+    <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 
     <script src="/app.js" type="module"></script>
   </body>

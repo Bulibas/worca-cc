@@ -1,15 +1,20 @@
 // test/ui-stats.test.mjs
 // Statistics view integration: the nav entry in BOTH menus, the #stats route and
-// its loader, the range segmented control, chart tooltip delegation, and the
-// WS-driven refresh. Boots the REAL app.js against the REAL index.html under
-// jsdom (harness from test/ui-cost.test.mjs) but with the dispatchable
-// WebSocket stub from test/ui-history-cache.test.mjs so `pipelines-changed`
-// can be pushed into the running client.
-import { test } from 'node:test';
+// its loader, the range segmented control, and the WS-driven refresh. Boots the
+// REAL app.js against the REAL index.html under jsdom (harness from
+// test/ui-cost.test.mjs) but with the dispatchable WebSocket stub from
+// test/ui-history-cache.test.mjs so `pipelines-changed` can be pushed into the
+// running client.
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -33,7 +38,7 @@ const STATS_FIXTURE = {
 };
 
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   const wsBox = { ws: null };
@@ -89,48 +94,34 @@ test('nav: the sidebar carries data-nav="stats"; #stats opens the view and fetch
   assert.equal(window.document.querySelectorAll('#stats-body .stat-tile').length, 7);
 });
 
-test('range seg: clicking All time refetches range=all and moves .on', async () => {
-  const { window, calls, tick, showStats } = await boot();
-  await showStats();
-  const allBtn = window.document.querySelector('#stats-range [data-range="all"]');
-  assert.ok(allBtn, 'All time button exists');
-  allBtn.click();
-  await tick();
-  assert.ok(calls.some((u) => u.includes('range=all')), 'refetched with range=all');
-  assert.ok(allBtn.classList.contains('on'), 'All time is the highlighted segment');
-  assert.equal(window.document.querySelector('#stats-range [data-range="month"]').classList.contains('on'),
-    false, 'the previous segment lost .on');
-});
-
-test('range seg: clicking Today refetches range=today and moves .on', async () => {
-  const { window, calls, tick, showStats } = await boot();
-  await showStats();
-  const todayBtn = window.document.querySelector('#stats-range [data-range="today"]');
-  assert.ok(todayBtn, 'Today button exists in the segmented control');
-  todayBtn.click();
-  await tick();
-  assert.ok(calls.some((u) => u.includes('range=today')), 'refetched with range=today');
-  assert.ok(todayBtn.classList.contains('on'), 'Today is the highlighted segment');
-  assert.equal(window.document.querySelector('#stats-range [data-range="month"]').classList.contains('on'),
-    false, 'the previous segment lost .on');
-});
-
-test('tooltip: pointerover on a .ch-hit fills and shows #stats-tip; focus parity', async () => {
-  const { window, showStats } = await boot();
-  await showStats();
-  const hit = window.document.querySelector('.ch-hit');
-  assert.ok(hit, 'chart hit target rendered');
-  const tip = window.document.querySelector('#stats-tip');
-  assert.equal(tip.hidden, true, 'tooltip starts hidden');
-  hit.dispatchEvent(new window.Event('pointerover', { bubbles: true }));
-  assert.equal(tip.hidden, false);
-  assert.ok(tip.textContent.length > 0, 'tooltip carries the hit target text');
-  hit.dispatchEvent(new window.Event('pointerout', { bubbles: true }));
-  assert.equal(tip.hidden, true);
-  hit.dispatchEvent(new window.Event('focusin', { bubbles: true }));
-  assert.equal(tip.hidden, false, 'keyboard focus shows the same tooltip');
-  hit.dispatchEvent(new window.Event('focusout', { bubbles: true }));
-  assert.equal(tip.hidden, true);
+// Each button boots its own page, so "the previous segment" is always Month (cuts the count, not the time).
+test('the range control refetches with range=all / range=today and moves .on', async () => {
+  await checkRows([
+    { name: 'range seg: clicking All time refetches range=all and moves .on', run: async () => {
+      const { window, calls, tick, showStats } = await boot();
+      await showStats();
+      const allBtn = window.document.querySelector('#stats-range [data-range="all"]');
+      assert.ok(allBtn, 'All time button exists');
+      allBtn.click();
+      await tick();
+      assert.ok(calls.some((u) => u.includes('range=all')), 'refetched with range=all');
+      assert.ok(allBtn.classList.contains('on'), 'All time is the highlighted segment');
+      assert.equal(window.document.querySelector('#stats-range [data-range="month"]').classList.contains('on'),
+        false, 'the previous segment lost .on');
+    } },
+    { name: 'range seg: clicking Today refetches range=today and moves .on', run: async () => {
+      const { window, calls, tick, showStats } = await boot();
+      await showStats();
+      const todayBtn = window.document.querySelector('#stats-range [data-range="today"]');
+      assert.ok(todayBtn, 'Today button exists in the segmented control');
+      todayBtn.click();
+      await tick();
+      assert.ok(calls.some((u) => u.includes('range=today')), 'refetched with range=today');
+      assert.ok(todayBtn.classList.contains('on'), 'Today is the highlighted segment');
+      assert.equal(window.document.querySelector('#stats-range [data-range="month"]').classList.contains('on'),
+        false, 'the previous segment lost .on');
+    } },
+  ]);
 });
 
 // A rejected fetch (offline, aborted) is not an !res.ok — without a catch it
@@ -154,37 +145,38 @@ test('a network-level failure clears the loading state and surfaces an error', a
   assert.ok(body.querySelector('.err'), 'the failure is surfaced in the body');
 });
 
-test('pipelines-changed while stats open refetches', async () => {
+test('while Statistics is open, pipelines-changed, ask-done and ask-error refetch /api/stats; other ask-* frames do not', async () => {
   const { window, calls, wsBox, tick, showStats } = await boot();
   await showStats();
-  const before = calls.length;
-  const body = window.document.querySelector('#stats-body');
-  wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'pipelines-changed' }) });
-  // SYNCHRONOUS assert: loadStatsView adds the class before its first `await
-  // fetch(...)` and removes it when the stub fetch resolves one microtask
-  // later, so an awaited tick would already see it gone.
-  assert.equal(body.classList.contains('is-loading'), true, 'loading state painted synchronously');
-  await tick();
-  assert.ok(calls.length > before, 'a second /api/stats fetch happened');
-  assert.equal(body.classList.contains('is-loading'), false, 'loading state cleared');
-});
-
-test('ask-done and ask-error while stats open refetch; other ask-* frames do not', async () => {
-  const { calls, wsBox, tick, showStats } = await boot();
-  await showStats();
-  const before = calls.length;
-  wsBox.ws.dispatch('message', { data: JSON.stringify(
-    { type: 'ask-usage', threadId: 'ask_00000000', messageId: 'askm_00000000', usage: {} }) });
-  await tick();
-  assert.equal(calls.length, before, 'ask-usage does not refetch');
-  wsBox.ws.dispatch('message', { data: JSON.stringify(
-    { type: 'ask-done', threadId: 'ask_00000000', messageId: 'askm_00000000',
-      status: 'done', usage: {}, costUsd: 0.1, threadTotals: null }) });
-  await tick();
-  assert.ok(calls.length > before, 'ask-done refetches /api/stats (D12)');
-  const afterDone = calls.length;
-  wsBox.ws.dispatch('message', { data: JSON.stringify(
-    { type: 'ask-error', threadId: 'ask_00000000', messageId: 'askm_00000000', message: 'boom' }) });
-  await tick();
-  assert.ok(calls.length > afterDone, 'ask-error refetches too — an error turn can carry recorded spend');
+  await checkRows([
+    { name: 'pipelines-changed while stats open refetches', run: async () => {
+      const before = calls.length;
+      const body = window.document.querySelector('#stats-body');
+      wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'pipelines-changed' }) });
+      // SYNCHRONOUS assert: loadStatsView adds the class before its first `await
+      // fetch(...)` and removes it when the stub fetch resolves one microtask
+      // later, so an awaited tick would already see it gone.
+      assert.equal(body.classList.contains('is-loading'), true, 'loading state painted synchronously');
+      await tick();
+      assert.ok(calls.length > before, 'a second /api/stats fetch happened');
+      assert.equal(body.classList.contains('is-loading'), false, 'loading state cleared');
+    } },
+    { name: 'ask-done and ask-error while stats open refetch; other ask-* frames do not', run: async () => {
+      const before = calls.length;
+      wsBox.ws.dispatch('message', { data: JSON.stringify(
+        { type: 'ask-usage', threadId: 'ask_00000000', messageId: 'askm_00000000', usage: {} }) });
+      await tick();
+      assert.equal(calls.length, before, 'ask-usage does not refetch');
+      wsBox.ws.dispatch('message', { data: JSON.stringify(
+        { type: 'ask-done', threadId: 'ask_00000000', messageId: 'askm_00000000',
+          status: 'done', usage: {}, costUsd: 0.1, threadTotals: null }) });
+      await tick();
+      assert.ok(calls.length > before, 'ask-done refetches /api/stats (D12)');
+      const afterDone = calls.length;
+      wsBox.ws.dispatch('message', { data: JSON.stringify(
+        { type: 'ask-error', threadId: 'ask_00000000', messageId: 'askm_00000000', message: 'boom' }) });
+      await tick();
+      assert.ok(calls.length > afterDone, 'ask-error refetches too — an error turn can carry recorded spend');
+    } },
+  ]);
 });

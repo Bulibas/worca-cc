@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeWorkspace, runDetector, keysOf, assertEvidence } from './helpers/wsmap-fixtures.mjs';
 import detector from '../src/core/workspace-map/detectors/deploy-k8s.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const BILLING_K8S = `apiVersion: apps/v1
 kind: Deployment
@@ -163,39 +164,46 @@ before(async () => {
 after(() => ws.cleanup());
 const member = (k) => ws.members.find((m) => m.key === k);
 
-test('deploy-k8s: workload, selected Service, whole Ingress host, chart and serverless names alias this member', async () => {
+test('deploy-k8s (member billing-api): aliases, consumes, placeholders, Helm templates', async () => {
   const r = await runDetector(detector, member('billing-api'), ws.members);
-  assert.deepEqual(r.aliases.map((a) => [a.value, a.source]).sort(), [
-    ['billing', 'k8s'], ['billing-api', 'helm'], ['billing-fn', 'serverless'], ['billing-svc', 'k8s'], ['pay.acme.com', 'k8s-ingress'],
+  await checkRows([
+    { name: 'deploy-k8s: workload, selected Service, whole Ingress host, chart and serverless names alias this member', run: () => {
+      assert.deepEqual(r.aliases.map((a) => [a.value, a.source]).sort(), [
+        ['billing', 'k8s'], ['billing-api', 'helm'], ['billing-fn', 'serverless'], ['billing-svc', 'k8s'], ['pay.acme.com', 'k8s-ingress'],
+      ]);
+      assert.ok(r.aliases.every((a) => a.member === 'billing-api'));
+    } },
+    { name: 'deploy-k8s: own workload env URLs, referenced ConfigMap values and Helm peer values are consumes', run: () => {
+      assert.deepEqual(keysOf(r, 'service', 'consumes'), ['cache', 'ledger', 'ledger.default.svc.cluster.local']);
+      assert.deepEqual(keysOf(r, 'http', 'consumes'), ['/metrics', '/v2']);
+      const metrics = r.facts.find((f) => f.key === '/metrics');
+      assert.deepEqual([metrics.target, metrics.confidence, metrics.line], ['metricsUrl', 'heuristic', 7], 'a localhost Helm value targets its key (P1 envStems)');
+      assert.deepEqual(keysOf(r, 'db', 'consumes'), ['db:billing']);
+      const ledger = r.facts.find((f) => f.key === '/v2');
+      assert.deepEqual([ledger.file, ledger.line, ledger.detail], ['k8s/billing.yaml', 15, 'LEDGER_URL (billing)']);
+      assert.equal(r.facts.find((f) => f.kind === 'db').detail, 'DB (configmap billing-config)');
+      assert.ok(!r.facts.some((f) => f.key.startsWith('nobody')), 'an unreferenced ConfigMap is not attributed');
+      assert.equal(r.facts.find((f) => f.key === 'cache').confidence, 'heuristic');
+      assertEvidence(member('billing-api'), r);
+    } },
+    { name: 'deploy-k8s: placeholder env is unresolved; Helm templates are skipped, not errors', run: () => {
+      assert.deepEqual(r.unresolved.map((u) => [u.raw, u.reason, u.line]), [['ORDERS_URL=${ORDERS_URL}', 'placeholder', 17]]);
+    } },
   ]);
-  assert.ok(r.aliases.every((a) => a.member === 'billing-api'));
 });
 
-test('deploy-k8s: own workload env URLs, referenced ConfigMap values and Helm peer values are consumes', async () => {
-  const r = await runDetector(detector, member('billing-api'), ws.members);
-  assert.deepEqual(keysOf(r, 'service', 'consumes'), ['cache', 'ledger', 'ledger.default.svc.cluster.local']);
-  assert.deepEqual(keysOf(r, 'http', 'consumes'), ['/metrics', '/v2']);
-  const metrics = r.facts.find((f) => f.key === '/metrics');
-  assert.deepEqual([metrics.target, metrics.confidence, metrics.line], ['metricsUrl', 'heuristic', 7], 'a localhost Helm value targets its key (P1 envStems)');
-  assert.deepEqual(keysOf(r, 'db', 'consumes'), ['db:billing']);
-  const ledger = r.facts.find((f) => f.key === '/v2');
-  assert.deepEqual([ledger.file, ledger.line, ledger.detail], ['k8s/billing.yaml', 15, 'LEDGER_URL (billing)']);
-  assert.equal(r.facts.find((f) => f.kind === 'db').detail, 'DB (configmap billing-config)');
-  assert.ok(!r.facts.some((f) => f.key.startsWith('nobody')), 'an unreferenced ConfigMap is not attributed');
-  assert.equal(r.facts.find((f) => f.key === 'cache').confidence, 'heuristic');
-  assertEvidence(member('billing-api'), r);
-});
-
-test('deploy-k8s: placeholder env is unresolved; Helm templates are skipped, not errors', async () => {
-  const r = await runDetector(detector, member('billing-api'), ws.members);
-  assert.deepEqual(r.unresolved.map((u) => [u.raw, u.reason, u.line]), [['ORDERS_URL=${ORDERS_URL}', 'placeholder', 17]]);
-});
-
-test('deploy-k8s (GitOps List): an image naming another member aliases that member and attributes no consumes here', async () => {
+test('deploy-k8s (member gitops): List image aliases the named member; malformed manifest unresolved', async () => {
   const r = await runDetector(detector, member('gitops'), ws.members);
-  assert.deepEqual(r.aliases.map((a) => [a.value, a.member]).sort(), [['nightly-report', 'gitops'], ['web', 'web']]);
-  assert.deepEqual(r.facts.map((f) => [f.kind, f.key]).sort(), [['http', '/run'], ['service', 'reports']], 'only the CronJob whose image matches no member is this member\'s');
-  assertEvidence(member('gitops'), r);
+  await checkRows([
+    { name: 'deploy-k8s (GitOps List): an image naming another member aliases that member and attributes no consumes here', run: () => {
+      assert.deepEqual(r.aliases.map((a) => [a.value, a.member]).sort(), [['nightly-report', 'gitops'], ['web', 'web']]);
+      assert.deepEqual(r.facts.map((f) => [f.kind, f.key]).sort(), [['http', '/run'], ['service', 'reports']], 'only the CronJob whose image matches no member is this member\'s');
+      assertEvidence(member('gitops'), r);
+    } },
+    { name: 'deploy-k8s: malformed manifest → unresolved parse error, never throws', run: () => {
+      assert.ok(r.unresolved.some((u) => u.file === 'broken.yaml' && u.reason.startsWith('yaml parse error')));
+    } },
+  ]);
 });
 
 test('deploy-k8s: infrastructure (official images, selector-less Services, vendored subcharts) and test-path samples alias nobody; a namespace adds <name>.<ns>', async () => {
@@ -214,11 +222,6 @@ test('deploy-k8s: a patch document (no image) takes the subject of the workload 
     'a patch of this member\'s workload adds its consumes; a patch of ledger\'s adds none here');
   assert.equal(detector.claims('docs/samples/demo.yaml'), false);
   assertEvidence(member('kust'), r);
-});
-
-test('deploy-k8s: malformed manifest → unresolved parse error, never throws', async () => {
-  const r = await runDetector(detector, member('gitops'), ws.members);
-  assert.ok(r.unresolved.some((u) => u.file === 'broken.yaml' && u.reason.startsWith('yaml parse error')));
 });
 
 const dep = (name, image, env = '', labels = `{ app: ${name} }`) => `apiVersion: apps/v1\nkind: Deployment\nmetadata: { name: ${name} }\nspec:\n  template:\n    metadata: { labels: ${labels} }\n    spec:\n      containers:\n        - image: ${image}\n${env}`;

@@ -12,7 +12,7 @@
 // JSON, so the teardown/rescue machinery is fully testable now.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, mkdir, readFile, realpath } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, mkdir, readFile, realpath, utimes } from 'node:fs/promises';
 import { existsSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -22,12 +22,16 @@ import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { createWorktree } from '../src/core/worktree.mjs';
 import { worcaHome } from '../src/core/projects.mjs';
 import { projectKey } from '../src/core/store.mjs';
-import { readPipelineForResume, readPipelineByKey } from '../src/core/artifacts.mjs';
+import { readPipelineForResume, readPipelineByKey, listPipelines } from '../src/core/artifacts.mjs';
+import { setActionsSettings } from '../src/core/settings.mjs';
 import {
   readRunManifest, updateRunManifest, claudeMdFenceBegin, CLAUDE_MD_FENCE_END,
 } from '../src/core/run-manifest.mjs';
 import { RUN_LOG_FILE } from '../src/core/run-log.mjs';
+import { STALE_INDEX_LOCK_MS } from '../src/core/git-lock.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 useTempHome(after);
 
@@ -41,15 +45,7 @@ async function tmp(prefix = 'worca-cc-rrt-') {
 }
 
 async function freshRepo(prefix = 'worca-cc-rrt-repo-') {
-  const dir = await tmp(prefix);
-  const g = (args) => spawnSync('git', args, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'seed.txt'), 'seed\n');
-  g(['add', '-A']);
-  g(['commit', '-qm', 'init']);
-  return dir;
+  return templateRepo('rrt-repo', { branch: 'main', user: true, files: { 'seed.txt': 'seed\n' }, into: await tmp(prefix) });
 }
 
 function branchList(dir) {
@@ -100,7 +96,9 @@ function workspaceOpts(dirs, { branch = { source: 'main' } } = {}) {
 
 // ── the run root is destroyed on completion, kept on pause ───────────────────
 
-test('detached: a completed run leaves NO <worcaHome>/runs/<id> behind', async () => {
+// One detached default run that also plants strays at the run root (§8.11 stray scan):
+// an agent writing at cwd instead of repos/<key>.
+test('detached: a completed run removes <worcaHome>/runs/<id>, copies run.json to the pipeline dir first, and rescues an unexpected run-root file to stray/ with a warning', async () => {
   const repo = await freshRepo();
   await withMode('detached', async () => {
     const orch = createOrchestrator({
@@ -108,15 +106,86 @@ test('detached: a completed run leaves NO <worcaHome>/runs/<id> behind', async (
     });
     let liveRunRoot = null;
     orch.on('state', (s) => { if (!liveRunRoot && s.branch?.worktreeDir) liveRunRoot = join(worcaHome(), 'runs', s.id); });
+    const warnings = [];
+    orch.on('log', (e) => { if (e.level === 'warn') warnings.push(e.text); });
+    let planted = false;
+    orch.on('state', (s) => {
+      if (planted || !s.branch?.worktreeDir) return;
+      const runRoot = join(worcaHome(), 'runs', s.id);
+      if (!existsSync(runRoot)) return;
+      planted = true;
+      // An agent writing at cwd instead of repos/<key>.
+      writeFileSync(join(runRoot, 'oops-notes.md'), '# valuable notes\n');
+      mkdirSync(join(runRoot, 'scratch'), { recursive: true });
+      writeFileSync(join(runRoot, 'scratch', 'deep.txt'), 'deep\n');
+    });
     const res = await orch.run();
-    assert.equal(res.status, 'done', JSON.stringify(res));
-    assert.ok(liveRunRoot, 'a run root existed during the run');
-    assert.ok(existsSync(liveRunRoot) === false, `run root must be gone: ${liveRunRoot}`);
-    // The branch survives and carries the mock agent's work.
-    const feature = orch.getState().branch.feature;
-    assert.ok(branchList(repo).includes(feature), 'the feature branch is KEPT');
-    assert.ok(treeOf(repo, feature).includes('src/feature.mjs'), 'the agent work was committed');
+    const pdir = orch.getState().pipelineDir;
+
+    await checkRows([
+      { name: 'detached: a completed run leaves NO <worcaHome>/runs/<id> behind', run: () => {
+        assert.equal(res.status, 'done', JSON.stringify(res));
+        assert.ok(liveRunRoot, 'a run root existed during the run');
+        assert.ok(existsSync(liveRunRoot) === false, `run root must be gone: ${liveRunRoot}`);
+        // The branch survives and carries the mock agent's work.
+        const feature = orch.getState().branch.feature;
+        assert.ok(branchList(repo).includes(feature), 'the feature branch is KEPT');
+        assert.ok(treeOf(repo, feature).includes('src/feature.mjs'), 'the agent work was committed');
+      } },
+      { name: 'detached: an unexpected file at the run root is copied to <pipelineDir>/stray/ with a warning', run: async () => {
+        assert.equal(res.status, 'done', JSON.stringify(res));
+        assert.ok(planted, 'precondition: a stray was planted at the run root');
+        assert.equal(await readFile(join(pdir, 'stray', 'oops-notes.md'), 'utf8'), '# valuable notes\n');
+        assert.equal(await readFile(join(pdir, 'stray', 'scratch', 'deep.txt'), 'utf8'), 'deep\n');
+        assert.ok(warnings.some((w) => /oops-notes\.md/.test(w) && /run root/.test(w)),
+          `a loud warning names the stray: ${JSON.stringify(warnings)}`);
+        // The durable ledger carries it too (run.json copied out before removal).
+        const manifest = JSON.parse(await readFile(join(pdir, 'run.json'), 'utf8'));
+        assert.ok((manifest.warnings || []).some((w) => /oops-notes\.md/.test(w)),
+          'the warning is in run.json.warnings');
+      } },
+      { name: 'detached: run.json is copied to <pipelineDir>/run.json before the run root is removed', run: async () => {
+        assert.equal(res.status, 'done', JSON.stringify(res));
+        const copied = JSON.parse(await readFile(join(pdir, 'run.json'), 'utf8'));
+        assert.equal(copied.pipelineId, orch.getState().id);
+        assert.equal(copied.runRootMode, 'detached');
+        assert.ok(Array.isArray(copied.members) && copied.members.length === 1);
+        assert.ok(!existsSync(join(worcaHome(), 'runs', orch.getState().id)), 'the original is gone');
+      } },
+    ]);
   });
+});
+
+// Keep policy (issue #529, D10): settingsFile() lives under HOME, so repoint HOME/USERPROFILE at a
+// temp dir for the test; otherwise it would rewrite the developer's real settings.json.
+test('detached + keep on-success: a finished run keeps its checkout, protected and recorded', async () => {
+  const repo = await freshRepo();
+  const prevHome = process.env.HOME;
+  const prevProfile = process.env.USERPROFILE;
+  process.env.HOME = process.env.USERPROFILE = await tmp('worca-cc-rrt-home-');
+  try {
+    await setActionsSettings({ keep: 'on-success' });
+    await withMode('detached', async () => {
+      const orch = createOrchestrator({
+        projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
+      });
+      const res = await orch.run();
+      assert.equal(res.status, 'done', JSON.stringify(res));
+      const st = orch.getState();
+      const key = projectKey(repo);
+      const runRoot = join(worcaHome(), 'runs', st.id);
+      assert.ok(existsSync(join(runRoot, 'repos', key)), 'the checkout is re-created at runs/<id>/repos/<key>');
+      assert.equal((await readRunManifest(runRoot))?.retain?.reason, 'checkout');
+      // A later persist of the in-memory state must not erase the targeted checkout stamp.
+      await orch._persist();
+      const entry = (await listPipelines(repo)).find((e) => e.id === st.id);
+      assert.equal(entry?.checkout?.members[0].policy, 'on-success');
+    });
+  } finally {
+    await setActionsSettings({ keep: null });
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
+  }
 });
 
 test('detached: a failed teardown commit retains the worktree + run root and persists the reason', async () => {
@@ -198,40 +267,7 @@ test('detached: the generated CLAUDE.md / mcp.json / skill mount are removed WIT
   });
 });
 
-test('detached: a PAUSED run keeps its run root whole (§8.13 pause exemption)', async () => {
-  const dir = await freshRepo();
-  await withMode('detached', async () => {
-    let orchRef = null;
-    let hangOnce = true;
-    const runners = {
-      producer: async (ctx) => {
-        if (hangOnce) {
-          hangOnce = false;
-          queueMicrotask(() => orchRef.pause());
-          return new Promise((_r, rej) => {
-            const onAbort = () => { const e = new Error('aborted'); e.name = 'AbortError'; rej(e); };
-            if (ctx.signal.aborted) onAbort(); else ctx.signal.addEventListener('abort', onAbort, { once: true });
-          });
-        }
-        return { status: 'ok', summary: 'ok' };
-      },
-      verifier: async () => ({ status: 'ok', issues: [], review: { issues: [] }, summary: '' }),
-    };
-    const orch = createOrchestrator({
-      projectDir: dir, prompt: 'demo', auto: true, claude: { mock: true }, runners,
-      branch: { source: 'main' },
-    });
-    orchRef = orch;
-    const res = await orch.run();
-    assert.equal(res.status, 'paused', JSON.stringify(res));
-    const runRoot = join(worcaHome(), 'runs', orch.getState().id);
-    assert.ok(existsSync(runRoot), 'the run root survives a pause');
-    assert.ok(existsSync(join(runRoot, 'run.json')), 'the live manifest is still there');
-    assert.ok(existsSync(orch.getState().branch.worktreeDir), 'the checkout we resume into survives');
-  });
-});
-
-test('detached: a paused -> resumed -> completed run ALSO leaves no run root (resume finally wiring)', async () => {
+test('detached: a PAUSED run keeps its run root whole; the resumed run that completes tears it down', async () => {
   const dir = await freshRepo();
   await withMode('detached', async () => {
     let orchRef = null;
@@ -260,6 +296,9 @@ test('detached: a paused -> resumed -> completed run ALSO leaves no run root (re
     const id = orch1.state.id;
     const runRoot = join(worcaHome(), 'runs', id);
     assert.ok(existsSync(runRoot), 'paused: run root kept');
+    // §8.13 pause exemption: the run root stays WHOLE.
+    assert.ok(existsSync(join(runRoot, 'run.json')), 'the live manifest is still there');
+    assert.ok(existsSync(orch1.getState().branch.worktreeDir), 'the checkout we resume into survives');
 
     // Restart simulation: a brand-new instance built ONLY from the DB.
     const saved = readPipelineForResume(id);
@@ -345,59 +384,6 @@ test('detached resume: assembleRunContext re-runs and SELF-HEALS the deleted con
     assert.equal(healed.mcp, before.mcp, 'and so is the merged mcp.json');
     assert.ok(healed.skill, 'the skill mount was re-created');
     assert.deepEqual(healed.grants, ['mcp__db'], 'and the resumed nodes get the same V1(a) grants');
-  });
-});
-
-// ── §8.11 stray scan ─────────────────────────────────────────────────────────
-
-test('detached: an unexpected file at the run root is copied to <pipelineDir>/stray/ with a warning', async () => {
-  const repo = await freshRepo();
-  await withMode('detached', async () => {
-    const orch = createOrchestrator({
-      projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
-    });
-    const warnings = [];
-    orch.on('log', (e) => { if (e.level === 'warn') warnings.push(e.text); });
-    let planted = false;
-    orch.on('state', (s) => {
-      if (planted || !s.branch?.worktreeDir) return;
-      const runRoot = join(worcaHome(), 'runs', s.id);
-      if (!existsSync(runRoot)) return;
-      planted = true;
-      // An agent writing at cwd instead of repos/<key>.
-      writeFileSync(join(runRoot, 'oops-notes.md'), '# valuable notes\n');
-      mkdirSync(join(runRoot, 'scratch'), { recursive: true });
-      writeFileSync(join(runRoot, 'scratch', 'deep.txt'), 'deep\n');
-    });
-    const res = await orch.run();
-    assert.equal(res.status, 'done', JSON.stringify(res));
-    assert.ok(planted, 'precondition: a stray was planted at the run root');
-    const pdir = orch.getState().pipelineDir;
-    assert.equal(await readFile(join(pdir, 'stray', 'oops-notes.md'), 'utf8'), '# valuable notes\n');
-    assert.equal(await readFile(join(pdir, 'stray', 'scratch', 'deep.txt'), 'utf8'), 'deep\n');
-    assert.ok(warnings.some((w) => /oops-notes\.md/.test(w) && /run root/.test(w)),
-      `a loud warning names the stray: ${JSON.stringify(warnings)}`);
-    // The durable ledger carries it too (run.json copied out before removal).
-    const manifest = JSON.parse(await readFile(join(pdir, 'run.json'), 'utf8'));
-    assert.ok((manifest.warnings || []).some((w) => /oops-notes\.md/.test(w)),
-      'the warning is in run.json.warnings');
-  });
-});
-
-test('detached: run.json is copied to <pipelineDir>/run.json before the run root is removed', async () => {
-  const repo = await freshRepo();
-  await withMode('detached', async () => {
-    const orch = createOrchestrator({
-      projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
-    });
-    const res = await orch.run();
-    assert.equal(res.status, 'done', JSON.stringify(res));
-    const pdir = orch.getState().pipelineDir;
-    const copied = JSON.parse(await readFile(join(pdir, 'run.json'), 'utf8'));
-    assert.equal(copied.pipelineId, orch.getState().id);
-    assert.equal(copied.runRootMode, 'detached');
-    assert.ok(Array.isArray(copied.members) && copied.members.length === 1);
-    assert.ok(!existsSync(join(worcaHome(), 'runs', orch.getState().id)), 'the original is gone');
   });
 });
 
@@ -744,6 +730,63 @@ test('detached: a hook-failing commit is retried with hooks bypassed even on the
   });
 });
 
+/** Plant an index.lock aged `ageMs` — what a git killed mid-write leaves behind. */
+async function plantIndexLock(repo, ageMs) {
+  const lock = join(repo, '.git', 'index.lock');
+  await writeFile(lock, '');
+  const t = (Date.now() - ageMs) / 1000;
+  await utimes(lock, t, t);
+  return lock;
+}
+
+test('index.lock: a stale lock left by a killed git is removed and the commit goes through; a fresh lock is left alone', async () => {
+  await checkRows([
+    { name: 'a stale index.lock left by a killed git is removed and the commit goes through', run: async () => {
+      const repo = await freshRepo();
+      await writeFile(join(repo, 'feature.mjs'), 'export {};\n');
+      const lock = await plantIndexLock(repo, STALE_INDEX_LOCK_MS + 60_000);
+      const orch = createOrchestrator({
+        projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
+      });
+      const res = await orch._commitWork({ worktreeDir: repo, branch: 'main' });
+      assert.equal(res.ok, true, JSON.stringify(res));
+      assert.equal(res.committed, true);
+      assert.equal(existsSync(lock), false);
+      assert.ok(treeOf(repo, 'main').includes('feature.mjs'));
+    } },
+    { name: 'a fresh index.lock is left alone: a live git may own it', run: async () => {
+      const repo = await freshRepo();
+      await writeFile(join(repo, 'feature.mjs'), 'export {};\n');
+      const lock = await plantIndexLock(repo, 1_000);
+      const orch = createOrchestrator({
+        projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
+      });
+      const res = await orch._commitWork({ worktreeDir: repo, branch: 'main' });
+      assert.equal(res.ok, false);
+      assert.equal(res.step, 'add');
+      assert.equal(existsSync(lock), true);
+    } },
+  ]);
+});
+
+test('per-step staging clears a stale index.lock and records a run warning', async () => {
+  const repo = await freshRepo();
+  await writeFile(join(repo, 'feature.mjs'), 'export {};\n');
+  const lock = await plantIndexLock(repo, STALE_INDEX_LOCK_MS + 60_000);
+  const orch = createOrchestrator({
+    projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
+  });
+  orch.workDirs = new Map([['k', repo]]);
+  const warnings = [];
+  orch._recordRunWarning = async (text) => { warnings.push(text); };
+  await orch._stageWorkingTree();
+  assert.equal(existsSync(lock), false);
+  assert.match(spawnSync('git', ['-C', repo, 'diff', '--name-only'], { encoding: 'utf8' }).stdout, /feature\.mjs/,
+    'the new file is intent-to-added, so the reviewer diff sees it');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /removed a stale git index lock/);
+});
+
 test('a worktree that vanished mid-run is not retained (nothing to retain)', async () => {
   const repo = await freshRepo();
   const orch = createOrchestrator({
@@ -754,37 +797,40 @@ test('a worktree that vanished mid-run is not retained (nothing to retain)', asy
   assert.equal(res.committed, false);
 });
 
-test('a commit failure with no branch record synthesizes one so retention is machine-readable', async () => {
-  const repo = await freshRepo();
-  const orch = createOrchestrator({
-    projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
-  });
-  orch.state.branch = null; // the abnormal row shape F6 describes
-  const kept = await orch._recordCommitFailure(
-    { ok: false, step: 'commit', message: 'hook failed' },
-    { info: { worktreeDir: join(repo, 'wt'), branch: 'worca/x' }, branchRecord: null },
-  );
-  assert.equal(kept, true);
-  assert.equal(orch.state.branch.commitFailed.code, 'commit_failed');
-  assert.equal(orch.state.branch.worktreeDir, join(repo, 'wt'));
-  assert.equal(orch.state.branch.worktreeRemoved, false);
-});
-
-test('the retention stamp is durable in the DB before _recordCommitFailure returns', async () => {
-  const repo = await freshRepo();
-  const orch = createOrchestrator({
-    projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
-  });
-  orch.state.id = 'rcf00001'; // writeState keys its UPSERT on state.id
-  orch.state.branch = { feature: 'worca/x', worktreeDir: join(repo, 'wt') };
-  const kept = await orch._recordCommitFailure(
-    { ok: false, step: 'commit', message: 'hook failed' },
-    { info: { worktreeDir: join(repo, 'wt'), branch: 'worca/x' }, branchRecord: orch.state.branch },
-  );
-  assert.equal(kept, true);
-  const persisted = await readPipelineByKey(projectKey(repo), 'rcf00001');
-  assert.equal(persisted.state.branch.commitFailed.code, 'commit_failed',
-    'the row is durable before any caller-side persist runs');
+test('_recordCommitFailure: synthesizes a branch record when none exists, and the retention stamp is durable in the DB before it returns', async () => {
+  await checkRows([
+    { name: 'a commit failure with no branch record synthesizes one so retention is machine-readable', run: async () => {
+      const repo = await freshRepo();
+      const orch = createOrchestrator({
+        projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
+      });
+      orch.state.branch = null; // the abnormal row shape F6 describes
+      const kept = await orch._recordCommitFailure(
+        { ok: false, step: 'commit', message: 'hook failed' },
+        { info: { worktreeDir: join(repo, 'wt'), branch: 'worca/x' }, branchRecord: null },
+      );
+      assert.equal(kept, true);
+      assert.equal(orch.state.branch.commitFailed.code, 'commit_failed');
+      assert.equal(orch.state.branch.worktreeDir, join(repo, 'wt'));
+      assert.equal(orch.state.branch.worktreeRemoved, false);
+    } },
+    { name: 'the retention stamp is durable in the DB before _recordCommitFailure returns', run: async () => {
+      const repo = await freshRepo();
+      const orch = createOrchestrator({
+        projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
+      });
+      orch.state.id = 'rcf00001'; // writeState keys its UPSERT on state.id
+      orch.state.branch = { feature: 'worca/x', worktreeDir: join(repo, 'wt') };
+      const kept = await orch._recordCommitFailure(
+        { ok: false, step: 'commit', message: 'hook failed' },
+        { info: { worktreeDir: join(repo, 'wt'), branch: 'worca/x' }, branchRecord: orch.state.branch },
+      );
+      assert.equal(kept, true);
+      const persisted = await readPipelineByKey(projectKey(repo), 'rcf00001');
+      assert.equal(persisted.state.branch.commitFailed.code, 'commit_failed',
+        'the row is durable before any caller-side persist runs');
+    } },
+  ]);
 });
 
 test('detached workspace: the rules copy sits at <runRoot>/.claude/rules/worca (never a stray, goes with the run root); the writable copy sits under the pipeline dir', async () => {

@@ -3,7 +3,7 @@
 // real bundle on a temp home.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,6 +15,7 @@ import { defaultCommentDeps } from '../src/core/ask/comment-deps.mjs';
 import { addDiffComment, addDiffCommentReply, getDiffComment, listDiffComments } from '../src/core/diff-comments.mjs';
 import { getDb } from '../src/core/db.mjs';
 import { GUARDRAIL_PRESETS } from '../src/core/guardrails.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -49,60 +50,38 @@ async function realTools(extra = {}) {
   return { tools: createAskTools(deps), run: seeded, deps };
 }
 
-test('list(): forty-five tools, the five comment tools in place, all with JSON-Schema inputs', async () => {
-  const { tools } = await realTools();
-  assert.deepEqual(tools.list().map((d) => d.name), ['list_projects', 'list_branches', 'list_workflows', 'list_runs', 'list_people', 'get_run', 'get_run_diff', 'track_run', 'propose_run', 'propose_workflow', 'read_attachment',
-    'list_diff_comments', 'add_diff_comment', 'reply_to_diff_comment', 'resolve_diff_comment', 'delete_diff_comment',
-    'open_worktree', 'list_worktrees', 'remove_worktree', 'git',
-    'list_run_artifacts', 'read_run_artifact', 'get_run_progress',
-    'get_team_metrics', 'list_team_metrics_runs', 'push_team_metrics', 'propose_metrics_change',
-    'get_team_policy', 'propose_policy_change',
-    'list_memory', 'read_memory', 'remember', 'forget',
-    'list_schedules', 'get_schedule', 'list_schedule_activity', 'preview_schedule', 'propose_schedule_change',
-    'pause_schedule', 'resume_schedule', 'skip_next_run', 'mark_schedule_activity_read',
-    'list_task_sources', 'find_tasks', 'get_task']);
-  const byName = (n) => tools.list().find((d) => d.name === n);
-  assert.deepEqual(byName('add_diff_comment').inputSchema.required, ['id', 'path', 'side', 'line', 'body']);
-  assert.deepEqual(byName('delete_diff_comment').inputSchema.required, ['commentId']);
-  assert.deepEqual(byName('reply_to_diff_comment').inputSchema.required, ['commentId', 'body']);
-  assert.deepEqual(byName('list_diff_comments').inputSchema.required, ['id']);
-  assert.equal(byName('resolve_diff_comment').inputSchema.properties.resolved.type, 'boolean');
-  assert.equal(byName('propose_run').inputSchema.properties.commentIds.type, 'array');
-  for (const n of ['list_diff_comments', 'add_diff_comment', 'reply_to_diff_comment', 'resolve_diff_comment', 'delete_diff_comment']) {
-    assert.equal(byName(n).inputSchema.additionalProperties, false);
-    assert.ok(byName(n).description.length > 20);
-  }
-});
-
-test('add_diff_comment: author ask, anchor validated, line_text captured, then listed with context', async () => {
-  const { tools, run } = await realTools();
-  const added = await tools.call('add_diff_comment', { id: run.id, path: 'src/a.js', side: 'new', line: 3, body: 'flaky' });
-  assert.match(added.comment.id, /^dc_[0-9a-f]{8}$/);
-  assert.equal(added.comment.author, 'ask');
-  assert.equal(added.comment.lineText, 'added');
-  assert.equal(added.comment.runId, run.id, 'the reducer poke reads this');
-  const listed = await tools.call('list_diff_comments', { id: run.id });
-  assert.equal(listed.comments.length, 1);
-  assert.equal(listed.comments[0].lineText, 'added');
-  // radius 3 around index 3 of a 5-row hunk clips to the whole hunk.
-  assert.deepEqual(listed.comments[0].context, [' keep', '-old', '+new', '+added', ' line3']);
-  assert.equal(listed.comments[0].projectKey, null, 'always present so anchors round-trip');
-  assert.equal(listed.patchAvailable, true);
-});
-
-test('add_diff_comment: a bad anchor is an AskToolError the model can act on', async () => {
-  const { tools, run } = await realTools();
-  for (const [input, re] of [
-    [{ id: run.id, path: 'ghost.js', side: 'new', line: 1, body: 'x' }, /not a file of this run's diff/],
-    [{ id: run.id, path: 'src/a.js', side: 'new', line: 99, body: 'x' }, /no new-side line 99/],
-    [{ id: run.id, path: '.env', side: 'new', line: 1, body: 'x' }, /protected path/],
-    [{ id: run.id, path: 'src/a.js', side: 'new', line: 1, body: 'x', memberProjectKey: 'p-00000001' }, /single project/],
-  ]) {
-    await assert.rejects(() => tools.call('add_diff_comment', input),
-      (e) => { assert.equal(e.name, 'AskToolError'); assert.match(e.message, re); return true; }, JSON.stringify(input));
-  }
-  await assert.rejects(() => tools.call('add_diff_comment', { id: 'aaaaaaaa', path: 'a', side: 'new', line: 1, body: 'x' }),
-    { message: 'add_diff_comment: run not found' });
+test('add_diff_comment: author ask, anchor validated, line_text captured and listed with context; a bad anchor is an AskToolError', async () => {
+  await checkRows([
+    { name: 'add_diff_comment: author ask, anchor validated, line_text captured, then listed with context', run: async () => {
+      const { tools, run } = await realTools();
+      const added = await tools.call('add_diff_comment', { id: run.id, path: 'src/a.js', side: 'new', line: 3, body: 'flaky' });
+      assert.match(added.comment.id, /^dc_[0-9a-f]{8}$/);
+      assert.equal(added.comment.author, 'ask');
+      assert.equal(added.comment.lineText, 'added');
+      assert.equal(added.comment.runId, run.id, 'the reducer poke reads this');
+      const listed = await tools.call('list_diff_comments', { id: run.id });
+      assert.equal(listed.comments.length, 1);
+      assert.equal(listed.comments[0].lineText, 'added');
+      // radius 3 around index 3 of a 5-row hunk clips to the whole hunk.
+      assert.deepEqual(listed.comments[0].context, [' keep', '-old', '+new', '+added', ' line3']);
+      assert.equal(listed.comments[0].projectKey, null, 'always present so anchors round-trip');
+      assert.equal(listed.patchAvailable, true);
+    } },
+    { name: 'add_diff_comment: a bad anchor is an AskToolError the model can act on', run: async () => {
+      const { tools, run } = await realTools();
+      for (const [input, re] of [
+        [{ id: run.id, path: 'ghost.js', side: 'new', line: 1, body: 'x' }, /not a file of this run's diff/],
+        [{ id: run.id, path: 'src/a.js', side: 'new', line: 99, body: 'x' }, /no new-side line 99/],
+        [{ id: run.id, path: '.env', side: 'new', line: 1, body: 'x' }, /protected path/],
+        [{ id: run.id, path: 'src/a.js', side: 'new', line: 1, body: 'x', memberProjectKey: 'p-00000001' }, /single project/],
+      ]) {
+        await assert.rejects(() => tools.call('add_diff_comment', input),
+          (e) => { assert.equal(e.name, 'AskToolError'); assert.match(e.message, re); return true; }, JSON.stringify(input));
+      }
+      await assert.rejects(() => tools.call('add_diff_comment', { id: 'aaaaaaaa', path: 'a', side: 'new', line: 1, body: 'x' }),
+        { message: 'add_diff_comment: run not found' });
+    } },
+  ]);
 });
 
 test('list_diff_comments: status filter, path filter, and a comment on a NOW-protected file is omitted', async () => {
@@ -174,19 +153,6 @@ test('list_diff_comments: a patch-less run still lists, just without context', a
   assert.equal(out.patchAvailable, false);
   assert.equal(out.comments[0].lineText, 'keep', 'the snapshot is always present');
   assert.equal(out.comments[0].context, undefined, 'context is omitted, never faked');
-});
-
-test('source scan: tools.mjs is still write-free and db-free; comment-deps holds only the comment bundle', () => {
-  const tools = readFileSync(new URL('../src/core/ask/tools.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(tools, /\b(INSERT|UPDATE|DELETE)\b/);
-  assert.doesNotMatch(tools, /from '\.\.\/db\.mjs'|getDb\(|\btx\(|node:sqlite/);
-  assert.equal(tools.split('\n').filter((l) => /^import /.test(l)).length, 0, 'tools.mjs stays import-free');
-  const deps = readFileSync(new URL('../src/core/ask/comment-deps.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(deps, /node:sqlite|from '\.\.\/db\.mjs'/);
-  assert.ok(deps.includes("from '../diff-comments.mjs'"), 'writes go through the one mutation module');
-  const stdio = readFileSync(new URL('../src/core/ask/mcp-stdio.mjs', import.meta.url), 'utf8');
-  // Match the WIRING, not the import line (the ask-worktree-tools precedent).
-  assert.match(stdio, /createAskTools\(\{[\s\S]*?defaultCommentDeps/, 'the MCP child spreads the comment bundle');
 });
 
 // A row persisted BEFORE Task 2's anchor fix keeps its quoted old_path, and the

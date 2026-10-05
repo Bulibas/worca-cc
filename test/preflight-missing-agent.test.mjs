@@ -15,6 +15,7 @@ import { _resetForTests } from '../src/core/db.mjs';
 import { writeGraphWorkflow } from '../src/core/workflows.mjs';
 import { readPluginsLock, writePluginsLock, pluginDir } from '../src/core/plugins-lock.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const prevHome = process.env.WORCA_HOME;
 let home, proj;
@@ -60,53 +61,36 @@ test('an unknown agent key errors the run BEFORE any pipeline/node work (was: em
   assert.equal(execs.length, 0, 'not one execution — not even the preflight bookend');
 });
 
-test('a key shipped by a DISABLED plugin gets the "enable it" message naming the plugin', async () => {
-  const versionDir = join(pluginDir('sleepy-source'), 'versions', 'abc1234');
-  mkdirSync(join(versionDir, 'agents'), { recursive: true });
-  writeFileSync(join(versionDir, 'agents', 'ghostAgent.md'), '# ghost\n');
-  writeFileSync(join(versionDir, 'agents', 'ghostAgent.meta.json'),
-    JSON.stringify({ key: 'ghostAgent', agentFile: 'ghostAgent.md', order: 50 }));
-  // 'junction' on Windows (a plain/dir symlink needs elevated privileges there);
-  // versionDir is absolute, as junctions require. Mirrors plugin-store's swap.
-  symlinkSync(versionDir, join(pluginDir('sleepy-source'), 'current'), process.platform === 'win32' ? 'junction' : 'dir');
-  writePluginsLock({ ...readPluginsLock(), 'sleepy-source': {
-    repo: 'r', subdir: 'sleepy-source', pinnedSha: 'a'.repeat(40),
-    version: '0.1.0', enabled: false, installedAt: '2026-07-12T00:00:00.000Z',
-  } });
+test('_preflightAgentKeys: a disabled plugin\'s key says "enable it"; an unknown key says "not installed"', async () => {
+  await checkRows([
+    { name: 'a key shipped by a DISABLED plugin gets the "enable it" message naming the plugin', run: () => {
+      const versionDir = join(pluginDir('sleepy-source'), 'versions', 'abc1234');
+      mkdirSync(join(versionDir, 'agents'), { recursive: true });
+      writeFileSync(join(versionDir, 'agents', 'ghostAgent.md'), '# ghost\n');
+      writeFileSync(join(versionDir, 'agents', 'ghostAgent.meta.json'),
+        JSON.stringify({ key: 'ghostAgent', agentFile: 'ghostAgent.md', order: 50 }));
+      // 'junction' on Windows (a plain/dir symlink needs elevated privileges there);
+      // versionDir is absolute, as junctions require. Mirrors plugin-store's swap.
+      symlinkSync(versionDir, join(pluginDir('sleepy-source'), 'current'), process.platform === 'win32' ? 'junction' : 'dir');
+      writePluginsLock({ ...readPluginsLock(), 'sleepy-source': {
+        repo: 'r', subdir: 'sleepy-source', pinnedSha: 'a'.repeat(40),
+        version: '0.1.0', enabled: false, installedAt: '2026-07-12T00:00:00.000Z',
+      } });
 
-  const wf = await writeGraphWorkflow({
-    id: 'wf_sleepy', name: 'Sleepy',
-    nodes: [
-      { id: 'n_task', kind: 'task', x: 0, y: 0, config: {} },
-      { id: 'n_ghost', kind: 'agent', key: 'ghostAgent', x: 200, y: 0, config: {} },
-      { id: 'n_end', kind: 'end', x: 400, y: 0, config: {} },
-    ],
-    wires: [],
-  });
-  const orch = createOrchestrator({ projectDir: proj, prompt: 'demo', workflowId: wf.id, auto: true, claude: { mock: true } });
-  orch.on('error', () => {});
-  const res = await orch.run();
-  assert.equal(res.status, 'error');
-  assert.match(res.error, /unknown agent "ghostAgent" — no such key in the registry/);
-
-  // The gate's actionable hint still exists and still names the disabled plugin.
-  // FINDING (P8): a saved graph can no longer REACH it — resolveGraph throws
-  // first — so the hint now only fires for keys a resolver cannot see.
-  const gate = createOrchestrator({ projectDir: proj, prompt: 'demo', claude: { mock: true } });
-  gate.registry = {};
-  assert.throws(() => gate._preflightAgentKeys(['ghostAgent']),
-    /agent "ghostAgent" comes from disabled plugin "sleepy-source" — enable it/);
-});
-
-test('_preflightAgentKeys: an unknown key with no plugin gets the "not installed" hint', () => {
-  const gate = createOrchestrator({ projectDir: proj, prompt: 'demo', claude: { mock: true } });
-  gate.registry = { planner: {} };
-  assert.throws(() => gate._preflightAgentKeys(['planner', 'nobodyAgent']),
-    /agent "nobodyAgent" is not installed \(removed plugin\?\)/);
-});
-
-test('happy path unaffected: the default workflow still runs to done in mock mode', async () => {
-  const orch = createOrchestrator({ projectDir: proj, prompt: 'demo happy', auto: true, claude: { mock: true } });
-  const res = await orch.run();
-  assert.equal(res.status, 'done');
+      // The gate's actionable hint still exists and still names the disabled plugin.
+      // FINDING (P8): a saved graph can no longer REACH it — resolveGraph throws
+      // first (the unknown-key test above pins that message) — so the hint now only
+      // fires for keys a resolver cannot see.
+      const gate = createOrchestrator({ projectDir: proj, prompt: 'demo', claude: { mock: true } });
+      gate.registry = {};
+      assert.throws(() => gate._preflightAgentKeys(['ghostAgent']),
+        /agent "ghostAgent" comes from disabled plugin "sleepy-source" — enable it/);
+    } },
+    { name: '_preflightAgentKeys: an unknown key with no plugin gets the "not installed" hint', run: () => {
+      const gate = createOrchestrator({ projectDir: proj, prompt: 'demo', claude: { mock: true } });
+      gate.registry = { planner: {} };
+      assert.throws(() => gate._preflightAgentKeys(['planner', 'nobodyAgent']),
+        /agent "nobodyAgent" is not installed \(removed plugin\?\)/);
+    } },
+  ]);
 });

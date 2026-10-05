@@ -8,6 +8,7 @@ import {
   MAX_HIGHLIGHT_INPUT_ROWS, MAX_HIGHLIGHT_OUTPUT_CHARS,
   MAX_HIGHLIGHT_OUTPUT_ROWS, MAX_HIGHLIGHT_OUTPUT_SPANS, MAX_HIGHLIGHT_NESTING,
 } from '../ui/public/syntax-highlight.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const escape = (text) => String(text)
   .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -180,144 +181,145 @@ test('input preflight uses UTF-8 bytes and exact per-side row work', () => {
   assert.equal(canHighlightParsed(context), false, 'context rows count once on each side');
 });
 
-test('highlightParsed aggregates raw-character work across hunks at exact and one-over limits', () => {
-  const half = MAX_HIGHLIGHT_OUTPUT_CHARS / 2;
-  const changed = () => hunk([{ kind: 'del', text: '' }, { kind: 'add', text: '' }]);
+test('highlightParsed aggregate budgets (raw chars, rebalanced chars, rows, spans) at exact and one-over limits', async () => {
+  await checkRows([
+    { name: 'highlightParsed aggregates raw-character work across hunks at exact and one-over limits', run: () => {
+      const half = MAX_HIGHLIGHT_OUTPUT_CHARS / 2;
+      const changed = () => hunk([{ kind: 'del', text: '' }, { kind: 'add', text: '' }]);
 
-  const exact = { hunks: [changed()] };
-  let calls = 0;
-  assert.equal(highlightParsed(exact, 'javascript', () => {
-    calls += 1;
-    return rawMarkup(half);
-  }), true);
-  assert.equal(calls, 2);
-  assert.ok(exact.hunks.every(hasHtml), 'an exact cap is accepted when the second side is final');
+      const exact = { hunks: [changed()] };
+      let calls = 0;
+      assert.equal(highlightParsed(exact, 'javascript', () => {
+        calls += 1;
+        return rawMarkup(half);
+      }), true);
+      assert.equal(calls, 2);
+      assert.ok(exact.hunks.every(hasHtml), 'an exact cap is accepted when the second side is final');
 
-  const followed = { hunks: [changed(), additionHunk([''])] };
-  calls = 0;
-  assert.equal(highlightParsed(followed, 'javascript', () => {
-    calls += 1;
-    return rawMarkup(half);
-  }), true);
-  assert.equal(calls, 2, 'no later hunk call is made after both sides reach the exact cap');
-  assert.ok(hasHtml(followed.hunks[0]));
-  assert.ok(lacksHtml(followed.hunks[1]));
+      const followed = { hunks: [changed(), additionHunk([''])] };
+      calls = 0;
+      assert.equal(highlightParsed(followed, 'javascript', () => {
+        calls += 1;
+        return rawMarkup(half);
+      }), true);
+      assert.equal(calls, 2, 'no later hunk call is made after both sides reach the exact cap');
+      assert.ok(hasHtml(followed.hunks[0]));
+      assert.ok(lacksHtml(followed.hunks[1]));
 
-  const over = { hunks: [additionHunk(['']), additionHunk(['']), additionHunk([''])] };
-  calls = 0;
-  assert.equal(highlightParsed(over, 'javascript', () => {
-    const size = calls++ === 0 ? half : half + 1;
-    return rawMarkup(size);
-  }), true, 'the already accepted first hunk remains highlighted');
-  assert.equal(calls, 2, 'one-over exhausts the budget and suppresses later work');
-  assert.ok(hasHtml(over.hunks[0]));
-  assert.ok(lacksHtml(over.hunks[1]));
-  assert.ok(lacksHtml(over.hunks[2]));
-});
+      const over = { hunks: [additionHunk(['']), additionHunk(['']), additionHunk([''])] };
+      calls = 0;
+      assert.equal(highlightParsed(over, 'javascript', () => {
+        const size = calls++ === 0 ? half : half + 1;
+        return rawMarkup(size);
+      }), true, 'the already accepted first hunk remains highlighted');
+      assert.equal(calls, 2, 'one-over exhausts the budget and suppresses later work');
+      assert.ok(hasHtml(over.hunks[0]));
+      assert.ok(lacksHtml(over.hunks[1]));
+      assert.ok(lacksHtml(over.hunks[2]));
+    } },
+    { name: 'highlightParsed aggregates rebalanced characters including close/reopen amplification', run: () => {
+      const half = MAX_HIGHLIGHT_OUTPUT_CHARS / 2;
+      const first = balancedMarkup(half);
+      const second = balancedMarkup(half);
+      assert.ok(first.html.length + second.html.length < MAX_HIGHLIGHT_OUTPUT_CHARS,
+        'raw output remains below the cap so rebalancing is the limiting dimension');
 
-test('highlightParsed aggregates rebalanced characters including close/reopen amplification', () => {
-  const half = MAX_HIGHLIGHT_OUTPUT_CHARS / 2;
-  const first = balancedMarkup(half);
-  const second = balancedMarkup(half);
-  assert.ok(first.html.length + second.html.length < MAX_HIGHLIGHT_OUTPUT_CHARS,
-    'raw output remains below the cap so rebalancing is the limiting dimension');
+      const exact = { hunks: [additionHunk(first.texts), additionHunk(second.texts)] };
+      let calls = 0;
+      assert.equal(highlightParsed(exact, 'javascript', () => [first.html, second.html][calls++]), true);
+      assert.equal(calls, 2);
+      assert.ok(exact.hunks.every(hasHtml), 'exact rebalanced output is accepted on the final side');
 
-  const exact = { hunks: [additionHunk(first.texts), additionHunk(second.texts)] };
-  let calls = 0;
-  assert.equal(highlightParsed(exact, 'javascript', () => [first.html, second.html][calls++]), true);
-  assert.equal(calls, 2);
-  assert.ok(exact.hunks.every(hasHtml), 'exact rebalanced output is accepted on the final side');
+      const followed = {
+        hunks: [additionHunk(first.texts), additionHunk(second.texts), additionHunk([''])],
+      };
+      calls = 0;
+      assert.equal(highlightParsed(followed, 'javascript', () => [first.html, second.html][calls++]), true);
+      assert.equal(calls, 2, 'the exact rebalanced cap suppresses the next hunk');
+      assert.ok(followed.hunks.slice(0, 2).every(hasHtml));
+      assert.ok(lacksHtml(followed.hunks[2]));
 
-  const followed = {
-    hunks: [additionHunk(first.texts), additionHunk(second.texts), additionHunk([''])],
-  };
-  calls = 0;
-  assert.equal(highlightParsed(followed, 'javascript', () => [first.html, second.html][calls++]), true);
-  assert.equal(calls, 2, 'the exact rebalanced cap suppresses the next hunk');
-  assert.ok(followed.hunks.slice(0, 2).every(hasHtml));
-  assert.ok(lacksHtml(followed.hunks[2]));
+      const overSecond = balancedMarkup(half + 1);
+      const over = {
+        hunks: [additionHunk(first.texts), additionHunk(overSecond.texts), additionHunk([''])],
+      };
+      calls = 0;
+      assert.equal(highlightParsed(over, 'javascript', () => [first.html, overSecond.html][calls++]), true);
+      assert.equal(calls, 2, 'aggregate rebalanced one-over suppresses the third call');
+      assert.ok(hasHtml(over.hunks[0]));
+      assert.ok(lacksHtml(over.hunks[1]));
+      assert.ok(lacksHtml(over.hunks[2]));
+    } },
+    { name: 'highlightParsed aggregates output rows and suppresses work after malformed one-over output', run: () => {
+      const half = MAX_HIGHLIGHT_OUTPUT_ROWS / 2;
+      const exact = {
+        hunks: [
+          additionHunk(Array.from({ length: half }, () => '')),
+          additionHunk(Array.from({ length: half }, () => '')),
+        ],
+      };
+      let calls = 0;
+      assert.equal(highlightParsed(exact, 'javascript', (text) => {
+        calls += 1;
+        return text;
+      }), true);
+      assert.equal(calls, 2);
+      assert.ok(exact.hunks.every(hasHtml), 'the exact aggregate row cap is accepted when final');
 
-  const overSecond = balancedMarkup(half + 1);
-  const over = {
-    hunks: [additionHunk(first.texts), additionHunk(overSecond.texts), additionHunk([''])],
-  };
-  calls = 0;
-  assert.equal(highlightParsed(over, 'javascript', () => [first.html, overSecond.html][calls++]), true);
-  assert.equal(calls, 2, 'aggregate rebalanced one-over suppresses the third call');
-  assert.ok(hasHtml(over.hunks[0]));
-  assert.ok(lacksHtml(over.hunks[1]));
-  assert.ok(lacksHtml(over.hunks[2]));
-});
+      const malformed = { hunks: [additionHunk(['a']), additionHunk(['b']), additionHunk(['c'])] };
+      calls = 0;
+      assert.equal(highlightParsed(malformed, 'javascript', () => {
+        calls += 1;
+        return calls === 1
+          ? outputRows(half, 'wrong')
+          : `${outputRows(half, 'wrong')}<img>`;
+      }), false);
+      assert.equal(calls, 2, 'mismatched and malformed rows consume the exact cap before rejection');
+      assert.ok(malformed.hunks.every(lacksHtml));
 
-test('highlightParsed aggregates output rows and suppresses work after malformed one-over output', () => {
-  const half = MAX_HIGHLIGHT_OUTPUT_ROWS / 2;
-  const exact = {
-    hunks: [
-      additionHunk(Array.from({ length: half }, () => '')),
-      additionHunk(Array.from({ length: half }, () => '')),
-    ],
-  };
-  let calls = 0;
-  assert.equal(highlightParsed(exact, 'javascript', (text) => {
-    calls += 1;
-    return text;
-  }), true);
-  assert.equal(calls, 2);
-  assert.ok(exact.hunks.every(hasHtml), 'the exact aggregate row cap is accepted when final');
+      const over = { hunks: [additionHunk(['a']), additionHunk(['b']), additionHunk(['c'])] };
+      calls = 0;
+      assert.equal(highlightParsed(over, 'javascript', () => {
+        calls += 1;
+        return outputRows(calls === 1 ? half : half + 1, 'wrong');
+      }), false);
+      assert.equal(calls, 2, 'aggregate output-row one-over suppresses the third call');
+      assert.ok(over.hunks.every(lacksHtml));
+    } },
+    { name: 'highlightParsed aggregates rendered spans across hunks at exact and one-over limits', run: () => {
+      const half = MAX_HIGHLIGHT_OUTPUT_SPANS / 2;
 
-  const malformed = { hunks: [additionHunk(['a']), additionHunk(['b']), additionHunk(['c'])] };
-  calls = 0;
-  assert.equal(highlightParsed(malformed, 'javascript', () => {
-    calls += 1;
-    return calls === 1
-      ? outputRows(half, 'wrong')
-      : `${outputRows(half, 'wrong')}<img>`;
-  }), false);
-  assert.equal(calls, 2, 'mismatched and malformed rows consume the exact cap before rejection');
-  assert.ok(malformed.hunks.every(lacksHtml));
+      const exact = { hunks: [additionHunk(['']), additionHunk([''])] };
+      let calls = 0;
+      assert.equal(highlightParsed(exact, 'javascript', () => {
+        calls += 1;
+        return spanMarkup(half);
+      }), true);
+      assert.equal(calls, 2);
+      assert.ok(exact.hunks.every(hasHtml), 'the exact aggregate span cap is accepted when final');
 
-  const over = { hunks: [additionHunk(['a']), additionHunk(['b']), additionHunk(['c'])] };
-  calls = 0;
-  assert.equal(highlightParsed(over, 'javascript', () => {
-    calls += 1;
-    return outputRows(calls === 1 ? half : half + 1, 'wrong');
-  }), false);
-  assert.equal(calls, 2, 'aggregate output-row one-over suppresses the third call');
-  assert.ok(over.hunks.every(lacksHtml));
-});
+      const followed = { hunks: [additionHunk(['']), additionHunk(['']), additionHunk([''])] };
+      calls = 0;
+      assert.equal(highlightParsed(followed, 'javascript', () => {
+        calls += 1;
+        return spanMarkup(half);
+      }), true);
+      assert.equal(calls, 2, 'the exact aggregate span cap suppresses later work');
+      assert.ok(followed.hunks.slice(0, 2).every(hasHtml));
+      assert.ok(lacksHtml(followed.hunks[2]));
 
-test('highlightParsed aggregates rendered spans across hunks at exact and one-over limits', () => {
-  const half = MAX_HIGHLIGHT_OUTPUT_SPANS / 2;
-
-  const exact = { hunks: [additionHunk(['']), additionHunk([''])] };
-  let calls = 0;
-  assert.equal(highlightParsed(exact, 'javascript', () => {
-    calls += 1;
-    return spanMarkup(half);
-  }), true);
-  assert.equal(calls, 2);
-  assert.ok(exact.hunks.every(hasHtml), 'the exact aggregate span cap is accepted when final');
-
-  const followed = { hunks: [additionHunk(['']), additionHunk(['']), additionHunk([''])] };
-  calls = 0;
-  assert.equal(highlightParsed(followed, 'javascript', () => {
-    calls += 1;
-    return spanMarkup(half);
-  }), true);
-  assert.equal(calls, 2, 'the exact aggregate span cap suppresses later work');
-  assert.ok(followed.hunks.slice(0, 2).every(hasHtml));
-  assert.ok(lacksHtml(followed.hunks[2]));
-
-  const over = { hunks: [additionHunk(['']), additionHunk(['']), additionHunk([''])] };
-  calls = 0;
-  assert.equal(highlightParsed(over, 'javascript', () => {
-    calls += 1;
-    return spanMarkup(calls === 1 ? half : half + 1);
-  }), true);
-  assert.equal(calls, 2, 'aggregate span one-over suppresses the third call');
-  assert.ok(hasHtml(over.hunks[0]));
-  assert.ok(lacksHtml(over.hunks[1]));
-  assert.ok(lacksHtml(over.hunks[2]));
+      const over = { hunks: [additionHunk(['']), additionHunk(['']), additionHunk([''])] };
+      calls = 0;
+      assert.equal(highlightParsed(over, 'javascript', () => {
+        calls += 1;
+        return spanMarkup(calls === 1 ? half : half + 1);
+      }), true);
+      assert.equal(calls, 2, 'aggregate span one-over suppresses the third call');
+      assert.ok(hasHtml(over.hunks[0]));
+      assert.ok(lacksHtml(over.hunks[1]));
+      assert.ok(lacksHtml(over.hunks[2]));
+    } },
+  ]);
 });
 
 test('rejected malformed and text-mismatching output still consumes aggregate work', () => {

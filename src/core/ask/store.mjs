@@ -13,6 +13,7 @@ import { basename, join } from 'node:path';
 import { getDb, prepare, tx } from '../db.mjs';
 import { worcaHome } from '../projects.mjs';
 import { extensionForAttachment } from './attachment-kind.mjs';
+import { mergeContexts } from './contexts.mjs';
 
 export const ASK_ID_RE = /^[a-z]+_[0-9a-f]{8}$/;
 const ROLES = new Set(['user', 'assistant', 'system']);
@@ -40,13 +41,19 @@ const emptyTotals = () => ({ costUsd: 0, input: 0, output: 0, cacheRead: 0, cach
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
 
 function rowToThread(r) {
+  const contexts = parse(r.contexts, null);
   return {
     id: r.id, title: r.title ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
     model: r.model ?? null, effort: r.effort ?? null, sessionId: r.session_id ?? null,
     context: parse(r.context, null),
+    // Context chips (contexts.mjs): accumulated across turns, origin first. NULL (a chat from
+    // before v46) reads as [] — no indicator.
+    contexts: Array.isArray(contexts) ? contexts : [],
     totals: { ...emptyTotals(), ...(parse(r.totals, {}) || {}) },
     // The thread's owner (identity.mjs actor); null = ownerless (before attribution).
     createdBy: r.created_by ?? null,
+    // MCP registry §9.4: the picker's switched-off {sets, members}; null = none (v45).
+    mcpOff: parse(r.mcp_off, null),
   };
 }
 
@@ -134,9 +141,10 @@ export function countAttachments() {
   return row ? Number(row.n) : 0;
 }
 
-const THREAD_PATCH_COLS = { title: 'title', model: 'model', effort: 'effort', sessionId: 'session_id', context: 'context' };
+const THREAD_PATCH_COLS = { title: 'title', model: 'model', effort: 'effort', sessionId: 'session_id', context: 'context', mcpOff: 'mcp_off' };
+const JSON_PATCH_KEYS = new Set(['context', 'mcpOff']);
 
-/** Patch ⊆ {title, model, effort, sessionId, context}; unknown keys ignored; always bumps updated_at. */
+/** Patch ⊆ {title, model, effort, sessionId, context, mcpOff}; unknown keys ignored; always bumps updated_at. */
 export function updateThread(id, patch = {}) {
   const db = getDb();
   const sets = [];
@@ -144,7 +152,7 @@ export function updateThread(id, patch = {}) {
   for (const [k, col] of Object.entries(THREAD_PATCH_COLS)) {
     if (!Object.prototype.hasOwnProperty.call(patch, k)) continue;
     sets.push(`${col} = ?`);
-    vals.push(k === 'context' ? str(patch[k]) : (patch[k] ?? null));
+    vals.push(JSON_PATCH_KEYS.has(k) ? str(patch[k]) : (patch[k] ?? null));
   }
   sets.push('updated_at = ?');
   vals.push(now(), id);
@@ -170,10 +178,28 @@ export function addThreadTotals(id, { costUsd = null, usage = null, agents = 0 }
     t.costUsd = round6(t.costUsd + (typeof costUsd === 'number' && Number.isFinite(costUsd) ? costUsd : 0));
     for (const k of ['input', 'output', 'cacheRead', 'cacheCreation']) t[k] += Number(usage?.[k]) || 0;
     if (Number.isFinite(usage?.ctx)) t.ctx = usage.ctx;                   // context fill: the turn's last per-call figure REPLACES (never sums)
+    if (Number.isInteger(usage?.ctxWindow) && usage.ctxWindow > 0) t.ctxWindow = usage.ctxWindow;   // the model's window: REPLACES; a turn without one keeps the last
     t.turns += 1;
     t.agents += Number.isInteger(agents) && agents > 0 ? agents : 0;
     prepare('UPDATE ask_threads SET totals = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(t), now(), id);
     return t;
+  });
+}
+
+/** Merge one turn's context chips into the thread (mergeContexts: origin first, deduped).
+ *  The ONLY writer of ask_threads.contexts; leaves updated_at alone (the turn already bumped it).
+ *  Returns the stored list, or null for an unknown thread. */
+export function addThreadContexts(id, entries) {
+  return tx(() => {
+    const row = prepare('SELECT contexts FROM ask_threads WHERE id = ?').get(id);
+    if (!row) return null;
+    const cur = parse(row.contexts, []);
+    const next = mergeContexts(cur, entries);
+    // a legacy NULL row with an empty turn stays NULL; anything that changes the list is written
+    if (JSON.stringify(next) !== JSON.stringify(Array.isArray(cur) ? cur : [])) {
+      prepare('UPDATE ask_threads SET contexts = ? WHERE id = ?').run(JSON.stringify(next), id);
+    }
+    return next;
   });
 }
 
@@ -287,7 +313,7 @@ export function updateCardBlock(threadId, cardId, patch = {}) {
       if (!(b && b.kind === 'card' && b.id === cardId)) return b;
       const subPatchable = !!(b.card && (b.card.type === 'workflow' || b.card.type === 'metrics'
         || b.card.type === 'policy' || b.card.type === 'schedule' || b.card.type === 'model' || b.card.type === 'clone' || b.card.type === 'web'
-        || b.card.type === 'workspace'));
+        || b.card.type === 'workspace' || b.card.type === 'actions' || b.card.type === 'away'));
       return { ...b, ...allowed, ...(sub && subPatchable ? { card: { ...(b.card || {}), ...sub } } : {}) };
     });
     prepare('UPDATE ask_messages SET blocks = ? WHERE id = ?').run(JSON.stringify(blocks), found.message.id);

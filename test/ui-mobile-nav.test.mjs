@@ -3,18 +3,21 @@
 // preference untouched. Phone (<=760px): the #mbar top bar whose hamburger opens the
 // FULL sidebar as a slide-in drawer (counts, live runs, spend, signed-in: parity).
 // jsdom has no matchMedia, so boot() installs a width-driven stub BEFORE app.js loads.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..', 'ui', 'public');
 const html = readFileSync(join(root, 'index.html'), 'utf8');
-const css = readFileSync(join(root, 'style.css'), 'utf8');
-const js = readFileSync(join(root, 'app.js'), 'utf8');
 const appPath = join(root, 'app.js');
 const PROJECT = '/tmp/proj';
 const SIDEBAR_KEY = 'worca-cc.sidebar.collapsed';
@@ -51,7 +54,7 @@ function mediaStub(width) {
 }
 
 async function boot({ width = 1280, seed = {} } = {}) {
-  const dom = new JSDOM(html, { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(html, { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.__budgetTickMs = DAY;   // the budget ticker must not repaint a later test's DOM (ui-sidebar-collapse:142-151)
@@ -97,165 +100,106 @@ const live = (runId, extra = {}) => ({
   startedAt: '10:00:00', pendingQuestion: null, ...extra,
 });
 
-// ---- static: the pill bar is gone everywhere ----
+// ---- the rail per tier ----
 
-test('the compact .topnav is removed from markup, CSS and JS', () => {
-  assert.doesNotMatch(html, /topnav/);
-  assert.doesNotMatch(css, /topnav/);
-  assert.doesNotMatch(js, /topnav/);
+// A viewport table: each row boots at its own width.
+test('rail derivation per tier: desktop follows the stored preference (hamburger inert), tablet forces the icon rail without touching it, phone drawer is the full sidebar', async () => {
+  await checkRows([
+    { name: 'desktop: the preference still drives the rail and the hamburger never opens a drawer', run: async () => {
+      const { $, click, window } = await boot({ width: 1280, seed: { [SIDEBAR_KEY]: '1' } });
+      assert.ok($('.sidebar').classList.contains('collapsed'));
+      click('#side-toggle');
+      assert.equal($('.sidebar').classList.contains('collapsed'), false);
+      assert.equal(window.localStorage.getItem(SIDEBAR_KEY), '0');
+      click('#mbar-menu');
+      assert.equal(window.document.body.classList.contains('nav-open'), false);
+    } },
+    { name: 'tablet: the icon rail is forced without touching the stored preference', run: async () => {
+      const { $, window, recv } = await boot({ width: 900 });
+      assert.ok($('.sidebar').classList.contains('collapsed'), 'rail on tablets');
+      assert.ok(window.document.body.classList.contains('rail-collapsed'), 'the Ask dock follows (left:76px)');
+      assert.equal(window.localStorage.getItem(SIDEBAR_KEY), null, 'nothing persisted');
+      assert.equal($('.nav button[data-nav="composer"]').title, 'Workflow Composer', 'rail tooltips');
+      recv({ type: 'hello', runs: [live('auth-fix')] });
+      assert.equal($('#nav-running-count').textContent, '1', 'the Runs badge counts the live run (no per-run rows)');
+    } },
+    { name: 'phone: the drawer is the FULL sidebar even when the rail preference is on', run: async () => {
+      const { $, window, recv } = await boot({ width: 390, seed: { [SIDEBAR_KEY]: '1' } });
+      assert.equal($('.sidebar').classList.contains('collapsed'), false);
+      assert.equal(window.document.body.classList.contains('rail-collapsed'), false);
+      assert.equal(window.localStorage.getItem(SIDEBAR_KEY), '1', 'the desktop preference survives');
+      recv({ type: 'hello', runs: [live('auth-fix'), live('seo', { pendingQuestion: { id: 'q1', kind: 'clarify', questions: [{ question: 'x?', options: ['a'] }] } })] });
+      assert.equal($('#nav-running-count').textContent, '2', 'counts');
+      assert.equal($('#mbar-rollup').hidden, false, 'the menu button carries the needs-input dot');
+      assert.equal($('#mbar-menu').getAttribute('aria-label'), 'Menu — a pipeline needs your input');
+    } },
+  ]);
 });
 
-test('phone bar markup: hamburger (controls the sidebar), rollup dot, title; scrim; drawer close', () => {
-  const doc = new JSDOM(html).window.document;
-  const bar = doc.querySelector('.app > #mbar.mbar');
-  assert.ok(bar, '#mbar is a direct child of .app');
-  const menu = bar.querySelector('#mbar-menu');
-  assert.equal(menu.tagName, 'BUTTON');
-  assert.equal(menu.getAttribute('aria-controls'), 'side-rail');
-  assert.equal(menu.getAttribute('aria-expanded'), 'false');
-  assert.equal(menu.getAttribute('aria-label'), 'Menu');
-  assert.ok(menu.querySelector('#mbar-rollup.nav-rollup[hidden]'), 'the needs-input dot rides the menu button');
-  assert.ok(bar.querySelector('#mbar-title'));
-  assert.equal(bar.querySelectorAll('[data-nav]').length, 0, 'the bar does not duplicate the route list');
-  assert.ok(doc.querySelector('.app > #nav-scrim.nav-scrim[hidden]'));
-  const close = doc.querySelector('#side-rail .brand #side-close');
-  assert.ok(close, 'the drawer has its own close button');
-  assert.equal(close.getAttribute('aria-label'), 'Close menu');
-});
+// ---- the phone drawer ----
 
-// ---- CSS structure ----
+// One phone boot, the steps in order: each row starts where the previous one left the page
+// (drawer closed, on New pipeline → Statistics → Runs), and a failing row names its step.
+test('phone drawer: opens; closes by scrim/close/Escape/route/back/resize with focus + inert managed; disclosure and mode switch do not close it', async () => {
+  const { $, click, key, resize, window } = await boot({ width: 390 });
+  await checkRows([
+    { name: 'phone: open, close by scrim / close button / Escape; focus and inert are managed', run: async () => {
+      const body = window.document.body;
+      click('#mbar-menu');
+      assert.ok(body.classList.contains('nav-open'));
+      assert.equal($('#mbar-menu').getAttribute('aria-expanded'), 'true');
+      assert.equal($('#nav-scrim').hidden, false);
+      assert.ok($('.main').hasAttribute('inert'), 'the page behind is inert');
+      assert.ok($('#mbar').hasAttribute('inert'));
+      assert.equal(window.document.activeElement, $('#side-close'), 'focus moves into the drawer');
 
-const tiers = () => {
-  const start = css.indexOf('/* ---------- Responsive nav tiers');
-  assert.ok(start > 0, 'the Responsive nav tiers block exists');
-  const end = css.indexOf('/* ---------- Ask Worca', start);
-  assert.ok(end > start, 'and it sits before the Ask Worca block');
-  return css.slice(start, end);
-};
+      click('#nav-scrim');
+      assert.equal(body.classList.contains('nav-open'), false);
+      assert.equal($('#nav-scrim').hidden, true);
+      assert.equal($('.main').hasAttribute('inert'), false);
+      assert.equal(window.document.activeElement, $('#mbar-menu'), 'focus returns to the hamburger');
 
-test('<=1080px no longer hides the sidebar; the tablet tier hides only the collapse toggle', () => {
-  assert.doesNotMatch(css, /@media \(max-width:1080px\)\{\s*\.grid\{[^}]*\}\s*\.sidebar\{display:none;\}/);
-  assert.match(tiers(), /@media \(max-width:1080px\)\{[^@]*\.sidebar \.side-toggle\{display:none;\}/);
-});
-
-test('phone tier: the sidebar is an off-canvas fixed drawer above the Ask dock and below modals', () => {
-  const t = tiers();
-  const phone = t.slice(t.indexOf('@media (max-width:760px){'));
-  assert.match(phone, /\.app\{flex-direction:column;\}/);
-  assert.match(phone, /\.mbar\{display:flex;/);
-  assert.match(phone, /\.sidebar\{position:fixed;[^}]*z-index:42;[^}]*transform:translateX\(-100%\);[^}]*visibility:hidden;/);
-  assert.match(phone, /body\.nav-open \.sidebar\{transform:none;visibility:visible;/);
-  assert.match(phone, /\.nav-scrim\{display:block;position:fixed;inset:0;z-index:41;background:var\(--scrim\);\}/);
-  assert.match(phone, /\.nav-scrim\[hidden\]\{display:none;\}/);
-  assert.match(phone, /\.side-close\{display:flex;/);
-  // outside the media blocks every new control is hidden (desktop + tablet)
-  assert.match(t, /\.mbar,\.nav-scrim,\.side-close\{display:none;\}/);
-});
-
-test('the Ask dock spans the viewport only on phones; the tablet rail keeps its 76px arm', () => {
-  assert.doesNotMatch(css, /@media \(max-width:1080px\)\{\s*\.ask-dock,body\.rail-collapsed \.ask-dock\{left:0;\}/);
-  assert.match(css, /@media \(max-width:760px\)\{\s*\.ask-dock,body\.rail-collapsed \.ask-dock\{left:0;\}\s*\}/);
-});
-
-// ---- desktop (unchanged) ----
-
-test('desktop: the preference still drives the rail and the hamburger never opens a drawer', async () => {
-  const { $, click, window } = await boot({ width: 1280, seed: { [SIDEBAR_KEY]: '1' } });
-  assert.ok($('.sidebar').classList.contains('collapsed'));
-  click('#side-toggle');
-  assert.equal($('.sidebar').classList.contains('collapsed'), false);
-  assert.equal(window.localStorage.getItem(SIDEBAR_KEY), '0');
-  click('#mbar-menu');
-  assert.equal(window.document.body.classList.contains('nav-open'), false);
-});
-
-// ---- tablet ----
-
-test('tablet: the icon rail is forced without touching the stored preference', async () => {
-  const { $, window, recv } = await boot({ width: 900 });
-  assert.ok($('.sidebar').classList.contains('collapsed'), 'rail on tablets');
-  assert.ok(window.document.body.classList.contains('rail-collapsed'), 'the Ask dock follows (left:76px)');
-  assert.equal(window.localStorage.getItem(SIDEBAR_KEY), null, 'nothing persisted');
-  assert.equal($('.nav button[data-nav="composer"]').title, 'Workflow Composer', 'rail tooltips');
-  recv({ type: 'hello', runs: [live('auth-fix')] });
-  assert.equal($('#nav-running-count').textContent, '1', 'the Runs badge counts the live run (no per-run rows)');
-});
-
-// ---- phone ----
-
-test('phone: the drawer is the FULL sidebar even when the rail preference is on', async () => {
-  const { $, window, recv } = await boot({ width: 390, seed: { [SIDEBAR_KEY]: '1' } });
-  assert.equal($('.sidebar').classList.contains('collapsed'), false);
-  assert.equal(window.document.body.classList.contains('rail-collapsed'), false);
-  assert.equal(window.localStorage.getItem(SIDEBAR_KEY), '1', 'the desktop preference survives');
-  recv({ type: 'hello', runs: [live('auth-fix'), live('seo', { pendingQuestion: { id: 'q1', kind: 'clarify', questions: [{ question: 'x?', options: ['a'] }] } })] });
-  assert.equal($('#nav-running-count').textContent, '2', 'counts');
-  assert.equal($('#mbar-rollup').hidden, false, 'the menu button carries the needs-input dot');
-  assert.equal($('#mbar-menu').getAttribute('aria-label'), 'Menu — a pipeline needs your input');
-});
-
-test('phone: open, close by scrim / close button / Escape; focus and inert are managed', async () => {
-  const { $, click, key, window } = await boot({ width: 390 });
-  const body = window.document.body;
-  click('#mbar-menu');
-  assert.ok(body.classList.contains('nav-open'));
-  assert.equal($('#mbar-menu').getAttribute('aria-expanded'), 'true');
-  assert.equal($('#nav-scrim').hidden, false);
-  assert.ok($('.main').hasAttribute('inert'), 'the page behind is inert');
-  assert.ok($('#mbar').hasAttribute('inert'));
-  assert.equal(window.document.activeElement, $('#side-close'), 'focus moves into the drawer');
-
-  click('#nav-scrim');
-  assert.equal(body.classList.contains('nav-open'), false);
-  assert.equal($('#nav-scrim').hidden, true);
-  assert.equal($('.main').hasAttribute('inert'), false);
-  assert.equal(window.document.activeElement, $('#mbar-menu'), 'focus returns to the hamburger');
-
-  click('#mbar-menu'); click('#side-close');
-  assert.equal(body.classList.contains('nav-open'), false);
-  click('#mbar-menu'); key('Escape');
-  assert.equal(body.classList.contains('nav-open'), false);
-});
-
-test('phone: a route closes the drawer and names the page in the bar; disclosure and mode switch do not', async () => {
-  const { $, click, window } = await boot({ width: 390 });
-  const body = window.document.body;
-  assert.equal($('#mbar-title').textContent, 'New pipeline');
-  click('#mbar-menu');
-  click('.nav .nav-group[data-nav-group="nodes"]');
-  assert.ok(body.classList.contains('nav-open'), 'folding Nodes keeps the drawer open');
-  click('#nav-mode');
-  assert.ok(body.classList.contains('nav-open'), 'the mode dialog opens over the drawer');
-  assert.equal($('#mode-modal').classList.contains('hidden'), false);
-  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  assert.equal($('#mode-modal').classList.contains('hidden'), true, 'Esc closes the dialog…');
-  assert.ok(body.classList.contains('nav-open'), '…and only the dialog');
-  click('.nav button[data-nav="stats"]');
-  await tick();
-  assert.equal(window.location.hash, '#stats');
-  assert.equal(body.classList.contains('nav-open'), false);
-  assert.equal($('#mbar-title').textContent, 'Statistics');
-});
-
-test('phone: a hash change (back button) closes an open drawer', async () => {
-  const { $, click, window } = await boot({ width: 390 });
-  click('#mbar-menu');
-  window.location.hash = 'history';   // a legacy bare route: it lands on the one Runs page
-  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
-  await tick();
-  assert.equal(window.document.body.classList.contains('nav-open'), false);
-  assert.equal($('#mbar-title').textContent, 'Runs');
-});
-
-test('resizing across tiers closes the drawer and re-derives the rail', async () => {
-  const { $, click, resize, window } = await boot({ width: 390 });
-  click('#mbar-menu');
-  resize(900);
-  assert.equal(window.document.body.classList.contains('nav-open'), false);
-  assert.equal($('.main').hasAttribute('inert'), false);
-  assert.ok($('.sidebar').classList.contains('collapsed'), 'tablet → rail');
-  resize(1280);
-  assert.equal($('.sidebar').classList.contains('collapsed'), false, 'desktop → the (unset) preference');
-  click('#mbar-menu');
-  assert.equal(window.document.body.classList.contains('nav-open'), false, 'no drawer off-phone');
+      click('#mbar-menu'); click('#side-close');
+      assert.equal(body.classList.contains('nav-open'), false);
+      click('#mbar-menu'); key('Escape');
+      assert.equal(body.classList.contains('nav-open'), false);
+    } },
+    { name: 'phone: a route closes the drawer and names the page in the bar; disclosure and mode switch do not', run: async () => {
+      const body = window.document.body;
+      assert.equal($('#mbar-title').textContent, 'New pipeline');
+      click('#mbar-menu');
+      click('.nav .nav-group[data-nav-group="nodes"]');
+      assert.ok(body.classList.contains('nav-open'), 'folding Nodes keeps the drawer open');
+      click('#nav-mode');
+      assert.ok(body.classList.contains('nav-open'), 'the mode dialog opens over the drawer');
+      assert.equal($('#mode-modal').classList.contains('hidden'), false);
+      window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      assert.equal($('#mode-modal').classList.contains('hidden'), true, 'Esc closes the dialog…');
+      assert.ok(body.classList.contains('nav-open'), '…and only the dialog');
+      click('.nav button[data-nav="stats"]');
+      await tick();
+      assert.equal(window.location.hash, '#stats');
+      assert.equal(body.classList.contains('nav-open'), false);
+      assert.equal($('#mbar-title').textContent, 'Statistics');
+    } },
+    { name: 'phone: a hash change (back button) closes an open drawer', run: async () => {
+      click('#mbar-menu');
+      window.location.hash = 'history';   // a legacy bare route: it lands on the one Runs page
+      window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+      await tick();
+      assert.equal(window.document.body.classList.contains('nav-open'), false);
+      assert.equal($('#mbar-title').textContent, 'Runs');
+    } },
+    { name: 'resizing across tiers closes the drawer and re-derives the rail', run: async () => {
+      click('#mbar-menu');
+      resize(900);
+      assert.equal(window.document.body.classList.contains('nav-open'), false);
+      assert.equal($('.main').hasAttribute('inert'), false);
+      assert.ok($('.sidebar').classList.contains('collapsed'), 'tablet → rail');
+      resize(1280);
+      assert.equal($('.sidebar').classList.contains('collapsed'), false, 'desktop → the (unset) preference');
+      click('#mbar-menu');
+      assert.equal(window.document.body.classList.contains('nav-open'), false, 'no drawer off-phone');
+    } },
+  ]);
 });

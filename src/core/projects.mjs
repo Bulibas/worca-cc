@@ -182,6 +182,13 @@ export async function addProjects(items) {
   return { results, projects: await listProjects() };
 }
 
+/** How long removeProject waits for the metrics-worktree prune before answering. A test passes a
+ *  small `pruneWaitMs`; WORCA_PRUNE_WAIT_MS (1 .. 600000) overrides the 10 s default. */
+export function pruneWaitMsFrom(env = process.env) {
+  const n = Number(env.WORCA_PRUNE_WAIT_MS);
+  return Number.isFinite(n) && n > 0 && n <= 600_000 ? n : 10_000;
+}
+
 /**
  * Remove a project by name (case-insensitive). Absent name is a no-op. Also prunes any metrics
  * worktree that belonged to this project's repository, waiting up to ~10s for it: the wait is
@@ -189,14 +196,30 @@ export async function addProjects(items) {
  * @param {string} name
  * @returns {Promise<Array<{key:string, name:string, path:string, exists:boolean}>>}
  */
-export async function removeProject(name) {
+export async function removeProject(name, { pruneWaitMs = pruneWaitMsFrom() } = {}) {
   const key = (typeof name === 'string' ? name : '').trim();
   let removedPath = null;
   if (key) {
     tx(() => {
-      const row = prepare('SELECT path FROM projects WHERE name = ? COLLATE NOCASE').get(key);
+      const row = prepare('SELECT key, path FROM projects WHERE name = ? COLLATE NOCASE').get(key);
       removedPath = row ? row.path : null;
       prepare('DELETE FROM projects WHERE name = ? COLLATE NOCASE').run(key);
+      // Its team-policy discovery cache goes with it: the home stops being followed here, so its Team set greys with
+      // Forget (MCP registry spec §11.2), and a later add of the same path discovers afresh.
+      // …unless a workspace still has this repo as a member (its policy and metrics homes are members too): Worca still
+      // reaches it there (discoverAllPolicies; findLocalRepoBySlug finds the home a workspace's policy project follows
+      // among its members), so the home it carries is still followed and its Team set must not grey.
+      const inWorkspace = !!row && prepare('SELECT project_key AS path FROM workspace_projects').all()
+        .some((w) => { try { return projectKey(w.path) === row.key; } catch { return false; } });
+      const pc = row && !inWorkspace ? prepare('SELECT extra FROM project_config WHERE project_key = ?').get(row.key) : null;
+      let extra = null;
+      try { extra = pc ? JSON.parse(pc.extra) : null; } catch { /* not JSON: left as it is */ }
+      if (extra && typeof extra === 'object' && Object.hasOwn(extra, 'teamPolicy')) {
+        // The total-cap acknowledgements stay (policy/state.mjs): a project added again is not asked twice in one window.
+        const acks = extra.teamPolicy?.acks;
+        if (acks && typeof acks === 'object') extra.teamPolicy = { acks }; else delete extra.teamPolicy;
+        prepare('UPDATE project_config SET extra = ? WHERE project_key = ?').run(JSON.stringify(extra), row.key);
+      }
     });
   }
   if (removedPath) {
@@ -206,7 +229,7 @@ export async function removeProject(name) {
       // Bounded: each removal waits for the slug lock, and a running flush can hold it for minutes.
       // The DELETE request must not hang on that; the prune finishes in the background.
       const prune = pruneMetricsWorktreesFor(removedPath).catch(() => []);
-      await Promise.race([prune, new Promise((r) => setTimeout(r, 10_000).unref?.())]);
+      await Promise.race([prune, new Promise((r) => setTimeout(r, pruneWaitMs).unref?.())]);
     } catch { /* best-effort: a leftover worktree is harmless and re-pruned by git */ }
   }
   return listProjects();

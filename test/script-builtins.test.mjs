@@ -16,6 +16,7 @@ import { probePython } from '../src/core/graph/python-probe.mjs';
 import { listScriptNodes } from '../src/core/workflow-share.mjs';
 import { realAgentMetas } from './helpers/graph-ports.mjs';
 import { gitDir } from './helpers/git-dir.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const scratch = [];
 const tmp = (p) => { const d = mkdtempSync(join(tmpdir(), p)); scratch.push(d); return d; };
@@ -151,15 +152,16 @@ test('py: an inline def main(api) runs through the python harness with the file-
   assert.equal(dflt.summary, 'ok', 'the default snippet is a working card');
 });
 
-test('py: an empty source and a source with no main are both named', { skip: pySkip }, async () => {
-  await assert.rejects(runScriptExecution(ctxFor('py', { params: { source: '   ' } })),
-    /^Error: script "py": the py card has no source$/);
-  await assert.rejects(runScriptExecution(ctxFor('py', { params: { source: 'value = 1\n' } })),
-    /^Error: script "py": the source must define `def main\(api\): …`$/);
-});
-
-test('py: an async def main is awaited, and a raise inside the snippet is the execution error', { skip: pySkip }, async () => {
-  const r = await runScriptExecution(ctxFor('py', { params: { source: `import asyncio
+test('py: an async def main is awaited; an empty source, a missing main and a raise are named execution errors', { skip: pySkip }, async () => {
+  await checkRows([
+    { name: 'py: an empty source and a source with no main are both named', run: async () => {
+      await assert.rejects(runScriptExecution(ctxFor('py', { params: { source: '   ' } })),
+        /^Error: script "py": the py card has no source$/);
+      await assert.rejects(runScriptExecution(ctxFor('py', { params: { source: 'value = 1\n' } })),
+        /^Error: script "py": the source must define `def main\(api\): …`$/);
+    } },
+    { name: 'py: an async def main is awaited, and a raise inside the snippet is the execution error', run: async () => {
+      const r = await runScriptExecution(ctxFor('py', { params: { source: `import asyncio
 
 async def main(api):
     await asyncio.sleep(0)
@@ -167,9 +169,11 @@ async def main(api):
         f.write('# async\\n')
     return {'summary': 'awaited'}
 ` } }));
-  assert.equal(r.summary, 'awaited');
-  await assert.rejects(runScriptExecution(ctxFor('py', { params: { source: 'def main(api):\n    raise RuntimeError("boom")\n' } })),
-    /^Error: script "py": boom$/);
+      assert.equal(r.summary, 'awaited');
+      await assert.rejects(runScriptExecution(ctxFor('py', { params: { source: 'def main(api):\n    raise RuntimeError("boom")\n' } })),
+        /^Error: script "py": boom$/);
+    } },
+  ]);
 });
 
 test('py: the snippet is a REAL module — a dataclass under postponed annotations works inline as it does in a file', { skip: pySkip }, async () => {

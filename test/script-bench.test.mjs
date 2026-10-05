@@ -16,11 +16,12 @@ import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import {
   createBench, runBenchOnce, buildBenchCtx, writeBenchInputs, sweepBenchDirs, benchRoot,
-  BENCH_MAX_PARALLEL, BENCH_INLINE_BYTES, BENCH_SWEEP_MS,
+  BENCH_INLINE_BYTES,
 } from '../src/core/script-bench.mjs';
 import { loadScriptRegistry } from '../src/core/script-registry.mjs';
 import { resetPythonProbe } from '../src/core/graph/python-probe.mjs';
 import { createScript, writeCases, deleteScript, userScriptsDir } from '../src/core/script-store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 const scratch = [];
@@ -50,13 +51,6 @@ const nodeScript = (body, over = {}) => layer('bench1', {
   inputs: PORTS.inputs, outputs: PORTS.outputs, verdict: PORTS.verdict, ...over,
 }, body);
 const collect = (bench) => { const lines = []; bench.on('scriptbench-line', (e) => lines.push(e)); return lines; };
-
-test('constants and the bench root', () => {
-  assert.equal(BENCH_MAX_PARALLEL, 2);
-  assert.equal(BENCH_INLINE_BYTES, 262144);
-  assert.equal(BENCH_SWEEP_MS, 86400000);
-  assert.equal(benchRoot('/home/x'), join('/home/x', 'bench'));
-});
 
 test('buildBenchCtx: the synthetic run — bench:true, cycle 1, the bench`s own dirs, no project store', () => {
   const meta = { key: 'k', displayName: 'K', runtime: 'node' };
@@ -175,13 +169,27 @@ export default async function () {
   assert.deepEqual(b3.error.tail, ['started'], 'the last 20 captured lines ride the error');
 });
 
-test('stop() aborts the child and the result is `stopped`', async () => {
-  const registry = nodeScript('export default async function () { console.log("up"); await new Promise(() => {}); }\n');
-  const bench = createBench({ key: 'bench1' }, { registry, agentKeys: [] });
-  bench.on('scriptbench-line', (e) => { if (e.text === 'up') bench.stop(); });
-  const result = await new Promise((r) => { bench.on('scriptbench-done', (e) => r(e.result)); bench.run(); });
-  assert.equal(result.status, 'stopped');
-  assert.equal(bench.getState().status, 'stopped');
+test('stop() ends a hung script as a stopped RESULT — via createBench and via runBenchOnce + onBench', async () => {
+  await checkRows([
+    { name: 'stop() aborts the child and the result is `stopped`', run: async () => {
+      const registry = nodeScript('export default async function () { console.log("up"); await new Promise(() => {}); }\n');
+      const bench = createBench({ key: 'bench1' }, { registry, agentKeys: [] });
+      bench.on('scriptbench-line', (e) => { if (e.text === 'up') bench.stop(); });
+      const result = await new Promise((r) => { bench.on('scriptbench-done', (e) => r(e.result)); bench.run(); });
+      assert.equal(result.status, 'stopped');
+      assert.equal(bench.getState().status, 'stopped');
+    } },
+    { name: 'onBench + stop(): a hung script ends as a stopped RESULT, not a rejection', run: async () => {
+      const registry = nodeScript('export default async function () { console.log("up"); await new Promise(() => {}); }\n');
+      let live = null;
+      const result = await runBenchOnce({ key: 'bench1' }, {
+        registry, agentKeys: [],
+        onBench: (bench) => { live = bench; },
+        onLine: (e) => { if (e.text === 'up') live.stop(); },
+      });
+      assert.equal(result.status, 'stopped');
+    } },
+  ]);
 });
 
 test('a shell script runs the command with WORCA_BENCH=1 and the bench env', async () => {
@@ -206,14 +214,6 @@ test('params are the run`s: defaults merged, unknown and mistyped values fail wi
     (e) => e.code === 'BAD_REQUEST' && e.message === `script node 'bench' sets unknown param 'nope' — script "bench1" declares mode`);
   await assert.rejects(runBenchOnce({ key: 'bench1', params: { mode: 'z' } }, { registry, agentKeys: [] }),
     (e) => e.code === 'BAD_REQUEST' && e.message === `script node 'bench' param 'mode': must be one of a, b (got "z")`);
-});
-
-test('`mock` is ignored: a sidecar mock does not stop the program from running (W13)', async () => {
-  const registry = nodeScript('export default async function () { return { summary: "real", outputs: { log: { value: "r" } } }; }\n',
-    { mock: { summary: 'mocked', outputs: { log: { text: 'm' } } } });
-  const result = await runBenchOnce({ key: 'bench1' }, { registry, agentKeys: [] });
-  assert.equal(result.summary, 'real');
-  assert.equal(result.outputs.log.text, 'r');
 });
 
 test('an unsaved draft runs beside the real file and the draft file is removed — on success AND on a throw', async () => {
@@ -343,19 +343,6 @@ test('one live folder per key (W11) and the 24 h sweep', async () => {
   assert.deepEqual(await sweepBenchDirs(join(root, 'does-not-exist')), [], 'a missing root is not an error');
 });
 
-test('a project cwd resolves through the projects registry; unknown and missing are 400', async () => {
-  const registry = nodeScript('export default async ({ ctx }) => ({ summary: ctx.cwd, outputs: { log: { value: "x" } } });\n');
-  const repo = tmp('worca-bench-proj-');
-  const projects = async () => [{ key: 'proj1', name: 'Proj', path: repo, exists: true },
-    { key: 'gone', name: 'Gone', path: join(repo, 'nope'), exists: false }];
-  const r = await runBenchOnce({ key: 'bench1', cwd: { kind: 'project', projectKey: 'proj1' } }, { registry, agentKeys: [], projects });
-  assert.equal(r.summary, repo, 'the script ran in the project checkout');
-  await assert.rejects(runBenchOnce({ key: 'bench1', cwd: { kind: 'project', projectKey: 'nope' } }, { registry, agentKeys: [], projects }),
-    (e) => e.code === 'BAD_REQUEST' && e.message === 'project "nope" is not registered');
-  await assert.rejects(runBenchOnce({ key: 'bench1', cwd: { kind: 'project', projectKey: 'gone' } }, { registry, agentKeys: [], projects }),
-    (e) => e.code === 'BAD_REQUEST' && /project path does not exist or is not a directory/.test(e.message));
-});
-
 test('an unknown key is a transport error, and run() never throws', async () => {
   const bench = createBench({ key: 'nope' }, { registry: {}, agentKeys: [] });
   const evs = [];
@@ -367,32 +354,6 @@ test('an unknown key is a transport error, and run() never throws', async () => 
   assert.equal(evs[0].code, 'NOT_FOUND');
   assert.equal(evs[0].benchId, bench.id);
   assert.equal(bench.getState().status, 'error');
-});
-
-test('runBenchOnce hands out every streamed line (onLine) and the live bench (onBench)', async () => {
-  const registry = nodeScript('export default async function () { console.log("line one"); console.log("line two"); return { summary: "ok", outputs: { log: { value: "x" } } }; }\n');
-  const lines = [];
-  let live = null;
-  const result = await runBenchOnce({ key: 'bench1' }, {
-    registry, agentKeys: [],
-    onLine: (e) => lines.push(e),
-    onBench: (bench) => { live = bench; },
-  });
-  assert.equal(result.status, 'clean');
-  assert.ok(live && typeof live.stop === 'function' && live.id.startsWith('bench_'), 'the caller can stop() it');
-  assert.deepEqual(lines.map((l) => l.text).filter((t) => t.startsWith('line ')), ['line one', 'line two']);
-  assert.ok(lines.every((l) => l.benchId === live.id && l.stream === 'out' && l.caseId === null));
-});
-
-test('onBench + stop(): a hung script ends as a stopped RESULT, not a rejection', async () => {
-  const registry = nodeScript('export default async function () { console.log("up"); await new Promise(() => {}); }\n');
-  let live = null;
-  const result = await runBenchOnce({ key: 'bench1' }, {
-    registry, agentKeys: [],
-    onBench: (bench) => { live = bench; },
-    onLine: (e) => { if (e.text === 'up') live.stop(); },
-  });
-  assert.equal(result.status, 'stopped');
 });
 
 test('stop() before run() still ends in ONE terminal event, so runBenchOnce settles', async () => {

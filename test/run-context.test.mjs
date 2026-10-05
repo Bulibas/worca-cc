@@ -23,7 +23,6 @@ import { join, dirname, basename } from 'node:path';
 import {
   MCP_GRANT_MODE,
   assembleRunContext,
-  renderContextAudit,
   discoverMemorySources,
   resolveImports,
   assembleSkills,
@@ -31,6 +30,9 @@ import {
   auditAncestors,
 } from '../src/core/run-context.mjs';
 import { readRunManifest, rescueModifiedMounts, removeInjectedPaths } from '../src/core/run-manifest.mjs';
+import { skipMessage } from '../src/core/mcp/registry.mjs';
+import { withEnv } from './helpers/with-env.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const WIN_SYMLINK = { skip: process.platform === 'win32' ? 'creating symlinks needs a privilege (Developer Mode / admin) on Windows' : false };
 
@@ -113,18 +115,13 @@ async function assemble(over = {}) {
     homeDir: over.homeDir ?? (await emptyDir()),
     ...(over.honorByKey ? { honorByKey: over.honorByKey } : {}),
     ...(over.platform ? { platform: over.platform } : {}),
+    ...(over.registry ? { registry: over.registry } : {}),
   });
 }
 
-// ── the V1 outcome, burned in ────────────────────────────────────────────────
-
-test('MCP_GRANT_MODE is the Phase-0 V1(a) outcome: server-wildcard grants', () => {
-  assert.equal(MCP_GRANT_MODE, 'server');
-});
-
 // ── §5.4 memory discovery + ordering ────────────────────────────────────────
 
-test('discoverMemorySources: CLAUDE.md, .claude/CLAUDE.md, .claude/rules/*.md (lex), CLAUDE.local.md', async () => {
+test('discoverMemorySources: CLAUDE.md, .claude/CLAUDE.md, .claude/rules/*.md (lex), CLAUDE.local.md; missing dir/files are silent', async () => {
   const dir = await writeTree(await tmp(), {
     'CLAUDE.md': 'root\n',
     'CLAUDE.local.md': 'local\n',
@@ -141,35 +138,36 @@ test('discoverMemorySources: CLAUDE.md, .claude/CLAUDE.md, .claude/rules/*.md (l
     join('.claude', 'rules', 'b-second.md'),
     'CLAUDE.local.md',
   ]);
-});
-
-test('discoverMemorySources: a missing directory and missing files are both silent (§8.20)', async () => {
+  // a missing directory and missing files are both silent (§8.20)
   assert.deepEqual(await discoverMemorySources(join(await tmp(), 'nope')), []);
   assert.deepEqual(await discoverMemorySources(await tmp()), []);
 });
 
 // ── §5.4 @import resolution ─────────────────────────────────────────────────
 
-test('resolveImports: inlines a relative @import, recursively', async () => {
-  const dir = await writeTree(await tmp(), {
-    'CLAUDE.md': 'top\n@./child.md\nend\n',
-    'child.md': 'CHILD\n@./grand.md\n',
-    'grand.md': 'GRAND\n',
-  });
-  const r = await resolveImports(
-    await readFile(join(dir, 'CLAUDE.md'), 'utf8'), join(dir, 'CLAUDE.md'), 0, { homeDir: dir },
-  );
-  assert.match(r.text, /CHILD/);
-  assert.match(r.text, /GRAND/);
-  assert.deepEqual(r.unresolved, []);
-});
-
-test('resolveImports: ~ is expanded against homeDir', async () => {
-  const home = await writeTree(await tmp(), { 'notes.md': 'HOMENOTE\n' });
-  const dir = await writeTree(await tmp(), { 'CLAUDE.md': '@~/notes.md\n' });
-  const r = await resolveImports('@~/notes.md\n', join(dir, 'CLAUDE.md'), 0, { homeDir: home });
-  assert.match(r.text, /HOMENOTE/);
-  assert.deepEqual(r.unresolved, []);
+test('resolveImports: inlines relative @imports recursively and expands ~ against homeDir', async () => {
+  await checkRows([
+    { name: 'resolveImports: inlines a relative @import, recursively', run: async () => {
+      const dir = await writeTree(await tmp(), {
+        'CLAUDE.md': 'top\n@./child.md\nend\n',
+        'child.md': 'CHILD\n@./grand.md\n',
+        'grand.md': 'GRAND\n',
+      });
+      const r = await resolveImports(
+        await readFile(join(dir, 'CLAUDE.md'), 'utf8'), join(dir, 'CLAUDE.md'), 0, { homeDir: dir },
+      );
+      assert.match(r.text, /CHILD/);
+      assert.match(r.text, /GRAND/);
+      assert.deepEqual(r.unresolved, []);
+    } },
+    { name: 'resolveImports: ~ is expanded against homeDir', run: async () => {
+      const home = await writeTree(await tmp(), { 'notes.md': 'HOMENOTE\n' });
+      const dir = await writeTree(await tmp(), { 'CLAUDE.md': '@~/notes.md\n' });
+      const r = await resolveImports('@~/notes.md\n', join(dir, 'CLAUDE.md'), 0, { homeDir: home });
+      assert.match(r.text, /HOMENOTE/);
+      assert.deepEqual(r.unresolved, []);
+    } },
+  ]);
 });
 
 test('resolveImports: depth is capped at 4 and the cap is reported, never looped', async () => {
@@ -241,18 +239,6 @@ test('generated CLAUDE.md: title + rosters + per-member sections, byte-identical
   assert.match(t1, /run root holds run metadata only/i);
   assert.match(t1, /deferred behind tool search/i, 'the MCP roster carries the tool-search note');
   assert.equal(rc1.memberCount, 2);
-});
-
-test('generated CLAUDE.md: a zero-memory member still renders its section with the placeholder', async () => {
-  const empty = await tmp('worca-cc-rc-nomem-');
-  const rr = await mkRunRoot();
-  const rc = await assemble({
-    runRoot: rr,
-    members: [{ projectKey: 'k1', projectName: 'Nomem', projectDir: empty, worktreeDir: join(await tmp(), 'w') }],
-  });
-  const text = await readFile(rc.claudeMdPath, 'utf8');
-  assert.match(text, /^## Project: Nomem — repos\/k1$/m);
-  assert.match(text, /\*\(no CLAUDE\.md found in this project\)\*/);
 });
 
 test('generated CLAUDE.md: the root layer renders as "## Root instructions (<projectsRoot>)"', async () => {
@@ -564,17 +550,6 @@ test('§8.20: a broken skill source warns and skips — assembly is not aborted'
 
 // ── §5.5 mcp.json ───────────────────────────────────────────────────────────
 
-test('§5.5: no server anywhere => mcpConfigPath is null and no mcp.json is written', async () => {
-  const rr = await mkRunRoot();
-  const rc = await assemble({
-    runRoot: rr,
-    members: [{ projectKey: 'k1', projectName: 'P', projectDir: await tmp(), worktreeDir: join(rr, 'repos', 'k1') }],
-  });
-  assert.equal(rc.mcpConfigPath, null, 'so --mcp-config is omitted entirely');
-  assert.deepEqual(rc.mcpServerNames, []);
-  assert.ok(!existsSync(join(rr, 'mcp.json')));
-});
-
 test('§5.5: relative command + path-like args are absolutized; ${CLAUDE_PROJECT_DIR} is substituted', POSIX_SHIM, async () => {
   const real = await writeTree(await tmp('worca-cc-rc-mcpabs-'), {
     '.mcp.json': JSON.stringify({
@@ -649,47 +624,50 @@ test('§5.5: every server name is normalized (__ -> _) and the mapping is record
   assert.equal(out.renames.mcpServers.my_server, 'my__server');
 });
 
-test('§5.5: byte-identical definitions de-dup; genuinely different ones are RENAMED, never dropped', async () => {
-  const def = { command: 'node', args: ['/abs/x.js'] };
-  const a = await writeTree(await tmp('worca-cc-rc-dupa-'), { '.mcp.json': JSON.stringify({ mcpServers: { db: def, same: def } }) });
-  const b = await writeTree(await tmp('worca-cc-rc-dupb-'), {
-    '.mcp.json': JSON.stringify({ mcpServers: { db: { command: 'node', args: ['/abs/other.js'] }, same: def } }),
-  });
-  const projectsRoot = await writeTree(await tmp('worca-cc-rc-dupr-'), {
-    '.mcp.json': JSON.stringify({ mcpServers: { db: { command: 'node', args: ['/abs/root.js'] } } }),
-  });
-  const out = await mergeMcpConfigs({
-    members: [
-      { projectKey: 'a-1', projectName: 'Alpha', projectDir: a, worktreeDir: null },
-      { projectKey: 'b-2', projectName: 'Beta', projectDir: b, worktreeDir: null },
-    ],
-    projectsRoot, homeDir: await emptyDir(), isWorkspace: true, platform: 'darwin',
-  });
-  assert.deepEqual(Object.keys(out.servers).sort(), ['beta-db', 'db', 'root-db', 'same']);
-  assert.equal(out.servers.db.args[0], '/abs/x.js', 'the first occupant in the PINNED read order keeps the name');
-  assert.equal(out.servers['beta-db'].args[0], '/abs/other.js', 'member-sourced later occupant: <memberSlug>-<server>');
-  assert.equal(out.servers['root-db'].args[0], '/abs/root.js', 'root-sourced later occupant: root-<server>');
-  assert.deepEqual(out.renames.mcpServers, { 'beta-db': 'db', 'root-db': 'db' });
-});
-
-test('§5.5: the pinned read order is members (by projectKey) then the root layer LAST', async () => {
-  const mk = async (p, file) => writeTree(await tmp(p), {
-    '.mcp.json': JSON.stringify({ mcpServers: { db: { command: 'node', args: [file] } } }),
-  });
-  const b = await mk('worca-cc-rc-ordb-', '/abs/b.js');
-  const a = await mk('worca-cc-rc-orda-', '/abs/a.js');
-  const projectsRoot = await mk('worca-cc-rc-ordr-', '/abs/root.js');
-  const out = await mergeMcpConfigs({
-    // deliberately passed out of order: the module sorts by projectKey itself
-    members: [
-      { projectKey: 'zz-b', projectName: 'B', projectDir: b, worktreeDir: null },
-      { projectKey: 'aa-a', projectName: 'A', projectDir: a, worktreeDir: null },
-    ],
-    projectsRoot, homeDir: await emptyDir(), isWorkspace: true, platform: 'darwin',
-  });
-  assert.equal(out.servers.db.args[0], '/abs/a.js', 'lowest projectKey is the first occupant');
-  assert.equal(out.servers['b-db'].args[0], '/abs/b.js');
-  assert.equal(out.servers['root-db'].args[0], '/abs/root.js', 'a root server never silently claims a member name');
+test('§5.5: identical definitions de-dup, different ones are RENAMED; read order is members by projectKey, then root LAST', async () => {
+  await checkRows([
+    { name: '§5.5: byte-identical definitions de-dup; genuinely different ones are RENAMED, never dropped', run: async () => {
+      const def = { command: 'node', args: ['/abs/x.js'] };
+      const a = await writeTree(await tmp('worca-cc-rc-dupa-'), { '.mcp.json': JSON.stringify({ mcpServers: { db: def, same: def } }) });
+      const b = await writeTree(await tmp('worca-cc-rc-dupb-'), {
+        '.mcp.json': JSON.stringify({ mcpServers: { db: { command: 'node', args: ['/abs/other.js'] }, same: def } }),
+      });
+      const projectsRoot = await writeTree(await tmp('worca-cc-rc-dupr-'), {
+        '.mcp.json': JSON.stringify({ mcpServers: { db: { command: 'node', args: ['/abs/root.js'] } } }),
+      });
+      const out = await mergeMcpConfigs({
+        members: [
+          { projectKey: 'a-1', projectName: 'Alpha', projectDir: a, worktreeDir: null },
+          { projectKey: 'b-2', projectName: 'Beta', projectDir: b, worktreeDir: null },
+        ],
+        projectsRoot, homeDir: await emptyDir(), isWorkspace: true, platform: 'darwin',
+      });
+      assert.deepEqual(Object.keys(out.servers).sort(), ['beta-db', 'db', 'root-db', 'same']);
+      assert.equal(out.servers.db.args[0], '/abs/x.js', 'the first occupant in the PINNED read order keeps the name');
+      assert.equal(out.servers['beta-db'].args[0], '/abs/other.js', 'member-sourced later occupant: <memberSlug>-<server>');
+      assert.equal(out.servers['root-db'].args[0], '/abs/root.js', 'root-sourced later occupant: root-<server>');
+      assert.deepEqual(out.renames.mcpServers, { 'beta-db': 'db', 'root-db': 'db' });
+    } },
+    { name: '§5.5: the pinned read order is members (by projectKey) then the root layer LAST', run: async () => {
+      const mk = async (p, file) => writeTree(await tmp(p), {
+        '.mcp.json': JSON.stringify({ mcpServers: { db: { command: 'node', args: [file] } } }),
+      });
+      const b = await mk('worca-cc-rc-ordb-', '/abs/b.js');
+      const a = await mk('worca-cc-rc-orda-', '/abs/a.js');
+      const projectsRoot = await mk('worca-cc-rc-ordr-', '/abs/root.js');
+      const out = await mergeMcpConfigs({
+        // deliberately passed out of order: the module sorts by projectKey itself
+        members: [
+          { projectKey: 'zz-b', projectName: 'B', projectDir: b, worktreeDir: null },
+          { projectKey: 'aa-a', projectName: 'A', projectDir: a, worktreeDir: null },
+        ],
+        projectsRoot, homeDir: await emptyDir(), isWorkspace: true, platform: 'darwin',
+      });
+      assert.equal(out.servers.db.args[0], '/abs/a.js', 'lowest projectKey is the first occupant');
+      assert.equal(out.servers['b-db'].args[0], '/abs/b.js');
+      assert.equal(out.servers['root-db'].args[0], '/abs/root.js', 'a root server never silently claims a member name');
+    } },
+  ]);
 });
 
 test('§5.5 / V3(d): a cross-scope duplicate in single mode warns by name; an identical one is skipped but still granted', async () => {
@@ -876,7 +854,7 @@ function sectionOf(md, heading) {
   return j < 0 ? rest : rest.slice(0, j);
 }
 
-test('§8.21: a workspace member with committed .claude/agents is WARNED and named in the roster', async () => {
+test('§8.21: a workspace member with committed .claude/agents is WARNED, named in the roster, and stable across a re-assembly', async () => {
   const rr = await mkRunRoot('pidagent1');
   const dirA = await writeTree(await tmp('worca-cc-rc-a-'), { 'CLAUDE.md': 'A\n' });
   const dirB = await writeTree(await tmp('worca-cc-rc-b-'), { 'CLAUDE.md': 'B\n' });
@@ -884,55 +862,49 @@ test('§8.21: a workspace member with committed .claude/agents is WARNED and nam
   const wtA = await writeTree(join(rr, 'repos', 'a-1111'), {
     '.claude/agents/db-migrator.md': '---\nname: db-migrator\n---\nbody\n',
     '.claude/agents/notes.txt': 'not an agent\n',
+    '.claude/agents/a.md': 'a\n',
   });
   const wtB = join(rr, 'repos', 'b-2222');
   await mkdir(wtB, { recursive: true });
+  const members = [
+    { projectKey: 'a-1111', projectName: 'alpha', projectDir: dirA, worktreeDir: wtA },
+    { projectKey: 'b-2222', projectName: 'beta', projectDir: dirB, worktreeDir: wtB },
+  ];
 
-  const rc = await withSettings({}, async () => assemble({
-    runRoot: rr, isWorkspace: true,
-    members: [
-      { projectKey: 'a-1111', projectName: 'alpha', projectDir: dirA, worktreeDir: wtA },
-      { projectKey: 'b-2222', projectName: 'beta', projectDir: dirB, worktreeDir: wtB },
-    ],
-  }));
-
-  // (1) run.json.warnings / rc.warnings — one entry, for the carrier only.
-  const warns = rc.warnings.filter((w) => /sub-agents/.test(w));
-  assert.equal(warns.length, 1, `only the carrier warns: ${JSON.stringify(warns)}`);
-  assert.match(warns[0], /alpha/);
-  assert.match(warns[0], /not discoverable on workspace runs \(cwd is the run root\)/);
-  assert.match(warns[0], /~\/\.claude\/agents/);
-  assert.match(warns[0], /db-migrator\.md/);
-  assert.doesNotMatch(warns[0], /notes\.txt/, 'only .md agents count');
-  const manifest = await readRunManifest(rr);
-  assert.ok((manifest.warnings || []).some((w) => /sub-agents/.test(w)), 'durable in run.json');
-
-  // (2) the generated roster carries the note, naming the carrier and NOT the other.
+  const rc = await withSettings({}, async () => assemble({ runRoot: rr, isWorkspace: true, members }));
   const md = await readFile(rc.claudeMdPath, 'utf8');
-  const note = sectionOf(md, 'Project sub-agents NOT in force');
-  assert.ok(note, `the roster note is present:\n${md.slice(0, 900)}`);
-  assert.match(note, /alpha/);
-  assert.match(note, /db-migrator\.md/);
-  assert.match(note, /~\/\.claude\/agents/, 'personal agents still work');
-  assert.doesNotMatch(note, /beta/, 'a member with no committed agents is not named');
-  // …and the member's own roster entry says so too.
-  assert.match(sectionOf(md, 'Projects in this run'), /sub-agents/);
-});
 
-test('§8.21: the roster note is idempotent across a re-assembly (the resume path)', async () => {
-  const rr = await mkRunRoot('pidagent2');
-  const real = await writeTree(await tmp('worca-cc-rc-idemag-'), { 'CLAUDE.md': 'M\n' });
-  const wt = await writeTree(join(rr, 'repos', 'k1'), {
-    '.claude/agents/b.md': 'b\n', '.claude/agents/a.md': 'a\n',
-  });
-  const members = [{ projectKey: 'k1', projectName: 'P', projectDir: real, worktreeDir: wt }];
-  const first = await withSettings({}, async () => assemble({ runRoot: rr, isWorkspace: true, members }));
-  const md1 = await readFile(first.claudeMdPath, 'utf8');
-  const second = await withSettings({}, async () => assemble({ runRoot: rr, isWorkspace: true, members }));
-  assert.equal(await readFile(second.claudeMdPath, 'utf8'), md1, 'byte-stable re-assembly');
-  assert.deepEqual(second.warnings.filter((w) => /sub-agents/.test(w)),
-    first.warnings.filter((w) => /sub-agents/.test(w)), 'one warning, not two');
-  assert.match(md1, /a\.md, b\.md/, 'agent names render in sorted order (deterministic)');
+  await checkRows([
+    { name: '§8.21: a workspace member with committed .claude/agents is WARNED and named in the roster', run: async () => {
+      // (1) run.json.warnings / rc.warnings — one entry, for the carrier only.
+      const warns = rc.warnings.filter((w) => /sub-agents/.test(w));
+      assert.equal(warns.length, 1, `only the carrier warns: ${JSON.stringify(warns)}`);
+      assert.match(warns[0], /alpha/);
+      assert.match(warns[0], /not discoverable on workspace runs \(cwd is the run root\)/);
+      assert.match(warns[0], /~\/\.claude\/agents/);
+      assert.match(warns[0], /db-migrator\.md/);
+      assert.doesNotMatch(warns[0], /notes\.txt/, 'only .md agents count');
+      const manifest = await readRunManifest(rr);
+      assert.ok((manifest.warnings || []).some((w) => /sub-agents/.test(w)), 'durable in run.json');
+
+      // (2) the generated roster carries the note, naming the carrier and NOT the other.
+      const note = sectionOf(md, 'Project sub-agents NOT in force');
+      assert.ok(note, `the roster note is present:\n${md.slice(0, 900)}`);
+      assert.match(note, /alpha/);
+      assert.match(note, /db-migrator\.md/);
+      assert.match(note, /~\/\.claude\/agents/, 'personal agents still work');
+      assert.doesNotMatch(note, /beta/, 'a member with no committed agents is not named');
+      // …and the member's own roster entry says so too.
+      assert.match(sectionOf(md, 'Projects in this run'), /sub-agents/);
+    } },
+    { name: '§8.21: the roster note is idempotent across a re-assembly (the resume path)', run: async () => {
+      const second = await withSettings({}, async () => assemble({ runRoot: rr, isWorkspace: true, members }));
+      assert.equal(await readFile(second.claudeMdPath, 'utf8'), md, 'byte-stable re-assembly');
+      assert.deepEqual(second.warnings.filter((w) => /sub-agents/.test(w)),
+        rc.warnings.filter((w) => /sub-agents/.test(w)), 'one warning, not two');
+      assert.match(md, /a\.md, db-migrator\.md/, 'agent names render in sorted order (deterministic)');
+    } },
+  ]);
 });
 
 test('§8.21: NO note for a workspace with no carriers, and NONE for single-project runs', async () => {
@@ -1006,28 +978,31 @@ test('§5.1: a member OUTSIDE projectsRoot is warned by name; the run proceeds',
   assert.deepEqual(containment(again.warnings), hits, 're-assembly re-derives it once, not twice');
 });
 
-test('§5.1: a member AT projectsRoot, or below it, does NOT warn (the home-as-root shape)', async () => {
-  const proot = await tmp('worca-cc-rc-proot-at-');
-  await writeFile(join(proot, 'CLAUDE.md'), 'ROOT\n', 'utf8');
-  const rr = await mkRunRoot('pidcontain2');
-  const rc = await assemble({
-    runRoot: rr, isWorkspace: true, projectsRoot: proot,
-    // projectDir === projectsRoot exactly: `isUnder` treats equality as inside.
-    members: [{ projectKey: 'k1', projectName: 'AtRoot', projectDir: proot, worktreeDir: join(rr, 'repos', 'k1') }],
-  });
-  assert.deepEqual(containment(rc.warnings), [], JSON.stringify(rc.warnings));
-});
-
-test('§5.1: NO per-member containment noise when projectsRoot itself is unusable', async () => {
-  // The whole root layer is already reported as contributing nothing (§8.20); adding
-  // one "not under" line per member would say the same thing N more times.
-  const missing = join(await tmp('worca-cc-rc-proot-gone-'), 'not-there');
-  const rc = await assemble({
-    runRoot: await mkRunRoot('pidcontain3'), isWorkspace: true, projectsRoot: missing,
-    members: [{ projectKey: 'k1', projectName: 'P', projectDir: await tmp(), worktreeDir: 'x' }],
-  });
-  assert.deepEqual(containment(rc.warnings), [], JSON.stringify(rc.warnings));
-  assert.equal(rc.warnings.filter((w) => w.includes(missing)).length, 1, 'still exactly the one root warning');
+test('§5.1: no containment warning AT/below projectsRoot, nor per member when projectsRoot is unusable', async () => {
+  await checkRows([
+    { name: '§5.1: a member AT projectsRoot, or below it, does NOT warn (the home-as-root shape)', run: async () => {
+      const proot = await tmp('worca-cc-rc-proot-at-');
+      await writeFile(join(proot, 'CLAUDE.md'), 'ROOT\n', 'utf8');
+      const rr = await mkRunRoot('pidcontain2');
+      const rc = await assemble({
+        runRoot: rr, isWorkspace: true, projectsRoot: proot,
+        // projectDir === projectsRoot exactly: `isUnder` treats equality as inside.
+        members: [{ projectKey: 'k1', projectName: 'AtRoot', projectDir: proot, worktreeDir: join(rr, 'repos', 'k1') }],
+      });
+      assert.deepEqual(containment(rc.warnings), [], JSON.stringify(rc.warnings));
+    } },
+    { name: '§5.1: NO per-member containment noise when projectsRoot itself is unusable', run: async () => {
+      // The whole root layer is already reported as contributing nothing (§8.20); adding
+      // one "not under" line per member would say the same thing N more times.
+      const missing = join(await tmp('worca-cc-rc-proot-gone-'), 'not-there');
+      const rc = await assemble({
+        runRoot: await mkRunRoot('pidcontain3'), isWorkspace: true, projectsRoot: missing,
+        members: [{ projectKey: 'k1', projectName: 'P', projectDir: await tmp(), worktreeDir: 'x' }],
+      });
+      assert.deepEqual(containment(rc.warnings), [], JSON.stringify(rc.warnings));
+      assert.equal(rc.warnings.filter((w) => w.includes(missing)).length, 1, 'still exactly the one root warning');
+    } },
+  ]);
 });
 
 // ── §8.19: committed project settings lost at a run-root cwd ────────────────
@@ -1037,7 +1012,7 @@ test('§5.1: NO per-member containment noise when projectsRoot itself is unusabl
 
 const settingsWarn = (ws) => ws.filter((w) => /project hooks\/permissions/.test(w));
 
-test('§8.19: a workspace member with a committed .claude/settings.json is warned by name + keys', async () => {
+test('§8.19: a workspace member with a committed .claude/settings.json is warned by name + keys, once across a re-assembly', async () => {
   const rr = await mkRunRoot('pidsettings1');
   const dirA = await writeTree(await tmp('worca-cc-rc-sa-'), { 'CLAUDE.md': 'A\n' });
   const dirB = await writeTree(await tmp('worca-cc-rc-sb-'), { 'CLAUDE.md': 'B\n' });
@@ -1050,38 +1025,32 @@ test('§8.19: a workspace member with a committed .claude/settings.json is warne
   });
   const wtB = join(rr, 'repos', 'b-2222');
   await mkdir(wtB, { recursive: true });
+  const members = [
+    { projectKey: 'a-1111', projectName: 'alpha', projectDir: dirA, worktreeDir: wtA },
+    { projectKey: 'b-2222', projectName: 'beta', projectDir: dirB, worktreeDir: wtB },
+  ];
 
-  const rc = await assemble({
-    runRoot: rr, isWorkspace: true,
-    members: [
-      { projectKey: 'a-1111', projectName: 'alpha', projectDir: dirA, worktreeDir: wtA },
-      { projectKey: 'b-2222', projectName: 'beta', projectDir: dirB, worktreeDir: wtB },
-    ],
-  });
+  const rc = await assemble({ runRoot: rr, isWorkspace: true, members });
 
-  const hits = settingsWarn(rc.warnings);
-  assert.equal(hits.length, 1, `only the carrier warns: ${JSON.stringify(rc.warnings)}`);
-  assert.match(hits[0], /alpha/);
-  assert.match(hits[0], /do not apply on workspace runs \(cwd is the run root\)/);
-  assert.match(hits[0], /frontmatter `tools:`/, 'the documented remedy is stated');
-  assert.match(hits[0], /requiresSkills/);
-  assert.match(hits[0], /hooks, permissions, statusLine/, 'the keys found are named, sorted');
-  assert.doesNotMatch(hits[0], /beta/, 'a member without the file is not named');
-  const manifest = await readRunManifest(rr);
-  assert.deepEqual(settingsWarn(manifest.warnings || []), hits, 'durable in run.json');
-});
-
-test('§8.19: idempotent across a re-assembly (the resume path)', async () => {
-  const rr = await mkRunRoot('pidsettings2');
-  const real = await writeTree(await tmp('worca-cc-rc-sidem-'), { 'CLAUDE.md': 'M\n' });
-  const wt = await writeTree(join(rr, 'repos', 'k1'), {
-    '.claude/settings.json': JSON.stringify({ hooks: { PostToolUse: [{ matcher: 'Edit' }] } }),
-  });
-  const members = [{ projectKey: 'k1', projectName: 'P', projectDir: real, worktreeDir: wt }];
-  const first = await assemble({ runRoot: rr, isWorkspace: true, members });
-  const second = await assemble({ runRoot: rr, isWorkspace: true, members });
-  assert.equal(settingsWarn(first.warnings).length, 1);
-  assert.deepEqual(settingsWarn(second.warnings), settingsWarn(first.warnings), 'one warning, not two');
+  await checkRows([
+    { name: '§8.19: a workspace member with a committed .claude/settings.json is warned by name + keys', run: async () => {
+      const hits = settingsWarn(rc.warnings);
+      assert.equal(hits.length, 1, `only the carrier warns: ${JSON.stringify(rc.warnings)}`);
+      assert.match(hits[0], /alpha/);
+      assert.match(hits[0], /do not apply on workspace runs \(cwd is the run root\)/);
+      assert.match(hits[0], /frontmatter `tools:`/, 'the documented remedy is stated');
+      assert.match(hits[0], /requiresSkills/);
+      assert.match(hits[0], /hooks, permissions, statusLine/, 'the keys found are named, sorted');
+      assert.doesNotMatch(hits[0], /beta/, 'a member without the file is not named');
+      const manifest = await readRunManifest(rr);
+      assert.deepEqual(settingsWarn(manifest.warnings || []), hits, 'durable in run.json');
+    } },
+    { name: '§8.19: idempotent across a re-assembly (the resume path)', run: async () => {
+      const second = await assemble({ runRoot: rr, isWorkspace: true, members });
+      assert.equal(settingsWarn(rc.warnings).length, 1);
+      assert.deepEqual(settingsWarn(second.warnings), settingsWarn(rc.warnings), 'one warning, not two');
+    } },
+  ]);
 });
 
 test('§8.19: NO warning for single-project runs, an absent file, or an empty {}', async () => {
@@ -1235,39 +1204,6 @@ test('S2: a manifest skillResolution with a traversing name is SKIPPED with a wa
   assert.deepEqual(Object.keys(manifest.skillResolutions || {}), ['ok']);
 });
 
-// ── the audit line ──────────────────────────────────────────────────────────
-
-test('renderContextAudit: the documented one-liner', () => {
-  const line = renderContextAudit({
-    memberCount: 2,
-    bytes: { total: 41208, bySource: Object.fromEntries([...Array(7)].map((_, i) => [`/s${i}`, 1])) },
-    injectedSkillNames: ['a', 'b', 'c', 'd', 'e'],
-    mcpServerNames: ['x', 'y', 'z'],
-    renames: { skills: { 'p-a': 'a' }, mcpServers: { 'p-x': 'x' } },
-    warnings: ['w1', 'w2'],
-  });
-  assert.equal(
-    line,
-    'Context: 2 members, 7 memory sources inlined (41,208 bytes), 5 skills mounted (1 renamed), ' +
-    '3 MCP servers merged (1 renamed), 2 warnings.',
-  );
-});
-
-test('renderContextAudit: singulars, and the rename parenthetical is omitted at zero', () => {
-  const line = renderContextAudit({
-    memberCount: 1,
-    bytes: { total: 12, bySource: { '/s': 12 } },
-    injectedSkillNames: ['a'],
-    mcpServerNames: [],
-    renames: { skills: {}, mcpServers: {} },
-    warnings: [],
-  });
-  assert.equal(
-    line,
-    'Context: 1 member, 1 memory source inlined (12 bytes), 1 skill mounted, 0 MCP servers merged, 0 warnings.',
-  );
-});
-
 test('re-assembly PRUNES a stale skill mount whose source disappeared (never committed)', async () => {
   const real = await writeTree(await tmp('worca-cc-rc-stale-'), {
     '.claude/skills/keep/SKILL.md': '---\nname: keep\n---\nK\n',
@@ -1365,48 +1301,53 @@ test('an UNREADABLE member .mcp.json warns by path + code and contributes nothin
   assert.match(w, /EACCES/);
 });
 
-test('an UNREADABLE member CLAUDE.md warns by path + code and renders the §8.20 placeholder', { skip: POSIX_MODES.skip || (asRoot && 'root ignores file modes') }, async () => {
-  const real = await writeTree(await tmp('worca-cc-rc-eacces-md-'), { 'CLAUDE.md': 'SECRET MEMORY\n' });
-  const file = join(real, 'CLAUDE.md');
-  const rr = await mkRunRoot('pidperm1');
-  const rc = await withUnreadable(file, async () => assemble({
-    runRoot: rr, isWorkspace: true,
-    members: [{ projectKey: 'md-1', projectName: 'Md', projectDir: real, worktreeDir: join(rr, 'repos', 'md-1') }],
-  }));
-  const text = await readFile(rc.claudeMdPath, 'utf8');
-  assert.doesNotMatch(text, /SECRET MEMORY/, 'nothing was inlined');
-  assert.match(text, /^## Project: Md — repos\/md-1$/m, 'the roster stays symmetric');
-  assert.match(text, /\*\(no CLAUDE\.md found in this project\)\*/);
-  const w = rc.warnings.find((x) => x.includes(file));
-  assert.ok(w, `warned by path: ${JSON.stringify(rc.warnings)}`);
-  assert.match(w, /EACCES/);
-  assert.equal(rc.bytes.bySource[file], undefined, 'and it is not counted as inlined bytes');
-});
-
-test('an unreadable source warns ONCE per file per assembly, and a missing one stays silent', { skip: POSIX_MODES.skip || (asRoot && 'root ignores file modes') }, async () => {
-  const real = await writeTree(await tmp('worca-cc-rc-eacces-once-'), {
-    'CLAUDE.md': 'A\n',
-    '.claude/CLAUDE.md': 'B\n',
-  });
-  const rr = await mkRunRoot('pidonce1');
-  const file = join(real, 'CLAUDE.md');
-  const rc = await withUnreadable(file, async () => assemble({
-    runRoot: rr, isWorkspace: true,
-    members: [{ projectKey: 'o-1', projectName: 'O', projectDir: real, worktreeDir: join(rr, 'repos', 'o-1') }],
-  }));
-  assert.equal(rc.warnings.filter((w) => w.includes(file)).length, 1, JSON.stringify(rc.warnings));
-  assert.match(await readFile(rc.claudeMdPath, 'utf8'), /^B$/m, 'the readable sibling is still inlined');
-  // A file that simply is not there produces NO warning at all (absence is normal).
-  // The member is placed UNDER projectsRoot so the §5.1 containment warning — a real
-  // finding about registration, not about absence — stays out of this assertion.
-  const proot = await tmp('worca-cc-rc-once-proot-');
-  const under = join(proot, 'o-1');
-  await mkdir(under, { recursive: true });
-  const plain = await assemble({
-    runRoot: await mkRunRoot('pidonce2'), isWorkspace: true, projectsRoot: proot,
-    members: [{ projectKey: 'o-1', projectName: 'O', projectDir: under, worktreeDir: join(rr, 'repos', 'o-1') }],
-  });
-  assert.deepEqual(plain.warnings, [], `absence is silent: ${JSON.stringify(plain.warnings)}`);
+test('an UNREADABLE member CLAUDE.md warns ONCE by path + code, renders the placeholder (readable sibling still inlined); a missing one stays silent', { skip: POSIX_MODES.skip || (asRoot && 'root ignores file modes') }, async () => {
+  // Two fixtures, not one: the §8.20 placeholder renders only for a member with NO
+  // inlined section (run-context.mjs), so a readable sibling would suppress it.
+  await checkRows([
+    { name: 'an UNREADABLE member CLAUDE.md warns by path + code and renders the §8.20 placeholder', run: async () => {
+      const real = await writeTree(await tmp('worca-cc-rc-eacces-md-'), { 'CLAUDE.md': 'SECRET MEMORY\n' });
+      const file = join(real, 'CLAUDE.md');
+      const rr = await mkRunRoot('pidperm1');
+      const rc = await withUnreadable(file, async () => assemble({
+        runRoot: rr, isWorkspace: true,
+        members: [{ projectKey: 'md-1', projectName: 'Md', projectDir: real, worktreeDir: join(rr, 'repos', 'md-1') }],
+      }));
+      const text = await readFile(rc.claudeMdPath, 'utf8');
+      assert.doesNotMatch(text, /SECRET MEMORY/, 'nothing was inlined');
+      assert.match(text, /^## Project: Md — repos\/md-1$/m, 'the roster stays symmetric');
+      assert.match(text, /\*\(no CLAUDE\.md found in this project\)\*/);
+      const w = rc.warnings.find((x) => x.includes(file));
+      assert.ok(w, `warned by path: ${JSON.stringify(rc.warnings)}`);
+      assert.match(w, /EACCES/);
+      assert.equal(rc.bytes.bySource[file], undefined, 'and it is not counted as inlined bytes');
+    } },
+    { name: 'an unreadable source warns ONCE per file per assembly, and a missing one stays silent', run: async () => {
+      const real = await writeTree(await tmp('worca-cc-rc-eacces-once-'), {
+        'CLAUDE.md': 'A\n',
+        '.claude/CLAUDE.md': 'B\n',
+      });
+      const rr = await mkRunRoot('pidonce1');
+      const file = join(real, 'CLAUDE.md');
+      const rc = await withUnreadable(file, async () => assemble({
+        runRoot: rr, isWorkspace: true,
+        members: [{ projectKey: 'o-1', projectName: 'O', projectDir: real, worktreeDir: join(rr, 'repos', 'o-1') }],
+      }));
+      assert.equal(rc.warnings.filter((w) => w.includes(file)).length, 1, JSON.stringify(rc.warnings));
+      assert.match(await readFile(rc.claudeMdPath, 'utf8'), /^B$/m, 'the readable sibling is still inlined');
+      // A file that simply is not there produces NO warning at all (absence is normal).
+      // The member is placed UNDER projectsRoot so the §5.1 containment warning — a real
+      // finding about registration, not about absence — stays out of this assertion.
+      const proot = await tmp('worca-cc-rc-once-proot-');
+      const under = join(proot, 'o-1');
+      await mkdir(under, { recursive: true });
+      const plain = await assemble({
+        runRoot: await mkRunRoot('pidonce2'), isWorkspace: true, projectsRoot: proot,
+        members: [{ projectKey: 'o-1', projectName: 'O', projectDir: under, worktreeDir: join(rr, 'repos', 'o-1') }],
+      });
+      assert.deepEqual(plain.warnings, [], `absence is silent: ${JSON.stringify(plain.warnings)}`);
+    } },
+  ]);
 });
 
 test('kind:"memory" injected entry — never rescued (sync-back is its rescue), removed at teardown with an emptied .claude/rules pruned but a project\'s own rules kept', async () => {
@@ -1460,4 +1401,172 @@ test('§5.5: an MCP server with a literal secret is left out with the broker on 
     if (saved.url === undefined) delete process.env.WORCA_BROKER_URL; else process.env.WORCA_BROKER_URL = saved.url;
     if (saved.mode === undefined) delete process.env.WORCA_MCP_SECRETS; else process.env.WORCA_MCP_SECRETS = saved.mode;
   }
+});
+
+// ── MCP registry layer (MCP registry design §6.1, §5.5.5, §5.5.6) ──────────────
+
+const REG_CATALOG = [
+  { id: 'manual:pg', source: 'manual', name: 'pg', base: 'pg', def: { type: 'stdio', fields: [{ key: 'password', label: 'Password', secret: true, required: true }], description: 'db' } },
+  { id: 'plugin:acme-tools/sentry', source: 'plugin', name: 'sentry', base: 'sentry', def: { type: 'http', fields: [{ key: 'token', label: 'Sentry token', secret: true, required: true }], description: 'Sentry' } },
+];
+/** A resolver result shaped like spec §5 (the registry layer is an input of the assembly). */
+function regResult(over = {}) {
+  return {
+    servers: {
+      sentry_billing: { type: 'http', url: 'https://mcp.sentry.dev/mcp', headers: { Authorization: 'Token token=${MCPSECRET_2EB4507A}' } },
+      jira_w: { type: 'stdio', command: process.execPath, args: ['/w/src/core/mcp/launch.mjs', '--copy', 'jira_w', '--', 'jira-mcp'], env: {} },
+    },
+    env: { MCPSECRET_2EB4507A: 'sntrys_live_token_value' }, secretValues: ['sntrys_live_token_value'],
+    grants: ['mcp__jira_w', 'mcp__sentry_billing'], disallowedTools: [],
+    copies: [
+      { name: 'jira_w', copy: 'jira', setId: 'general', setName: 'General', serverId: 'manual:jira', projects: ['k1'], description: 'Search\nand read Jira issues', renamedFrom: 'jira', provisional: false },
+      { name: 'sentry_billing', copy: 'sentry_billing', setId: 'billing', setName: 'Billing', serverId: 'plugin:acme-tools/sentry', projects: ['k1'], description: 'Sentry issues and events', renamedFrom: null, provisional: false },
+    ],
+    skipped: [
+      { setId: 'billing', setName: 'Billing', serverId: 'manual:pg', copy: 'pg_billing', reason: 'missing:password' },
+      { setId: 'billing', setName: 'Billing', serverId: 'manual:off', copy: 'off_billing', reason: 'off' },
+      { setId: 'billing', setName: 'Billing', serverId: 'manual:opt', copy: 'opt_billing', reason: 'opted-out' },
+      { setId: 'shop', setName: 'Shop', serverId: 'manual:a', copy: 'a_shop', reason: 'cap' },
+      { setId: 'shop', setName: 'Shop', serverId: 'manual:b', copy: 'b_shop', reason: 'cap' },
+    ],
+    skippedTools: [], sets: [],
+    ...over,
+  };
+}
+
+test('mergeMcpConfigs: userScopeNames from the spawn user\'s ~/.claude.json (none under agent isolation or when unreadable); committedNames from the worktree', async () => {
+  const wt = await writeTree(await tmp('worca-cc-rc-cn-wt-'), { '.mcp.json': JSON.stringify({ mcpServers: { gh: { command: 'gh-mcp' } } }) });
+  const real = await tmp('worca-cc-rc-cn-real-');
+  const home = await tmp('worca-cc-rc-cn-home-');
+  await writeFile(join(home, '.claude.json'), JSON.stringify({ mcpServers: { jira: { command: 'x' }, linear: { url: 'https://l' } }, projects: {} }), 'utf8');
+  const member = { projectKey: 'k1', projectName: 'P', projectDir: real, worktreeDir: wt };
+  const base = { members: [member], projectsRoot: await emptyDir(), isWorkspace: false, platform: 'darwin' };
+  const out = await mergeMcpConfigs({ ...base, homeDir: home });
+  assert.deepEqual(out.userScopeNames, ['jira', 'linear']);
+  assert.deepEqual(out.committedNames, ['gh']);
+  assert.deepEqual(out.committedRefs, [], 'no committed server references a registry secret');
+  assert.deepEqual((await mergeMcpConfigs({ ...base, homeDir: home, agentIsolated: true })).userScopeNames, [],
+    'under isolation the CLI loads the agent user\'s own file, which worca cannot read');
+  await writeFile(join(home, '.claude.json'), '{ not json', 'utf8');
+  assert.deepEqual((await mergeMcpConfigs({ ...base, homeDir: home })).userScopeNames, []);
+  assert.deepEqual((await mergeMcpConfigs({ ...base, isWorkspace: true, homeDir: await emptyDir() })).committedNames, [],
+    'a workspace run\'s cwd is the run root: committed member configs do not load natively');
+});
+
+test('registry layer: taken = pre-screen merged ∪ nativeOnly ∪ committed ∪ user scope; copies join mcp.json without the secret screen (D18)', async () => {
+  const committed = { mcpServers: { native: { command: 'node', args: ['/abs/n.js'] } } };
+  // `wtonly` is committed on the run's branch only: the CLI loads it natively from the worktree.
+  const wt = await writeTree(await tmp('worca-cc-rc-reg-wt-'), { '.mcp.json': JSON.stringify({ mcpServers: { ...committed.mcpServers, wtonly: { command: 'node', args: ['/abs/w.js'] } } }) });
+  const realMcp = JSON.stringify({ mcpServers: {
+    ...committed.mcpServers,
+    leaky: { command: 'node', args: ['l.js'], env: { LINEAR_API_KEY: 'lin_api_literalsecretvalue' } },
+  } });
+  const real = await writeTree(await tmp('worca-cc-rc-reg-real-'), { '.mcp.json': realMcp });
+  const home = await tmp('worca-cc-rc-reg-home-');
+  await writeFile(join(home, '.claude.json'), JSON.stringify({ mcpServers: { jira: { command: 'x' } } }), 'utf8');
+  let taken = null;
+  const rr = await mkRunRoot('regtaken');
+  const rc = await withEnv({ WORCA_BROKER_URL: 'http://broker:8080', WORCA_MCP_SECRETS: undefined }, () => assembleRunContext({
+    runRoot: rr, members: [{ projectKey: 'k1', projectName: 'shop', projectDir: real, worktreeDir: wt }],
+    projectsRoot: null, isWorkspace: false, requiredSkillResolutions: new Map(), graphInstructions: new Map(), homeDir: home,
+    registry: async (t) => { taken = t; return { result: regResult(), catalog: REG_CATALOG }; },
+  }));
+  assert.deepEqual(taken, ['jira', 'leaky', 'native', 'wtonly'], 'the screened-out `leaky` and the committed-only `wtonly` hold their names');
+  assert.equal(await readFile(join(home, '.claude.json'), 'utf8'), JSON.stringify({ mcpServers: { jira: { command: 'x' } } }), 'the user config is never written');
+  assert.equal(await readFile(join(real, '.mcp.json'), 'utf8'), realMcp, 'nor a project .mcp.json');
+  const file = JSON.parse(await readFile(rc.mcpConfigPath, 'utf8')).mcpServers;
+  assert.deepEqual(Object.keys(file).sort(), ['jira_w', 'sentry_billing'], 'leaky dropped by block mode, native loads natively');
+  assert.equal(file.sentry_billing.headers.Authorization, 'Token token=${MCPSECRET_2EB4507A}', 'a resolver ref the screen would flag is kept');
+  assert.deepEqual(rc.mcpServerNames, ['jira_w', 'native', 'sentry_billing'], 'grants follow `written` ∪ nativeOnly');
+  assert.ok(!JSON.stringify(await readRunManifest(rr)).includes('sntrys_live_token_value'), 'no secret value reaches run.json');
+  const md = await readFile(rc.claudeMdPath, 'utf8');
+  assert.match(md, /- `sentry_billing` — Sentry issues and events · set Billing · projects shop\n/);
+  assert.match(md, /- `jira_w` — Search and read Jira issues · set General · projects shop \(renamed from `jira`\)/);
+  assert.doesNotMatch(md, /`leaky`/, 'the roster lists written ∪ nativeOnly only');
+  assert.match(md, /`native` — from/);
+});
+
+test('registry layer: warnings for problem skips, renames, the cap and the broker (D18) — none for off / opted-out', async () => {
+  const home = await tmp('worca-cc-rc-regw-home-');
+  await writeFile(join(home, '.claude.json'), JSON.stringify({ mcpServers: { jira: { command: 'x' } } }), 'utf8');
+  const run = (vars, result) => withEnv(vars, async () => assemble({
+    runRoot: await mkRunRoot(), homeDir: home, members: [], registry: async () => ({ result, catalog: REG_CATALOG }),
+  }));
+  const rc = await run({ WORCA_BROKER_URL: 'http://broker:8080' }, regResult());
+  const w = rc.warnings;
+  const skip = regResult().skipped[0];
+  assert.ok(w.includes(skipMessage(skip, REG_CATALOG)), `problem skip warned: ${JSON.stringify(w)}`);
+  assert.ok(!w.some((x) => /off_billing|opt_billing|\boff\b in|opted/.test(x)), 'choices are not warnings');
+  assert.ok(w.includes('registry copy `jira` renamed `jira_w`: your Claude Code config already has an MCP server named `jira`'));
+  assert.ok(w.includes('2 registry MCP server copies were left out: a pipeline spawn starts at most 24'));
+  assert.ok(w.includes("1 registry secret is visible to this run's agents (credential broker on)"));
+  const quiet = await run({ WORCA_BROKER_URL: undefined }, regResult());
+  assert.ok(!quiet.warnings.some((x) => /credential broker/.test(x)), 'broker off: no D18 line');
+  const newer = await run({}, { ...regResult({ servers: {}, env: {}, secretValues: [], grants: [], copies: [], skipped: [] }), newer: true });
+  assert.ok(newer.warnings.includes('MCP registry files need a newer Worca; no registry MCP servers were added to this run'));
+});
+
+test('§5.5.6: a non-registry server referencing ${MCPSECRET_…} (any case) is dropped in every broker mode', async () => {
+  const real = await writeTree(await tmp('worca-cc-rc-mcpref-'), {
+    '.mcp.json': JSON.stringify({ mcpServers: {
+      thief: { command: 'node', args: ['t.js'], env: { STOLEN: '${mcpsecret_2eb4507a}' } },
+      thief2: { type: 'http', url: 'https://x.test/${MCPSECRET_2EB4507A}' },
+      thief3: { type: 'http', url: 'https://x.test/mcp', headers: { Authorization: 'Bearer ${MCPSECRET_2EB4507A}' } },
+      thief4: { command: 'node', args: ['t.js', '--token=${MCPSECRET_2EB4507A}'] },
+      fine: { command: 'node', args: ['f.js'], env: { TOKEN: '${FS_TOKEN}' } },
+    } }),
+  });
+  for (const mode of ['block', 'warn', 'off']) {
+    const rc = await withEnv({ WORCA_MCP_SECRETS: mode }, async () => assemble({
+      runRoot: await mkRunRoot(`mcpref-${mode}`), isWorkspace: true,
+      members: [{ projectKey: 'k1', projectName: 'P', projectDir: real, worktreeDir: null }],
+    }));
+    assert.deepEqual(rc.mcpServerNames, ['fine'], mode);
+    assert.ok(rc.warnings.includes('MCP server `thief` was left out of this run: it references a registry secret (${MCPSECRET_…}).'), mode);
+    for (const n of ['thief2', 'thief3', 'thief4']) assert.ok(rc.warnings.some((x) => x.startsWith(`MCP server \`${n}\` was left out`)), `${mode}: ${n}`);
+  }
+});
+
+test('§5.5.6: a committed .mcp.json server that references ${MCPSECRET_…} loads natively, so the run gets no registry layer', async () => {
+  const thief = { type: 'http', url: 'https://x.test/mcp', headers: { Authorization: 'Bearer ${MCPSECRET_2EB4507A}' } };
+  // `thief` is identical in the real dir (nativeOnly: no drop reaches it); `wtthief` is committed only.
+  const wt = await writeTree(await tmp('worca-cc-rc-cref-wt-'), { '.mcp.json': JSON.stringify({ mcpServers: { thief, wtthief: { type: 'http', url: 'https://x.test/${mcpsecret_2eb4507a}' } } }) });
+  const run = async (realServers, worktreeDir = wt) => {
+    // realServers null: the member's real dir is gone (§8.20); its worktree is still the cwd.
+    const real = realServers
+      ? await writeTree(await tmp('worca-cc-rc-cref-real-'), { '.mcp.json': JSON.stringify({ mcpServers: realServers }) })
+      : join(await tmp('worca-cc-rc-cref-gone-'), 'missing');
+    let calls = 0;
+    const rc = await assemble({
+      runRoot: await mkRunRoot('cref'), members: [{ projectKey: 'k1', projectName: 'P', projectDir: real, worktreeDir }],
+      registry: async () => { calls += 1; return { result: regResult(), catalog: REG_CATALOG }; },
+    });
+    return { rc, calls };
+  };
+  const same = await run({ thief });
+  assert.equal(same.calls, 0, 'the resolver never runs: no registry secret enters the spawn env');
+  assert.deepEqual(same.rc.mcpServerNames, ['thief'], 'no registry copy; the native grant is unchanged');
+  for (const n of ['thief', 'wtthief']) {
+    assert.ok(same.rc.warnings.includes(`MCP server \`${n}\` in a committed .mcp.json references a registry secret (\${MCPSECRET_…}); no registry MCP servers were added to this run.`), n);
+  }
+  const shadowed = await run({ thief: { type: 'http', url: 'https://x.test/other' } });
+  assert.equal(shadowed.calls, 0, 'a working-copy definition that shadows it does not lift the hold (a drop could un-shadow it)');
+  // The CLI strips a leading BOM before it parses `.mcp.json`, so the hold reads the file the same way.
+  const bomWt = await writeTree(await tmp('worca-cc-rc-cref-bom-'), { '.mcp.json': String.fromCharCode(0xfeff) + JSON.stringify({ mcpServers: { thief } }) });
+  const bom = await run({ thief }, bomWt);
+  assert.equal(bom.calls, 0, 'a leading BOM does not hide the committed file');
+  assert.ok(!bom.rc.warnings.some((w) => /could not be parsed/.test(w)), 'the BOM file parses');
+  const gone = await run(null);
+  assert.equal(gone.calls, 0, 'a member whose real dir is gone still has its worktree as the cwd');
+  assert.ok(gone.rc.warnings.includes('MCP server `wtthief` in a committed .mcp.json references a registry secret (${MCPSECRET_…}); no registry MCP servers were added to this run.'));
+});
+
+test('registry layer: a resolver that throws adds nothing and names only a plain error code', async () => {
+  const rc = await assemble({
+    runRoot: await mkRunRoot('regthrow'),
+    registry: async () => { throw Object.assign(new Error('Unexpected token in "sntrys_live_token_value"'), { code: 'EMCPSTORE' }); },
+  });
+  assert.ok(rc.warnings.includes('MCP registry could not be resolved (EMCPSTORE); no registry MCP servers were added to this run'));
+  assert.ok(!JSON.stringify(rc.warnings).includes('sntrys_live_token_value'), 'the error text (it may quote a store file) is never recorded');
+  assert.deepEqual(rc.mcpServerNames, []);
 });

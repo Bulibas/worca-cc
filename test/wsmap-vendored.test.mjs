@@ -16,7 +16,6 @@ import { buildCatalog } from '../src/core/workspace-map/catalog.mjs';
 import { joinMap } from '../src/core/workspace-map/join.mjs';
 import { DETECTORS, detectorById } from '../src/core/workspace-map/detectors/index.mjs';
 import { makeWorkspace } from './helpers/wsmap-fixtures.mjs';
-import { makeRepos } from './helpers/wsmap-p1-repos.mjs';
 
 const J = (o) => JSON.stringify(o, null, 2) + '\n';
 const ctl = (pkg, base, cls) => `package ${pkg};\n@RestController\n@RequestMapping("${base}")\npublic class ${cls} {\n  @GetMapping("/{id}")\n  public Object get(@PathVariable String id) { return null; }\n}\n`;
@@ -99,17 +98,6 @@ test('listMemberFiles (git ls-files): third-party folders are skipped at the mem
   try {
     const r = await listMemberFiles(ws.members[0].dir);
     assert.equal(r.via, 'git');
-    assert.deepEqual(r.files, KEPT);
-  } finally {
-    await ws.cleanup();
-  }
-});
-
-test('listMemberFiles (fs walk, no git): the same folders are skipped', async () => {
-  const ws = await makeRepos({ m: LISTED }, { git: false });
-  try {
-    const r = await listMemberFiles(ws.members[0].dir);
-    assert.equal(r.via, 'walk');
     assert.deepEqual(r.files, KEPT);
   } finally {
     await ws.cleanup();

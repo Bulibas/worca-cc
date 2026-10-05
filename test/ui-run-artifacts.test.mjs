@@ -8,11 +8,16 @@
 // boot() / settle() / go() / live() / openRun() are a deliberate local copy of the
 // harness in test/ui-running-detail.test.mjs (the UI suites do not import each
 // other), trimmed to what these cases need.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -21,7 +26,7 @@ const PROJECT = '/tmp/proj';
 const ok = (body) => Promise.resolve({ ok: true, status: 200, json: async () => body });
 
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
 
@@ -106,94 +111,100 @@ async function openRunWithArtifacts(ctx, over = {}) {
   return ctx;
 }
 
-test('the Running detail exposes an Artifacts tab whose badge tracks r.artifacts', async () => {
-  const ctx = await boot();
-  await openRunWithArtifacts(ctx);
-  // A state frame forces a full detail repaint so rdPaintTabBadges runs.
-  frame(ctx, { type: 'state', runId: 'r1', id: 'p1', status: 'running', phase: 'implement', cycle: 1, stepper: STEPPER(), steps: STEPS(), subAgents: SUBS() });
-  await settle(ctx.window);
-  const tab = tabOf(ctx.window, 'artifacts');
-  assert.ok(tab, 'an Artifacts tab is rendered');
-  assert.match(tab.textContent, /Artifacts/);
-  assert.equal(tab.querySelector('.rd-tab-badge').textContent, '3',
-    'badge counts the three displayable artifacts (the transient questions marker is dropped)');
+test('the Running detail Artifacts tab badge counts displayable artifacts and the tab renders per-node groups (Plan, Implementer, Run) without the transient questions file', async () => {
+  await checkRows([
+    { name: 'the Running detail exposes an Artifacts tab whose badge tracks r.artifacts', run: async () => {
+      const ctx = await boot();
+      await openRunWithArtifacts(ctx);
+      // A state frame forces a full detail repaint so rdPaintTabBadges runs.
+      frame(ctx, { type: 'state', runId: 'r1', id: 'p1', status: 'running', phase: 'implement', cycle: 1, stepper: STEPPER(), steps: STEPS(), subAgents: SUBS() });
+      await settle(ctx.window);
+      const tab = tabOf(ctx.window, 'artifacts');
+      assert.ok(tab, 'an Artifacts tab is rendered');
+      assert.match(tab.textContent, /Artifacts/);
+      assert.equal(tab.querySelector('.rd-tab-badge').textContent, '3',
+        'badge counts the three displayable artifacts (the transient questions marker is dropped)');
+    } },
+    { name: 'activating the Artifacts tab renders per-node groups with clickable rows', run: async () => {
+      const ctx = await boot();
+      await openRunWithArtifacts(ctx);
+      click(ctx.window, tabOf(ctx.window, 'artifacts'));
+      await settle(ctx.window);
+      const sec = secOf(ctx.window, 'artifacts');
+      const groups = [...sec.querySelectorAll('.artifact-group')];
+      // plan + implement (ordered by the step ledger), then the legacy "Run" bucket last.
+      assert.deepEqual(groups.map((g) => g.querySelector('.artifact-group-head b').textContent),
+        ['Plan', 'Implementer', 'Run']);
+      const rows = [...sec.querySelectorAll('.artifact-row')];
+      assert.equal(rows.length, 3, 'every displayable artifact gets a clickable row (questions dropped)');
+      assert.ok(rows.some((r) => r.querySelector('.artifact-name').textContent === 'plan.md'));
+      assert.ok(rows.some((r) => r.querySelector('.artifact-name').textContent === 'prompt.md'),
+        'the legacy null-node artifact is surfaced in the Run bucket');
+      assert.ok(!rows.some((r) => r.querySelector('.artifact-name').textContent === 'questions.json'),
+        'the transient questions scratch file is not offered as a row');
+    } },
+  ]);
 });
 
-test('activating the Artifacts tab renders per-node groups with clickable rows', async () => {
-  const ctx = await boot();
-  await openRunWithArtifacts(ctx);
-  click(ctx.window, tabOf(ctx.window, 'artifacts'));
-  await settle(ctx.window);
-  const sec = secOf(ctx.window, 'artifacts');
-  const groups = [...sec.querySelectorAll('.artifact-group')];
-  // plan + implement (ordered by the step ledger), then the legacy "Run" bucket last.
-  assert.deepEqual(groups.map((g) => g.querySelector('.artifact-group-head b').textContent),
-    ['Plan', 'Implementer', 'Run']);
-  const rows = [...sec.querySelectorAll('.artifact-row')];
-  assert.equal(rows.length, 3, 'every displayable artifact gets a clickable row (questions dropped)');
-  assert.ok(rows.some((r) => r.querySelector('.artifact-name').textContent === 'plan.md'));
-  assert.ok(rows.some((r) => r.querySelector('.artifact-name').textContent === 'prompt.md'),
-    'the legacy null-node artifact is surfaced in the Run bucket');
-  assert.ok(!rows.some((r) => r.querySelector('.artifact-name').textContent === 'questions.json'),
-    'the transient questions scratch file is not offered as a row');
-});
+test('clicking an artifact row fetches it by pipeline id and mounts the typed viewer (diff lines coloured; markdown through the injected marked+DOMPurify seam)', async () => {
+  await checkRows([
+    { name: 'clicking an artifact row fetches it by id and mounts the typed viewer', run: async () => {
+      const DIFF = 'diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+new\n';
+      let asked = null;
+      const ctx = await boot({
+        fetchHandler: (url) => {
+          if (url.includes('/api/runs/p1/artifact?rel=')) { asked = url; return ok({ rel: 'result.diff', text: DIFF }); }
+          return null;
+        },
+      });
+      await openRunWithArtifacts(ctx);
+      click(ctx.window, tabOf(ctx.window, 'artifacts'));
+      await settle(ctx.window);
+      const sec = secOf(ctx.window, 'artifacts');
+      const diffRow = [...sec.querySelectorAll('.artifact-row')]
+        .find((r) => r.querySelector('.artifact-name').textContent === 'result.diff');
+      assert.ok(diffRow, 'the result.diff row is present');
+      click(ctx.window, diffRow);
+      await settle(ctx.window);
 
-test('clicking an artifact row fetches it by id and mounts the typed viewer', async () => {
-  const DIFF = 'diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+new\n';
-  let asked = null;
-  const ctx = await boot({
-    fetchHandler: (url) => {
-      if (url.includes('/api/runs/p1/artifact?rel=')) { asked = url; return ok({ rel: 'result.diff', text: DIFF }); }
-      return null;
-    },
-  });
-  await openRunWithArtifacts(ctx);
-  click(ctx.window, tabOf(ctx.window, 'artifacts'));
-  await settle(ctx.window);
-  const sec = secOf(ctx.window, 'artifacts');
-  const diffRow = [...sec.querySelectorAll('.artifact-row')]
-    .find((r) => r.querySelector('.artifact-name').textContent === 'result.diff');
-  assert.ok(diffRow, 'the result.diff row is present');
-  click(ctx.window, diffRow);
-  await settle(ctx.window);
-
-  assert.ok(asked && asked.includes('rel=result.diff'), 'fetched the singular artifact route by pipeline id');
-  const viewerCard = ctx.window.document.querySelector('#viewer-card');
-  assert.equal(viewerCard.classList.contains('hidden'), false, 'the viewer modal opens');
-  const view = ctx.window.document.querySelector('#viewer .artifact-view .artifact-diff');
-  assert.ok(view, 'the diff viewer is mounted');
-  assert.ok(view.querySelector('.artifact-diff-line.add'), 'a +line is coloured as an addition');
-  assert.ok(view.querySelector('.artifact-diff-line.del'), 'a -line is coloured as a deletion');
-});
-
-test('the markdown viewer reuses the injected marked+DOMPurify seam', async () => {
-  const MD = '# Plan\n\nhello';
-  const ctx = await boot({
-    fetchHandler: (url) => {
-      if (url.includes('/api/runs/p1/artifact?rel=')) return ok({ rel: 'plans/plan.md', text: MD });
-      return null;
-    },
-  });
-  // Stub the SAME hook the Ask panel uses; artifactViewerDeps reads it at call time.
-  ctx.window.__worcaTestHooks = {
-    askMarkdown: () => Promise.resolve({
-      marked: { parse: (s) => `<h1>${s.split('\n')[0].replace(/^#\s*/, '')}</h1><p>hello</p>` },
-      createDOMPurify: (win) => ({
-        sanitize: (html) => { const t = win.document.createElement('template'); t.innerHTML = html; return t.content; },
-      }),
-    }),
-  };
-  await openRunWithArtifacts(ctx);
-  click(ctx.window, tabOf(ctx.window, 'artifacts'));
-  await settle(ctx.window);
-  const sec = secOf(ctx.window, 'artifacts');
-  const mdRow = [...sec.querySelectorAll('.artifact-row')]
-    .find((r) => r.querySelector('.artifact-name').textContent === 'plan.md');
-  click(ctx.window, mdRow);
-  await settle(ctx.window);
-  const md = ctx.window.document.querySelector('#viewer .artifact-view .artifact-markdown');
-  assert.ok(md, 'the markdown viewer is mounted through renderMarkdown');
-  assert.equal(md.querySelector('h1').textContent, 'Plan');
+      assert.ok(asked && asked.includes('rel=result.diff'), 'fetched the singular artifact route by pipeline id');
+      const viewerCard = ctx.window.document.querySelector('#viewer-card');
+      assert.equal(viewerCard.classList.contains('hidden'), false, 'the viewer modal opens');
+      const view = ctx.window.document.querySelector('#viewer .artifact-view .artifact-diff');
+      assert.ok(view, 'the diff viewer is mounted');
+      assert.ok(view.querySelector('.artifact-diff-line.add'), 'a +line is coloured as an addition');
+      assert.ok(view.querySelector('.artifact-diff-line.del'), 'a -line is coloured as a deletion');
+    } },
+    { name: 'the markdown viewer reuses the injected marked+DOMPurify seam', run: async () => {
+      const MD = '# Plan\n\nhello';
+      const ctx = await boot({
+        fetchHandler: (url) => {
+          if (url.includes('/api/runs/p1/artifact?rel=')) return ok({ rel: 'plans/plan.md', text: MD });
+          return null;
+        },
+      });
+      // Stub the SAME hook the Ask panel uses; artifactViewerDeps reads it at call time.
+      ctx.window.__worcaTestHooks = {
+        askMarkdown: () => Promise.resolve({
+          marked: { parse: (s) => `<h1>${s.split('\n')[0].replace(/^#\s*/, '')}</h1><p>hello</p>` },
+          createDOMPurify: (win) => ({
+            sanitize: (html) => { const t = win.document.createElement('template'); t.innerHTML = html; return t.content; },
+          }),
+        }),
+      };
+      await openRunWithArtifacts(ctx);
+      click(ctx.window, tabOf(ctx.window, 'artifacts'));
+      await settle(ctx.window);
+      const sec = secOf(ctx.window, 'artifacts');
+      const mdRow = [...sec.querySelectorAll('.artifact-row')]
+        .find((r) => r.querySelector('.artifact-name').textContent === 'plan.md');
+      click(ctx.window, mdRow);
+      await settle(ctx.window);
+      const md = ctx.window.document.querySelector('#viewer .artifact-view .artifact-markdown');
+      assert.ok(md, 'the markdown viewer is mounted through renderMarkdown');
+      assert.equal(md.querySelector('h1').textContent, 'Plan');
+    } },
+  ]);
 });
 
 test('renderMarkdown hardens untrusted content: strips stray classes, neutralizes inputs', async () => {
@@ -250,51 +261,69 @@ test('the Agents tab carries a per-node "Artifacts (N)" affordance that opens ro
   assert.ok(!names.includes('questions.json'), 'the transient questions file is not offered');
 });
 
-// The per-node list collapses via the `hidden` attribute, but `.artifact-list`
-// sets an author `display:flex`, which outranks the UA's `[hidden]{display:none}`.
-// Without an explicit `[hidden]` override the toggle could never close the list
-// (caught live: aria-expanded="false" with a computed display of flex).
-test('style.css restates display:none for a hidden .artifact-list so the toggle can collapse it', () => {
-  const css = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8');
-  assert.match(css, /\.artifact-list\{display:flex/, 'the expanded rule is the author display:flex');
-  assert.match(css, /\.artifact-list\[hidden\]\{display:none;?\}/, 'the [hidden] override restates display:none');
-});
-
 // One extra artifact event, attributed to the implement node like the fixtures above.
 const shot = (ctx, n) => frame(ctx, {
   type: 'artifact', runId: 'r1', kind: 'deck-shot', path: `shots/s${String(n).padStart(2, '0')}.png`,
   nodeId: 'implement', executionId: 'implement#1', cycle: 1,
 });
 
-test('a kind over the collapse threshold renders as one expandable summary row', async () => {
-  const ctx = await boot();
-  await openRunWithArtifacts(ctx);
-  for (let i = 1; i <= 6; i++) shot(ctx, i);
-  click(ctx.window, tabOf(ctx.window, 'artifacts'));
-  await settle(ctx.window);
-  const sec = secOf(ctx.window, 'artifacts');
+test('a kind over the collapse threshold renders as one expandable summary row, the badge counts its files individually, and an expanded group survives a live repaint', async () => {
+  await checkRows([
+    { name: 'a kind over the collapse threshold renders as one expandable summary row', run: async () => {
+      const ctx = await boot();
+      await openRunWithArtifacts(ctx);
+      for (let i = 1; i <= 6; i++) shot(ctx, i);
+      click(ctx.window, tabOf(ctx.window, 'artifacts'));
+      await settle(ctx.window);
+      const sec = secOf(ctx.window, 'artifacts');
 
-  const bulk = sec.querySelector('.artifact-bulk-toggle');
-  assert.ok(bulk, 'the six screenshots collapse behind one summary row');
-  assert.match(bulk.textContent, /deck-shot/);
-  assert.match(bulk.textContent, /6 files/);
-  assert.equal(bulk.getAttribute('aria-expanded'), 'false');
-  assert.equal(sec.querySelectorAll('.artifact-row').length, 3,
-    'the three ordinary artifacts stay flat rows; no screenshot is one yet');
+      const bulk = sec.querySelector('.artifact-bulk-toggle');
+      assert.ok(bulk, 'the six screenshots collapse behind one summary row');
+      assert.match(bulk.textContent, /deck-shot/);
+      assert.match(bulk.textContent, /6 files/);
+      assert.equal(bulk.getAttribute('aria-expanded'), 'false');
+      assert.equal(sec.querySelectorAll('.artifact-row').length, 3,
+        'the three ordinary artifacts stay flat rows; no screenshot is one yet');
 
-  click(ctx.window, bulk);
-  await settle(ctx.window);
-  assert.equal(bulk.getAttribute('aria-expanded'), 'true');
-  assert.equal(sec.querySelectorAll('.artifact-row').length, 9, 'expanding reveals every screenshot');
-});
+      click(ctx.window, bulk);
+      await settle(ctx.window);
+      assert.equal(bulk.getAttribute('aria-expanded'), 'true');
+      assert.equal(sec.querySelectorAll('.artifact-row').length, 9, 'expanding reveals every screenshot');
+    } },
+    { name: 'the Artifacts badge counts collapsed files individually', run: async () => {
+      const ctx = await boot();
+      await openRunWithArtifacts(ctx);
+      for (let i = 1; i <= 6; i++) shot(ctx, i);
+      frame(ctx, { type: 'state', runId: 'r1', id: 'p1', status: 'running', phase: 'implement', cycle: 1, stepper: STEPPER(), steps: STEPS(), subAgents: SUBS() });
+      await settle(ctx.window);
+      assert.equal(tabOf(ctx.window, 'artifacts').querySelector('.rd-tab-badge').textContent, '9');
+    } },
+    { name: 'an expanded bulk group survives a live repaint', run: async () => {
+      // buildRdArtifacts repaints on every state frame and renderRunArtifacts opens
+      // with mount.innerHTML = '', so an expanded bulk group snapped shut on the next
+      // frame — the collapse affordance was unusable exactly while the run was live,
+      // which is the only time 43 screenshots are arriving.
+      const ctx = await boot();
+      await openRunWithArtifacts(ctx);
+      for (let i = 1; i <= 6; i++) shot(ctx, i);
+      click(ctx.window, tabOf(ctx.window, 'artifacts'));
+      await settle(ctx.window);
+      const sec = secOf(ctx.window, 'artifacts');
 
-test('the Artifacts badge counts collapsed files individually', async () => {
-  const ctx = await boot();
-  await openRunWithArtifacts(ctx);
-  for (let i = 1; i <= 6; i++) shot(ctx, i);
-  frame(ctx, { type: 'state', runId: 'r1', id: 'p1', status: 'running', phase: 'implement', cycle: 1, stepper: STEPPER(), steps: STEPS(), subAgents: SUBS() });
-  await settle(ctx.window);
-  assert.equal(tabOf(ctx.window, 'artifacts').querySelector('.rd-tab-badge').textContent, '9');
+      click(ctx.window, sec.querySelector('.artifact-bulk-toggle'));
+      await settle(ctx.window);
+      assert.equal(sec.querySelectorAll('.artifact-row').length, 9, 'expanded');
+
+      // A state frame repaints the open detail (Overview/Agents/Artifacts all do).
+      frame(ctx, { type: 'state', runId: 'r1', id: 'p1', status: 'running', phase: 'implement', cycle: 1, stepper: STEPPER(), steps: STEPS(), subAgents: SUBS() });
+      await settle(ctx.window);
+
+      const after = secOf(ctx.window, 'artifacts');
+      assert.equal(after.querySelector('.artifact-bulk-toggle').getAttribute('aria-expanded'), 'true',
+        'the group is still expanded after the repaint');
+      assert.equal(after.querySelectorAll('.artifact-row').length, 9, 'and its rows are still rendered');
+    } },
+  ]);
 });
 
 test('an indexed subresource is never offered as a browsable row', async () => {
@@ -312,73 +341,32 @@ test('an indexed subresource is never offered as a browsable row', async () => {
     'the kit script is indexed but not listed');
 });
 
-test('the History Artifacts tab says when the route truncated the list', async () => {
-  const rows = Array.from({ length: 200 }, (_, i) => ({ kind: 'deck-shot', relPath: `shots/s${i}.png`, nodeId: 'implement', stepKey: 'implement#1', cycle: 1 }));
-  const ctx = await boot({
-    fetchHandler: (url) => (url.includes('/api/runs/p1/artifacts')
-      ? ok({ runId: 'p1', artifacts: rows, truncated: true }) : null),
-  });
-  const sec = ctx.window.document.createElement('div');
-  ctx.window.__np.buildHdArtifacts(sec, { id: 'p1' }, { state: {} });
-  await settle(ctx.window, 12);
-  const note = sec.querySelector('.artifact-truncated');
-  assert.ok(note, 'a partial list must not read as the whole run');
-  assert.match(note.textContent, /first 200/);
-});
-
-test('an untruncated History list carries no such note', async () => {
-  const ctx = await boot({
-    fetchHandler: (url) => (url.includes('/api/runs/p1/artifacts')
-      ? ok({ runId: 'p1', artifacts: [{ kind: 'plan', relPath: 'plan.md' }], truncated: false }) : null),
-  });
-  const sec = ctx.window.document.createElement('div');
-  ctx.window.__np.buildHdArtifacts(sec, { id: 'p1' }, { state: {} });
-  await settle(ctx.window, 12);
-  assert.equal(sec.querySelector('.artifact-truncated'), null);
-});
-
-// buildRdArtifacts repaints on every state frame and renderRunArtifacts opens
-// with mount.innerHTML = '', so an expanded bulk group snapped shut on the next
-// frame — the collapse affordance was unusable exactly while the run was live,
-// which is the only time 43 screenshots are arriving.
-test('an expanded bulk group survives a live repaint', async () => {
-  const ctx = await boot();
-  await openRunWithArtifacts(ctx);
-  for (let i = 1; i <= 6; i++) shot(ctx, i);
-  click(ctx.window, tabOf(ctx.window, 'artifacts'));
-  await settle(ctx.window);
-  const sec = secOf(ctx.window, 'artifacts');
-
-  click(ctx.window, sec.querySelector('.artifact-bulk-toggle'));
-  await settle(ctx.window);
-  assert.equal(sec.querySelectorAll('.artifact-row').length, 9, 'expanded');
-
-  // A state frame repaints the open detail (Overview/Agents/Artifacts all do).
-  frame(ctx, { type: 'state', runId: 'r1', id: 'p1', status: 'running', phase: 'implement', cycle: 1, stepper: STEPPER(), steps: STEPS(), subAgents: SUBS() });
-  await settle(ctx.window);
-
-  const after = secOf(ctx.window, 'artifacts');
-  assert.equal(after.querySelector('.artifact-bulk-toggle').getAttribute('aria-expanded'), 'true',
-    'the group is still expanded after the repaint');
-  assert.equal(after.querySelectorAll('.artifact-row').length, 9, 'and its rows are still rendered');
-});
-
-// The typed host mounts inside <pre class="viewer">, which carries
-// max-height:480px — so .artifact-view's 80vh and the 70vh <embed> a PDF renders
-// into were clamped to 480px, giving nested scrollbars and a half-height PDF.
-test('the viewer sheds its markdown shell while it holds a typed artifact', async () => {
-  const ctx = await boot({
-    fetchHandler: (url) => (url.includes('/api/runs/p1/artifact?rel=') ? ok({ rel: 'plan.md', text: '# hi' }) : null),
-  });
-  const viewer = ctx.window.document.querySelector('#viewer');
-  assert.equal(viewer.classList.contains('holds-artifact'), false);
-
-  ctx.window.__np.showArtifactViewer('p1', { kind: 'plan', relPath: 'plan.md' });
-  await settle(ctx.window, 10);
-  assert.ok(viewer.classList.contains('holds-artifact'), 'the clamp is lifted while a typed viewer is mounted');
-
-  const css = readFileSync(new URL('../ui/public/style.css', import.meta.url), 'utf8');
-  assert.match(css, /\.viewer\.holds-artifact\{[^}]*max-height:none/, 'and the stylesheet actually lifts it');
+test('the History Artifacts tab notes a truncated list and adds no note to a complete one', async () => {
+  await checkRows([
+    { name: 'the History Artifacts tab says when the route truncated the list', run: async () => {
+      const rows = Array.from({ length: 200 }, (_, i) => ({ kind: 'deck-shot', relPath: `shots/s${i}.png`, nodeId: 'implement', stepKey: 'implement#1', cycle: 1 }));
+      const ctx = await boot({
+        fetchHandler: (url) => (url.includes('/api/runs/p1/artifacts')
+          ? ok({ runId: 'p1', artifacts: rows, truncated: true }) : null),
+      });
+      const sec = ctx.window.document.createElement('div');
+      ctx.window.__np.buildHdArtifacts(sec, { id: 'p1' }, { state: {} });
+      await settle(ctx.window, 12);
+      const note = sec.querySelector('.artifact-truncated');
+      assert.ok(note, 'a partial list must not read as the whole run');
+      assert.match(note.textContent, /first 200/);
+    } },
+    { name: 'an untruncated History list carries no such note', run: async () => {
+      const ctx = await boot({
+        fetchHandler: (url) => (url.includes('/api/runs/p1/artifacts')
+          ? ok({ runId: 'p1', artifacts: [{ kind: 'plan', relPath: 'plan.md' }], truncated: false }) : null),
+      });
+      const sec = ctx.window.document.createElement('div');
+      ctx.window.__np.buildHdArtifacts(sec, { id: 'p1' }, { state: {} });
+      await settle(ctx.window, 12);
+      assert.equal(sec.querySelector('.artifact-truncated'), null);
+    } },
+  ]);
 });
 
 // r.artifacts is built only from live WS events and the state snapshot carries
@@ -714,35 +702,38 @@ test('a pruned artifact is removed from the live list instead of 404ing on click
   assert.ok(names.includes('plan.md'), 'and the surviving rows are untouched');
 });
 
-// The byte branches hand the raw URL straight to an <iframe>/<embed>/<img>. The
-// raw route answers 404 (the file went between listing and click — routine on a
-// live run, the audit clears shots/ every cycle), 415 (no preview for the type)
-// or 413 (over 25 MB), each a JSON body that renders as a blank frame or a broken
-// image. The modal sat open on an empty shell with no explanation, while the text
-// branch beside it has always shown `Error: …`.
-test('a raw-artifact error is shown, not rendered as a blank frame', async () => {
-  const ctx = await boot({
-    fetchHandler: (url) => (url.includes('/artifact-raw/')
-      ? Promise.resolve({ ok: false, status: 404, json: async () => ({ error: 'artifact not found' }) })
-      : null),
-  });
-  await ctx.window.__np.showArtifactViewer('p1', { kind: 'deck-shot', relPath: 'shots/s43.png' });
-  await settle(ctx.window, 8);
-  const host = ctx.window.document.querySelector('.artifact-view, #viewer');
-  assert.match(host.textContent, /artifact not found/, 'the reason is on screen');
-});
-
-test('a raw artifact that IS there still renders', async () => {
-  const ctx = await boot({
-    fetchHandler: (url) => (url.includes('/artifact-raw/')
-      ? Promise.resolve({ ok: true, status: 200, json: async () => ({}) })
-      : null),
-  });
-  await ctx.window.__np.showArtifactViewer('p1', { kind: 'deck-shot', relPath: 'shots/s01.png' });
-  await settle(ctx.window, 8);
-  const host = ctx.window.document.querySelector('.artifact-view, #viewer');
-  assert.doesNotMatch(host.textContent, /Error:/, 'no error for a healthy artifact');
-  assert.ok(host.querySelector('img, iframe, embed'), 'and the media element is mounted');
+test('a raw-artifact error (404/415/413) is shown as text; a raw artifact that is there still mounts its media element', async () => {
+  await checkRows([
+    { name: 'a raw-artifact error is shown, not rendered as a blank frame', run: async () => {
+      // The byte branches hand the raw URL straight to an <iframe>/<embed>/<img>. The
+      // raw route answers 404 (the file went between listing and click — routine on a
+      // live run, the audit clears shots/ every cycle), 415 (no preview for the type)
+      // or 413 (over 25 MB), each a JSON body that renders as a blank frame or a broken
+      // image. The modal sat open on an empty shell with no explanation, while the text
+      // branch beside it has always shown `Error: …`.
+      const ctx = await boot({
+        fetchHandler: (url) => (url.includes('/artifact-raw/')
+          ? Promise.resolve({ ok: false, status: 404, json: async () => ({ error: 'artifact not found' }) })
+          : null),
+      });
+      await ctx.window.__np.showArtifactViewer('p1', { kind: 'deck-shot', relPath: 'shots/s43.png' });
+      await settle(ctx.window, 8);
+      const host = ctx.window.document.querySelector('.artifact-view, #viewer');
+      assert.match(host.textContent, /artifact not found/, 'the reason is on screen');
+    } },
+    { name: 'a raw artifact that IS there still renders', run: async () => {
+      const ctx = await boot({
+        fetchHandler: (url) => (url.includes('/artifact-raw/')
+          ? Promise.resolve({ ok: true, status: 200, json: async () => ({}) })
+          : null),
+      });
+      await ctx.window.__np.showArtifactViewer('p1', { kind: 'deck-shot', relPath: 'shots/s01.png' });
+      await settle(ctx.window, 8);
+      const host = ctx.window.document.querySelector('.artifact-view, #viewer');
+      assert.doesNotMatch(host.textContent, /Error:/, 'no error for a healthy artifact');
+      assert.ok(host.querySelector('img, iframe, embed'), 'and the media element is mounted');
+    } },
+  ]);
 });
 
 // A later page failing threw away every row already in hand: readPage returned
@@ -766,27 +757,49 @@ test('hydration keeps the pages it already has when a later one fails', async ()
   assert.ok(names.includes('a.md') && names.includes('b.md'), `page 1 survives: ${names.join(',')}`);
 });
 
-// A failed "Load the next page" left `body` null, so the truncation notice was
-// NOT re-added — and a partial list with no notice reads as the whole run, which
-// is the one failure the notice exists to prevent.
-test('a failed "load next page" keeps saying the list is partial', async () => {
-  const row = (kind, relPath) => ({ kind, relPath, nodeId: 'implement', stepKey: 'implement#1', cycle: 1 });
-  const ctx = await boot({
-    fetchHandler: (url) => {
-      if (!url.includes('/api/runs/p1/artifacts')) return null;
-      return url.includes('offset=2')
-        ? Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'boom' }) })
-        : ok({ runId: 'p1', artifacts: [row('plan', 'a.md'), row('plan', 'b.md')], truncated: true, nextOffset: 2 });
-    },
-  });
-  const sec = ctx.window.document.createElement('div');
-  ctx.window.__np.buildHdArtifacts(sec, { id: 'p1' }, { state: {} });
-  await settle(ctx.window, 12);
-  click(ctx.window, sec.querySelector('.artifact-truncated'));
-  await settle(ctx.window, 12);
-  assert.ok(sec.querySelector('.artifact-truncated'),
-    'the list still declares itself partial after the page failed');
-  assert.equal(sec.querySelectorAll('.artifact-row').length, 2, 'and keeps the rows it had');
+test('a failed "load next page" (HTTP error or thrown fetch) keeps the rows and still flags the list as partial', async () => {
+  await checkRows([
+    { name: 'a failed "load next page" keeps saying the list is partial', run: async () => {
+      // A failed "Load the next page" left `body` null, so the truncation notice was
+      // NOT re-added — and a partial list with no notice reads as the whole run, which
+      // is the one failure the notice exists to prevent.
+      const row = (kind, relPath) => ({ kind, relPath, nodeId: 'implement', stepKey: 'implement#1', cycle: 1 });
+      const ctx = await boot({
+        fetchHandler: (url) => {
+          if (!url.includes('/api/runs/p1/artifacts')) return null;
+          return url.includes('offset=2')
+            ? Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'boom' }) })
+            : ok({ runId: 'p1', artifacts: [row('plan', 'a.md'), row('plan', 'b.md')], truncated: true, nextOffset: 2 });
+        },
+      });
+      const sec = ctx.window.document.createElement('div');
+      ctx.window.__np.buildHdArtifacts(sec, { id: 'p1' }, { state: {} });
+      await settle(ctx.window, 12);
+      click(ctx.window, sec.querySelector('.artifact-truncated'));
+      await settle(ctx.window, 12);
+      assert.ok(sec.querySelector('.artifact-truncated'),
+        'the list still declares itself partial after the page failed');
+      assert.equal(sec.querySelectorAll('.artifact-row').length, 2, 'and keeps the rows it had');
+    } },
+    { name: 'a thrown failure on a later page keeps the partial list flagged as partial', run: async () => {
+      const row = (kind, relPath) => ({ kind, relPath, nodeId: 'implement', stepKey: 'implement#1', cycle: 1 });
+      const ctx = await boot({
+        fetchHandler: (url) => {
+          if (!url.includes('/api/runs/p1/artifacts')) return null;
+          return url.includes('offset=2')
+            ? Promise.reject(new Error('offline'))
+            : ok({ runId: 'p1', artifacts: [row('plan', 'a.md'), row('plan', 'b.md')], truncated: true, nextOffset: 2 });
+        },
+      });
+      const sec = ctx.window.document.createElement('div');
+      ctx.window.__np.buildHdArtifacts(sec, { id: 'p1' }, { state: {} });
+      await settle(ctx.window, 12);
+      click(ctx.window, sec.querySelector('.artifact-truncated'));
+      await settle(ctx.window, 12);
+      assert.ok(sec.querySelector('.artifact-truncated'), 'still declares itself partial');
+      assert.equal(sec.querySelectorAll('.artifact-row').length, 2, 'and keeps the rows it had');
+    } },
+  ]);
 });
 
 // The `!body` branch only fires for a NON-OK HTTP response. A THROWN failure —
@@ -805,25 +818,6 @@ test('a thrown fetch failure is reported, not silently rendered as an empty run'
   await settle(ctx.window, 12);
   assert.match(sec.textContent, /Could not load/, `an outright failure says so: ${sec.textContent}`);
   assert.doesNotMatch(sec.textContent, /no artifacts recorded/, 'and does not claim the run has none');
-});
-
-test('a thrown failure on a later page keeps the partial list flagged as partial', async () => {
-  const row = (kind, relPath) => ({ kind, relPath, nodeId: 'implement', stepKey: 'implement#1', cycle: 1 });
-  const ctx = await boot({
-    fetchHandler: (url) => {
-      if (!url.includes('/api/runs/p1/artifacts')) return null;
-      return url.includes('offset=2')
-        ? Promise.reject(new Error('offline'))
-        : ok({ runId: 'p1', artifacts: [row('plan', 'a.md'), row('plan', 'b.md')], truncated: true, nextOffset: 2 });
-    },
-  });
-  const sec = ctx.window.document.createElement('div');
-  ctx.window.__np.buildHdArtifacts(sec, { id: 'p1' }, { state: {} });
-  await settle(ctx.window, 12);
-  click(ctx.window, sec.querySelector('.artifact-truncated'));
-  await settle(ctx.window, 12);
-  assert.ok(sec.querySelector('.artifact-truncated'), 'still declares itself partial');
-  assert.equal(sec.querySelectorAll('.artifact-row').length, 2, 'and keeps the rows it had');
 });
 
 // Stopping at the page ceiling is correct; memoising that as a COMPLETE walk is

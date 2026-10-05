@@ -4,12 +4,13 @@
 // read-only source scan (§6.1).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { seedPipeline, seedWorkspacePipeline } from './helpers/db-seed.mjs';
 import { createAskTools, AskToolError, splitUnifiedDiff, isProtectedBasename, sliceBytes, isByteArtifact } from '../src/core/ask/tools.mjs';
 import { viewerKindFor, BINARY_KINDS } from '../src/shared/artifact-kinds.mjs';
@@ -126,21 +127,24 @@ const NOPREFIX_DIFF = [
   '',
 ].join('\n');
 
-test('splitUnifiedDiff: EVERY `diff --git ` line starts a section, prefixes or not', () => {
-  const s = splitUnifiedDiff(NOPREFIX_DIFF);
-  assert.deepEqual(s.map((x) => [x.path, x.added, x.removed]),
-    [['aaa.txt', 1, 0], ['secrets/db.json', 1, 0], ['zserver.pem', 1, 0]],
-    'three sections with their own counts — not one section charging +3 to aaa.txt');
-  assert.equal(s.map((x) => x.text).join(''), NOPREFIX_DIFF, 'sections concatenate back to the input');
-});
-
-test('splitUnifiedDiff: a header whose path cannot be read yields path:null, and never absorbs the next file', () => {
-  const patch = 'diff --git a/ok.md b/ok.md\n+++ b/ok.md\n@@ -0,0 +1 @@\n+fine\n'
-    + 'diff --git !weird!\nBinary files differ\nDB_PASSWORD=hunter2\n';
-  assert.deepEqual(splitUnifiedDiff(patch).map((x) => [x.path, x.member]), [['ok.md', false], [null, false]]);
-  // a member header is a section of its own: an unreadable body cannot ride inside it
-  const ws = splitUnifiedDiff('# app-00000001\ndiff --git secrets/db.json secrets/db.json\n+++ secrets/db.json\n+DB_PASSWORD=hunter2\n');
-  assert.deepEqual(ws.map((x) => [x.path, x.projectKey, x.member]), [[null, 'app-00000001', true], ['secrets/db.json', 'app-00000001', false]]);
+test('splitUnifiedDiff: every `diff --git ` line starts a section; an unreadable header yields path:null and never absorbs the next file', async () => {
+  await checkRows([
+    { name: 'splitUnifiedDiff: EVERY `diff --git ` line starts a section, prefixes or not', run: async () => {
+      const s = splitUnifiedDiff(NOPREFIX_DIFF);
+      assert.deepEqual(s.map((x) => [x.path, x.added, x.removed]),
+        [['aaa.txt', 1, 0], ['secrets/db.json', 1, 0], ['zserver.pem', 1, 0]],
+        'three sections with their own counts — not one section charging +3 to aaa.txt');
+      assert.equal(s.map((x) => x.text).join(''), NOPREFIX_DIFF, 'sections concatenate back to the input');
+    } },
+    { name: 'splitUnifiedDiff: a header whose path cannot be read yields path:null, and never absorbs the next file', run: async () => {
+      const patch = 'diff --git a/ok.md b/ok.md\n+++ b/ok.md\n@@ -0,0 +1 @@\n+fine\n'
+        + 'diff --git !weird!\nBinary files differ\nDB_PASSWORD=hunter2\n';
+      assert.deepEqual(splitUnifiedDiff(patch).map((x) => [x.path, x.member]), [['ok.md', false], [null, false]]);
+      // a member header is a section of its own: an unreadable body cannot ride inside it
+      const ws = splitUnifiedDiff('# app-00000001\ndiff --git secrets/db.json secrets/db.json\n+++ secrets/db.json\n+DB_PASSWORD=hunter2\n');
+      assert.deepEqual(ws.map((x) => [x.path, x.projectKey, x.member]), [[null, 'app-00000001', true], ['secrets/db.json', 'app-00000001', false]]);
+    } },
+  ]);
 });
 
 // A patch with no `diff --git ` line at all (a legacy external-diff patch, or the
@@ -160,47 +164,49 @@ const LEGACY_EXTERNAL_DIFF = [
   '',
 ].join('\n');
 
-test('splitUnifiedDiff: only a `diff --git ` section may take its path from a `--- `/`+++ ` label', () => {
-  assert.deepEqual(splitUnifiedDiff(LEGACY_EXTERNAL_DIFF).map((x) => x.path), [null],
-    'one unattributable section — not a section named aaa.txt carrying the .env body');
-  // a relative label is no better: with no header the diff TOOL chose the shape, so
-  // the label is a claim about a file, not git's own name for the section
-  assert.deepEqual(splitUnifiedDiff('--- aaa.txt\n+++ aaa.txt\n@@ -1 +1 @@\n+x\n--- .env\n+++ .env\n+A=SECRET\n')
-    .map((x) => x.path), [null]);
-  // …while a real header keeps the label precedence of the tests above intact
-  assert.deepEqual(splitUnifiedDiff('diff --git !weird!\n+++ "b/caf\\303\\251.env"\n+X=1\n').map((x) => x.path), ['café.env']);
-});
-
-test('splitUnifiedDiff: a `diff --git ` header is read only where it is unambiguous', () => {
-  // rename out of a directory named `a b`: a lazy first-match read the path as
-  // `x.txt "b/we\"ird.pem"`, which matches no guardrail pattern, so the .pem leaked.
-  assert.deepEqual(splitUnifiedDiff('diff --git a/a b/x.txt "b/we\\"ird.pem"\n+K=1\n').map((x) => x.path), ['we"ird.pem']);
-  // `a/<p> b/<p>`: the separator is fixed by the lengths, so the WHOLE path is read
-  // — a last-` b/` cut returned `x.txt` here, and the guardrail patterns that carry
-  // a slash (`**/secrets/**`) stopped matching.
-  assert.deepEqual(splitUnifiedDiff('diff --git a/dir b/x.txt b/dir b/x.txt\n+K=1\n').map((x) => x.path), ['dir b/x.txt']);
-  assert.deepEqual(splitUnifiedDiff('diff --git a/secrets/plan b/creds.json b/secrets/plan b/creds.json\n+K=1\n').map((x) => x.path),
-    ['secrets/plan b/creds.json']);
-  // a rename is not two equal halves: with ` b/` inside a side the header is a
-  // guess, so it yields no path at all (the section is then dropped by get_run_diff)
-  assert.deepEqual(splitUnifiedDiff('diff --git a/a b/old.pem b/plain.txt\n+K=1\n').map((x) => x.path), [null]);
-  // an ordinary rename has exactly one ` b/` — nothing else can be the separator
-  assert.deepEqual(splitUnifiedDiff('diff --git a/old.txt b/new.txt\n+K=1\n').map((x) => x.path), ['new.txt']);
-});
-
-test('splitUnifiedDiff: the section`s own `+++ ` line wins over the ambiguous header', () => {
-  // git tab-terminates a name that needs it, so `+++ ` is exact where the header
-  // is a guess. Before this, the header won whenever it parsed to anything at all.
-  const p = 'diff --git a/dir b/x.txt b/dir b/x.txt\n--- a/dir b/x.txt\t\n+++ b/dir b/x.txt\t\n@@ -1 +1 @@\n+K=1\n';
-  assert.deepEqual(splitUnifiedDiff(p).map((x) => x.path), ['dir b/x.txt']);
-  // …but only the b-side: the a-side is still a rename out of `old.pem`, which
-  // get_run_diff drops on the OLD name (see the rename tests below).
-  assert.deepEqual(splitUnifiedDiff('diff --git a/a b/old.pem b/plain.txt\n+++ b/plain.txt\n@@ -1 +1 @@\n+K=1\n').map((x) => [x.path, x.oldPath]),
-    [['plain.txt', 'a b/old.pem']]);
-  // …but only in the extended header: past the first `@@` a `+++ ` line is body
-  // content (a diff of a diff), so it can never re-point a section at a safe path.
-  const body = splitUnifiedDiff('diff --git a/config/.env b/config/.env\n+++ b/config/.env\n@@ -0,0 +1,2 @@\n+++ b/harmless.md\n+K=1\n');
-  assert.deepEqual(body.map((x) => [x.path, x.added]), [['config/.env', 2]], 'and both body lines count as added');
+test('splitUnifiedDiff: header ambiguity — only a diff --git section may take a ---/+++ label, the header is read only when unambiguous, and the section\'s own +++ wins', async () => {
+  await checkRows([
+    { name: 'splitUnifiedDiff: only a `diff --git ` section may take its path from a `--- `/`+++ ` label', run: async () => {
+      assert.deepEqual(splitUnifiedDiff(LEGACY_EXTERNAL_DIFF).map((x) => x.path), [null],
+        'one unattributable section — not a section named aaa.txt carrying the .env body');
+      // a relative label is no better: with no header the diff TOOL chose the shape, so
+      // the label is a claim about a file, not git's own name for the section
+      assert.deepEqual(splitUnifiedDiff('--- aaa.txt\n+++ aaa.txt\n@@ -1 +1 @@\n+x\n--- .env\n+++ .env\n+A=SECRET\n')
+        .map((x) => x.path), [null]);
+      // …while a real header keeps the label precedence of the tests above intact
+      assert.deepEqual(splitUnifiedDiff('diff --git !weird!\n+++ "b/caf\\303\\251.env"\n+X=1\n').map((x) => x.path), ['café.env']);
+    } },
+    { name: 'splitUnifiedDiff: a `diff --git ` header is read only where it is unambiguous', run: async () => {
+      // rename out of a directory named `a b`: a lazy first-match read the path as
+      // `x.txt "b/we\"ird.pem"`, which matches no guardrail pattern, so the .pem leaked.
+      assert.deepEqual(splitUnifiedDiff('diff --git a/a b/x.txt "b/we\\"ird.pem"\n+K=1\n').map((x) => x.path), ['we"ird.pem']);
+      // `a/<p> b/<p>`: the separator is fixed by the lengths, so the WHOLE path is read
+      // — a last-` b/` cut returned `x.txt` here, and the guardrail patterns that carry
+      // a slash (`**/secrets/**`) stopped matching.
+      assert.deepEqual(splitUnifiedDiff('diff --git a/dir b/x.txt b/dir b/x.txt\n+K=1\n').map((x) => x.path), ['dir b/x.txt']);
+      assert.deepEqual(splitUnifiedDiff('diff --git a/secrets/plan b/creds.json b/secrets/plan b/creds.json\n+K=1\n').map((x) => x.path),
+        ['secrets/plan b/creds.json']);
+      // a rename is not two equal halves: with ` b/` inside a side the header is a
+      // guess, so it yields no path at all (the section is then dropped by get_run_diff)
+      assert.deepEqual(splitUnifiedDiff('diff --git a/a b/old.pem b/plain.txt\n+K=1\n').map((x) => x.path), [null]);
+      // an ordinary rename has exactly one ` b/` — nothing else can be the separator
+      assert.deepEqual(splitUnifiedDiff('diff --git a/old.txt b/new.txt\n+K=1\n').map((x) => x.path), ['new.txt']);
+    } },
+    { name: 'splitUnifiedDiff: the section`s own `+++ ` line wins over the ambiguous header', run: async () => {
+      // git tab-terminates a name that needs it, so `+++ ` is exact where the header
+      // is a guess. Before this, the header won whenever it parsed to anything at all.
+      const p = 'diff --git a/dir b/x.txt b/dir b/x.txt\n--- a/dir b/x.txt\t\n+++ b/dir b/x.txt\t\n@@ -1 +1 @@\n+K=1\n';
+      assert.deepEqual(splitUnifiedDiff(p).map((x) => x.path), ['dir b/x.txt']);
+      // …but only the b-side: the a-side is still a rename out of `old.pem`, which
+      // get_run_diff drops on the OLD name (see the rename tests below).
+      assert.deepEqual(splitUnifiedDiff('diff --git a/a b/old.pem b/plain.txt\n+++ b/plain.txt\n@@ -1 +1 @@\n+K=1\n').map((x) => [x.path, x.oldPath]),
+        [['plain.txt', 'a b/old.pem']]);
+      // …but only in the extended header: past the first `@@` a `+++ ` line is body
+      // content (a diff of a diff), so it can never re-point a section at a safe path.
+      const body = splitUnifiedDiff('diff --git a/config/.env b/config/.env\n+++ b/config/.env\n@@ -0,0 +1,2 @@\n+++ b/harmless.md\n+K=1\n');
+      assert.deepEqual(body.map((x) => [x.path, x.added]), [['config/.env', 2]], 'and both body lines count as added');
+    } },
+  ]);
 });
 
 // `diffPatch` passes `-M` (git-info.mjs:127), so a rename+edit of a credential file
@@ -249,73 +255,79 @@ test('splitUnifiedDiff: `+`/`-` body lines are counted even when they start `+++
   assert.deepEqual(s.map((x) => [x.path, x.added, x.removed]), [['a.md', 1, 1]]);
 });
 
-test('isProtectedBasename: the seven normal-tier patterns, * prefix/suffix only', () => {
-  const pats = GUARDRAIL_PRESETS.normal.protectedPaths;
-  for (const hit of ['.env', '.env.local', '.envrc', 'server.pem', 'id_rsa', 'id_ed25519', 'x.key', 'bundle.p12', 'cert.pfx']) {
-    assert.ok(isProtectedBasename(hit, pats), hit);
-  }
-  for (const miss of ['env', 'environment.md', 'key.txt', 'id_rsa.pub', 'README.md', 'pem']) assert.ok(!isProtectedBasename(miss, pats), miss);
-  assert.ok(isProtectedBasename('a-secret-b', ['*secret*']));
-  assert.ok(!isProtectedBasename('x', []));
-  // slash-less patterns match the basename at ANY depth, as the CLI does
-  assert.ok(isProtectedBasename('deploy/prod/.env.local', pats));
-  assert.ok(isProtectedBasename('certs/server.pem', pats));
-  assert.ok(!isProtectedBasename('.env/README.md', pats), 'a protected name as a DIRECTORY does not protect its children');
+test('isProtectedBasename: the normal-tier patterns (* prefix/suffix), slash patterns match the whole path, ~/ and // skipped', async () => {
+  await checkRows([
+    { name: 'isProtectedBasename: the seven normal-tier patterns, * prefix/suffix only', run: async () => {
+      const pats = GUARDRAIL_PRESETS.normal.protectedPaths;
+      for (const hit of ['.env', '.env.local', '.envrc', 'server.pem', 'id_rsa', 'id_ed25519', 'x.key', 'bundle.p12', 'cert.pfx']) {
+        assert.ok(isProtectedBasename(hit, pats), hit);
+      }
+      for (const miss of ['env', 'environment.md', 'key.txt', 'id_rsa.pub', 'README.md', 'pem']) assert.ok(!isProtectedBasename(miss, pats), miss);
+      assert.ok(isProtectedBasename('a-secret-b', ['*secret*']));
+      assert.ok(!isProtectedBasename('x', []));
+      // slash-less patterns match the basename at ANY depth, as the CLI does
+      assert.ok(isProtectedBasename('deploy/prod/.env.local', pats));
+      assert.ok(isProtectedBasename('certs/server.pem', pats));
+      assert.ok(!isProtectedBasename('.env/README.md', pats), 'a protected name as a DIRECTORY does not protect its children');
+    } },
+    { name: 'isProtectedBasename: slash-containing patterns match the whole path; ~/ and // patterns are skipped', run: async () => {
+      const pats = GUARDRAIL_PRESETS.secure.protectedPaths;
+      for (const hit of ['.git/config', 'sub/dir/.git/config', 'secrets/db.json', 'app/secrets/deep/x.yml', '.npmrc', 'infra/.netrc',
+        'env/main.tfstate', 'env/main.tfstate.backup', 'android/app.keystore', 'x.jks']) {
+        assert.ok(isProtectedBasename(hit, pats), hit);
+      }
+      for (const miss of ['config', 'src/config.js', 'secrets.md', 'src/secretstuff/x.js', 'docs/git/config']) {
+        assert.ok(!isProtectedBasename(miss, pats), miss);
+      }
+      // ~/… and //… are absolute: they can never name a file inside a run diff
+      assert.ok(!isProtectedBasename('.ssh/id_rsa.pub', ['~/.ssh/**']));
+      assert.ok(!isProtectedBasename('etc/passwd', ['//etc/**']));
+      // a trailing-anchor pattern without the **/ prefix anchors at the repo root
+      assert.ok(isProtectedBasename('secrets/x', ['secrets/**']));
+      assert.ok(!isProtectedBasename('a/secrets/x', ['secrets/**']));
+    } },
+  ]);
 });
 
-test('isProtectedBasename: slash-containing patterns match the whole path; ~/ and // patterns are skipped', () => {
-  const pats = GUARDRAIL_PRESETS.secure.protectedPaths;
-  for (const hit of ['.git/config', 'sub/dir/.git/config', 'secrets/db.json', 'app/secrets/deep/x.yml', '.npmrc', 'infra/.netrc',
-    'env/main.tfstate', 'env/main.tfstate.backup', 'android/app.keystore', 'x.jks']) {
-    assert.ok(isProtectedBasename(hit, pats), hit);
-  }
-  for (const miss of ['config', 'src/config.js', 'secrets.md', 'src/secretstuff/x.js', 'docs/git/config']) {
-    assert.ok(!isProtectedBasename(miss, pats), miss);
-  }
-  // ~/… and //… are absolute: they can never name a file inside a run diff
-  assert.ok(!isProtectedBasename('.ssh/id_rsa.pub', ['~/.ssh/**']));
-  assert.ok(!isProtectedBasename('etc/passwd', ['//etc/**']));
-  // a trailing-anchor pattern without the **/ prefix anchors at the repo root
-  assert.ok(isProtectedBasename('secrets/x', ['secrets/**']));
-  assert.ok(!isProtectedBasename('a/secrets/x', ['secrets/**']));
-});
-
-test('sliceBytes: pages on byte offsets, cuts at a newline, never splits a UTF-8 sequence', () => {
-  const text = 'line one\nline two\nline three\n';
-  const p1 = sliceBytes(text, 0, 12);
-  assert.deepEqual(p1, { text: 'line one\n', nextOffset: 9, truncated: true, totalBytes: 29 });
-  const p2 = sliceBytes(text, p1.nextOffset, 12);
-  assert.deepEqual(p2, { text: 'line two\n', nextOffset: 18, truncated: true, totalBytes: 29 });
-  const p3 = sliceBytes(text, p2.nextOffset, 100);
-  assert.deepEqual(p3, { text: 'line three\n', nextOffset: 29, truncated: false, totalBytes: 29 });
-  assert.deepEqual(sliceBytes(text, 999, 10), { text: '', nextOffset: 29, truncated: false, totalBytes: 29 });
-  const utf = 'ééé'; // 6 bytes, no newline
-  const u = sliceBytes(utf, 0, 3);
-  assert.equal(u.text, 'é', 'backs off to a character boundary');
-  assert.equal(u.nextOffset, 2);
-  assert.equal(sliceBytes('a'.repeat(10), 0, 4).text, 'aaaa', 'a single long line is cut raw');
-});
-
-test('sliceBytes: always advances — the UTF-8 back-off can never return zero progress', () => {
-  // maxBytes below the width of the first character used to return nextOffset === offset,
-  // so the documented "page until truncated is false" loop never terminated.
-  for (const maxBytes of [1, 2, 3]) {
-    const p = sliceBytes('😀abc', 0, maxBytes);
-    assert.ok(p.nextOffset > 0, `maxBytes ${maxBytes}: nextOffset ${p.nextOffset}`);
-    assert.equal(p.text, '😀', 'a whole character is emitted rather than nothing');
-  }
-  // and the loop as the tool describes it terminates on every window size
-  for (const maxBytes of [1, 2, 3, 4, 5]) {
-    let off = 0;
-    let out = '';
-    for (let i = 0; i < 50; i++) {
-      const p = sliceBytes('😀é\nab', off, maxBytes);
-      out += p.text;
-      off = p.nextOffset;
-      if (!p.truncated) break;
-    }
-    assert.equal(out, '😀é\nab', `maxBytes ${maxBytes} pages the whole text`);
-  }
+test('sliceBytes: pages on byte offsets at a newline, never splits a UTF-8 sequence, and always advances', async () => {
+  await checkRows([
+    { name: 'sliceBytes: pages on byte offsets, cuts at a newline, never splits a UTF-8 sequence', run: async () => {
+      const text = 'line one\nline two\nline three\n';
+      const p1 = sliceBytes(text, 0, 12);
+      assert.deepEqual(p1, { text: 'line one\n', nextOffset: 9, truncated: true, totalBytes: 29 });
+      const p2 = sliceBytes(text, p1.nextOffset, 12);
+      assert.deepEqual(p2, { text: 'line two\n', nextOffset: 18, truncated: true, totalBytes: 29 });
+      const p3 = sliceBytes(text, p2.nextOffset, 100);
+      assert.deepEqual(p3, { text: 'line three\n', nextOffset: 29, truncated: false, totalBytes: 29 });
+      assert.deepEqual(sliceBytes(text, 999, 10), { text: '', nextOffset: 29, truncated: false, totalBytes: 29 });
+      const utf = 'ééé'; // 6 bytes, no newline
+      const u = sliceBytes(utf, 0, 3);
+      assert.equal(u.text, 'é', 'backs off to a character boundary');
+      assert.equal(u.nextOffset, 2);
+      assert.equal(sliceBytes('a'.repeat(10), 0, 4).text, 'aaaa', 'a single long line is cut raw');
+    } },
+    { name: 'sliceBytes: always advances — the UTF-8 back-off can never return zero progress', run: async () => {
+      // maxBytes below the width of the first character used to return nextOffset === offset,
+      // so the documented "page until truncated is false" loop never terminated.
+      for (const maxBytes of [1, 2, 3]) {
+        const p = sliceBytes('😀abc', 0, maxBytes);
+        assert.ok(p.nextOffset > 0, `maxBytes ${maxBytes}: nextOffset ${p.nextOffset}`);
+        assert.equal(p.text, '😀', 'a whole character is emitted rather than nothing');
+      }
+      // and the loop as the tool describes it terminates on every window size
+      for (const maxBytes of [1, 2, 3, 4, 5]) {
+        let off = 0;
+        let out = '';
+        for (let i = 0; i < 50; i++) {
+          const p = sliceBytes('😀é\nab', off, maxBytes);
+          out += p.text;
+          off = p.nextOffset;
+          if (!p.truncated) break;
+        }
+        assert.equal(out, '😀é\nab', `maxBytes ${maxBytes} pages the whole text`);
+      }
+    } },
+  ]);
 });
 
 // ── handlers over fake readers ───────────────────────────────────────────────
@@ -380,7 +392,7 @@ test('list(): forty-five tools with JSON-Schema inputs', () => {
     'open_worktree', 'list_worktrees', 'remove_worktree', 'git',
     'list_run_artifacts', 'read_run_artifact', 'get_run_progress',
     'get_team_metrics', 'list_team_metrics_runs', 'push_team_metrics', 'propose_metrics_change',
-    'get_team_policy', 'propose_policy_change',
+    'get_team_policy', 'propose_policy_change', 'get_away_mode', 'set_away_now', 'set_run_away_mode', 'propose_away_mode_change',
     'list_memory', 'read_memory', 'remember', 'forget',
     'list_schedules', 'get_schedule', 'list_schedule_activity', 'preview_schedule', 'propose_schedule_change',
     'pause_schedule', 'resume_schedule', 'skip_next_run', 'mark_schedule_activity_read',
@@ -404,38 +416,41 @@ test('list_projects / list_workflows come from the shared catalog', async () => 
   assert.equal(wfs[0].steps[0][0].displayName, 'Planner');
 });
 
-test('list_runs: scan limit, filters, newest-first order preserved, shape per target, limit clamp', async () => {
-  calls.length = 0;
-  const all = await tools.call('list_runs', {});
-  assert.deepEqual(calls[0], ['listAllPipelines', { lite: true, limit: 200 }]);
-  assert.deepEqual(all.map((r) => r.id), ['8c3d12ab', '4e1f2a9b', 'bbbbbbbb']);
-  assert.deepEqual(all[0], { id: '8c3d12ab', title: 'Rename', target: 'workspace', workspaceId: 'wks-team-0000abcd', workspaceName: 'Team', status: 'running',
-    startedAt: ROW_W.started_at, updatedAt: null, branch: 'worca-cc/rename-8c3d12ab', sourceBranch: null, guardrailsId: 'secure', totalCostUsd: null, startedBy: null });
-  assert.deepEqual(all[1], { id: '4e1f2a9b', title: 'Fix login', target: 'project', projectKey: 'demo-00000001', projectName: 'Demo', status: 'done',
-    startedAt: ROW_P.started_at, updatedAt: '2026-08-20T10:00:00.000Z', branch: 'worca-cc/fix-login-4e1f2a9b', sourceBranch: 'main', guardrailsId: 'normal', totalCostUsd: 1.25, startedBy: null });
-  assert.deepEqual((await tools.call('list_runs', { projectKey: 'demo-00000001' })).map((r) => r.id), ['4e1f2a9b']);
-  assert.deepEqual((await tools.call('list_runs', { workspaceId: 'wks-team-0000abcd' })).map((r) => r.id), ['8c3d12ab']);
-  assert.deepEqual((await tools.call('list_runs', { status: 'ERROR' })).map((r) => r.id), ['bbbbbbbb'], 'status match is case-insensitive');
-  assert.deepEqual((await tools.call('list_runs', { query: 'login' })).map((r) => r.id), ['4e1f2a9b'], 'title substring, case-insensitive');
-  assert.equal((await tools.call('list_runs', { limit: 1 })).length, 1);
-  await assert.rejects(() => tools.call('list_runs', { projectKey: 'a', workspaceId: 'b' }), AskToolError);
-  calls.length = 0;
-  await tools.call('list_runs', { projectKey: 'demo-00000001' });
-  assert.deepEqual(calls[0], ['listAllPipelines', { lite: true, limit: -1 }], 'a keyed query scans every row (a project\'s runs may all be older than the 200 newest)');
-});
-
-test('list_runs: limit is clamped to 1..100, default 20 (130-row fake — both bounds observable)', async () => {
-  const many = Array.from({ length: 130 }, (_, i) => ({ ...LITE[1], id: `r${String(i).padStart(7, '0')}`, title: `Run ${i}`, mtime: 1000 - i }));
-  const t = createAskTools({ ...fake, listAllPipelines: async () => many });
-  assert.equal((await t.call('list_runs', {})).length, 20, 'default 20');
-  assert.equal((await t.call('list_runs', { limit: 1000 })).length, 100, 'clamped DOWN to listRunsMaxLimit (130 rows available)');
-  assert.equal((await t.call('list_runs', { limit: 0 })).length, 1, 'clamped up to 1');
-  assert.equal((await t.call('list_runs', { limit: -5 })).length, 1);
-  assert.equal((await t.call('list_runs', { limit: 3 })).length, 3);
-  assert.equal((await t.call('list_runs', { limit: 'abc' })).length, 20, 'non-numeric → default');
-  assert.equal((await t.call('list_runs', { query: 'run 2' })).map((r) => r.title).length, 11, 'substring match: Run 2, Run 20..29');
-  const leak = createAskTools({ ...fake, listAllPipelines: async () => [{ ...LITE[1], title: 'T ghp_abcdefghijklmnopqrstuvwxyz0123456789' }] });
-  assert.equal((await leak.call('list_runs', {}))[0].title, 'T ghp_<redacted>', 'titles redacted');
+test('list_runs: scan limit, filters, newest-first, shape per target, limit clamped to 1..100 default 20', async () => {
+  await checkRows([
+    { name: 'list_runs: scan limit, filters, newest-first order preserved, shape per target, limit clamp', run: async () => {
+      calls.length = 0;
+      const all = await tools.call('list_runs', {});
+      assert.deepEqual(calls[0], ['listAllPipelines', { lite: true, limit: 200 }]);
+      assert.deepEqual(all.map((r) => r.id), ['8c3d12ab', '4e1f2a9b', 'bbbbbbbb']);
+      assert.deepEqual(all[0], { id: '8c3d12ab', title: 'Rename', target: 'workspace', workspaceId: 'wks-team-0000abcd', workspaceName: 'Team', status: 'running',
+        startedAt: ROW_W.started_at, updatedAt: null, branch: 'worca-cc/rename-8c3d12ab', sourceBranch: null, guardrailsId: 'secure', totalCostUsd: null, startedBy: null });
+      assert.deepEqual(all[1], { id: '4e1f2a9b', title: 'Fix login', target: 'project', projectKey: 'demo-00000001', projectName: 'Demo', status: 'done',
+        startedAt: ROW_P.started_at, updatedAt: '2026-08-20T10:00:00.000Z', branch: 'worca-cc/fix-login-4e1f2a9b', sourceBranch: 'main', guardrailsId: 'normal', totalCostUsd: 1.25, startedBy: null });
+      assert.deepEqual((await tools.call('list_runs', { projectKey: 'demo-00000001' })).map((r) => r.id), ['4e1f2a9b']);
+      assert.deepEqual((await tools.call('list_runs', { workspaceId: 'wks-team-0000abcd' })).map((r) => r.id), ['8c3d12ab']);
+      assert.deepEqual((await tools.call('list_runs', { status: 'ERROR' })).map((r) => r.id), ['bbbbbbbb'], 'status match is case-insensitive');
+      assert.deepEqual((await tools.call('list_runs', { query: 'login' })).map((r) => r.id), ['4e1f2a9b'], 'title substring, case-insensitive');
+      assert.equal((await tools.call('list_runs', { limit: 1 })).length, 1);
+      await assert.rejects(() => tools.call('list_runs', { projectKey: 'a', workspaceId: 'b' }), AskToolError);
+      calls.length = 0;
+      await tools.call('list_runs', { projectKey: 'demo-00000001' });
+      assert.deepEqual(calls[0], ['listAllPipelines', { lite: true, limit: -1 }], 'a keyed query scans every row (a project\'s runs may all be older than the 200 newest)');
+    } },
+    { name: 'list_runs: limit is clamped to 1..100, default 20 (130-row fake — both bounds observable)', run: async () => {
+      const many = Array.from({ length: 130 }, (_, i) => ({ ...LITE[1], id: `r${String(i).padStart(7, '0')}`, title: `Run ${i}`, mtime: 1000 - i }));
+      const t = createAskTools({ ...fake, listAllPipelines: async () => many });
+      assert.equal((await t.call('list_runs', {})).length, 20, 'default 20');
+      assert.equal((await t.call('list_runs', { limit: 1000 })).length, 100, 'clamped DOWN to listRunsMaxLimit (130 rows available)');
+      assert.equal((await t.call('list_runs', { limit: 0 })).length, 1, 'clamped up to 1');
+      assert.equal((await t.call('list_runs', { limit: -5 })).length, 1);
+      assert.equal((await t.call('list_runs', { limit: 3 })).length, 3);
+      assert.equal((await t.call('list_runs', { limit: 'abc' })).length, 20, 'non-numeric → default');
+      assert.equal((await t.call('list_runs', { query: 'run 2' })).map((r) => r.title).length, 11, 'substring match: Run 2, Run 20..29');
+      const leak = createAskTools({ ...fake, listAllPipelines: async () => [{ ...LITE[1], title: 'T ghp_abcdefghijklmnopqrstuvwxyz0123456789' }] });
+      assert.equal((await leak.call('list_runs', {}))[0].title, 'T ghp_<redacted>', 'titles redacted');
+    } },
+  ]);
 });
 
 test('get_run: scoped and key-less lookups, project and workspace shapes, archived flag', async () => {
@@ -614,137 +629,135 @@ const RENAME_PATCH = [
   '',
 ].join('\n');
 
-test('get_run_diff: a rename OUT OF a credential file is dropped — the old file`s lines never ship', async () => {
-  for (const [tier, protectedPaths] of [
-    ['normal', GUARDRAIL_PRESETS.normal.protectedPaths],
-    ['secure', defaultToolDeps({ threadId: 'ask_00000001' }).protectedPaths],
-  ]) {
-    const t = createAskTools({ ...fake, protectedPaths, readDiffPatch: async () => RENAME_PATCH });
-    const d = await t.call('get_run_diff', { id: '4e1f2a9b' });
-    assert.deepEqual(d.files.map((f) => f.path), ['docs/ok.md'], `${tier}: the renamed credential file is not listed`);
-    for (const secret of ['sk-live-REALSECRET-0001', 'hunter2-realpass', 'config/.env', 'env.sample']) {
-      assert.ok(!d.text.includes(secret), `${tier}: ${secret} never reaches the model`);
-    }
-  }
-  // the same shape with no `rename from` / `--- ` line: the a-side still falls out of
-  // the header once the `+++ ` line has pinned the b-side exactly
-  const bare = createAskTools({ ...fake, protectedPaths: defaultToolDeps({ threadId: 'ask_00000001' }).protectedPaths,
-    readDiffPatch: async () => 'diff --git a/a b/old.pem b/plain.txt\n+++ b/plain.txt\n@@ -1 +1 @@\n PRIVATE KEY MATERIAL\n' });
-  const b = await bare.call('get_run_diff', { id: '4e1f2a9b' });
-  assert.deepEqual(b.files, [], 'a rename out of a .pem is dropped even under its harmless new name');
-  assert.equal(b.text, '');
+test('get_run_diff renames: out of a credential file is dropped (old lines never ship); a harmless rename ships under its new path', async () => {
+  await checkRows([
+    { name: 'get_run_diff: a rename OUT OF a credential file is dropped — the old file`s lines never ship', run: async () => {
+      for (const [tier, protectedPaths] of [
+        ['normal', GUARDRAIL_PRESETS.normal.protectedPaths],
+        ['secure', defaultToolDeps({ threadId: 'ask_00000001' }).protectedPaths],
+      ]) {
+        const t = createAskTools({ ...fake, protectedPaths, readDiffPatch: async () => RENAME_PATCH });
+        const d = await t.call('get_run_diff', { id: '4e1f2a9b' });
+        assert.deepEqual(d.files.map((f) => f.path), ['docs/ok.md'], `${tier}: the renamed credential file is not listed`);
+        for (const secret of ['sk-live-REALSECRET-0001', 'hunter2-realpass', 'config/.env', 'env.sample']) {
+          assert.ok(!d.text.includes(secret), `${tier}: ${secret} never reaches the model`);
+        }
+      }
+      // the same shape with no `rename from` / `--- ` line: the a-side still falls out of
+      // the header once the `+++ ` line has pinned the b-side exactly
+      const bare = createAskTools({ ...fake, protectedPaths: defaultToolDeps({ threadId: 'ask_00000001' }).protectedPaths,
+        readDiffPatch: async () => 'diff --git a/a b/old.pem b/plain.txt\n+++ b/plain.txt\n@@ -1 +1 @@\n PRIVATE KEY MATERIAL\n' });
+      const b = await bare.call('get_run_diff', { id: '4e1f2a9b' });
+      assert.deepEqual(b.files, [], 'a rename out of a .pem is dropped even under its harmless new name');
+      assert.equal(b.text, '');
+    } },
+    { name: 'get_run_diff: a HARMLESS rename still ships, listed under its new path', run: async () => {
+      const t = createAskTools({ ...fake,
+        readDiffPatch: async () => 'diff --git a/docs/a.md b/docs/b.md\nsimilarity index 90%\nrename from docs/a.md\nrename to docs/b.md\n--- a/docs/a.md\n+++ b/docs/b.md\n@@ -1 +1 @@\n-x\n+y\n' });
+      const d = await t.call('get_run_diff', { id: '4e1f2a9b' });
+      assert.deepEqual(d.files, [{ path: 'docs/b.md', added: 1, removed: 1 }], 'files[].path is the NEW path');
+      assert.ok(d.text.includes('rename from docs/a.md'), 'and the section ships whole');
+    } },
+  ]);
 });
 
-test('get_run_diff: a HARMLESS rename still ships, listed under its new path', async () => {
-  const t = createAskTools({ ...fake,
-    readDiffPatch: async () => 'diff --git a/docs/a.md b/docs/b.md\nsimilarity index 90%\nrename from docs/a.md\nrename to docs/b.md\n--- a/docs/a.md\n+++ b/docs/b.md\n@@ -1 +1 @@\n-x\n+y\n' });
-  const d = await t.call('get_run_diff', { id: '4e1f2a9b' });
-  assert.deepEqual(d.files, [{ path: 'docs/b.md', added: 1, removed: 1 }], 'files[].path is the NEW path');
-  assert.ok(d.text.includes('rename from docs/a.md'), 'and the section ships whole');
+test('read_attachment: thread-scoped reader with redaction and paging, not found; a binary attachment returns metadata + path, never a text slice', async () => {
+  await checkRows([
+    { name: 'read_attachment: thread-scoped reader, redaction, paging, not found', run: async () => {
+      const r = await tools.call('read_attachment', { id: 'att_00000001' });
+      assert.equal(r.name, 'notes.md');
+      assert.equal(r.text, 'token ghp_<redacted> here\nsecond line\n');
+      assert.equal(r.truncated, false);
+      assert.equal(r.totalBytes, Buffer.byteLength(r.text));
+      const p = await tools.call('read_attachment', { id: 'att_00000001', maxBytes: 5 });
+      assert.equal(p.truncated, true);
+      await assert.rejects(() => tools.call('read_attachment', { id: 'att_ffffffff' }), { message: 'read_attachment: attachment not found' });
+      await assert.rejects(() => tools.call('read_attachment', {}), { message: 'read_attachment: id is required' });
+    } },
+    { name: 'read_attachment (#398): a binary attachment returns metadata + path, never a text slice', run: async () => {
+      const r = await tools.call('read_attachment', { id: 'att_00000002' });
+      assert.deepEqual(r, {
+        name: 'shot.png', kind: 'image', mime: 'image/png', totalBytes: 2048,
+        path: '/home/ask/ask_00000001/att/att_00000002.png',
+        note: 'binary attachment: pass `path` to your Read tool to view the content',
+      });
+      assert.ok(!('text' in r) && !('truncated' in r) && !('nextOffset' in r), 'no sliceBytes fields on a binary read');
+    } },
+  ]);
 });
 
-test('read_attachment: thread-scoped reader, redaction, paging, not found', async () => {
-  const r = await tools.call('read_attachment', { id: 'att_00000001' });
-  assert.equal(r.name, 'notes.md');
-  assert.equal(r.text, 'token ghp_<redacted> here\nsecond line\n');
-  assert.equal(r.truncated, false);
-  assert.equal(r.totalBytes, Buffer.byteLength(r.text));
-  const p = await tools.call('read_attachment', { id: 'att_00000001', maxBytes: 5 });
-  assert.equal(p.truncated, true);
-  await assert.rejects(() => tools.call('read_attachment', { id: 'att_ffffffff' }), { message: 'read_attachment: attachment not found' });
-  await assert.rejects(() => tools.call('read_attachment', {}), { message: 'read_attachment: id is required' });
+test('read_attachment as=raw: HTML reads as raw redacted markup by default; `as` is ignored for non-HTML', async () => {
+  await checkRows([
+    { name: 'read_attachment: an HTML attachment reads as raw markup by default (and with as: "raw"), redacted', run: async () => {
+      const r = await tools.call('read_attachment', { id: 'att_00000003' });
+      const raw = redactAskText(HTML_PAGE);
+      assert.deepEqual(r, { name: 'page.html', kind: 'text', text: raw, truncated: false, totalBytes: Buffer.byteLength(raw), nextOffset: Buffer.byteLength(raw) });
+      assert.ok(r.text.includes('<script>window.secret'), 'raw keeps the markup, scripts included');
+      assert.ok(!r.text.includes('ghp_abcdefghijklmnopqrstuvwxyz0123456789'), 'redaction applies to raw markup');
+      assert.deepEqual(await tools.call('read_attachment', { id: 'att_00000003', as: 'raw' }), r);
+    } },
+    { name: 'read_attachment: as is ignored for non-HTML attachments', run: async () => {
+      assert.deepEqual(await tools.call('read_attachment', { id: 'att_00000001', as: 'text' }), await tools.call('read_attachment', { id: 'att_00000001' }));
+      assert.deepEqual(await tools.call('read_attachment', { id: 'att_00000002', as: 'text' }), await tools.call('read_attachment', { id: 'att_00000002' }));
+      let converted = 0;
+      const t = createAskTools({ ...fake, htmlToText: async () => { converted += 1; return { title: null, text: '', truncated: false }; },
+        readAttachment: () => ({ name: 'data.json', kind: 'text', mime: 'application/json', text: '{"a":"<b>x</b>"}' }) });
+      const j = await t.call('read_attachment', { id: 'att_00000009', as: 'text' });
+      assert.equal(j.text, '{"a":"<b>x</b>"}', 'a JSON body holding markup is returned verbatim');
+      assert.equal(converted, 0, 'the converter never runs for a non-HTML mime');
+      assert.ok(!('as' in j) && !('title' in j));
+    } },
+  ]);
 });
 
-test('read_attachment (#398): a binary attachment returns metadata + path, never a text slice', async () => {
-  const r = await tools.call('read_attachment', { id: 'att_00000002' });
-  assert.deepEqual(r, {
-    name: 'shot.png', kind: 'image', mime: 'image/png', totalBytes: 2048,
-    path: '/home/ask/ask_00000001/att/att_00000002.png',
-    note: 'binary attachment: pass `path` to your Read tool to view the content',
-  });
-  assert.ok(!('text' in r) && !('truncated' in r) && !('nextOffset' in r), 'no sliceBytes fields on a binary read');
+test('read_attachment as="text": converted, redacted and paged; the converter\'s own truncation is reported as conversionTruncated', async () => {
+  await checkRows([
+    { name: 'read_attachment: as "text" converts an HTML attachment (scripts/styles stripped, title), then redacts and pages the CONVERTED text', run: async () => {
+      const r = await tools.call('read_attachment', { id: 'att_00000003', as: 'text' });
+      const expected = '# Deploy\n\ntoken ghp_<redacted> here\n\n- first step\n- second step';
+      assert.deepEqual(r, {
+        name: 'page.html', kind: 'text', mime: 'text/html', as: 'text', title: 'Deploy ghp_<redacted> notes',
+        text: expected, truncated: false, totalBytes: Buffer.byteLength(expected), nextOffset: Buffer.byteLength(expected), conversionTruncated: false,
+      });
+      assert.ok(!/window\.secret|color: red|<\/?(html|head|title|style|script|body|h1|p|ul|li)\b/.test(r.text), 'no script, no style, no tags');
+      // offsets refer to the converted text: paging it back together yields exactly the one-shot read
+      let offset = 0; let joined = ''; let pages = 0;
+      for (;;) {
+        const p = await tools.call('read_attachment', { id: 'att_00000003', as: 'text', offset, maxBytes: 16 });
+        assert.equal(p.totalBytes, Buffer.byteLength(expected), 'totalBytes is the converted size, not the markup size');
+        joined += p.text; pages += 1; offset = p.nextOffset;
+        if (!p.truncated) break;
+      }
+      assert.ok(pages > 1, 'the small window really paged');
+      assert.equal(joined, expected);
+      await assert.rejects(() => tools.call('read_attachment', { id: 'att_00000003', as: 'markdown' }), { name: 'AskToolError', message: 'read_attachment: as must be raw or text' });
+    } },
+    { name: 'read_attachment: the converter\'s own truncation is reported as conversionTruncated', run: async () => {
+      const seen = [];
+      const t = createAskTools({ ...fake, htmlToText: async (html, baseUrl, opts) => { seen.push({ baseUrl, opts }); return { title: null, text: 'cut short', truncated: true }; } });
+      const r = await t.call('read_attachment', { id: 'att_00000003', as: 'text' });
+      assert.equal(r.conversionTruncated, true);
+      assert.equal(r.truncated, false, 'paging truncation is separate');
+      assert.equal(r.title, null);
+      assert.equal(seen[0].baseUrl, null, 'no base URL: an attachment has no origin');
+      assert.ok(seen[0].opts.maxChars >= ASK_LIMITS.attachment.maxBytesPerFile, 'maxChars covers a full 512 KB text attachment');
+    } },
+  ]);
 });
 
-test('read_attachment: an HTML attachment reads as raw markup by default (and with as: "raw"), redacted', async () => {
-  const r = await tools.call('read_attachment', { id: 'att_00000003' });
-  const raw = redactAskText(HTML_PAGE);
-  assert.deepEqual(r, { name: 'page.html', kind: 'text', text: raw, truncated: false, totalBytes: Buffer.byteLength(raw), nextOffset: Buffer.byteLength(raw) });
-  assert.ok(r.text.includes('<script>window.secret'), 'raw keeps the markup, scripts included');
-  assert.ok(!r.text.includes('ghp_abcdefghijklmnopqrstuvwxyz0123456789'), 'redaction applies to raw markup');
-  assert.deepEqual(await tools.call('read_attachment', { id: 'att_00000003', as: 'raw' }), r);
-});
-
-test('read_attachment: as "text" converts an HTML attachment (scripts/styles stripped, title), then redacts and pages the CONVERTED text', async () => {
-  const r = await tools.call('read_attachment', { id: 'att_00000003', as: 'text' });
-  const expected = '# Deploy\n\ntoken ghp_<redacted> here\n\n- first step\n- second step';
-  assert.deepEqual(r, {
-    name: 'page.html', kind: 'text', mime: 'text/html', as: 'text', title: 'Deploy ghp_<redacted> notes',
-    text: expected, truncated: false, totalBytes: Buffer.byteLength(expected), nextOffset: Buffer.byteLength(expected), conversionTruncated: false,
-  });
-  assert.ok(!/window\.secret|color: red|<\/?(html|head|title|style|script|body|h1|p|ul|li)\b/.test(r.text), 'no script, no style, no tags');
-  // offsets refer to the converted text: paging it back together yields exactly the one-shot read
-  let offset = 0; let joined = ''; let pages = 0;
-  for (;;) {
-    const p = await tools.call('read_attachment', { id: 'att_00000003', as: 'text', offset, maxBytes: 16 });
-    assert.equal(p.totalBytes, Buffer.byteLength(expected), 'totalBytes is the converted size, not the markup size');
-    joined += p.text; pages += 1; offset = p.nextOffset;
-    if (!p.truncated) break;
-  }
-  assert.ok(pages > 1, 'the small window really paged');
-  assert.equal(joined, expected);
-  await assert.rejects(() => tools.call('read_attachment', { id: 'att_00000003', as: 'markdown' }), { name: 'AskToolError', message: 'read_attachment: as must be raw or text' });
-});
-
-test('read_attachment: the converter\'s own truncation is reported as conversionTruncated', async () => {
-  const seen = [];
-  const t = createAskTools({ ...fake, htmlToText: async (html, baseUrl, opts) => { seen.push({ baseUrl, opts }); return { title: null, text: 'cut short', truncated: true }; } });
-  const r = await t.call('read_attachment', { id: 'att_00000003', as: 'text' });
-  assert.equal(r.conversionTruncated, true);
-  assert.equal(r.truncated, false, 'paging truncation is separate');
-  assert.equal(r.title, null);
-  assert.equal(seen[0].baseUrl, null, 'no base URL: an attachment has no origin');
-  assert.ok(seen[0].opts.maxChars >= ASK_LIMITS.attachment.maxBytesPerFile, 'maxChars covers a full 512 KB text attachment');
-});
-
-test('read_attachment: as is ignored for non-HTML attachments', async () => {
-  assert.deepEqual(await tools.call('read_attachment', { id: 'att_00000001', as: 'text' }), await tools.call('read_attachment', { id: 'att_00000001' }));
-  assert.deepEqual(await tools.call('read_attachment', { id: 'att_00000002', as: 'text' }), await tools.call('read_attachment', { id: 'att_00000002' }));
-  let converted = 0;
-  const t = createAskTools({ ...fake, htmlToText: async () => { converted += 1; return { title: null, text: '', truncated: false }; },
-    readAttachment: () => ({ name: 'data.json', kind: 'text', mime: 'application/json', text: '{"a":"<b>x</b>"}' }) });
-  const j = await t.call('read_attachment', { id: 'att_00000009', as: 'text' });
-  assert.equal(j.text, '{"a":"<b>x</b>"}', 'a JSON body holding markup is returned verbatim');
-  assert.equal(converted, 0, 'the converter never runs for a non-HTML mime');
-  assert.ok(!('as' in j) && !('title' in j));
-});
-
-test('read_attachment: the schema offers as = raw | text', () => {
-  const def = tools.list().find((d) => d.name === 'read_attachment');
-  assert.equal(def.inputSchema.properties.as.type, 'string');
-  assert.match(def.inputSchema.properties.as.description, /"raw".*"text"/);
-  assert.match(def.description, /as: "text"/);
-  assert.deepEqual(def.inputSchema.required, ['id']);
-});
-
-test('propose_run passes through validateProposal; unknown tools and bad input are AskToolErrors', async () => {
-  assert.deepEqual(await tools.call('propose_run', { projectKey: 'demo-00000001', brief: 'b' }), { ok: true, card: { echoed: { projectKey: 'demo-00000001', brief: 'b' } } });
-  await assert.rejects(() => tools.call('nope', {}), { name: 'AskToolError', message: 'unknown tool: nope' });
-  await assert.rejects(() => tools.call('get_run', 'not-an-object'), AskToolError);
-  await assert.rejects(() => tools.call('get_run', { id: 'x', projectKey: 'a', workspaceId: 'b' }), { message: 'get_run: give projectKey OR workspaceId, not both' });
-});
-
-test('propose_run accepts commentIds and passes them through untouched', async () => {
-  assert.deepEqual(await tools.call('propose_run', { projectKey: 'demo-00000001', brief: 'b', commentIds: ['dc_00000001'] }),
-    { ok: true, card: { echoed: { projectKey: 'demo-00000001', brief: 'b', commentIds: ['dc_00000001'] } } });
-});
-
-test('propose_run schema names note + attachmentIds', () => {
-  const props = tools.list().find((d) => d.name === 'propose_run').inputSchema.properties;
-  assert.equal(props.note.type, 'string');
-  assert.equal(props.attachmentIds.type, 'array');
-  assert.deepEqual(props.attachmentIds.items, { type: 'string' });
-  assert.match(props.attachmentIds.description, /extra files/);
-  assert.match(props.brief.description, new RegExp(`≤ ${ASK_LIMITS.briefMaxChars} chars`));
+test('propose_run passes through validateProposal (commentIds untouched); unknown tools and bad input are AskToolErrors', async () => {
+  await checkRows([
+    { name: 'propose_run passes through validateProposal; unknown tools and bad input are AskToolErrors', run: async () => {
+      assert.deepEqual(await tools.call('propose_run', { projectKey: 'demo-00000001', brief: 'b' }), { ok: true, card: { echoed: { projectKey: 'demo-00000001', brief: 'b' } } });
+      await assert.rejects(() => tools.call('nope', {}), { name: 'AskToolError', message: 'unknown tool: nope' });
+      await assert.rejects(() => tools.call('get_run', 'not-an-object'), AskToolError);
+      await assert.rejects(() => tools.call('get_run', { id: 'x', projectKey: 'a', workspaceId: 'b' }), { message: 'get_run: give projectKey OR workspaceId, not both' });
+    } },
+    { name: 'propose_run accepts commentIds and passes them through untouched', run: async () => {
+      assert.deepEqual(await tools.call('propose_run', { projectKey: 'demo-00000001', brief: 'b', commentIds: ['dc_00000001'] }),
+        { ok: true, card: { echoed: { projectKey: 'demo-00000001', brief: 'b', commentIds: ['dc_00000001'] } } });
+    } },
+  ]);
 });
 
 test('propose_run hands the thread\'s attachment ledger to the validator', async () => {
@@ -760,25 +773,28 @@ test('propose_run hands the thread\'s attachment ledger to the validator', async
   assert.deepEqual((await t2.call('propose_run', { projectKey: 'demo-00000001', brief: 'b' })).card.opts, { attachments: [] }, 'no dep → empty ledger');
 });
 
-test('defaultToolDeps.listAttachments is thread-scoped and empty without a thread', () => {
-  assert.deepEqual(defaultToolDeps({ threadId: null }).listAttachments(), []);
-  assert.equal(typeof defaultToolDeps({ threadId: 'ask_00000001' }).listAttachments, 'function');
-});
-
-test('defaultToolDeps.listAttachments degrades to [] on an unreadable DB — never an error the model cannot propose past', () => {
-  // Same contract as the sibling pinnedScope dep and the parent path (turn.mjs): the ledger is
-  // context for the card, so a locked/corrupt store means "no attachments", not a failed tool call.
-  const prev = process.env.WORCA_HOME;
-  const blocked = join(mkdtempSync(join(tmpdir(), 'worca-ask-deps-')), 'not-a-dir');
-  writeFileSync(blocked, 'x');            // getDb() mkdirSync's the home first: a FILE there throws
-  closeDb();                              // drop the handle opened at the temp home
-  process.env.WORCA_HOME = blocked;
-  try {
-    assert.deepEqual(defaultToolDeps({ threadId: 'ask_00000001' }).listAttachments(), []);
-  } finally {
-    process.env.WORCA_HOME = prev;
-    closeDb();                            // the next getDb() reopens against the suite's temp home
-  }
+test('defaultToolDeps.listAttachments: thread-scoped, empty without a thread, [] on an unreadable DB', async () => {
+  await checkRows([
+    { name: 'defaultToolDeps.listAttachments is thread-scoped and empty without a thread', run: async () => {
+      assert.deepEqual(defaultToolDeps({ threadId: null }).listAttachments(), []);
+      assert.equal(typeof defaultToolDeps({ threadId: 'ask_00000001' }).listAttachments, 'function');
+    } },
+    { name: 'defaultToolDeps.listAttachments degrades to [] on an unreadable DB — never an error the model cannot propose past', run: async () => {
+      // Same contract as the sibling pinnedScope dep and the parent path (turn.mjs): the ledger is
+      // context for the card, so a locked/corrupt store means "no attachments", not a failed tool call.
+      const prev = process.env.WORCA_HOME;
+      const blocked = join(mkdtempSync(join(tmpdir(), 'worca-ask-deps-')), 'not-a-dir');
+      writeFileSync(blocked, 'x');            // getDb() mkdirSync's the home first: a FILE there throws
+      closeDb();                              // drop the handle opened at the temp home
+      process.env.WORCA_HOME = blocked;
+      try {
+        assert.deepEqual(defaultToolDeps({ threadId: 'ask_00000001' }).listAttachments(), []);
+      } finally {
+        process.env.WORCA_HOME = prev;
+        closeDb();                            // the next getDb() reopens against the suite's temp home
+      }
+    } },
+  ]);
 });
 
 test('propose_run refuses commentIds from another project and says so', async () => {
@@ -960,16 +976,99 @@ test('list_run_artifacts / read_run_artifact / get_run_progress over real deps',
   assert.doesNotMatch(t1.title, /ghp_abcdefghijklmnopqrstuvwxyz0123456789/, 'task title redacted');
 });
 
-test('source scan: tools.mjs issues no writes and never touches db.mjs; tool-deps.mjs only reads', () => {
-  const src = readFileSync(new URL('../src/core/ask/tools.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(src, /\b(INSERT|UPDATE|DELETE)\b/);
-  assert.doesNotMatch(src, /from '\.\.\/db\.mjs'|getDb\(|\btx\(/);
-  assert.doesNotMatch(src, /node:sqlite/);
-  const deps = readFileSync(new URL('../src/core/ask/tool-deps.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(deps, /\b(INSERT|UPDATE|DELETE)\b/);
-  assert.doesNotMatch(deps, /\btx\(|writeStoreMeta|writeState|rmSync|writeFile|mkdir|appendFile|unlink/, 'the real reader bundle never writes');
-  assert.match(deps, /import \{ readFile, access \} from 'node:fs\/promises';/, 'fs surface = readFile + access only');
-  assert.doesNotMatch(deps, /from 'node:fs'(?!\/promises)/);
+// The one repo guard for the read-only chat tool layer (§6.1): tools.mjs, tool-deps.mjs and every
+// src/core/ask/*-deps.mjs / *-proposal.mjs. Each row was a per-module source scan in that module's
+// own test file (named in the row); their mcp-stdio wiring regexes are not carried.
+test('ask tool layer stays write-free (table-driven source scan over tools.mjs, tool-deps.mjs and every src/core/ask/*-deps.mjs / *-proposal.mjs)', async () => {
+  await checkRows([
+    { name: 'source scan: tools.mjs issues no writes and never touches db.mjs; tool-deps.mjs only reads', run: () => {
+      const src = readFileSync(new URL('../src/core/ask/tools.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(src, /\b(INSERT|UPDATE|DELETE)\b/);
+      assert.doesNotMatch(src, /from '\.\.\/db\.mjs'|getDb\(|\btx\(/);
+      assert.doesNotMatch(src, /node:sqlite/);
+      const deps = readFileSync(new URL('../src/core/ask/tool-deps.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(deps, /\b(INSERT|UPDATE|DELETE)\b/);
+      assert.doesNotMatch(deps, /\btx\(|writeStoreMeta|writeState|rmSync|writeFile|mkdir|appendFile|unlink/, 'the real reader bundle never writes');
+      assert.match(deps, /import \{ readFile, access \} from 'node:fs\/promises';/, 'fs surface = readFile + access only');
+      assert.doesNotMatch(deps, /from 'node:fs'(?!\/promises)/);
+    } },
+    { name: 'every src/core/ask/*-deps.mjs / *-proposal.mjs: no SQL write verbs and no node:sqlite', run: () => {
+      const dir = new URL('../src/core/ask/', import.meta.url);
+      const mods = readdirSync(dir).filter((f) => /-(deps|proposal)\.mjs$/.test(f));
+      for (const m of ['branch-deps.mjs', 'comment-deps.mjs', 'memory-deps.mjs', 'metrics-deps.mjs', 'metrics-proposal.mjs', 'script-deps.mjs', 'workflow-deps.mjs', 'worktree-deps.mjs']) {
+        assert.ok(mods.includes(m), `the scan reaches ${m}`);
+      }
+      for (const m of mods) {
+        const src = readFileSync(new URL(m, dir), 'utf8');
+        assert.doesNotMatch(src, /\b(INSERT|UPDATE|DELETE)\b/, m);
+        assert.doesNotMatch(src, /node:sqlite/, m);
+      }
+    } },
+    { name: 'test/ask-branch-tools.test.mjs > read-only pins: no write-tool set names list_branches; branch-deps never writes; mcp-stdio wires it', run: () => {
+      const events = readFileSync(new URL('../src/core/ask/events.mjs', import.meta.url), 'utf8');
+      for (const m of events.matchAll(/new Set\(\[([\s\S]*?)\]\)/g)) assert.ok(!m[1].includes('list_branches'), m[0]);
+      const deps = readFileSync(new URL('../src/core/ask/branch-deps.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(deps, /fastForward|ensureLocalBranch|syncBaseForRun|syncRepo|update-ref|merge/);
+    } },
+    { name: 'test/ask-diff-comment-tools.test.mjs > source scan: tools.mjs is still write-free and db-free; comment-deps holds only the comment bundle', run: () => {
+      const tools = readFileSync(new URL('../src/core/ask/tools.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(tools, /\b(INSERT|UPDATE|DELETE)\b/);
+      assert.doesNotMatch(tools, /from '\.\.\/db\.mjs'|getDb\(|\btx\(|node:sqlite/);
+      assert.equal(tools.split('\n').filter((l) => /^import /.test(l)).length, 0, 'tools.mjs stays import-free');
+      const deps = readFileSync(new URL('../src/core/ask/comment-deps.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(deps, /node:sqlite|from '\.\.\/db\.mjs'/);
+      assert.ok(deps.includes("from '../diff-comments.mjs'"), 'writes go through the one mutation module');
+    } },
+    { name: 'test/ask-memory-tools.test.mjs > source scans: tools.mjs still has no imports and no SQL verbs; memory-deps.mjs is the ONE Ask module that imports the store; the MCP child spreads it', run: () => {
+      const tools = readFileSync(new URL('../src/core/ask/tools.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(tools, /^import /m, 'tools.mjs imports nothing');
+      assert.doesNotMatch(tools, /\b(INSERT|UPDATE|DELETE)\b/);
+      const deps = readFileSync(new URL('../src/core/ask/memory-deps.mjs', import.meta.url), 'utf8');
+      assert.match(deps, /from '\.\.\/memory-store\.mjs'/);
+      assert.doesNotMatch(deps, /from 'node:fs/, 'no direct fs — the store owns every write');
+      const toolDeps = readFileSync(new URL('../src/core/ask/tool-deps.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(toolDeps, /memory-store/, 'tool-deps stays store-free');
+    } },
+    { name: 'test/ask-metrics-tools.test.mjs > source scan: the tools module still issues no writes; the deps bundle is the only file naming the metrics core', run: () => {
+      const src = readFileSync(new URL('../src/core/ask/tools.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(src, /\b(INSERT|UPDATE|DELETE)\b/);
+      assert.doesNotMatch(src, /metrics\/(sync|read)\.mjs|outboxDir|slugDirName|worca-metrics\//, 'no metrics mechanics leak into the tool layer');
+      const deps = readFileSync(new URL('../src/core/ask/metrics-deps.mjs', import.meta.url), 'utf8');
+      assert.match(deps, /export async function applyMetricsChange/);
+      assert.match(deps, /export function defaultMetricsDeps/);
+    } },
+    { name: 'test/ask-metrics-proposal.test.mjs > source scan: the validator module never writes and never touches the DB or git', run: () => {
+      const src = readFileSync(new URL('../src/core/ask/metrics-proposal.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(src, /\b(INSERT|UPDATE|DELETE)\b/);
+      assert.doesNotMatch(src, /from '\.\.\/db\.mjs'|node:fs|node:child_process|metrics\/sync\.mjs/);
+    } },
+    { name: 'test/ask-script-tools.test.mjs > source scans: tools.mjs stays import-free and write-free; script-deps.mjs is the ONE Ask module that imports the store and the bench', run: () => {
+      const tools = readFileSync(new URL('../src/core/ask/tools.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(tools, /^import /m, 'tools.mjs imports nothing');
+      assert.doesNotMatch(tools, /\b(INSERT|UPDATE|DELETE)\b/);
+      assert.doesNotMatch(tools, /script-store|script-bench/, 'the store and the bench are reachable only through deps.scripts');
+      const deps = readFileSync(new URL('../src/core/ask/script-deps.mjs', import.meta.url), 'utf8');
+      assert.match(deps, /from '\.\.\/script-store\.mjs'/);
+      assert.match(deps, /from '\.\.\/script-bench\.mjs'/);
+      assert.doesNotMatch(deps, /from 'node:fs/, 'no direct fs — the store owns every write');
+      const toolDeps = readFileSync(new URL('../src/core/ask/tool-deps.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(toolDeps, /script-store|script-bench/, 'tool-deps stays read-only');
+    } },
+    { name: 'test/ask-workflow-deps.test.mjs > source scan: workflow-deps.mjs never writes (no row writer, no db.mjs, no SQL verbs)', run: () => {
+      const src = readFileSync(new URL('../src/core/ask/workflow-deps.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(src, /\b(INSERT|UPDATE|DELETE)\b/);
+      assert.doesNotMatch(src, /from '\.\.\/db\.mjs'|getDb\(|\btx\(|node:sqlite|writeGraphWorkflow|mintAutoWorkflowId/);
+    } },
+    { name: 'test/ask-worktree-tools.test.mjs > source scans: tools.mjs still write-free; worktree-deps.mjs holds only the worktree bundle', run: () => {
+      const tools = readFileSync(new URL('../src/core/ask/tools.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(tools, /from '\.\.\/db\.mjs'|getDb\(|\btx\(|node:sqlite/);
+      const deps = readFileSync(new URL('../src/core/ask/worktree-deps.mjs', import.meta.url), 'utf8');
+      assert.doesNotMatch(deps, /from '\.\.\/db\.mjs'|node:sqlite|writeStoreMeta|writeFile|appendFile|rmSync/);
+      for (const m of ['./worktrees.mjs', '../worktree.mjs', './git-allowlist.mjs']) {
+        assert.ok(deps.includes(`from '${m}'`), `worktree-deps imports ${m}`);
+      }
+    } },
+  ]);
 });
 
 // Review of PR #376: every page re-read the whole diff-patch.patch, re-split it
@@ -1014,29 +1113,27 @@ test('#397: an unscoped run id tries the pinned scope first, then falls back eve
   await assert.rejects(t.call('get_run', { id: '4e1f2a9b', projectKey: 'other-00000003' }), /run not found/);
 });
 
-test('#397: propose_run defaults its target from the pin ONLY when both keys are absent', async () => {
-  const t = createAskTools({ ...fake, pinnedScope: () => ({ projectKey: 'demo-00000001' }) });
-  const r = await t.call('propose_run', { brief: 'x' });
-  assert.equal(r.card.echoed.projectKey, 'demo-00000001', 'the pin fills the missing target');
-  const r2 = await t.call('propose_run', { brief: 'x', workspaceId: 'wks-team-0000abcd' });
-  assert.equal(r2.card.echoed.projectKey, undefined, 'an explicit target is never overridden');
-  assert.equal(r2.card.echoed.workspaceId, 'wks-team-0000abcd');
-  const tw = createAskTools({ ...fake, pinnedScope: () => ({ workspaceId: 'wks-team-0000abcd' }) });
-  assert.deepEqual((await tw.call('propose_run', { brief: 'x' })).card.echoed.workspaceId, 'wks-team-0000abcd');
-});
-
-test('#397: a missing or failing pinnedScope dep means "nothing pinned", never an error', async () => {
-  const noDep = createAskTools(fake);   // the shared `fake` has no pinnedScope at all
-  assert.equal((await noDep.call('propose_run', { brief: 'x' })).card.echoed.projectKey, undefined);
-  assert.equal((await noDep.call('get_run', { id: '4e1f2a9b' })).id, '4e1f2a9b');
-  const throwing = createAskTools({ ...fake, pinnedScope: () => { throw new Error('db gone'); } });
-  assert.equal((await throwing.call('propose_run', { brief: 'x' })).card.echoed.projectKey, undefined);
-  assert.equal((await throwing.call('get_run', { id: '4e1f2a9b' })).id, '4e1f2a9b');
-});
-
-test('propose_schedule_change accepts after / afterPolicy / sourceFromPrevious (run chains)', () => {
-  const ps = tools.list().find((d) => d.name === 'propose_schedule_change');
-  for (const k of ['after', 'afterPolicy', 'sourceFromPrevious']) assert.ok(k in ps.inputSchema.properties, k);
+test('#397: propose_run defaults its target from the pin only when both keys are absent; a missing or failing pinnedScope dep means nothing pinned', async () => {
+  await checkRows([
+    { name: '#397: propose_run defaults its target from the pin ONLY when both keys are absent', run: async () => {
+      const t = createAskTools({ ...fake, pinnedScope: () => ({ projectKey: 'demo-00000001' }) });
+      const r = await t.call('propose_run', { brief: 'x' });
+      assert.equal(r.card.echoed.projectKey, 'demo-00000001', 'the pin fills the missing target');
+      const r2 = await t.call('propose_run', { brief: 'x', workspaceId: 'wks-team-0000abcd' });
+      assert.equal(r2.card.echoed.projectKey, undefined, 'an explicit target is never overridden');
+      assert.equal(r2.card.echoed.workspaceId, 'wks-team-0000abcd');
+      const tw = createAskTools({ ...fake, pinnedScope: () => ({ workspaceId: 'wks-team-0000abcd' }) });
+      assert.deepEqual((await tw.call('propose_run', { brief: 'x' })).card.echoed.workspaceId, 'wks-team-0000abcd');
+    } },
+    { name: '#397: a missing or failing pinnedScope dep means "nothing pinned", never an error', run: async () => {
+      const noDep = createAskTools(fake);   // the shared `fake` has no pinnedScope at all
+      assert.equal((await noDep.call('propose_run', { brief: 'x' })).card.echoed.projectKey, undefined);
+      assert.equal((await noDep.call('get_run', { id: '4e1f2a9b' })).id, '4e1f2a9b');
+      const throwing = createAskTools({ ...fake, pinnedScope: () => { throw new Error('db gone'); } });
+      assert.equal((await throwing.call('propose_run', { brief: 'x' })).card.echoed.projectKey, undefined);
+      assert.equal((await throwing.call('get_run', { id: '4e1f2a9b' })).id, '4e1f2a9b');
+    } },
+  ]);
 });
 
 // list_run_artifacts lists every indexed row, screenshots and PDFs included, and
@@ -1044,31 +1141,34 @@ test('propose_schedule_change accepts after / afterPolicy / sourceFromPrevious (
 // a slide render charged up to 200KB of replacement-character mojibake to the
 // turn's context. The UI has a raw-bytes route for these; the tool refuses them
 // and says where the bytes are instead.
-test('read_run_artifact refuses the byte kinds instead of decoding them as text', async () => {
-  const tools = createAskTools({
-    limits: ASK_LIMITS,
-    redact: (t) => t,
-    findPipelineRowById: () => ({ id: 'p1' }),
-    readRunArtifact: async () => { throw new Error('must not be read'); },
-  });
-  for (const rel of ['shots/s01.png', 'deck/deck.pdf', 'deck/poppins-400.woff2']) {
-    await assert.rejects(
-      () => tools.call('read_run_artifact', { runId: 'p1', relPath: rel }),
-      (e) => e instanceof AskToolError && /not text/i.test(e.message), rel,
-    );
-  }
-});
-
-test('read_run_artifact still reads the text kinds', async () => {
-  const tools = createAskTools({
-    limits: ASK_LIMITS,
-    redact: (t) => t,
-    findPipelineRowById: () => ({ id: 'p1' }),
-    lookupPipelineRow: () => ({ id: 'p1' }),
-    readRunArtifact: async (_row, rel) => ({ rel, text: '# the plan\n' }),
-  });
-  const out = await tools.call('read_run_artifact', { runId: 'p1', relPath: 'plan.md' });
-  assert.equal(out.text, '# the plan\n');
+test('read_run_artifact refuses byte kinds and still reads text kinds', async () => {
+  await checkRows([
+    { name: 'read_run_artifact refuses the byte kinds instead of decoding them as text', run: async () => {
+      const tools = createAskTools({
+        limits: ASK_LIMITS,
+        redact: (t) => t,
+        findPipelineRowById: () => ({ id: 'p1' }),
+        readRunArtifact: async () => { throw new Error('must not be read'); },
+      });
+      for (const rel of ['shots/s01.png', 'deck/deck.pdf', 'deck/poppins-400.woff2']) {
+        await assert.rejects(
+          () => tools.call('read_run_artifact', { runId: 'p1', relPath: rel }),
+          (e) => e instanceof AskToolError && /not text/i.test(e.message), rel,
+        );
+      }
+    } },
+    { name: 'read_run_artifact still reads the text kinds', run: async () => {
+      const tools = createAskTools({
+        limits: ASK_LIMITS,
+        redact: (t) => t,
+        findPipelineRowById: () => ({ id: 'p1' }),
+        lookupPipelineRow: () => ({ id: 'p1' }),
+        readRunArtifact: async (_row, rel) => ({ rel, text: '# the plan\n' }),
+      });
+      const out = await tools.call('read_run_artifact', { runId: 'p1', relPath: 'plan.md' });
+      assert.equal(out.text, '# the plan\n');
+    } },
+  ]);
 });
 
 // tools.mjs is import-free by contract (two source scans assert it), so its byte

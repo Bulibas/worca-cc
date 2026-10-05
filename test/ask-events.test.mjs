@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTurnReducer, normalizeUsage, estimateAgentCosts, matchModelKey, labelForTool, scriptResultNote, scriptToolKey } from '../src/core/ask/events.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // ── frame builders (the runner envelope: {type, raw}) ───────────────────────
 const SID = 'sess-0001';
@@ -70,66 +71,72 @@ test('plain text turn: label, batched deltas, usage frames, the assistant block 
   assert.equal(h.r.finish(), s, 'idempotent');
 });
 
-test('delta batching: 256 chars flush immediately, flush() forces, redaction per batch, messages join with a blank line', () => {
-  const h = harness();
-  h.push(mstart('msg_1'));
-  h.push(delta('x'.repeat(255)));
-  assert.equal(h.frames.filter((f) => f.type === 'ask-delta').length, 0);
-  h.push(delta('y'));
-  assert.equal(h.frames.at(-1).text.length, 256, 'size threshold flushes without the timer');
-  h.push(delta('key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 end'));
-  h.r.flush();
-  assert.equal(h.frames.at(-1).text, 'key sk-ant-<redacted> end');
-  h.push(atext('msg_1', 'first'), mstart('msg_2'), delta('second'));
-  h.r.flush();
-  const deltas = h.frames.filter((f) => f.type === 'ask-delta').map((f) => f.text);
-  assert.equal(deltas.at(-1), '\n\nsecond', 'a later message announces itself with a blank line (same batch)');
-  assert.equal(h.r.finish().text, 'first\n\nsecond');
-  const out = [];
-  const sync = createTurnReducer({ onFrame: (f) => out.push(f), now: () => 0, setTimeout: (fn) => { fn(); return 1; }, clearTimeout: () => {} });
-  sync.push(mstart('m')); sync.push(delta('a')); sync.push(delta('b'));
-  assert.deepEqual(out.filter((f) => f.type === 'ask-delta').map((f) => f.text), ['a', 'b'], 'a synchronous timer stub flushes every delta (no stale timer id)');
+test('delta batching: 256-char flush, flush(), per-batch redaction, blank-line joins; a tool call flushes the text before its block', async () => {
+  await checkRows([
+    { name: 'delta batching: 256 chars flush immediately, flush() forces, redaction per batch, messages join with a blank line', run: async () => {
+      const h = harness();
+      h.push(mstart('msg_1'));
+      h.push(delta('x'.repeat(255)));
+      assert.equal(h.frames.filter((f) => f.type === 'ask-delta').length, 0);
+      h.push(delta('y'));
+      assert.equal(h.frames.at(-1).text.length, 256, 'size threshold flushes without the timer');
+      h.push(delta('key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 end'));
+      h.r.flush();
+      assert.equal(h.frames.at(-1).text, 'key sk-ant-<redacted> end');
+      h.push(atext('msg_1', 'first'), mstart('msg_2'), delta('second'));
+      h.r.flush();
+      const deltas = h.frames.filter((f) => f.type === 'ask-delta').map((f) => f.text);
+      assert.equal(deltas.at(-1), '\n\nsecond', 'a later message announces itself with a blank line (same batch)');
+      assert.equal(h.r.finish().text, 'first\n\nsecond');
+      const out = [];
+      const sync = createTurnReducer({ onFrame: (f) => out.push(f), now: () => 0, setTimeout: (fn) => { fn(); return 1; }, clearTimeout: () => {} });
+      sync.push(mstart('m')); sync.push(delta('a')); sync.push(delta('b'));
+      assert.deepEqual(out.filter((f) => f.type === 'ask-delta').map((f) => f.text), ['a', 'b'], 'a synchronous timer stub flushes every delta (no stale timer id)');
+    } },
+    { name: 'a tool call flushes the batched text before it: the text reaches the client before the tool block', run: async () => {
+      const h = harness();
+      h.push(mstart('msg_1'), delta("I'll check the runs."));
+      assert.equal(h.frames.filter((f) => f.type === 'ask-delta').length, 0, 'still batched');
+      h.push(atool('msg_1', 'tu_1', 'mcp__worca__list_runs', {}));
+      const order = h.types().filter((t) => t === 'ask-delta' || t === 'ask-block');
+      assert.deepEqual(order, ['ask-delta', 'ask-block']);
+      assert.equal(h.frames.find((f) => f.type === 'ask-delta').text, "I'll check the runs.");
+    } },
+  ]);
 });
 
-test('a tool call flushes the batched text before it: the text reaches the client before the tool block', () => {
-  const h = harness();
-  h.push(mstart('msg_1'), delta("I'll check the runs."));
-  assert.equal(h.frames.filter((f) => f.type === 'ask-delta').length, 0, 'still batched');
-  h.push(atool('msg_1', 'tu_1', 'mcp__worca__list_runs', {}));
-  const order = h.types().filter((t) => t === 'ask-delta' || t === 'ask-block');
-  assert.deepEqual(order, ['ask-delta', 'ask-block']);
-  assert.equal(h.frames.find((f) => f.type === 'ask-delta').text, "I'll check the runs.");
-});
-
-test('text comes from the main stream only; result.result is a fallback when no assistant text arrived', () => {
-  const h = harness();
-  h.push(mstart('msg_c', 'toolu_agent'), delta('child text', 'toolu_agent'), atext('msg_1', 'parent'));
-  h.r.flush();
-  assert.ok(!h.frames.some((f) => f.type === 'ask-delta' && f.text.includes('child')));
-  assert.equal(h.r.finish().text, 'parent');
-  const h2 = harness();
-  h2.push(result({ result: 'from result' }));
-  assert.equal(h2.r.finish().text, 'from result');
-});
-
-test('a synthetic CLI error message is never answer text; an is_error result never feeds the fallback', () => {
-  const apiLine = 'Failed to authenticate. API Error: 403 No access to this model: claude-opus-5-5';
-  const h = harness();
-  // The real failure shape: init → synthetic assistant (model "<synthetic>") carrying
-  // the refusal → is_error result whose `result` repeats it.
-  h.push(
-    init(),
-    ev({ type: 'assistant', message: { id: 'synth-1', model: '<synthetic>', role: 'assistant', content: [{ type: 'text', text: apiLine }], usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } }, parent_tool_use_id: null, session_id: SID }),
-    result({ is_error: true, result: apiLine, total_cost_usd: 0, num_turns: 0 }),
-  );
-  const s = h.r.finish();
-  assert.equal(s.text, '', 'neither the synthetic line nor the error result becomes the answer');
-  assert.equal(s.cliErrorText, apiLine, 'the synthetic line is kept aside for the error notice');
-  assert.equal(s.isError, true);
-  // An error result must not feed the result-text fallback either.
-  const h2 = harness();
-  h2.push(result({ is_error: true, result: apiLine }));
-  assert.equal(h2.r.finish().text, '');
+test('answer text: main stream only; result.result is the fallback, never a synthetic CLI error or an is_error result', async () => {
+  await checkRows([
+    { name: 'text comes from the main stream only; result.result is a fallback when no assistant text arrived', run: async () => {
+      const h = harness();
+      h.push(mstart('msg_c', 'toolu_agent'), delta('child text', 'toolu_agent'), atext('msg_1', 'parent'));
+      h.r.flush();
+      assert.ok(!h.frames.some((f) => f.type === 'ask-delta' && f.text.includes('child')));
+      assert.equal(h.r.finish().text, 'parent');
+      const h2 = harness();
+      h2.push(result({ result: 'from result' }));
+      assert.equal(h2.r.finish().text, 'from result');
+    } },
+    { name: 'a synthetic CLI error message is never answer text; an is_error result never feeds the fallback', run: async () => {
+      const apiLine = 'Failed to authenticate. API Error: 403 No access to this model: claude-opus-5-5';
+      const h = harness();
+      // The real failure shape: init → synthetic assistant (model "<synthetic>") carrying
+      // the refusal → is_error result whose `result` repeats it.
+      h.push(
+        init(),
+        ev({ type: 'assistant', message: { id: 'synth-1', model: '<synthetic>', role: 'assistant', content: [{ type: 'text', text: apiLine }], usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } }, parent_tool_use_id: null, session_id: SID }),
+        result({ is_error: true, result: apiLine, total_cost_usd: 0, num_turns: 0 }),
+      );
+      const s = h.r.finish();
+      assert.equal(s.text, '', 'neither the synthetic line nor the error result becomes the answer');
+      assert.equal(s.cliErrorText, apiLine, 'the synthetic line is kept aside for the error notice');
+      assert.equal(s.isError, true);
+      // An error result must not feed the result-text fallback either.
+      const h2 = harness();
+      h2.push(result({ is_error: true, result: apiLine }));
+      assert.equal(h2.r.finish().text, '');
+    } },
+  ]);
 });
 
 test('usage dedupe: repeated per-block assistant usage is never summed; message ids are summed; result wins', () => {
@@ -165,7 +172,7 @@ test('tool lifecycle: labels, running → done/error blocks, durations, input cl
   h.push(atool('msg_1', 'toolu_4', 'mcp__worca__read_attachment', { id: 'att_unknown' }));
   assert.equal(h.frames.at(-2).label, 'Reading attachment');
   h.push(atool('msg_1', 'toolu_5', 'mcp__other__thing', {}));
-  assert.equal(h.frames.at(-2).label, 'Using mcp__other__thing');
+  assert.equal(h.frames.at(-2).label, 'Using other · thing', '§9.7: a registry copy reads <copy> · <tool>');
   const before = h.frames.length;
   h.push(atool('msg_1', 'toolu_6', 'mcp__worca__list_runs', {}), atool('msg_1', 'toolu_7', 'mcp__worca__list_runs', {}));
   assert.deepEqual(h.frames.slice(before).map((f) => f.type), ['ask-label', 'ask-block', 'ask-block'], 'the same label is never repeated back to back');
@@ -183,197 +190,201 @@ test('tool lifecycle: labels, running → done/error blocks, durations, input cl
   assert.equal(s.reducerErrors, 0);
 });
 
-test('labelForTool table', () => {
-  assert.equal(labelForTool('mcp__worca__list_runs', {}), 'Finding runs');
-  assert.equal(labelForTool('mcp__worca__list_branches', { projectKey: 'web-00000001' }), 'Looking at branches');
-  assert.equal(labelForTool('mcp__worca__get_run', { id: 'abcdefghijklmnop' }), 'Reading run abcdefghijkl');
-  assert.equal(labelForTool('mcp__worca__get_run', {}), 'Reading run');
-  assert.equal(labelForTool('mcp__worca__list_workflows', {}), 'Looking at workflows');
-  assert.equal(labelForTool('mcp__worca__list_projects', {}), 'Looking at projects');
-  assert.equal(labelForTool('mcp__worca__propose_run', {}), 'Preparing a run');
-  assert.equal(labelForTool('mcp__worca__read_attachment', { id: 'a' }, { a: 'x.md' }), 'Reading x.md');
-  assert.equal(labelForTool('mcp__worca__list_diff_comments', { id: 'abcdefghijklmnop' }), 'Reading comments on abcdefghijkl');
-  assert.equal(labelForTool('mcp__worca__list_diff_comments', {}), 'Reading diff comments');
-  assert.equal(labelForTool('mcp__worca__add_diff_comment', {}), 'Writing a diff comment');
-  assert.equal(labelForTool('mcp__worca__resolve_diff_comment', {}), 'Updating a diff comment');
-  assert.equal(labelForTool('mcp__worca__delete_diff_comment', {}), 'Deleting a diff comment');
-  assert.equal(labelForTool('mcp__worca__reply_to_diff_comment', {}), 'Replying to a diff comment');
-  assert.equal(labelForTool('mcp__worca__list_memory', {}), 'Reading memory');
-  assert.equal(labelForTool('mcp__worca__read_memory', { name: 'testing' }), 'Reading memory: testing');
-  assert.equal(labelForTool('mcp__worca__read_memory', {}), 'Reading memory');
-  assert.equal(labelForTool('mcp__worca__remember', { name: 'style' }), 'Saving memory: style');
-  assert.equal(labelForTool('mcp__worca__forget', { name: 'style' }), 'Removing memory: style');
+// REDUCED (suite reduction): a few representative worca labels — an id clipped to 12,
+// an attachment named from the turn's map, a named memory — stand for the per-tool
+// label copy; Task/Agent → null and the host-only web labels stay whole.
+test('labelForTool: representative worca labels, Task/Agent → null, web tools name the host never the full URL', async () => {
+  await checkRows([
+    { name: 'labelForTool table', run: () => {
+      assert.equal(labelForTool('mcp__worca__list_runs', {}), 'Finding runs');
+      assert.equal(labelForTool('mcp__worca__get_run', { id: 'abcdefghijklmnop' }), 'Reading run abcdefghijkl');
+      assert.equal(labelForTool('mcp__worca__get_run', {}), 'Reading run');
+      assert.equal(labelForTool('mcp__worca__read_attachment', { id: 'a' }, { a: 'x.md' }), 'Reading x.md');
+      assert.equal(labelForTool('mcp__worca__read_memory', { name: 'testing' }), 'Reading memory: testing');
 
-  assert.equal(labelForTool('Task', {}), null);
-  assert.equal(labelForTool('Agent', {}), null);
-  assert.equal(labelForTool('Read', {}), 'Using Read');
+      assert.equal(labelForTool('Task', {}), null);
+      assert.equal(labelForTool('Agent', {}), null);
+      assert.equal(labelForTool('Read', {}), 'Using Read');
+    } },
+    { name: 'labelForTool: web tools name the host, never the full URL', run: () => {
+      assert.equal(labelForTool('mcp__worca__web_fetch', { url: 'https://docs.example.com/x' }), 'Reading docs.example.com');
+      assert.equal(labelForTool('mcp__worca__web_fetch', { url: 'bad' }), 'Reading a web page');
+      assert.equal(labelForTool('mcp__worca__web_search', { query: 'q' }), 'Searching the web');
+    } },
+  ]);
 });
 
-test('a successful comment write calls onCommentMutation; an error result does not', () => {
-  const seen = [];
-  const h = harness({ onCommentMutation: (e) => seen.push(e) });
-  h.push(atool('msg_1', 'toolu_1', 'mcp__worca__add_diff_comment', { id: '4e1f2a9b', path: 'a.js', side: 'new', line: 1, body: 'x' }));
-  h.push(uresult('toolu_1', JSON.stringify({ comment: { id: 'dc_00000001', runId: '4e1f2a9b' } })));
-  h.push(atool('msg_1', 'toolu_2', 'mcp__worca__delete_diff_comment', { commentId: 'dc_00000002' }));
-  h.push(uresult('toolu_2', 'error: delete_diff_comment: comment not found', { isError: true }));
-  h.push(atool('msg_1', 'toolu_3', 'mcp__worca__list_diff_comments', { id: '4e1f2a9b' }));
-  h.push(uresult('toolu_3', JSON.stringify({ runId: '4e1f2a9b', comments: [] })));
-  assert.deepEqual(seen, [{ runId: '4e1f2a9b' }], 'writes only, successes only');
-});
-
-test('a successful reply_to_diff_comment calls onCommentMutation like the other comment writes', () => {
-  const seen = [];
-  const h = harness({ onCommentMutation: (e) => seen.push(e) });
-  h.push(atool('msg_r', 'toolu_r', 'mcp__worca__reply_to_diff_comment', { commentId: 'dc_00000001', body: 'x' }));
-  h.push(uresult('toolu_r', JSON.stringify({ comment: { id: 'dc_00000002', runId: 'abcdef12', storeKey: 'p-1' } })));
-  assert.deepEqual(seen, [{ runId: 'abcdef12' }]);
-});
-
-test('an unparseable comment-write result pokes nothing and does not throw', () => {
-  const seen = [];
-  const h = harness({ onCommentMutation: (e) => seen.push(e) });
-  h.push(atool('msg_1', 'toolu_1', 'mcp__worca__resolve_diff_comment', { commentId: 'dc_00000001' }));
-  h.push(uresult('toolu_1', 'not json at all'));
-  assert.deepEqual(seen, []);
+test('comment writes poke onCommentMutation on success only, once even from a sub-agent', async () => {
+  await checkRows([
+    { name: 'a successful comment write calls onCommentMutation; an error result does not', run: () => {
+      const seen = [];
+      const h = harness({ onCommentMutation: (e) => seen.push(e) });
+      h.push(atool('msg_1', 'toolu_1', 'mcp__worca__add_diff_comment', { id: '4e1f2a9b', path: 'a.js', side: 'new', line: 1, body: 'x' }));
+      h.push(uresult('toolu_1', JSON.stringify({ comment: { id: 'dc_00000001', runId: '4e1f2a9b' } })));
+      h.push(atool('msg_1', 'toolu_2', 'mcp__worca__delete_diff_comment', { commentId: 'dc_00000002' }));
+      h.push(uresult('toolu_2', 'error: delete_diff_comment: comment not found', { isError: true }));
+      h.push(atool('msg_1', 'toolu_3', 'mcp__worca__list_diff_comments', { id: '4e1f2a9b' }));
+      h.push(uresult('toolu_3', JSON.stringify({ runId: '4e1f2a9b', comments: [] })));
+      assert.deepEqual(seen, [{ runId: '4e1f2a9b' }], 'writes only, successes only');
+    } },
+    { name: 'a successful reply_to_diff_comment calls onCommentMutation like the other comment writes', run: () => {
+      const seen = [];
+      const h = harness({ onCommentMutation: (e) => seen.push(e) });
+      h.push(atool('msg_r', 'toolu_r', 'mcp__worca__reply_to_diff_comment', { commentId: 'dc_00000001', body: 'x' }));
+      h.push(uresult('toolu_r', JSON.stringify({ comment: { id: 'dc_00000002', runId: 'abcdef12', storeKey: 'p-1' } })));
+      assert.deepEqual(seen, [{ runId: 'abcdef12' }]);
+    } },
+    { name: 'an unparseable comment-write result pokes nothing and does not throw', run: () => {
+      const seen = [];
+      const h = harness({ onCommentMutation: (e) => seen.push(e) });
+      h.push(atool('msg_1', 'toolu_1', 'mcp__worca__resolve_diff_comment', { commentId: 'dc_00000001' }));
+      h.push(uresult('toolu_1', 'not json at all'));
+      assert.deepEqual(seen, []);
+    } },
+    { name: 'a sub-agent comment write pokes too, exactly once', run: async () => {
+      const seen = [];
+      const h = harness({ onCommentMutation: (e) => seen.push(e) });
+      h.push(atool('msg_1', 'toolu_agent', 'Task', { description: 'review the diff', subagent_type: 'general-purpose' }));
+      h.push(atool('msg_c1', 'toolu_c1', 'mcp__worca__add_diff_comment', { id: '4e1f2a9b', path: 'a.js', side: 'new', line: 1, body: 'x' }, 'toolu_agent'));
+      h.push(uresult('toolu_c1', JSON.stringify({ comment: { id: 'dc_00000001', runId: '4e1f2a9b' } }), { ptu: 'toolu_agent' }));
+      assert.deepEqual(seen, [{ runId: '4e1f2a9b' }], 'the child result reaches the same hook the main path uses');
+      // The Task's AGGREGATE result carries the child's text back on the main
+      // transcript — it must not poke a second time (its name is not a comment tool).
+      h.push(uresult('toolu_agent', [{ type: 'text', text: JSON.stringify({ comment: { runId: '4e1f2a9b' } }) }], { tur: AGENT_TUR }));
+      assert.equal(seen.length, 1, 'no double broadcast');
+      // A re-delivered child result is a no-op (childTools was consumed).
+      h.push(uresult('toolu_c1', JSON.stringify({ comment: { runId: '4e1f2a9b' } }), { ptu: 'toolu_agent' }));
+      assert.equal(seen.length, 1, 'idempotent');
+      // Errors and reads still poke nothing, on the child path too.
+      h.push(atool('msg_c1', 'toolu_c2', 'mcp__worca__delete_diff_comment', { commentId: 'dc_00000002' }, 'toolu_agent'));
+      h.push(uresult('toolu_c2', 'error: delete_diff_comment: comment not found', { isError: true, ptu: 'toolu_agent' }));
+      h.push(atool('msg_c1', 'toolu_c3', 'mcp__worca__list_diff_comments', { id: '4e1f2a9b' }, 'toolu_agent'));
+      h.push(uresult('toolu_c3', JSON.stringify({ runId: '4e1f2a9b', comments: [] }), { ptu: 'toolu_agent' }));
+      assert.equal(seen.length, 1, 'writes only, successes only — same rule as the main path');
+    } },
+  ]);
 });
 
 const AGENT_TUR = { status: 'completed', prompt: 'SECRET PROMPT TEXT', agentId: 'a61fb0ef9162947fb', agentType: 'general-purpose',
   content: [{ type: 'text', text: 'count: 1' }], resolvedModel: 'claude-haiku-4-5', totalDurationMs: 3557, totalTokens: 4139, totalToolUseCount: 1,
   usage: { input_tokens: 4016, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 123 } };
 
-test('a sub-agent comment write pokes too, exactly once', () => {
-  const seen = [];
-  const h = harness({ onCommentMutation: (e) => seen.push(e) });
-  h.push(atool('msg_1', 'toolu_agent', 'Task', { description: 'review the diff', subagent_type: 'general-purpose' }));
-  h.push(atool('msg_c1', 'toolu_c1', 'mcp__worca__add_diff_comment', { id: '4e1f2a9b', path: 'a.js', side: 'new', line: 1, body: 'x' }, 'toolu_agent'));
-  h.push(uresult('toolu_c1', JSON.stringify({ comment: { id: 'dc_00000001', runId: '4e1f2a9b' } }), { ptu: 'toolu_agent' }));
-  assert.deepEqual(seen, [{ runId: '4e1f2a9b' }], 'the child result reaches the same hook the main path uses');
-  // The Task's AGGREGATE result carries the child's text back on the main
-  // transcript — it must not poke a second time (its name is not a comment tool).
-  h.push(uresult('toolu_agent', [{ type: 'text', text: JSON.stringify({ comment: { runId: '4e1f2a9b' } }) }], { tur: AGENT_TUR }));
-  assert.equal(seen.length, 1, 'no double broadcast');
-  // A re-delivered child result is a no-op (childTools was consumed).
-  h.push(uresult('toolu_c1', JSON.stringify({ comment: { runId: '4e1f2a9b' } }), { ptu: 'toolu_agent' }));
-  assert.equal(seen.length, 1, 'idempotent');
-  // Errors and reads still poke nothing, on the child path too.
-  h.push(atool('msg_c1', 'toolu_c2', 'mcp__worca__delete_diff_comment', { commentId: 'dc_00000002' }, 'toolu_agent'));
-  h.push(uresult('toolu_c2', 'error: delete_diff_comment: comment not found', { isError: true, ptu: 'toolu_agent' }));
-  h.push(atool('msg_c1', 'toolu_c3', 'mcp__worca__list_diff_comments', { id: '4e1f2a9b' }, 'toolu_agent'));
-  h.push(uresult('toolu_c3', JSON.stringify({ runId: '4e1f2a9b', comments: [] }), { ptu: 'toolu_agent' }));
-  assert.equal(seen.length, 1, 'writes only, successes only — same rule as the main path');
+test('sub-agents: foreground Agent block (log, cost estimate, prompt never stored), two agents (plural label, log cap 50), background launch shape', async () => {
+  await checkRows([
+    { name: 'foreground sub-agent (F3): Agent block, child log lines, finishing tool_use_result, cost estimate, prompt never stored', run: async () => {
+      const h = harness();
+      h.push(init(), atool('msg_1', 'toolu_agent', 'Agent', { subagent_type: 'general-purpose', description: 'count runs', prompt: 'SECRET PROMPT TEXT' }));
+      assert.equal(h.frames.at(-2).label, 'Running 1 sub-agent');
+      const spawned = h.frames.at(-1).block;
+      assert.deepEqual(spawned, { kind: 'agent', id: 'toolu_agent', label: 'count runs', type: 'general-purpose', model: null, tokens: null, ctx: null, usage: null, costUsd: null, estimated: true, status: 'running', durationMs: null, log: [] });
+      h.push(ev({ type: 'system', subtype: 'task_started', task_id: 't1', tool_use_id: 'toolu_agent', description: 'count runs', subagent_type: 'general-purpose', is_backgrounded: false, prompt: 'SECRET PROMPT TEXT' }));
+      h.push(ev({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'SECRET PROMPT TEXT' }] }, parent_tool_use_id: 'toolu_agent', subagent_type: 'general-purpose', task_description: 'count runs' }));
+      h.tick(100);
+      h.push(atool('msg_c1', 'toolu_c1', 'mcp__worca__list_runs', { limit: 2 }, 'toolu_agent'));
+      assert.deepEqual(h.frames.at(-1).block.log, [{ t: 100, text: '→ list_runs {"limit":2}' }]);
+      h.tick(500);
+      h.push(uresult('toolu_c1', [{ type: 'text', text: '[]' }], { ptu: 'toolu_agent' }));
+      assert.deepEqual(h.frames.at(-1).block.log.at(-1), { t: 600, text: '← ok 0.5s' });
+      h.push(atool('msg_c1', 'toolu_c2', 'mcp__worca__get_run', { id: 'x' }, 'toolu_agent'), uresult('toolu_c2', 'error: get_run: run not found', { isError: true, ptu: 'toolu_agent' }));
+      assert.equal(h.frames.at(-1).block.log.at(-1).text, '← error: error: get_run: run not found');
+      h.push(ev({ type: 'system', subtype: 'task_progress', task_id: 't1', usage: { total_tokens: 3471, tool_uses: 2, duration_ms: 1600 }, last_tool_name: 'mcp__worca__get_run' }));
+      h.push(ev({ type: 'system', subtype: 'task_notification', task_id: 't1', tool_use_id: 'toolu_agent', status: 'completed', summary: 'done', usage: {} }));
+      h.tick(2957);
+      h.push(uresult('toolu_agent', [{ type: 'text', text: 'count: 1' }, { type: 'text', text: 'agentId: a61fb0ef9162947fb\n<usage>subagent_tokens: 4139</usage>' }], { tur: AGENT_TUR }));
+      assert.equal(h.frames.at(-2).label, 'Thinking', 'label first (back to Thinking when no agent runs)…');
+      const done = h.frames.at(-1).block;                                    // …then the finished block
+      assert.equal(done.status, 'done');
+      assert.equal(done.model, 'claude-haiku-4-5');
+      assert.deepEqual(done.usage, { input: 4016, output: 123, cacheRead: 0, cacheCreation: 0 });
+      assert.equal(done.tokens, 4139);
+      assert.equal(done.durationMs, 3557);
+      h.push(result({ modelUsage: {
+        'claude-haiku-4-5-20251001': { inputTokens: 905, outputTokens: 11, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.00096, canonicalModel: 'claude-haiku-4-5' },
+        'claude-haiku-4-5': { inputTokens: 8032, outputTokens: 246, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.02, canonicalModel: 'claude-haiku-4-5' },
+      } }));
+      const s = h.r.finish();
+      const agent = s.blocks.find((b) => b.kind === 'agent');
+      // w(agent) = 4016 + 5·123 = 4631 ; w(total) = 8032 + 5·246 = 9262 ; share = 0.02 × 0.5 = 0.01
+      assert.equal(agent.costUsd, 0.01);
+      assert.equal(agent.estimated, true);
+      assert.equal(s.agents, 1);
+      assert.ok(!JSON.stringify(s.blocks).includes('SECRET PROMPT TEXT'), 'Task prompts are never persisted');
+      assert.equal(s.text, '', 'child text never becomes the answer');
+      assert.deepEqual(s.labels, ['Thinking', 'Running 1 sub-agent', 'Thinking']);
+    } },
+    { name: 'two agents: plural label, Task name accepted, log cap at 50 with an omission marker', run: async () => {
+      const h = harness();
+      h.push(atool('msg_1', 'toolu_a', 'Task', { description: 'A', subagent_type: 'Explore' }), atool('msg_1', 'toolu_b', 'Agent', { description: 'B' }));
+      assert.equal(h.frames.filter((f) => f.type === 'ask-label').at(-1).label, 'Running 2 sub-agents');
+      for (let i = 0; i < 60; i++) h.push(atool('m', `c${i}`, 'mcp__worca__list_runs', { i }, 'toolu_a'));
+      const a = h.r.snapshot().blocks.find((b) => b.id === 'toolu_a');
+      assert.equal(a.log.length, 50);
+      assert.equal(a.log[49].text, '… more lines omitted');
+      assert.equal(a.log[48].text, '→ list_runs {"i":48}');
+      h.push(uresult('toolu_a', 'x', { tur: { ...AGENT_TUR, agentId: 'aa' } }));
+      assert.equal(h.frames.filter((f) => f.type === 'ask-label').at(-1).label, 'Running 1 sub-agent');
+      assert.equal(h.r.snapshot().runningAgents, 1);
+    } },
+    { name: 'background sub-agent shape (F1 without the env var): async launch keeps the agent running; second init and second result tolerated', run: async () => {
+      const h = harness();
+      h.push(init(), atool('msg_1', 'toolu_agent', 'Agent', { description: 'bg' }));
+      h.push(uresult('toolu_agent', 'Async agent launched successfully.', { tur: { isAsync: true, status: 'async_launched', agentId: 'af21', description: 'bg', resolvedModel: 'claude-haiku-4-5', prompt: 'P', outputFile: '/x', canReadOutputFile: false } }));
+      assert.equal(h.r.snapshot().blocks[0].status, 'running');
+      h.push(init(), result({ total_cost_usd: 0.01, num_turns: 2 }), result({ total_cost_usd: 0.03, num_turns: 1, origin: { kind: 'task-notification' } }));
+      const s = h.r.finish();
+      assert.equal(s.costUsd, 0.03, 'the LAST result wins; costs are never summed');
+      assert.equal(s.blocks[0].status, 'error');
+      assert.equal(s.blocks[0].error, 'interrupted');
+      assert.equal(s.sessionId, SID);
+    } },
+  ]);
 });
 
-test('foreground sub-agent (F3): Agent block, child log lines, finishing tool_use_result, cost estimate, prompt never stored', () => {
-  const h = harness();
-  h.push(init(), atool('msg_1', 'toolu_agent', 'Agent', { subagent_type: 'general-purpose', description: 'count runs', prompt: 'SECRET PROMPT TEXT' }));
-  assert.equal(h.frames.at(-2).label, 'Running 1 sub-agent');
-  const spawned = h.frames.at(-1).block;
-  assert.deepEqual(spawned, { kind: 'agent', id: 'toolu_agent', label: 'count runs', type: 'general-purpose', model: null, tokens: null, ctx: null, usage: null, costUsd: null, estimated: true, status: 'running', durationMs: null, log: [] });
-  h.push(ev({ type: 'system', subtype: 'task_started', task_id: 't1', tool_use_id: 'toolu_agent', description: 'count runs', subagent_type: 'general-purpose', is_backgrounded: false, prompt: 'SECRET PROMPT TEXT' }));
-  h.push(ev({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'SECRET PROMPT TEXT' }] }, parent_tool_use_id: 'toolu_agent', subagent_type: 'general-purpose', task_description: 'count runs' }));
-  h.tick(100);
-  h.push(atool('msg_c1', 'toolu_c1', 'mcp__worca__list_runs', { limit: 2 }, 'toolu_agent'));
-  assert.deepEqual(h.frames.at(-1).block.log, [{ t: 100, text: '→ list_runs {"limit":2}' }]);
-  h.tick(500);
-  h.push(uresult('toolu_c1', [{ type: 'text', text: '[]' }], { ptu: 'toolu_agent' }));
-  assert.deepEqual(h.frames.at(-1).block.log.at(-1), { t: 600, text: '← ok 0.5s' });
-  h.push(atool('msg_c1', 'toolu_c2', 'mcp__worca__get_run', { id: 'x' }, 'toolu_agent'), uresult('toolu_c2', 'error: get_run: run not found', { isError: true, ptu: 'toolu_agent' }));
-  assert.equal(h.frames.at(-1).block.log.at(-1).text, '← error: error: get_run: run not found');
-  h.push(ev({ type: 'system', subtype: 'task_progress', task_id: 't1', usage: { total_tokens: 3471, tool_uses: 2, duration_ms: 1600 }, last_tool_name: 'mcp__worca__get_run' }));
-  h.push(ev({ type: 'system', subtype: 'task_notification', task_id: 't1', tool_use_id: 'toolu_agent', status: 'completed', summary: 'done', usage: {} }));
-  h.tick(2957);
-  h.push(uresult('toolu_agent', [{ type: 'text', text: 'count: 1' }, { type: 'text', text: 'agentId: a61fb0ef9162947fb\n<usage>subagent_tokens: 4139</usage>' }], { tur: AGENT_TUR }));
-  assert.equal(h.frames.at(-2).label, 'Thinking', 'label first (back to Thinking when no agent runs)…');
-  const done = h.frames.at(-1).block;                                    // …then the finished block
-  assert.equal(done.status, 'done');
-  assert.equal(done.model, 'claude-haiku-4-5');
-  assert.deepEqual(done.usage, { input: 4016, output: 123, cacheRead: 0, cacheCreation: 0 });
-  assert.equal(done.tokens, 4139);
-  assert.equal(done.durationMs, 3557);
-  h.push(result({ modelUsage: {
-    'claude-haiku-4-5-20251001': { inputTokens: 905, outputTokens: 11, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.00096, canonicalModel: 'claude-haiku-4-5' },
-    'claude-haiku-4-5': { inputTokens: 8032, outputTokens: 246, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.02, canonicalModel: 'claude-haiku-4-5' },
-  } }));
-  const s = h.r.finish();
-  const agent = s.blocks.find((b) => b.kind === 'agent');
-  // w(agent) = 4016 + 5·123 = 4631 ; w(total) = 8032 + 5·246 = 9262 ; share = 0.02 × 0.5 = 0.01
-  assert.equal(agent.costUsd, 0.01);
-  assert.equal(agent.estimated, true);
-  assert.equal(s.agents, 1);
-  assert.ok(!JSON.stringify(s.blocks).includes('SECRET PROMPT TEXT'), 'Task prompts are never persisted');
-  assert.equal(s.text, '', 'child text never becomes the answer');
-  assert.deepEqual(s.labels, ['Thinking', 'Running 1 sub-agent', 'Thinking']);
-});
-
-test('two agents: plural label, Task name accepted, log cap at 50 with an omission marker', () => {
-  const h = harness();
-  h.push(atool('msg_1', 'toolu_a', 'Task', { description: 'A', subagent_type: 'Explore' }), atool('msg_1', 'toolu_b', 'Agent', { description: 'B' }));
-  assert.equal(h.frames.filter((f) => f.type === 'ask-label').at(-1).label, 'Running 2 sub-agents');
-  for (let i = 0; i < 60; i++) h.push(atool('m', `c${i}`, 'mcp__worca__list_runs', { i }, 'toolu_a'));
-  const a = h.r.snapshot().blocks.find((b) => b.id === 'toolu_a');
-  assert.equal(a.log.length, 50);
-  assert.equal(a.log[49].text, '… more lines omitted');
-  assert.equal(a.log[48].text, '→ list_runs {"i":48}');
-  h.push(uresult('toolu_a', 'x', { tur: { ...AGENT_TUR, agentId: 'aa' } }));
-  assert.equal(h.frames.filter((f) => f.type === 'ask-label').at(-1).label, 'Running 1 sub-agent');
-  assert.equal(h.r.snapshot().runningAgents, 1);
-});
-
-test('background sub-agent shape (F1 without the env var): async launch keeps the agent running; second init and second result tolerated', () => {
-  const h = harness();
-  h.push(init(), atool('msg_1', 'toolu_agent', 'Agent', { description: 'bg' }));
-  h.push(uresult('toolu_agent', 'Async agent launched successfully.', { tur: { isAsync: true, status: 'async_launched', agentId: 'af21', description: 'bg', resolvedModel: 'claude-haiku-4-5', prompt: 'P', outputFile: '/x', canReadOutputFile: false } }));
-  assert.equal(h.r.snapshot().blocks[0].status, 'running');
-  h.push(init(), result({ total_cost_usd: 0.01, num_turns: 2 }), result({ total_cost_usd: 0.03, num_turns: 1, origin: { kind: 'task-notification' } }));
-  const s = h.r.finish();
-  assert.equal(s.costUsd, 0.03, 'the LAST result wins; costs are never summed');
-  assert.equal(s.blocks[0].status, 'error');
-  assert.equal(s.blocks[0].error, 'interrupted');
-  assert.equal(s.sessionId, SID);
-});
-
-test('proposal hook: called with the FULL input after the propose_run tool_result; addBlock/updateBlock emit ask-card', () => {
-  const seen = [];
-  const h = harness({ onProposal: (p) => seen.push(p) });
-  const input = { projectKey: 'p-00000001', brief: 'b'.repeat(3000), workflowId: 'wf_default' };
-  h.push(atool('msg_1', 'toolu_p', 'mcp__worca__propose_run', input));
-  assert.equal(h.frames.at(-1).block.input._truncated, true);
-  h.push(uresult('toolu_p', [{ type: 'text', text: JSON.stringify({ ok: true, card: {} }) }]));
-  assert.deepEqual(seen, [{ toolUseId: 'toolu_p', input, childOk: true }]);
-  h.push(atool('msg_1', 'toolu_q', 'mcp__worca__propose_run', { brief: '' }), uresult('toolu_q', JSON.stringify({ ok: false, errors: ['brief is required'] })));
-  assert.equal(seen[1].childOk, false);
-  h.push(atool('msg_1', 'toolu_r', 'mcp__worca__propose_run', { brief: 'x' }), uresult('toolu_r', 'error: boom', { isError: true }));
-  assert.equal(seen[2].childOk, null, 'unparseable result → null');
-  const card = { kind: 'card', id: 'card_00000001', state: 'proposed', card: { target: 'project', projectKey: 'p-00000001' } };
-  assert.deepEqual(h.r.addBlock(card), card);
-  assert.deepEqual(h.frames.at(-1), { type: 'ask-card', block: card });
-  const notice = h.r.addBlock({ kind: 'notice', text: 'Proposal rejected: brief is required' });
-  assert.deepEqual(h.frames.at(-1), { type: 'ask-block', block: notice });
-  assert.deepEqual(h.r.updateBlock('card_00000001', { state: 'started', runId: 'run-1' }), { ...card, state: 'started', runId: 'run-1' });
-  assert.equal(h.frames.at(-1).type, 'ask-card');
-  assert.equal(h.r.updateBlock('nope', {}), null);
-  const s = h.r.finish();
-  assert.deepEqual(s.blocks.map((b) => b.kind), ['tool', 'tool', 'tool', 'card', 'notice'], 'insertion order kept');
-  const h2 = harness({ onProposal: () => { throw new Error('hook boom'); } });
-  h2.push(atool('m', 't', 'mcp__worca__propose_run', {}), uresult('t', '{"ok":true}'));
-  assert.equal(h2.r.finish().reducerErrors, 1, 'a throwing hook is counted, never propagated');
-});
-
-test('settle(): an async proposal hook that resolves after the result frame still lands its card before finish()', async () => {
-  let resolveHook;
-  const h = harness({ onProposal: () => new Promise((res) => { resolveHook = res; }) });
-  h.push(atool('m', 'toolu_p', 'mcp__worca__propose_run', { brief: 'b' }), uresult('toolu_p', '{"ok":true}'), result());
-  setTimeout(() => { h.r.addBlock({ kind: 'card', id: 'card_00000001', state: 'proposed', card: {} }); resolveHook(); }, 5);
-  await h.r.settle();
-  const s = h.r.finish();
-  assert.deepEqual(s.blocks.map((b) => b.kind), ['tool', 'card'], 'the card made it into the persisted blocks');
-  assert.equal(h.r.addBlock({ kind: 'notice', text: 'late' }), null, 'after finish(): refused');
-  assert.equal(h.r.updateBlock('card_00000001', { state: 'started' }), null);
-  assert.equal(h.r.snapshot().reducerErrors, 2, 'both late calls are counted (finish() is cached — read the live snapshot)');
-  const rejecting = harness({ onProposal: () => Promise.reject(new Error('validation crashed')) });
-  rejecting.push(atool('m', 't', 'mcp__worca__propose_run', {}), uresult('t', '{"ok":true}'));
-  await rejecting.r.settle();
-  assert.equal(rejecting.r.finish().reducerErrors, 1, 'a rejecting hook is counted, never propagated');
+test('proposal hook: full input after the propose_run result, addBlock/updateBlock emit ask-card, settle() lands a late card before finish()', async () => {
+  await checkRows([
+    { name: 'proposal hook: called with the FULL input after the propose_run tool_result; addBlock/updateBlock emit ask-card', run: async () => {
+      const seen = [];
+      const h = harness({ onProposal: (p) => seen.push(p) });
+      const input = { projectKey: 'p-00000001', brief: 'b'.repeat(3000), workflowId: 'wf_default' };
+      h.push(atool('msg_1', 'toolu_p', 'mcp__worca__propose_run', input));
+      assert.equal(h.frames.at(-1).block.input._truncated, true);
+      h.push(uresult('toolu_p', [{ type: 'text', text: JSON.stringify({ ok: true, card: {} }) }]));
+      assert.deepEqual(seen, [{ toolUseId: 'toolu_p', input, childOk: true }]);
+      h.push(atool('msg_1', 'toolu_q', 'mcp__worca__propose_run', { brief: '' }), uresult('toolu_q', JSON.stringify({ ok: false, errors: ['brief is required'] })));
+      assert.equal(seen[1].childOk, false);
+      h.push(atool('msg_1', 'toolu_r', 'mcp__worca__propose_run', { brief: 'x' }), uresult('toolu_r', 'error: boom', { isError: true }));
+      assert.equal(seen[2].childOk, null, 'unparseable result → null');
+      const card = { kind: 'card', id: 'card_00000001', state: 'proposed', card: { target: 'project', projectKey: 'p-00000001' } };
+      assert.deepEqual(h.r.addBlock(card), card);
+      assert.deepEqual(h.frames.at(-1), { type: 'ask-card', block: card });
+      const notice = h.r.addBlock({ kind: 'notice', text: 'Proposal rejected: brief is required' });
+      assert.deepEqual(h.frames.at(-1), { type: 'ask-block', block: notice });
+      assert.deepEqual(h.r.updateBlock('card_00000001', { state: 'started', runId: 'run-1' }), { ...card, state: 'started', runId: 'run-1' });
+      assert.equal(h.frames.at(-1).type, 'ask-card');
+      assert.equal(h.r.updateBlock('nope', {}), null);
+      const s = h.r.finish();
+      assert.deepEqual(s.blocks.map((b) => b.kind), ['tool', 'tool', 'tool', 'card', 'notice'], 'insertion order kept');
+      const h2 = harness({ onProposal: () => { throw new Error('hook boom'); } });
+      h2.push(atool('m', 't', 'mcp__worca__propose_run', {}), uresult('t', '{"ok":true}'));
+      assert.equal(h2.r.finish().reducerErrors, 1, 'a throwing hook is counted, never propagated');
+    } },
+    { name: 'settle(): an async proposal hook that resolves after the result frame still lands its card before finish()', run: async () => {
+      let resolveHook;
+      const h = harness({ onProposal: () => new Promise((res) => { resolveHook = res; }) });
+      h.push(atool('m', 'toolu_p', 'mcp__worca__propose_run', { brief: 'b' }), uresult('toolu_p', '{"ok":true}'), result());
+      setTimeout(() => { h.r.addBlock({ kind: 'card', id: 'card_00000001', state: 'proposed', card: {} }); resolveHook(); }, 5);
+      await h.r.settle();
+      const s = h.r.finish();
+      assert.deepEqual(s.blocks.map((b) => b.kind), ['tool', 'card'], 'the card made it into the persisted blocks');
+      assert.equal(h.r.addBlock({ kind: 'notice', text: 'late' }), null, 'after finish(): refused');
+      assert.equal(h.r.updateBlock('card_00000001', { state: 'started' }), null);
+      assert.equal(h.r.snapshot().reducerErrors, 2, 'both late calls are counted (finish() is cached — read the live snapshot)');
+      const rejecting = harness({ onProposal: () => Promise.reject(new Error('validation crashed')) });
+      rejecting.push(atool('m', 't', 'mcp__worca__propose_run', {}), uresult('t', '{"ok":true}'));
+      await rejecting.r.settle();
+      assert.equal(rejecting.r.finish().reducerErrors, 1, 'a rejecting hook is counted, never propagated');
+    } },
+  ]);
 });
 
 test('terminal subtypes: max_turns / max_budget → stopped + reason; errors and is_error captured', () => {
@@ -447,32 +458,35 @@ test('normalizeUsage, matchModelKey, estimateAgentCosts', () => {
   assert.deepEqual(estimateAgentCosts(agents, {}).map((a) => a.costUsd), [null, null, null, null, null]);
 });
 
-test('context fill: usage.ctx is the LAST main call total; result swaps buckets but never ctx; no main call → null', () => {
-  const h = harness();
-  h.push(mstart('msg_1'), mdelta({ input_tokens: 5, output_tokens: 10 }));
-  let u = h.frames.filter((f) => f.type === 'ask-usage').at(-1);
-  assert.equal(u.usage.ctx, 15, 'first call: input+output');
-  h.push(mstart('msg_2'), mdelta({ input_tokens: 100, cache_read_input_tokens: 1000, cache_creation_input_tokens: 50, output_tokens: 20 }));
-  u = h.frames.filter((f) => f.type === 'ask-usage').at(-1);
-  assert.equal(u.usage.ctx, 1170, 'a later call REPLACES ctx — never sums');
-  assert.equal(h.r.snapshot().usage.ctx, 1170);
-  h.push(result());
-  const s = h.r.finish();
-  assert.deepEqual(s.usage, { ...normalizeUsage(RESULT_USAGE), ctx: 1170 }, 'cumulative buckets come from the result; ctx stays per-call');
-  const h2 = harness();
-  h2.push(result());
-  assert.equal(h2.r.finish().usage.ctx, null, 'a turn with no main call has no context figure');
-});
-
-test('context fill: a child message_delta sets the agent block ctx (last call wins) and re-emits the block', () => {
-  const h = harness();
-  h.push(atool('msg_1', 'toolu_agent', 'Agent', { description: 'count runs', subagent_type: 'general-purpose' }));
-  h.push(mstart('msg_c1', 'toolu_agent'), mdelta({ input_tokens: 10, cache_read_input_tokens: 11343, output_tokens: 292 }, 'toolu_agent'));
-  const agentFrames = () => h.frames.filter((f) => f.type === 'ask-block' && f.block && f.block.kind === 'agent');
-  assert.equal(agentFrames().at(-1).block.ctx, 11645, 'child per-call total: input+cacheRead+output');
-  h.push(mstart('msg_c2', 'toolu_agent'), mdelta({ input_tokens: 10, cache_read_input_tokens: 11343, cache_creation_input_tokens: 465, output_tokens: 51 }, 'toolu_agent'));
-  assert.equal(agentFrames().at(-1).block.ctx, 11869, 'the last child call replaces');
-  assert.equal(h.r.snapshot().usage.ctx, 11, 'main ctx comes from the main call (the spawn message), never the child');
+test('context fill: main ctx is the last main call (never summed, never the child); a child message_delta sets the agent block ctx', async () => {
+  await checkRows([
+    { name: 'context fill: usage.ctx is the LAST main call total; result swaps buckets but never ctx; no main call → null', run: () => {
+      const h = harness();
+      h.push(mstart('msg_1'), mdelta({ input_tokens: 5, output_tokens: 10 }));
+      let u = h.frames.filter((f) => f.type === 'ask-usage').at(-1);
+      assert.equal(u.usage.ctx, 15, 'first call: input+output');
+      h.push(mstart('msg_2'), mdelta({ input_tokens: 100, cache_read_input_tokens: 1000, cache_creation_input_tokens: 50, output_tokens: 20 }));
+      u = h.frames.filter((f) => f.type === 'ask-usage').at(-1);
+      assert.equal(u.usage.ctx, 1170, 'a later call REPLACES ctx — never sums');
+      assert.equal(h.r.snapshot().usage.ctx, 1170);
+      h.push(result());
+      const s = h.r.finish();
+      assert.deepEqual(s.usage, { ...normalizeUsage(RESULT_USAGE), ctx: 1170 }, 'cumulative buckets come from the result; ctx stays per-call');
+      const h2 = harness();
+      h2.push(result());
+      assert.equal(h2.r.finish().usage.ctx, null, 'a turn with no main call has no context figure');
+    } },
+    { name: 'context fill: a child message_delta sets the agent block ctx (last call wins) and re-emits the block', run: () => {
+      const h = harness();
+      h.push(atool('msg_1', 'toolu_agent', 'Agent', { description: 'count runs', subagent_type: 'general-purpose' }));
+      h.push(mstart('msg_c1', 'toolu_agent'), mdelta({ input_tokens: 10, cache_read_input_tokens: 11343, output_tokens: 292 }, 'toolu_agent'));
+      const agentFrames = () => h.frames.filter((f) => f.type === 'ask-block' && f.block && f.block.kind === 'agent');
+      assert.equal(agentFrames().at(-1).block.ctx, 11645, 'child per-call total: input+cacheRead+output');
+      h.push(mstart('msg_c2', 'toolu_agent'), mdelta({ input_tokens: 10, cache_read_input_tokens: 11343, cache_creation_input_tokens: 465, output_tokens: 51 }, 'toolu_agent'));
+      assert.equal(agentFrames().at(-1).block.ctx, 11869, 'the last child call replaces');
+      assert.equal(h.r.snapshot().usage.ctx, 11, 'main ctx comes from the main call (the spawn message), never the child');
+    } },
+  ]);
 });
 
 // ── the injected cost override (config.mjs resolveModelCost) ─────────────────
@@ -480,29 +494,62 @@ test('context fill: a child message_delta sets the agent block ctx (last call wi
 // pin the CONTRACT with hand-rolled overrides. Ask spend feeds the same windowed
 // budget as pipeline spend, which is why a re-priced turn matters here at all.
 
-test('resolveCost: the injected override replaces the CLI cost everywhere the turn reports it', () => {
-  const seen = [];
-  const h = harness({ resolveCost: (cli, usage) => { seen.push({ cli, usage }); return 0; } });
-  h.push(init(), mstart('msg_1'), mdelta({ output_tokens: 7 }), atext('msg_1', 'hi'));
-  assert.deepEqual(h.frames.filter((f) => f.type === 'ask-usage').map((f) => f.costUsd), [null],
-    'nothing to re-price before the result frame — the hook is not even called');
-  assert.equal(seen.length, 0);
+test('resolveCost: the override replaces the CLI cost everywhere (memoised), absent/non-finite/throwing keeps the CLI figure, no result stays null, agent shares scale with it', async () => {
+  await checkRows([
+    { name: 'resolveCost: the injected override replaces the CLI cost everywhere the turn reports it', run: async () => {
+      const seen = [];
+      const h = harness({ resolveCost: (cli, usage) => { seen.push({ cli, usage }); return 0; } });
+      h.push(init(), mstart('msg_1'), mdelta({ output_tokens: 7 }), atext('msg_1', 'hi'));
+      assert.deepEqual(h.frames.filter((f) => f.type === 'ask-usage').map((f) => f.costUsd), [null],
+        'nothing to re-price before the result frame — the hook is not even called');
+      assert.equal(seen.length, 0);
 
-  h.push(result());
-  const usageFrames = h.frames.filter((f) => f.type === 'ask-usage');
-  assert.equal(usageFrames.at(-1).costUsd, 0, 'the ask-usage frame carries the OVERRIDE, not 0.0234');
-  assert.equal(h.r.snapshot().costUsd, 0);
-  assert.equal(h.r.finish().costUsd, 0);
-  assert.equal(seen.length, 1, 'memoized on the result — one catalog read per turn, not one per reader');
-  assert.equal(seen[0].cli, 0.0234, 'the hook sees what the CLI reported…');
-  assert.deepEqual(seen[0].usage, { ...normalizeUsage(RESULT_USAGE), ctx: 7 }, '…and this turn\'s usage');
-});
+      h.push(result());
+      const usageFrames = h.frames.filter((f) => f.type === 'ask-usage');
+      assert.equal(usageFrames.at(-1).costUsd, 0, 'the ask-usage frame carries the OVERRIDE, not 0.0234');
+      assert.equal(h.r.snapshot().costUsd, 0);
+      assert.equal(h.r.finish().costUsd, 0);
+      assert.equal(seen.length, 1, 'memoized on the result — one catalog read per turn, not one per reader');
+      assert.equal(seen[0].cli, 0.0234, 'the hook sees what the CLI reported…');
+      assert.deepEqual(seen[0].usage, { ...normalizeUsage(RESULT_USAGE), ctx: 7 }, '…and this turn\'s usage');
+    } },
+    { name: 'resolveCost: absent, non-finite or throwing → the CLI figure stands (never a forged price)', run: () => {
+      assert.equal(harnessAfterResult({}).costUsd, 0.0234, 'no hook = default behavior');
+      assert.equal(harnessAfterResult({ resolveCost: () => NaN }).costUsd, 0.0234, 'unpriceable falls back');
+      assert.equal(harnessAfterResult({ resolveCost: () => { throw new Error('catalog on fire'); } }).costUsd, 0.0234,
+        'a pricing override must never break a turn');
+    } },
+    { name: 'resolveCost: a turn with NO result frame stays costUsd:null — §6.2.8 is not a price to re-price', run: () => {
+      const h = harness({ resolveCost: () => 0 });
+      h.push(init(), atext('msg_1', 'hi'));
+      assert.equal(h.r.finish().costUsd, null);
+    } },
+    { name: 'resolveCost: the §6.6 per-agent split is scaled so agent rows never out-total their turn', run: async () => {
+      const MU = { 'claude-haiku-4-5': { inputTokens: 8032, outputTokens: 246, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.02 } };
+      const runAgentTurn = (opts) => {
+        const h = harness(opts);
+        h.push(init(), atool('msg_1', 'toolu_agent', 'Agent', { subagent_type: 'general-purpose', description: 'count runs', prompt: 'P' }));
+        h.push(uresult('toolu_agent', [{ type: 'text', text: 'count: 1' }], { tur: AGENT_TUR }));
+        h.push(result({ modelUsage: MU }));
+        const s = h.r.finish();
+        return { agent: s.blocks.find((b) => b.kind === 'agent'), total: s.costUsd };
+      };
+      // Baseline (unchanged): w(agent)=4016+5·123=4631, w(total)=8032+5·246=9262 → 0.02 × 0.5.
+      const base = runAgentTurn({});
+      assert.equal(base.agent.costUsd, 0.01);
 
-test('resolveCost: absent, non-finite or throwing → the CLI figure stands (never a forged price)', () => {
-  assert.equal(harnessAfterResult({}).costUsd, 0.0234, 'no hook = default behavior');
-  assert.equal(harnessAfterResult({ resolveCost: () => NaN }).costUsd, 0.0234, 'unpriceable falls back');
-  assert.equal(harnessAfterResult({ resolveCost: () => { throw new Error('catalog on fire'); } }).costUsd, 0.0234,
-    'a pricing override must never break a turn');
+      // {free}: the turn is $0, so its agents must be too.
+      const free = runAgentTurn({ resolveCost: () => 0 });
+      assert.equal(free.total, 0);
+      assert.equal(free.agent.costUsd, 0, 'a $0 turn cannot contain a billing agent');
+
+      // {perMtok}-style re-price: halve the turn, halve every share.
+      const half = runAgentTurn({ resolveCost: (cli) => cli / 2 });
+      assert.equal(half.total, 0.0117);
+      assert.equal(half.agent.costUsd, 0.005);
+      assert.equal(half.agent.estimated, true, 'still an estimate — scaling does not make it exact');
+    } },
+  ]);
 });
 
 function harnessAfterResult(opts) {
@@ -511,118 +558,90 @@ function harnessAfterResult(opts) {
   return h.r.finish();
 }
 
-test('resolveCost: a turn with NO result frame stays costUsd:null — §6.2.8 is not a price to re-price', () => {
-  const h = harness({ resolveCost: () => 0 });
-  h.push(init(), atext('msg_1', 'hi'));
-  assert.equal(h.r.finish().costUsd, null);
+test('estimatedCostUsd: priced live until the result, then retired; a throwing or non-finite estimator degrades to null', async () => {
+  await checkRows([
+    { name: 'estimatedCostUsd: the injected estimator prices the live usage sum until the result lands, then retires', run: () => {
+      const calls = [];
+      const h = harness({ estimateLiveCost: (u) => { calls.push(u); return (u.input * 2 + u.output * 4) / 1e6; } });
+      h.push(session(), init(), mstart('msg_1'), atext('msg_1', 'Hello!'), mdelta({ output_tokens: 300, input_tokens: 12 }));
+      const live = h.frames.filter((f) => f.type === 'ask-usage');
+      assert.equal(live.length, 1);
+      assert.equal(live[0].costUsd, null, 'no result yet → costUsd stays null (§6.2.8)');
+      assert.equal(live[0].estimatedCostUsd, (12 * 2 + 300 * 4) / 1e6);
+      assert.deepEqual(calls[0], { input: 12, output: 300, cacheRead: 0, cacheCreation: 0, ctx: 312 }, 'the estimator sees exactly currentUsage()');
+      h.push(result());
+      const last = h.frames.filter((f) => f.type === 'ask-usage').at(-1);
+      assert.equal(last.costUsd, 0.0234, 'authoritative');
+      assert.equal(last.estimatedCostUsd, null, 'the estimate retires once the CLI figure exists');
+      const s = h.r.finish();
+      assert.equal(s.costUsd, 0.0234);
+      assert.equal('estimatedCostUsd' in s, false, 'never persisted: finish() is what every sink reads');
+    } },
+    { name: 'estimatedCostUsd: a throwing or non-finite estimator degrades to null and never breaks the stream', run: () => {
+      const h = harness({ estimateLiveCost: () => { throw new Error('boom'); } });
+      h.push(session(), init(), mstart('msg_1'), atext('msg_1', 'x'), mdelta({ output_tokens: 1, input_tokens: 1 }));
+      assert.equal(h.frames.filter((f) => f.type === 'ask-usage')[0].estimatedCostUsd, null);
+      const h2 = harness({ estimateLiveCost: () => NaN });
+      h2.push(session(), init(), mstart('msg_1'), atext('msg_1', 'x'), mdelta({ output_tokens: 1, input_tokens: 1 }));
+      assert.equal(h2.frames.filter((f) => f.type === 'ask-usage')[0].estimatedCostUsd, null);
+    } },
+  ]);
 });
 
-test('resolveCost: the §6.6 per-agent split is scaled so agent rows never out-total their turn', () => {
-  const MU = { 'claude-haiku-4-5': { inputTokens: 8032, outputTokens: 246, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.02 } };
-  const runAgentTurn = (opts) => {
-    const h = harness(opts);
-    h.push(init(), atool('msg_1', 'toolu_agent', 'Agent', { subagent_type: 'general-purpose', description: 'count runs', prompt: 'P' }));
-    h.push(uresult('toolu_agent', [{ type: 'text', text: 'count: 1' }], { tur: AGENT_TUR }));
-    h.push(result({ modelUsage: MU }));
-    const s = h.r.finish();
-    return { agent: s.blocks.find((b) => b.kind === 'agent'), total: s.costUsd };
-  };
-  // Baseline (unchanged): w(agent)=4016+5·123=4631, w(total)=8032+5·246=9262 → 0.02 × 0.5.
-  const base = runAgentTurn({});
-  assert.equal(base.agent.costUsd, 0.01);
-
-  // {free}: the turn is $0, so its agents must be too.
-  const free = runAgentTurn({ resolveCost: () => 0 });
-  assert.equal(free.total, 0);
-  assert.equal(free.agent.costUsd, 0, 'a $0 turn cannot contain a billing agent');
-
-  // {perMtok}-style re-price: halve the turn, halve every share.
-  const half = runAgentTurn({ resolveCost: (cli) => cli / 2 });
-  assert.equal(half.total, 0.0117);
-  assert.equal(half.agent.costUsd, 0.005);
-  assert.equal(half.agent.estimated, true, 'still an estimate — scaling does not make it exact');
-});
-
-test('estimatedCostUsd: the injected estimator prices the live usage sum until the result lands, then retires', () => {
-  const calls = [];
-  const h = harness({ estimateLiveCost: (u) => { calls.push(u); return (u.input * 2 + u.output * 4) / 1e6; } });
-  h.push(session(), init(), mstart('msg_1'), atext('msg_1', 'Hello!'), mdelta({ output_tokens: 300, input_tokens: 12 }));
-  const live = h.frames.filter((f) => f.type === 'ask-usage');
-  assert.equal(live.length, 1);
-  assert.equal(live[0].costUsd, null, 'no result yet → costUsd stays null (§6.2.8)');
-  assert.equal(live[0].estimatedCostUsd, (12 * 2 + 300 * 4) / 1e6);
-  assert.deepEqual(calls[0], { input: 12, output: 300, cacheRead: 0, cacheCreation: 0, ctx: 312 }, 'the estimator sees exactly currentUsage()');
-  h.push(result());
-  const last = h.frames.filter((f) => f.type === 'ask-usage').at(-1);
-  assert.equal(last.costUsd, 0.0234, 'authoritative');
-  assert.equal(last.estimatedCostUsd, null, 'the estimate retires once the CLI figure exists');
-  const s = h.r.finish();
-  assert.equal(s.costUsd, 0.0234);
-  assert.equal('estimatedCostUsd' in s, false, 'never persisted: finish() is what every sink reads');
-});
-
-test('estimatedCostUsd: a throwing or non-finite estimator degrades to null and never breaks the stream', () => {
-  const h = harness({ estimateLiveCost: () => { throw new Error('boom'); } });
-  h.push(session(), init(), mstart('msg_1'), atext('msg_1', 'x'), mdelta({ output_tokens: 1, input_tokens: 1 }));
-  assert.equal(h.frames.filter((f) => f.type === 'ask-usage')[0].estimatedCostUsd, null);
-  const h2 = harness({ estimateLiveCost: () => NaN });
-  h2.push(session(), init(), mstart('msg_1'), atext('msg_1', 'x'), mdelta({ output_tokens: 1, input_tokens: 1 }));
-  assert.equal(h2.frames.filter((f) => f.type === 'ask-usage')[0].estimatedCostUsd, null);
-});
-
-test('a successful worktree write calls onWorktreeMutation; errors and read-only tools do not', () => {
-  const seen = [];
-  const h = harness({ onWorktreeMutation: (e) => seen.push(e) });
-  h.push(atool('msg_1', 'toolu_1', 'mcp__worca__open_worktree', { projectKey: 'demo-00000001', ref: 'main' }));
-  h.push(uresult('toolu_1', JSON.stringify({ worktreeId: 'wt_00000001', path: '/x', projectKey: 'demo-00000001', ref: 'main', commit: 'abc' })));
-  h.push(atool('msg_1', 'toolu_2', 'mcp__worca__remove_worktree', { worktreeId: 'wt_ffffffff' }));
-  h.push(uresult('toolu_2', 'error: worktree not found', { isError: true }));
-  h.push(atool('msg_1', 'toolu_3', 'mcp__worca__list_worktrees', {}));
-  h.push(uresult('toolu_3', JSON.stringify({ worktrees: [] })));
-  h.push(atool('msg_1', 'toolu_4', 'mcp__worca__remove_worktree', { worktreeId: 'wt_00000001' }));
-  h.push(uresult('toolu_4', JSON.stringify({ ok: true })));
-  assert.deepEqual(seen, [{ tool: 'open_worktree' }, { tool: 'remove_worktree' }], 'writes only, successes only');
-});
-
-test('git pokes only for the navigating subcommands (checkout/switch/fetch) — exactly the calls noteNav acts on', () => {
-  const seen = [];
-  const h = harness({ onWorktreeMutation: (e) => seen.push(e) });
-  const git = (id, args) => {
-    h.push(atool('msg_1', id, 'mcp__worca__git', { worktreeId: 'wt_00000001', args }));
-    h.push(uresult(id, JSON.stringify({ command: `git ${args.join(' ')}`, text: '', truncated: false, totalBytes: 0, nextOffset: 0 })));
-  };
-  git('toolu_1', ['log', '--oneline']);
-  git('toolu_2', ['status']);
-  git('toolu_3', ['checkout', 'v1.2.0']);
-  git('toolu_4', ['switch', '--detach', 'origin/dev']);
-  git('toolu_5', ['fetch', 'origin']);
-  h.push(atool('msg_1', 'toolu_6', 'mcp__worca__git', { worktreeId: 'wt_00000001', args: ['checkout', 'nope'] }));
-  h.push(uresult('toolu_6', 'error: git checkout failed', { isError: true }));
-  h.push(atool('msg_1', 'toolu_7', 'mcp__worca__git', { worktreeId: 'wt_00000001' }));   // no args: never pokes, never throws
-  h.push(uresult('toolu_7', 'error: args required', { isError: true }));
-  assert.equal(seen.length, 3, 'checkout + switch + fetch');
-  assert.ok(seen.every((e) => e.tool === 'git'));
-});
-
-test('a sub-agent worktree write pokes too, exactly once; its read-only git does not (the child input is kept)', () => {
-  const seen = [];
-  const h = harness({ onWorktreeMutation: (e) => seen.push(e) });
-  h.push(atool('msg_1', 'toolu_agent', 'Task', { description: 'inspect the branch', subagent_type: 'general-purpose' }));
-  h.push(atool('msg_c1', 'toolu_c1', 'mcp__worca__git', { worktreeId: 'wt_00000001', args: ['log', '-3'] }, 'toolu_agent'));
-  h.push(uresult('toolu_c1', JSON.stringify({ command: 'git log -3', text: 'x', truncated: false, totalBytes: 1, nextOffset: 1 }), { ptu: 'toolu_agent' }));
-  assert.equal(seen.length, 0, 'a child `git log` is read-only: the same subcommand filter applies');
-  h.push(atool('msg_c1', 'toolu_c2', 'mcp__worca__open_worktree', { projectKey: 'demo-00000001', ref: 'main' }, 'toolu_agent'));
-  h.push(uresult('toolu_c2', JSON.stringify({ worktreeId: 'wt_00000002', path: '/y', projectKey: 'demo-00000001', ref: 'main', commit: 'def' }), { ptu: 'toolu_agent' }));
-  assert.deepEqual(seen, [{ tool: 'open_worktree' }]);
-  h.push(uresult('toolu_agent', [{ type: 'text', text: 'opened wt_00000002' }], { tur: AGENT_TUR }));
-  assert.equal(seen.length, 1, 'the Task aggregate result never double-pokes');
-});
-
-test('onWorktreeMutation: a throwing sink is contained', () => {
-  const h = harness({ onWorktreeMutation: () => { throw new Error('sink'); } });
-  h.push(atool('msg_1', 'toolu_1', 'mcp__worca__open_worktree', { projectKey: 'p', ref: 'main' }));
-  assert.doesNotThrow(() => h.push(uresult('toolu_1', JSON.stringify({ worktreeId: 'wt_00000001' }))));
-  assert.equal(h.frames.filter((f) => f.type === 'ask-block').at(-1).block.status, 'done', 'the block still completed');
+test('worktree pokes: successful writes and navigating git (checkout/switch/fetch) only, once from a sub-agent; a throwing sink is contained', async () => {
+  await checkRows([
+    { name: 'a successful worktree write calls onWorktreeMutation; errors and read-only tools do not', run: () => {
+      const seen = [];
+      const h = harness({ onWorktreeMutation: (e) => seen.push(e) });
+      h.push(atool('msg_1', 'toolu_1', 'mcp__worca__open_worktree', { projectKey: 'demo-00000001', ref: 'main' }));
+      h.push(uresult('toolu_1', JSON.stringify({ worktreeId: 'wt_00000001', path: '/x', projectKey: 'demo-00000001', ref: 'main', commit: 'abc' })));
+      h.push(atool('msg_1', 'toolu_2', 'mcp__worca__remove_worktree', { worktreeId: 'wt_ffffffff' }));
+      h.push(uresult('toolu_2', 'error: worktree not found', { isError: true }));
+      h.push(atool('msg_1', 'toolu_3', 'mcp__worca__list_worktrees', {}));
+      h.push(uresult('toolu_3', JSON.stringify({ worktrees: [] })));
+      h.push(atool('msg_1', 'toolu_4', 'mcp__worca__remove_worktree', { worktreeId: 'wt_00000001' }));
+      h.push(uresult('toolu_4', JSON.stringify({ ok: true })));
+      assert.deepEqual(seen, [{ tool: 'open_worktree' }, { tool: 'remove_worktree' }], 'writes only, successes only');
+    } },
+    { name: 'onWorktreeMutation: a throwing sink is contained', run: () => {
+      const h = harness({ onWorktreeMutation: () => { throw new Error('sink'); } });
+      h.push(atool('msg_1', 'toolu_1', 'mcp__worca__open_worktree', { projectKey: 'p', ref: 'main' }));
+      assert.doesNotThrow(() => h.push(uresult('toolu_1', JSON.stringify({ worktreeId: 'wt_00000001' }))));
+      assert.equal(h.frames.filter((f) => f.type === 'ask-block').at(-1).block.status, 'done', 'the block still completed');
+    } },
+    { name: 'git pokes only for the navigating subcommands (checkout/switch/fetch) — exactly the calls noteNav acts on', run: async () => {
+      const seen = [];
+      const h = harness({ onWorktreeMutation: (e) => seen.push(e) });
+      const git = (id, args) => {
+        h.push(atool('msg_1', id, 'mcp__worca__git', { worktreeId: 'wt_00000001', args }));
+        h.push(uresult(id, JSON.stringify({ command: `git ${args.join(' ')}`, text: '', truncated: false, totalBytes: 0, nextOffset: 0 })));
+      };
+      git('toolu_1', ['log', '--oneline']);
+      git('toolu_2', ['status']);
+      git('toolu_3', ['checkout', 'v1.2.0']);
+      git('toolu_4', ['switch', '--detach', 'origin/dev']);
+      git('toolu_5', ['fetch', 'origin']);
+      h.push(atool('msg_1', 'toolu_6', 'mcp__worca__git', { worktreeId: 'wt_00000001', args: ['checkout', 'nope'] }));
+      h.push(uresult('toolu_6', 'error: git checkout failed', { isError: true }));
+      h.push(atool('msg_1', 'toolu_7', 'mcp__worca__git', { worktreeId: 'wt_00000001' }));   // no args: never pokes, never throws
+      h.push(uresult('toolu_7', 'error: args required', { isError: true }));
+      assert.equal(seen.length, 3, 'checkout + switch + fetch');
+      assert.ok(seen.every((e) => e.tool === 'git'));
+    } },
+    { name: 'a sub-agent worktree write pokes too, exactly once; its read-only git does not (the child input is kept)', run: async () => {
+      const seen = [];
+      const h = harness({ onWorktreeMutation: (e) => seen.push(e) });
+      h.push(atool('msg_1', 'toolu_agent', 'Task', { description: 'inspect the branch', subagent_type: 'general-purpose' }));
+      h.push(atool('msg_c1', 'toolu_c1', 'mcp__worca__git', { worktreeId: 'wt_00000001', args: ['log', '-3'] }, 'toolu_agent'));
+      h.push(uresult('toolu_c1', JSON.stringify({ command: 'git log -3', text: 'x', truncated: false, totalBytes: 1, nextOffset: 1 }), { ptu: 'toolu_agent' }));
+      assert.equal(seen.length, 0, 'a child `git log` is read-only: the same subcommand filter applies');
+      h.push(atool('msg_c1', 'toolu_c2', 'mcp__worca__open_worktree', { projectKey: 'demo-00000001', ref: 'main' }, 'toolu_agent'));
+      h.push(uresult('toolu_c2', JSON.stringify({ worktreeId: 'wt_00000002', path: '/y', projectKey: 'demo-00000001', ref: 'main', commit: 'def' }), { ptu: 'toolu_agent' }));
+      assert.deepEqual(seen, [{ tool: 'open_worktree' }]);
+      h.push(uresult('toolu_agent', [{ type: 'text', text: 'opened wt_00000002' }], { tur: AGENT_TUR }));
+      assert.equal(seen.length, 1, 'the Task aggregate result never double-pokes');
+    } },
+  ]);
 });
 
 test('a successful remember/forget calls onMemoryMutation with the scope key from the RESULT; errors, reads and sub-agent double-fires do not', () => {
@@ -667,124 +686,120 @@ test('propose_workflow: label, START hook with the full input, RESULT hook with 
   assert.deepEqual(results.at(-1), { toolUseId: 'toolu_wf3', input: {}, text: 'error: propose_workflow: boom', isError: true });
 });
 
-test('propose_metrics_change: label, RESULT hook with the full input + raw text + isError; never for a sub-agent', () => {
-  assert.equal(labelForTool('mcp__worca__propose_metrics_change', {}), 'Proposing a metrics change');
-  assert.equal(labelForTool('mcp__worca__get_team_metrics', {}), 'Reading team metrics');
-  const results = [];
-  const h = harness({ onMetricsProposal: (e) => { results.push(e); return Promise.resolve(); } });
-  const input = { kind: 'record', projectKey: 'p-00000001', record: false };
-  h.push(session(), init(), mstart('msg_1'), atool('msg_1', 'toolu_tm', 'mcp__worca__propose_metrics_change', input));
-  assert.deepEqual(results, [], 'no START hook: the card is minted at RESULT, from the input');
-  h.push(uresult('toolu_tm', '{"ok":true,"card":{}}'));
-  assert.deepEqual(results, [{ toolUseId: 'toolu_tm', input, text: '{"ok":true,"card":{}}', isError: false }]);
-  h.push(atool('msg_1', 'toolu_task', 'Agent', { description: 'helper', subagent_type: 'general-purpose', prompt: 'x' }));
-  h.push(atool('msg_c', 'toolu_tm2', 'mcp__worca__propose_metrics_change', input, 'toolu_task'));
-  h.push(uresult('toolu_tm2', '{"ok":true}', { ptu: 'toolu_task' }));
-  assert.equal(results.length, 1, 'child-stream calls are logged, never intercepted');
-  h.push(atool('msg_1', 'toolu_tm3', 'mcp__worca__propose_metrics_change', {}));
-  h.push(uresult('toolu_tm3', 'error: propose_metrics_change: boom', { isError: true }));
-  assert.deepEqual(results.at(-1), { toolUseId: 'toolu_tm3', input: {}, text: 'error: propose_metrics_change: boom', isError: true });
-  const throwing = harness({ onMetricsProposal: () => { throw new Error('hook'); } });
-  throwing.push(atool('msg_1', 'toolu_x', 'mcp__worca__propose_metrics_change', input));
-  assert.doesNotThrow(() => throwing.push(uresult('toolu_x', '{"ok":true}')));
+// The RESULT-hooked tools share one dispatch shape (events.mjs: one try/catch per hook
+// after the block completes), so they run as one table. Every row asserts the same
+// negatives: no START hook, an error result passes isError, a sub-agent's call is
+// never intercepted, and a throwing hook is contained. Label strings are not pinned.
+const RESULT_HOOKS = [
+  ['propose_metrics_change: label, RESULT hook with the full input + raw text + isError; never for a sub-agent',
+    'propose_metrics_change', 'onMetricsProposal', { kind: 'record', projectKey: 'p-00000001', record: false }],
+  ['onTrackRun fires on the MAIN-stream track_run tool_result with the full input, the text and isError; never for a sub-agent',
+    'track_run', 'onTrackRun', { id: 'abcd1234' }],
+  ['propose_policy_change / get_team_policy: labels, the RESULT hook with the full input; never for a sub-agent',
+    'propose_policy_change', 'onPolicyProposal', { kind: 'edit', projectKey: 'p-00000001', set: [{ key: 'cost.pipelineLimitUsd', value: 30 }] }],
+  ['propose_clone_project: labelled, and its RESULT reaches onCloneProposal with the full input; a sub-agent call never does',
+    'propose_clone_project', 'onCloneProposal', { url: 'https://github.com/acme/api', branch: 'dev' }],
+  ['propose_web_access: labelled, and its RESULT reaches onWebProposal with the full input; a sub-agent call never does',
+    'propose_web_access', 'onWebProposal', { url: 'https://jev.example.dev/', reason: 'docs' }],
+  ['onAwaySwitch fires on set_away_now and set_run_away_mode results, with their labels — set_away_now',
+    'set_away_now', 'onAwaySwitch', { mode: 'away' }],
+  ['onAwaySwitch fires on set_away_now and set_run_away_mode results, with their labels — set_run_away_mode',
+    'set_run_away_mode', 'onAwaySwitch', { runId: 'abcd1234', mode: 'off' }],
+  ['onAwayProposal fires on the propose_away_mode_change result, with its label',
+    'propose_away_mode_change', 'onAwayProposal', { level: 'user', set: { enabled: true } }],
+  ['propose_workspace_change: labelled, and its RESULT reaches onWorkspaceProposal with the full input; a sub-agent call never does',
+    'propose_workspace_change', 'onWorkspaceProposal', { kind: 'add_members', workspaceId: 'wks-demo-0000abcd', projectKeys: ['k1'] }],
+];
+
+test('RESULT hooks: each hooked tool (metrics, track_run, policy, clone, web, away switch, away proposal, workspace) reaches its hook on the main stream with {toolUseId,input,text,isError}; never for a sub-agent; a throwing hook is contained', async () => {
+  await checkRows(RESULT_HOOKS.map(([name, tool, hook, input]) => ({ name, run: () => {
+    const mcpName = `mcp__worca__${tool}`;
+    const calls = [];
+    const h = harness({ [hook]: (e) => { calls.push(e); return Promise.resolve(); } });
+    h.push(session(), init(), mstart('msg_1'), atool('msg_1', 'toolu_1', mcpName, input));
+    assert.deepEqual(calls, [], 'no START hook: the card is minted at RESULT, from the input');
+    h.push(uresult('toolu_1', '{"ok":true,"card":{}}'));
+    assert.deepEqual(calls, [{ toolUseId: 'toolu_1', input, text: '{"ok":true,"card":{}}', isError: false }]);
+    h.push(atool('msg_1', 'toolu_2', mcpName, {}));
+    h.push(uresult('toolu_2', `error: ${tool}: boom`, { isError: true }));
+    assert.deepEqual(calls.at(-1), { toolUseId: 'toolu_2', input: {}, text: `error: ${tool}: boom`, isError: true });
+    // a sub-agent's call (parent_tool_use_id set) is logged on the agent block, never hooked (D16)
+    h.push(atool('msg_1', 'toolu_task', 'Agent', { description: 'helper', subagent_type: 'general-purpose', prompt: 'x' }));
+    h.push(atool('msg_c', 'toolu_3', mcpName, input, 'toolu_task'));
+    h.push(uresult('toolu_3', '{"ok":true}', { ptu: 'toolu_task' }));
+    assert.equal(calls.length, 2, 'child-stream calls are logged, never intercepted');
+    const throwing = harness({ [hook]: () => { throw new Error('hook'); } });
+    throwing.push(atool('msg_1', 'toolu_x', mcpName, input));
+    assert.doesNotThrow(() => throwing.push(uresult('toolu_x', '{"ok":true}')));
+  } })));
 });
 
-test('onTrackRun fires on the MAIN-stream track_run tool_result with the full input, the text and isError; never for a sub-agent', () => {
-  const calls = [];
-  const h = harness({ onTrackRun: (e) => calls.push(e) });
-  h.push(session(), init(), atool('msg_1', 't1', 'mcp__worca__track_run', { id: 'abcd1234' }), uresult('t1', '{"ok":true}'));
-  assert.deepEqual(calls, [{ toolUseId: 't1', input: { id: 'abcd1234' }, text: '{"ok":true}', isError: false }]);
-  assert.ok(h.frames.some((f) => f.type === 'ask-label' && f.label === 'Tracking a run'), 'the activity label has its own arm (the FIRST ask-label frame is the turn\'s own Thinking)');
-  h.push(atool('msg_2', 't2', 'mcp__worca__track_run', { id: 'zz' }), uresult('t2', 'error: track_run: run not found', { isError: true }));
-  assert.equal(calls[1].isError, true);
-  assert.equal(calls[1].text, 'error: track_run: run not found');
-  // a sub-agent's call (parent_tool_use_id set) is logged on the agent block, never hooked (D16)
-  h.push(atool('msg_3', 'agent-1', 'Task', { prompt: 'x' }), atool('msg_4', 't3', 'mcp__worca__track_run', { id: 'abcd1234' }, 'agent-1'), uresult('t3', '{"ok":true}', { ptu: 'agent-1' }));
-  assert.equal(calls.length, 2);
-});
+test('script tools: save_script pokes on success only; labels, the key stamped at the call and the result note on the block', async () => {
+  await checkRows([
+    { name: 'a successful save_script pokes onScriptMutation with the key and the action; a refusal, an error and a test run do not', run: async () => {
+      const seen = [];
+      const h = harness({ onScriptMutation: (e) => seen.push(e) });
+      h.push(atool('msg_1', 'toolu_1', 'mcp__worca__save_script', { key: 'runTests', meta: {}, source: 'npm test' }));
+      h.push(uresult('toolu_1', JSON.stringify({ ok: true, key: 'runTests', created: true, path: '/h/s/runTests.sh', link: '#scripts/runTests' })));
+      // A refusal carries a well-formed body and is NOT an is_error result, so only `ok` can stop it.
+      h.push(atool('msg_1', 'toolu_2', 'mcp__worca__save_script', { key: 'shell', meta: {}, source: 'x' }));
+      h.push(uresult('toolu_2', JSON.stringify({ ok: false, errors: ['script "shell" is a built-in — save your version under a new key instead'] })));
+      h.push(atool('msg_1', 'toolu_3', 'mcp__worca__save_script', { key: 'boom', meta: {}, source: 'x' }));
+      h.push(uresult('toolu_3', 'error: EACCES', { isError: true }));
+      // …and running a script changes no file.
+      h.push(atool('msg_1', 'toolu_4', 'mcp__worca__test_script', { key: 'runTests' }));
+      h.push(uresult('toolu_4', JSON.stringify({ ok: true, key: 'runTests', result: { status: 'clean' } })));
+      // A sub-agent's save still wrote the file, so it still pokes (the memory rule).
+      h.push(atool('msg_1', 'toolu_agent', 'Task', { description: 'save it', subagent_type: 'general-purpose' }));
+      h.push(atool('msg_c1', 'toolu_c1', 'mcp__worca__save_script', { key: 'lint', meta: {}, source: 'x' }, 'toolu_agent'));
+      h.push(uresult('toolu_c1', JSON.stringify({ ok: true, key: 'lint', created: false }), { ptu: 'toolu_agent' }));
+      h.push(uresult('toolu_agent', [{ type: 'text', text: 'saved' }], { tur: AGENT_TUR }));
+      assert.deepEqual(seen, [{ key: 'runTests', action: 'created' }, { key: 'lint', action: 'updated' }]);
+      const boom = harness({ onScriptMutation: () => { throw new Error('sink'); } });
+      boom.push(atool('msg_1', 'toolu_1', 'mcp__worca__save_script', { key: 'a', meta: {}, source: 'x' }));
+      assert.doesNotThrow(() => boom.push(uresult('toolu_1', JSON.stringify({ ok: true, key: 'a', created: true }))));
+      assert.equal(boom.frames.filter((f) => f.type === 'ask-block').at(-1).block.status, 'done', 'the block still completed');
+    } },
+    { name: 'script tools: activity labels, the key stamped at the call, and the result note merged on the block', run: async () => {
+      assert.equal(labelForTool('mcp__worca__list_scripts', {}), 'Looking at scripts');
+      assert.equal(labelForTool('mcp__worca__get_script', { key: 'runTests' }), 'Reading script: runTests');
+      assert.equal(labelForTool('mcp__worca__save_script', { key: 'runTests' }), 'Saving script: runTests');
+      assert.equal(labelForTool('mcp__worca__save_script', {}), 'Saving a script');
+      assert.equal(labelForTool('mcp__worca__test_script', { key: 'runTests' }), 'Testing script: runTests');
 
-test('a successful save_script pokes onScriptMutation with the key and the action; a refusal, an error and a test run do not', () => {
-  const seen = [];
-  const h = harness({ onScriptMutation: (e) => seen.push(e) });
-  h.push(atool('msg_1', 'toolu_1', 'mcp__worca__save_script', { key: 'runTests', meta: {}, source: 'npm test' }));
-  h.push(uresult('toolu_1', JSON.stringify({ ok: true, key: 'runTests', created: true, path: '/h/s/runTests.sh', link: '#scripts/runTests' })));
-  // A refusal carries a well-formed body and is NOT an is_error result, so only `ok` can stop it.
-  h.push(atool('msg_1', 'toolu_2', 'mcp__worca__save_script', { key: 'shell', meta: {}, source: 'x' }));
-  h.push(uresult('toolu_2', JSON.stringify({ ok: false, errors: ['script "shell" is a built-in — save your version under a new key instead'] })));
-  h.push(atool('msg_1', 'toolu_3', 'mcp__worca__save_script', { key: 'boom', meta: {}, source: 'x' }));
-  h.push(uresult('toolu_3', 'error: EACCES', { isError: true }));
-  // …and running a script changes no file.
-  h.push(atool('msg_1', 'toolu_4', 'mcp__worca__test_script', { key: 'runTests' }));
-  h.push(uresult('toolu_4', JSON.stringify({ ok: true, key: 'runTests', result: { status: 'clean' } })));
-  // A sub-agent's save still wrote the file, so it still pokes (the memory rule).
-  h.push(atool('msg_1', 'toolu_agent', 'Task', { description: 'save it', subagent_type: 'general-purpose' }));
-  h.push(atool('msg_c1', 'toolu_c1', 'mcp__worca__save_script', { key: 'lint', meta: {}, source: 'x' }, 'toolu_agent'));
-  h.push(uresult('toolu_c1', JSON.stringify({ ok: true, key: 'lint', created: false }), { ptu: 'toolu_agent' }));
-  h.push(uresult('toolu_agent', [{ type: 'text', text: 'saved' }], { tur: AGENT_TUR }));
-  assert.deepEqual(seen, [{ key: 'runTests', action: 'created' }, { key: 'lint', action: 'updated' }]);
-  const boom = harness({ onScriptMutation: () => { throw new Error('sink'); } });
-  boom.push(atool('msg_1', 'toolu_1', 'mcp__worca__save_script', { key: 'a', meta: {}, source: 'x' }));
-  assert.doesNotThrow(() => boom.push(uresult('toolu_1', JSON.stringify({ ok: true, key: 'a', created: true }))));
-  assert.equal(boom.frames.filter((f) => f.type === 'ask-block').at(-1).block.status, 'done', 'the block still completed');
-});
+      assert.equal(scriptToolKey('mcp__worca__save_script', { key: 'runTests', source: 'x' }), 'runTests');
+      assert.equal(scriptToolKey('mcp__worca__list_scripts', {}), '', 'a script tool with no key still says "script tool"');
+      assert.equal(scriptToolKey('mcp__worca__save_script', { key: 'a'.repeat(200) }), 'a'.repeat(64), 'clipped to the key regex\'s width');
+      assert.equal(scriptToolKey('mcp__worca__list_runs', { key: 'x' }), null, 'not a script tool');
 
-test('script tools: activity labels, the key stamped at the call, and the result note merged on the block', () => {
-  assert.equal(labelForTool('mcp__worca__list_scripts', {}), 'Looking at scripts');
-  assert.equal(labelForTool('mcp__worca__get_script', { key: 'runTests' }), 'Reading script: runTests');
-  assert.equal(labelForTool('mcp__worca__save_script', { key: 'runTests' }), 'Saving script: runTests');
-  assert.equal(labelForTool('mcp__worca__save_script', {}), 'Saving a script');
-  assert.equal(labelForTool('mcp__worca__test_script', { key: 'runTests' }), 'Testing script: runTests');
+      assert.deepEqual(scriptResultNote('mcp__worca__save_script', '{"ok":true,"key":"a","created":true}'), { saved: 'created' });
+      assert.deepEqual(scriptResultNote('mcp__worca__save_script', '{"ok":true,"key":"a","created":false}'), { saved: 'updated' });
+      assert.deepEqual(scriptResultNote('mcp__worca__save_script', '{"ok":false,"errors":["x"]}'), { saved: 'not saved' });
+      assert.deepEqual(scriptResultNote('mcp__worca__test_script', '{"ok":true,"result":{"status":"blocking","exitCode":1}}'), { status: 'blocking', exitCode: 1 });
+      assert.deepEqual(scriptResultNote('mcp__worca__test_script', '{"ok":false,"errors":["x"]}'), { status: 'not run' });
+      assert.equal(scriptResultNote('mcp__worca__test_script', 'not json'), null);
+      assert.equal(scriptResultNote('mcp__worca__save_script', '{"ok":true}', true), null, 'an errored call keeps the row\'s own error');
+      assert.equal(scriptResultNote('mcp__worca__list_scripts', '{"scripts":[]}'), null, 'the readers carry no note');
 
-  assert.equal(scriptToolKey('mcp__worca__save_script', { key: 'runTests', source: 'x' }), 'runTests');
-  assert.equal(scriptToolKey('mcp__worca__list_scripts', {}), '', 'a script tool with no key still says "script tool"');
-  assert.equal(scriptToolKey('mcp__worca__save_script', { key: 'a'.repeat(200) }), 'a'.repeat(64), 'clipped to the key regex\'s width');
-  assert.equal(scriptToolKey('mcp__worca__list_runs', { key: 'x' }), null, 'not a script tool');
-
-  assert.deepEqual(scriptResultNote('mcp__worca__save_script', '{"ok":true,"key":"a","created":true}'), { saved: 'created' });
-  assert.deepEqual(scriptResultNote('mcp__worca__save_script', '{"ok":true,"key":"a","created":false}'), { saved: 'updated' });
-  assert.deepEqual(scriptResultNote('mcp__worca__save_script', '{"ok":false,"errors":["x"]}'), { saved: 'not saved' });
-  assert.deepEqual(scriptResultNote('mcp__worca__test_script', '{"ok":true,"result":{"status":"blocking","exitCode":1}}'), { status: 'blocking', exitCode: 1 });
-  assert.deepEqual(scriptResultNote('mcp__worca__test_script', '{"ok":false,"errors":["x"]}'), { status: 'not run' });
-  assert.equal(scriptResultNote('mcp__worca__test_script', 'not json'), null);
-  assert.equal(scriptResultNote('mcp__worca__save_script', '{"ok":true}', true), null, 'an errored call keeps the row\'s own error');
-  assert.equal(scriptResultNote('mcp__worca__list_scripts', '{"scripts":[]}'), null, 'the readers carry no note');
-
-  const h = harness();
-  h.push(atool('msg_1', 'toolu_1', 'mcp__worca__test_script', { key: 'runTests' }));
-  assert.deepEqual(h.frames.filter((f) => f.type === 'ask-block').at(-1).block.script, { key: 'runTests' }, 'the key rides the block from the call on');
-  h.push(uresult('toolu_1', JSON.stringify({ ok: true, key: 'runTests', result: { status: 'blocking', exitCode: 1, durationMs: 4200 } })));
-  const block = h.frames.filter((f) => f.type === 'ask-block').at(-1).block;
-  assert.deepEqual(block.script, { key: 'runTests', status: 'blocking', exitCode: 1 });
-  assert.equal(block.status, 'done');
-  // A save_script input is a whole program: past blockIoMaxChars the persisted input is the
-  // { _truncated, preview } stub and input.key is GONE — the stamp is what keeps the key.
-  h.push(atool('msg_1', 'toolu_2', 'mcp__worca__save_script', { key: 'runTests', meta: {}, source: 'x'.repeat(5000) }));
-  h.push(uresult('toolu_2', JSON.stringify({ ok: true, key: 'runTests', created: true })));
-  const big = h.frames.filter((f) => f.type === 'ask-block').at(-1).block;
-  assert.equal(big.input._truncated, true);
-  assert.deepEqual(big.script, { key: 'runTests', saved: 'created' });
-  h.push(atool('msg_1', 'toolu_3', 'mcp__worca__list_runs', { limit: 5 }));
-  h.push(uresult('toolu_3', '[]'));
-  assert.equal('script' in h.frames.filter((f) => f.type === 'ask-block').at(-1).block, false, 'other tools are untouched');
-});
-
-test('propose_policy_change / get_team_policy: labels, the RESULT hook with the full input; never for a sub-agent', () => {
-  assert.equal(labelForTool('mcp__worca__propose_policy_change', {}), 'Proposing a policy change');
-  assert.equal(labelForTool('mcp__worca__get_team_policy', {}), 'Reading team policy');
-  const results = [];
-  const h = harness({ onPolicyProposal: (e) => { results.push(e); return Promise.resolve(); } });
-  const input = { kind: 'edit', projectKey: 'p-00000001', set: [{ key: 'cost.pipelineLimitUsd', value: 30 }] };
-  h.push(session(), init(), mstart('msg_1'), atool('msg_1', 'toolu_tp', 'mcp__worca__propose_policy_change', input));
-  assert.deepEqual(results, [], 'minted at RESULT');
-  h.push(uresult('toolu_tp', '{"ok":true,"card":{}}'));
-  assert.deepEqual(results, [{ toolUseId: 'toolu_tp', input, text: '{"ok":true,"card":{}}', isError: false }]);
-  h.push(atool('msg_1', 'toolu_task', 'Agent', { description: 'helper', subagent_type: 'general-purpose', prompt: 'x' }));
-  h.push(atool('msg_c', 'toolu_tp2', 'mcp__worca__propose_policy_change', input, 'toolu_task'));
-  h.push(uresult('toolu_tp2', '{"ok":true}', { ptu: 'toolu_task' }));
-  assert.equal(results.length, 1, 'child-stream calls are never intercepted');
-  const throwing = harness({ onPolicyProposal: () => { throw new Error('hook'); } });
-  throwing.push(atool('msg_1', 'toolu_x', 'mcp__worca__propose_policy_change', input));
-  assert.doesNotThrow(() => throwing.push(uresult('toolu_x', '{"ok":true}')));
+      const h = harness();
+      h.push(atool('msg_1', 'toolu_1', 'mcp__worca__test_script', { key: 'runTests' }));
+      assert.deepEqual(h.frames.filter((f) => f.type === 'ask-block').at(-1).block.script, { key: 'runTests' }, 'the key rides the block from the call on');
+      h.push(uresult('toolu_1', JSON.stringify({ ok: true, key: 'runTests', result: { status: 'blocking', exitCode: 1, durationMs: 4200 } })));
+      const block = h.frames.filter((f) => f.type === 'ask-block').at(-1).block;
+      assert.deepEqual(block.script, { key: 'runTests', status: 'blocking', exitCode: 1 });
+      assert.equal(block.status, 'done');
+      // A save_script input is a whole program: past blockIoMaxChars the persisted input is the
+      // { _truncated, preview } stub and input.key is GONE — the stamp is what keeps the key.
+      h.push(atool('msg_1', 'toolu_2', 'mcp__worca__save_script', { key: 'runTests', meta: {}, source: 'x'.repeat(5000) }));
+      h.push(uresult('toolu_2', JSON.stringify({ ok: true, key: 'runTests', created: true })));
+      const big = h.frames.filter((f) => f.type === 'ask-block').at(-1).block;
+      assert.equal(big.input._truncated, true);
+      assert.deepEqual(big.script, { key: 'runTests', saved: 'created' });
+      h.push(atool('msg_1', 'toolu_3', 'mcp__worca__list_runs', { limit: 5 }));
+      h.push(uresult('toolu_3', '[]'));
+      assert.equal('script' in h.frames.filter((f) => f.type === 'ask-block').at(-1).block, false, 'other tools are untouched');
+    } },
+  ]);
 });
 
 // Scheduled runs (docs/scheduled-runs.md "Ask Worca"): the four direct writes repaint the page; a
@@ -812,53 +827,62 @@ test('schedule tools: a successful direct write pokes onScheduleMutation (errors
   assert.equal(labelForTool('mcp__worca__propose_schedule_change', {}), 'Proposing a schedule change');
 });
 
-test('propose_clone_project: labelled, and its RESULT reaches onCloneProposal with the full input; a sub-agent call never does', () => {
-  assert.equal(labelForTool('mcp__worca__propose_clone_project', {}), 'Proposing a project clone');
-  const seen = [];
-  const h = harness({ onCloneProposal: (e) => { seen.push(e); return Promise.resolve(); } });
-  const input = { url: 'https://github.com/acme/api', branch: 'dev' };
-  h.push(session(), init(), mstart('msg_1'), atool('msg_1', 'toolu_cl', 'mcp__worca__propose_clone_project', input));
-  assert.deepEqual(seen, [], 'minted at RESULT, never at START');
-  h.push(uresult('toolu_cl', '{"ok":true,"card":{}}'));
-  assert.deepEqual(seen, [{ toolUseId: 'toolu_cl', input, text: '{"ok":true,"card":{}}', isError: false }]);
-  h.push(atool('msg_1', 'toolu_task', 'Agent', { description: 'helper', subagent_type: 'general-purpose', prompt: 'x' }));
-  h.push(atool('msg_c', 'toolu_cl2', 'mcp__worca__propose_clone_project', input, 'toolu_task'));
-  h.push(uresult('toolu_cl2', '{"ok":true}', { ptu: 'toolu_task' }));
-  assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
+test('ctxWindow: the main model\'s window rides usage after the result; absent when unmatched, garbage, or the lone entry is not the init model', async () => {
+  await checkRows([
+    { name: 'ctxWindow: the main model\'s contextWindow rides the usage once the result lands', run: () => {
+      const h = harness();
+      h.push(session(), init({ model: 'claude-opus-5-5' }), mstart('msg_1'), atext('msg_1', 'ok'), mdelta({ output_tokens: 4, input_tokens: 2 }));
+      assert.equal('ctxWindow' in h.r.snapshot().usage, false, 'no result yet: window unknown');
+      h.push(result({ modelUsage: {
+        'claude-opus-5-5': { inputTokens: 2, outputTokens: 4, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.01, contextWindow: 1000000, canonicalModel: 'claude-opus-5-5' },
+        'claude-haiku-4-5-20251001': { inputTokens: 900, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.001, contextWindow: 200000, canonicalModel: 'claude-haiku-4-5' },
+      } }));
+      assert.equal(h.r.snapshot().usage.ctxWindow, 1000000, 'the main model, never the title call');
+      assert.equal(h.frames.filter((f) => f.type === 'ask-usage').at(-1).usage.ctxWindow, 1000000);
+      assert.equal(h.r.finish().usage.ctxWindow, 1000000);
+    } },
+    { name: 'ctxWindow: absent when the main model cannot be matched or the window is garbage', run: () => {
+      const two = {
+        a: { contextWindow: 1000000, canonicalModel: 'a' },
+        b: { contextWindow: 200000, canonicalModel: 'b' },
+      };
+      let h = harness();
+      h.push(session(), init(), mstart('msg_1'), atext('msg_1', 'ok'), result({ modelUsage: two }));   // no init model, two keys
+      assert.equal('ctxWindow' in h.r.snapshot().usage, false);
+      for (const bad of [0, -5, '1000000', 1.5, null]) {
+        h = harness();
+        h.push(session(), init({ model: 'm' }), mstart('msg_1'), atext('msg_1', 'ok'), result({ modelUsage: { m: { contextWindow: bad } } }));
+        assert.equal('ctxWindow' in h.r.snapshot().usage, false, `window ${JSON.stringify(bad)} is unknown`);
+      }
+      h = harness();
+      h.push(session(), init(), mstart('msg_1'), atext('msg_1', 'ok'), result({ modelUsage: { only: { contextWindow: 200000 } } }));
+      assert.equal(h.r.snapshot().usage.ctxWindow, 200000, 'a single entry is the main model (matchModelKey fallback)');
+    } },
+    { name: 'ctxWindow: a lone modelUsage entry that is not the init model is never taken (failed main call, title call only)', run: () => {
+      const h = harness();
+      h.push(session(), init({ model: 'claude-opus-5-5' }), mstart('msg_1'), atext('msg_1', 'ok'), result({ modelUsage: {
+        'claude-haiku-4-5-20251001': { inputTokens: 900, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.001, contextWindow: 200000, canonicalModel: 'claude-haiku-4-5' },
+      } }));
+      assert.equal('ctxWindow' in h.r.snapshot().usage, false, 'the Haiku title call must not supply the Opus window');
+    } },
+  ]);
 });
 
-test('labelForTool: web tools name the host, never the full URL', () => {
-  assert.equal(labelForTool('mcp__worca__web_fetch', { url: 'https://docs.example.com/x' }), 'Reading docs.example.com');
-  assert.equal(labelForTool('mcp__worca__web_fetch', { url: 'bad' }), 'Reading a web page');
-  assert.equal(labelForTool('mcp__worca__web_search', { query: 'q' }), 'Searching the web');
-});
-
-test('propose_web_access: labelled, and its RESULT reaches onWebProposal with the full input; a sub-agent call never does', () => {
-  assert.equal(labelForTool('mcp__worca__propose_web_access', {}), 'Asking to read a new site');
-  const seen = [];
-  const h = harness({ onWebProposal: (e) => { seen.push(e); return Promise.resolve(); } });
-  const input = { url: 'https://jev.example.dev/', reason: 'docs' };
-  h.push(session(), init(), mstart('msg_1'), atool('msg_1', 'toolu_w', 'mcp__worca__propose_web_access', input));
-  assert.deepEqual(seen, []);
-  h.push(uresult('toolu_w', '{"ok":true,"card":{}}'));
-  assert.deepEqual(seen, [{ toolUseId: 'toolu_w', input, text: '{"ok":true,"card":{}}', isError: false }]);
-  h.push(atool('msg_1', 'toolu_task', 'Agent', { description: 'helper', subagent_type: 'general-purpose', prompt: 'x' }));
-  h.push(atool('msg_c', 'toolu_w2', 'mcp__worca__propose_web_access', input, 'toolu_task'));
-  h.push(uresult('toolu_w2', '{"ok":true}', { ptu: 'toolu_task' }));
-  assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
-});
-
-test('propose_workspace_change: labelled, and its RESULT reaches onWorkspaceProposal with the full input; a sub-agent call never does', () => {
-  assert.equal(labelForTool('mcp__worca__propose_workspace_change', {}), 'Proposing a workspace change');
-  const seen = [];
-  const h = harness({ onWorkspaceProposal: (e) => { seen.push(e); return Promise.resolve(); } });
-  const input = { kind: 'add_members', workspaceId: 'wks-demo-0000abcd', projectKeys: ['k1'] };
-  h.push(session(), init(), mstart('msg_1'), atool('msg_1', 'toolu_ws', 'mcp__worca__propose_workspace_change', input));
-  assert.deepEqual(seen, [], 'minted at RESULT, never at START');
-  h.push(uresult('toolu_ws', '{"ok":true,"card":{}}'));
-  assert.deepEqual(seen, [{ toolUseId: 'toolu_ws', input, text: '{"ok":true,"card":{}}', isError: false }]);
-  h.push(atool('msg_1', 'toolu_task', 'Agent', { description: 'helper', subagent_type: 'general-purpose', prompt: 'x' }));
-  h.push(atool('msg_c', 'toolu_ws2', 'mcp__worca__propose_workspace_change', input, 'toolu_task'));
-  h.push(uresult('toolu_ws2', '{"ok":true}', { ptu: 'toolu_task' }));
-  assert.equal(seen.length, 1, 'child-stream calls are never intercepted');
+test('agent ctxWindow: each sub-agent gets its own model\'s window at finish; an inheriting agent gets the main window; an unresolved alias gets none', () => {
+  const h = harness();
+  h.push(session(), init({ model: 'claude-opus-5-5' }));
+  h.push(atool('msg_1', 'toolu_h', 'Agent', { description: 'haiku child', subagent_type: 'general-purpose', model: 'haiku' }));
+  h.push(atool('msg_2', 'toolu_i', 'Agent', { description: 'inherits', subagent_type: 'general-purpose' }));
+  h.push(atool('msg_3', 'toolu_s', 'Agent', { description: 'sonnet alias, never resolved', subagent_type: 'general-purpose', model: 'sonnet' }));
+  h.push(uresult('toolu_h', [{ type: 'text', text: 'ok' }], { tur: { ...AGENT_TUR, resolvedModel: 'claude-haiku-4-5-20251001' } }));
+  h.push(uresult('toolu_i', [{ type: 'text', text: 'ok' }], { tur: { ...AGENT_TUR, resolvedModel: undefined } }));
+  h.push(uresult('toolu_s', [{ type: 'text', text: 'boom' }], { isError: true }));
+  h.push(result({ modelUsage: {
+    'claude-opus-5-5': { inputTokens: 2, outputTokens: 4, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.01, contextWindow: 1000000, canonicalModel: 'claude-opus-5-5' },
+    'claude-haiku-4-5-20251001': { inputTokens: 4016, outputTokens: 123, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.001, contextWindow: 200000, canonicalModel: 'claude-haiku-4-5' },
+  } }));
+  const agents = Object.fromEntries(h.r.finish().blocks.filter((b) => b.kind === 'agent').map((b) => [b.id, b]));
+  assert.equal(agents.toolu_h.ctxWindow, 200000, 'the Haiku child: its own window');
+  assert.equal(agents.toolu_i.ctxWindow, 1000000, 'no model: it inherits the main model, so the main window');
+  assert.equal('ctxWindow' in agents.toolu_s, false, 'an alias that never resolved matches nothing: no guess');
 });

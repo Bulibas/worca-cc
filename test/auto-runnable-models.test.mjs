@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { autoModelsFor } from '../src/core/auto/runnable.mjs';
 import { buildClassifierSystemPrompt, checkShapeModels } from '../src/core/auto/classify.mjs';
 import { normalizeShape } from '../src/shared/graph/assemble.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const CATALOG = [
   { id: 'claude-opus-5', efforts: ['high'] },
@@ -18,32 +19,33 @@ const CATALOG = [
 ];
 const routed = (id) => id === 'openrouter-nemotron' || id === 'gateway-model' || id === 'copilot-gpt';
 
-test('autoModelsFor: signed in — everything but a bridged model whose provider is not set up; no model required', () => {
-  const r = autoModelsFor(CATALOG, { auth: 'signed-in', routed });
-  assert.deepEqual(r.models.map((m) => m.id), ['claude-opus-5', 'claude-sonnet-5', 'openrouter-nemotron', 'gateway-model']);
-  assert.equal(r.requireModel, false);
-  assert.equal(r.note, null);
-});
-
-test('autoModelsFor: signed out — only endpoint-routed / bridged models that are ready, and every stage must name one', () => {
-  const r = autoModelsFor(CATALOG, { auth: 'signed-out', routed });
-  assert.deepEqual(r.models.map((m) => m.id), ['openrouter-nemotron', 'gateway-model']);
-  assert.equal(r.requireModel, true);
-  assert.match(r.note, /isn't signed in/);
-  assert.match(r.note, /2 model/);
-});
-
-test('autoModelsFor: an unknown sign-in state changes nothing (never narrows on a guess)', () => {
-  const r = autoModelsFor(CATALOG, { auth: 'unknown', routed });
-  assert.equal(r.models.length, 4);
-  assert.equal(r.requireModel, false);
-});
-
-test('autoModelsFor: signed out with nothing routed — keeps the list and says why the run will fail', () => {
-  const r = autoModelsFor(CATALOG.slice(0, 2), { auth: 'signed-out', routed });
-  assert.deepEqual(r.models.map((m) => m.id), ['claude-opus-5', 'claude-sonnet-5']);
-  assert.equal(r.requireModel, false);
-  assert.match(r.note, /no endpoint or provider model/i);
+test('autoModelsFor per sign-in state: signed-in, signed-out, unknown, signed-out with nothing routed', async () => {
+  await checkRows([
+    { name: 'autoModelsFor: signed in — everything but a bridged model whose provider is not set up; no model required', run: () => {
+      const r = autoModelsFor(CATALOG, { auth: 'signed-in', routed });
+      assert.deepEqual(r.models.map((m) => m.id), ['claude-opus-5', 'claude-sonnet-5', 'openrouter-nemotron', 'gateway-model']);
+      assert.equal(r.requireModel, false);
+      assert.equal(r.note, null);
+    } },
+    { name: 'autoModelsFor: signed out — only endpoint-routed / bridged models that are ready, and every stage must name one', run: () => {
+      const r = autoModelsFor(CATALOG, { auth: 'signed-out', routed });
+      assert.deepEqual(r.models.map((m) => m.id), ['openrouter-nemotron', 'gateway-model']);
+      assert.equal(r.requireModel, true);
+      assert.match(r.note, /isn't signed in/);
+      assert.match(r.note, /2 model/);
+    } },
+    { name: 'autoModelsFor: an unknown sign-in state changes nothing (never narrows on a guess)', run: () => {
+      const r = autoModelsFor(CATALOG, { auth: 'unknown', routed });
+      assert.equal(r.models.length, 4);
+      assert.equal(r.requireModel, false);
+    } },
+    { name: 'autoModelsFor: signed out with nothing routed — keeps the list and says why the run will fail', run: () => {
+      const r = autoModelsFor(CATALOG.slice(0, 2), { auth: 'signed-out', routed });
+      assert.deepEqual(r.models.map((m) => m.id), ['claude-opus-5', 'claude-sonnet-5']);
+      assert.equal(r.requireModel, false);
+      assert.match(r.note, /no endpoint or provider model/i);
+    } },
+  ]);
 });
 
 test('classifier prompt: requireModel replaces "omit to use the default model" with "every stage names a model"', () => {

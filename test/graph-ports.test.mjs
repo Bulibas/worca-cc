@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import {
   flowPorts, portsFnFor, portsOf, findPort, typeCompatible,
   resolveOrOutType, inboundWires, outboundWires, firedOutputs,
@@ -64,27 +65,30 @@ test('findPort + typeCompatible', () => {
   assert.equal(typeCompatible(null, 'md'), true, 'unresolvable source: caller skips');
 });
 
-test('resolveOrOutType walks inbound wires by inK index then wire id, through chained ors', () => {
-  const tpl = { version: 2, nodes: [
-    agent('n_p', 'planner'), { id: 'or1', kind: 'or', x: 0, y: 0, config: { arity: 2 } },
-    { id: 'or2', kind: 'or', x: 0, y: 0, config: { arity: 2 } }],
-    wires: [
-      { id: 'w2', from: { node: 'or1', port: 'out' }, to: { node: 'or2', port: 'in1' } },
-      { id: 'w1', from: { node: 'n_p', port: 'plan' }, to: { node: 'or1', port: 'in1' } },
-    ] };
-  assert.equal(resolveOrOutType(tpl, portsFn, 'or1'), 'md');
-  assert.equal(resolveOrOutType(tpl, portsFn, 'or2'), 'md', 'resolves THROUGH the chained or');
-  assert.equal(resolveOrOutType({ version: 2, nodes: [{ id: 'or1', kind: 'or', x: 0, y: 0, config: {} }], wires: [] }, portsFn, 'or1'), null);
-});
-
-test('resolveOrOutType terminates on a cyclic or chain (seen-set)', () => {
-  const tpl = { version: 2, nodes: [
-    { id: 'a', kind: 'or', x: 0, y: 0, config: {} }, { id: 'b', kind: 'or', x: 0, y: 0, config: {} }],
-    wires: [
-      { id: 'w1', from: { node: 'a', port: 'out' }, to: { node: 'b', port: 'in1' } },
-      { id: 'w2', from: { node: 'b', port: 'out' }, to: { node: 'a', port: 'in1' } },
-    ] };
-  assert.equal(resolveOrOutType(tpl, portsFn, 'a'), null);
+test('resolveOrOutType: inK then wire-id order, through chained ors, terminates on a cyclic chain', async () => {
+  await checkRows([
+    { name: 'resolveOrOutType walks inbound wires by inK index then wire id, through chained ors', run: () => {
+      const tpl = { version: 2, nodes: [
+        agent('n_p', 'planner'), { id: 'or1', kind: 'or', x: 0, y: 0, config: { arity: 2 } },
+        { id: 'or2', kind: 'or', x: 0, y: 0, config: { arity: 2 } }],
+        wires: [
+          { id: 'w2', from: { node: 'or1', port: 'out' }, to: { node: 'or2', port: 'in1' } },
+          { id: 'w1', from: { node: 'n_p', port: 'plan' }, to: { node: 'or1', port: 'in1' } },
+        ] };
+      assert.equal(resolveOrOutType(tpl, portsFn, 'or1'), 'md');
+      assert.equal(resolveOrOutType(tpl, portsFn, 'or2'), 'md', 'resolves THROUGH the chained or');
+      assert.equal(resolveOrOutType({ version: 2, nodes: [{ id: 'or1', kind: 'or', x: 0, y: 0, config: {} }], wires: [] }, portsFn, 'or1'), null);
+    } },
+    { name: 'resolveOrOutType terminates on a cyclic or chain (seen-set)', run: () => {
+      const tpl = { version: 2, nodes: [
+        { id: 'a', kind: 'or', x: 0, y: 0, config: {} }, { id: 'b', kind: 'or', x: 0, y: 0, config: {} }],
+        wires: [
+          { id: 'w1', from: { node: 'a', port: 'out' }, to: { node: 'b', port: 'in1' } },
+          { id: 'w2', from: { node: 'b', port: 'out' }, to: { node: 'a', port: 'in1' } },
+        ] };
+      assert.equal(resolveOrOutType(tpl, portsFn, 'a'), null);
+    } },
+  ]);
 });
 
 test('inboundWires / outboundWires filter by node and optional port', () => {

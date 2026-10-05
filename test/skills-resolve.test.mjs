@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveSkill, collectRequiredSkills, validateSkills } from '../src/core/skills.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const dirs = [];
 const tmp = async () => { const d = await mkdtemp(join(tmpdir(), 'worca-cc-skills-')); dirs.push(d); return d; };
@@ -38,28 +39,39 @@ test('resolveSkill: bundle, global, project, and miss in priority order', async 
   assert.equal(hit.searched.length, 3);
 });
 
-test('collectRequiredSkills: union across plan nodes, deduped, with attribution', () => {
-  const registry = {
-    artDirector: { requiresSkills: ['imagegen'] },
-    visualIdentityDirector: { requiresSkills: ['imagegen'] },
-    planner: {},
-  };
-  const plan = { steps: [[{ key: 'planner' }], [{ key: 'artDirector' }, { key: 'visualIdentityDirector' }]] };
-  assert.deepEqual(collectRequiredSkills(registry, plan), [
-    { skill: 'imagegen', requiredBy: ['artDirector', 'visualIdentityDirector'] },
+test('collectRequiredSkills (plan object): union with attribution, empty, ignores agents outside the plan, never iterates the plan', async () => {
+  await checkRows([
+    { name: 'collectRequiredSkills: union across plan nodes, deduped, with attribution', run: () => {
+      const registry = {
+        artDirector: { requiresSkills: ['imagegen'] },
+        visualIdentityDirector: { requiresSkills: ['imagegen'] },
+        planner: {},
+      };
+      const plan = { steps: [[{ key: 'planner' }], [{ key: 'artDirector' }, { key: 'visualIdentityDirector' }]] };
+      assert.deepEqual(collectRequiredSkills(registry, plan), [
+        { skill: 'imagegen', requiredBy: ['artDirector', 'visualIdentityDirector'] },
+      ]);
+    } },
+    { name: 'collectRequiredSkills: empty when no node requires a skill', run: () => {
+      const registry = { planner: {}, implementer: {} };
+      const plan = { steps: [[{ key: 'planner' }], [{ key: 'implementer' }]] };
+      assert.deepEqual(collectRequiredSkills(registry, plan), []);
+    } },
+    { name: 'collectRequiredSkills: ignores skills from agents not in the plan', run: () => {
+      const registry = { artDirector: { requiresSkills: ['imagegen'] }, planner: {} };
+      const plan = { steps: [[{ key: 'planner' }]] }; // artDirector absent from plan
+      assert.deepEqual(collectRequiredSkills(registry, plan), []);
+    } },
+    { name: 'collectRequiredSkills: a plan object still walks plan.steps (v1 path intact)', run: () => {
+      const registry = { planner: { requiresSkills: ['brainstorming'] }, ghost: { requiresSkills: ['nope'] } };
+      const plan = { steps: [[{ key: 'planner' }]] };
+      assert.deepEqual(collectRequiredSkills(registry, plan), [
+        { skill: 'brainstorming', requiredBy: ['planner'] },
+      ]);
+      // A plan is NOT iterable: it must not be treated as a key list.
+      assert.equal(typeof plan[Symbol.iterator], 'undefined');
+    } },
   ]);
-});
-
-test('collectRequiredSkills: empty when no node requires a skill', () => {
-  const registry = { planner: {}, implementer: {} };
-  const plan = { steps: [[{ key: 'planner' }], [{ key: 'implementer' }]] };
-  assert.deepEqual(collectRequiredSkills(registry, plan), []);
-});
-
-test('collectRequiredSkills: ignores skills from agents not in the plan', () => {
-  const registry = { artDirector: { requiresSkills: ['imagegen'] }, planner: {} };
-  const plan = { steps: [[{ key: 'planner' }]] }; // artDirector absent from plan
-  assert.deepEqual(collectRequiredSkills(registry, plan), []);
 });
 
 test('validateSkills: passes when all resolvable, returns bundle resolutions', async () => {
@@ -102,14 +114,4 @@ test('collectRequiredSkills: accepts a Set of agent keys (harness entry point)',
   assert.deepEqual(collectRequiredSkills(registry, new Set()), []);
   // A bare string is iterable but is NOT a key list: it must not union per character.
   assert.deepEqual(collectRequiredSkills({ ...registry, p: { requiresSkills: ['perChar'] } }, 'planner'), []);
-});
-
-test('collectRequiredSkills: a plan object still walks plan.steps (v1 path intact)', () => {
-  const registry = { planner: { requiresSkills: ['brainstorming'] }, ghost: { requiresSkills: ['nope'] } };
-  const plan = { steps: [[{ key: 'planner' }]] };
-  assert.deepEqual(collectRequiredSkills(registry, plan), [
-    { skill: 'brainstorming', requiredBy: ['planner'] },
-  ]);
-  // A plan is NOT iterable: it must not be treated as a key list.
-  assert.equal(typeof plan[Symbol.iterator], 'undefined');
 });

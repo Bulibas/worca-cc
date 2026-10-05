@@ -7,6 +7,7 @@ import http from 'node:http';
 import { mkdtemp, mkdir, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { checkRows } from './helpers/rows.mjs';
 
 let home, srv, base, prev, settingsFile, projDir;
 before(async () => {
@@ -30,17 +31,20 @@ const post = (path, body) => fetch(`${base}${path}`, { method: 'POST', headers: 
 const stored = async () => { try { return JSON.parse(await readFile(settingsFile(), 'utf8')).uiLevel; } catch { return undefined; } };
 const shellLevel = async () => ((await (await fetch(`${base}/`)).text()).match(/<html lang="en" data-theme="\w+" data-level="(\w+)">/) || [])[1];
 
-test('fresh install: the shell and GET /api/settings say simple, nothing stored yet', async () => {
-  assert.equal(await shellLevel(), 'simple');
-  assert.equal((await (await fetch(`${base}/api/settings`)).json()).uiLevel, 'simple');
-  assert.equal(await stored(), undefined, 'a GET never writes');
-});
-
-test('adding the first project pins simple, so the new user stays in simple mode', async () => {
-  const r = await post('/api/projects', { name: 'p', path: projDir });
-  assert.equal(r.status, 200);
-  assert.equal(await stored(), 'simple');
-  assert.equal(await shellLevel(), 'simple', 'not "expert" now that a project exists');
+test('fresh install: shell + GET /api/settings say simple with nothing stored; adding the first project pins simple', async () => {
+  await checkRows([
+    { name: 'fresh install: the shell and GET /api/settings say simple, nothing stored yet', run: async () => {
+      assert.equal(await shellLevel(), 'simple');
+      assert.equal((await (await fetch(`${base}/api/settings`)).json()).uiLevel, 'simple');
+      assert.equal(await stored(), undefined, 'a GET never writes');
+    } },
+    { name: 'adding the first project pins simple, so the new user stays in simple mode', run: async () => {
+      const r = await post('/api/projects', { name: 'p', path: projDir });
+      assert.equal(r.status, 200);
+      assert.equal(await stored(), 'simple');
+      assert.equal(await shellLevel(), 'simple', 'not "expert" now that a project exists');
+    } },
+  ]);
 });
 
 test('POST /api/settings {uiLevel} stores a choice and rejects anything else', async () => {
@@ -50,7 +54,7 @@ test('POST /api/settings {uiLevel} stores a choice and rejects anything else', a
   assert.equal(await shellLevel(), 'advanced');
   const bad = await post('/api/settings', { uiLevel: 'wizard' });
   assert.equal(bad.status, 400);
-  assert.match((await bad.json()).error, /uiLevel must be simple, advanced or expert/);
+  assert.match((await bad.json()).error, /“Interface mode” must be simple, advanced or expert/);
   assert.equal(await stored(), 'advanced', 'a refused POST changes nothing');
 });
 

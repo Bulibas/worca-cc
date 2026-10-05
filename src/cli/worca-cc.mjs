@@ -20,7 +20,6 @@ import process from 'node:process';
 
 import { preflightNode } from '../core/preflight-node.mjs';
 import { preflightDeps } from '../core/preflight-deps.mjs';
-import { createOrchestratorFor } from '../core/engine-select.mjs';
 import {
   addProject,
   listProjects,
@@ -29,22 +28,24 @@ import {
 } from '../core/projects.mjs';
 import { projectKey } from '../core/store.mjs';
 import { formatExecLine, formatGateHeader, formatRunSummary, formatWorkflowProposal } from './render.mjs';
-// Ask forms (spec §8): the prompt FORMATTING lives in render.mjs too. A second import
-// statement, not a longer first one — test/cli-exec-render.test.mjs pins the line above.
-import { formatFormField, formatCoerceError, formatFormErrors, FORM_REPROMPT_MAX } from './render.mjs';
-import { promptFields, projectForm, coerceInput } from '../shared/forms/project.mjs';
-import { whenOk } from '../shared/forms/layout.mjs';
-import { validate } from '../shared/forms/schema.mjs';
-import { collectAnswer } from '../shared/forms/answer.mjs';
+// Ask forms (spec §8): the prompt FORMATTING lives in render.mjs too (a second import
+// statement, not a longer first one); the field-by-field asker lives in forms.mjs.
+import { formatFormErrors, FORM_REPROMPT_MAX } from './render.mjs';
+import { projectForm } from '../shared/forms/project.mjs';
+import { createFormAsker } from './forms.mjs';
+import { kindLabel } from '../shared/away-mode/labels.mjs';
 import { pauseExitCode, describePauseReason, promptOptions, REASON } from '../core/failure-policy.mjs';
 import { effectiveDebugSpawn } from '../core/settings.mjs';
 import { SCHEDULE_VALUE_FLAGS, wantsSchedule, readScheduleFlags, createFromFlags, waitAndRun, cmdSchedule } from './schedule.mjs';
 import { cmdRuns } from './runs.mjs';
+import { cmdLogs } from './logs.mjs';
+import { cmdControl } from './control.mjs';
 import { cmdModels } from './models.mjs';
 import { cmdContainer } from './container.mjs';
 import {
   DEFAULT_UI_HOST, DEFAULT_UI_PORT, probeUi, stopUi, readUiInstance, uiUrl, waitForUiState,
 } from '../core/ui-instance.mjs';
+import { useEnvProxy, proxyNotice } from '../core/env-proxy.mjs';
 
 // ── node:sqlite runtime guard + warning filter ──────────────────────────────────
 // Drop ONLY the one-time ExperimentalWarning emitted by node:sqlite (the module is
@@ -113,6 +114,7 @@ function parseArgs(argv) {
     workflow: undefined,
     mock: false,
     auto: false,
+    nightMode: false,       // --night: this run opts into night mode (src/core/night/*)
     pastTeamCap: false,     // team policy (design §12): start with the total-cap acknowledgement recorded
     reason: undefined,      // …and the reason the team sees for it
     install: null,
@@ -170,6 +172,10 @@ function parseArgs(argv) {
     }
     if (arg === '--yes' || arg === '--non-interactive') {
       out.auto = true;
+      continue;
+    }
+    if (arg === '--night') {
+      out.nightMode = true;
       continue;
     }
     if (arg === '--no-human') {
@@ -270,6 +276,10 @@ Subcommands:
     [--past-team-cap]         Continue past a TEAM cap (soft; recorded to team metrics). Add --reason "<why>".
   runs [list|show|<id>]       List pipeline runs across projects, or show one in detail
                               (any unique prefix; --json for machines). See: worca runs help
+  logs <id> [-f]              Tail a run's live log (--tail N, --component, --level,
+                              --json). -f follows; Ctrl-C detaches, the run continues. See: worca logs help
+  stop <id>                   Stop a live or paused run (any unique prefix). See: worca stop help
+  pause <id>                  Gracefully pause a live run; resume with: worca resume <id>
   doctor                      Reconcile crashed runs and sweep leftover run roots.
   plugin <cmd> [...]          Manage plugins: add|install|list|update|remove|purge|enable|
                               disable|doctor|link|reimport|init|validate|exec. See: worca plugin help
@@ -322,7 +332,10 @@ Options:
   --after <id>             Start when another run ends: a run id or a scheduled run id (any unique prefix)
   --after-any              …even if that run fails or is stopped
   --source-from-previous   Start on that run's feature branch (with --after)
-  --yes, --non-interactive Auto-answer clarify (first option) and gates (continue)
+  --yes, --non-interactive Auto-answer clarify (recommended, else first option) and gates (continue)
+  --night                  Mark this run: worca may answer its questions while you are away
+                           (your away hours or "I'm away now"), and by day once a question has
+                           waited 30 min. Configure in Settings > Away mode.
   --ui                     Same as "worca ui start" (accepts --port, --open, --mock)
   --install <targetDir>    Copy agents + /worca skill into <targetDir>/.claude
   -h, --help               Show this help
@@ -339,6 +352,7 @@ const COLORS = {
   yellow: '\x1b[33m',
   red: '\x1b[31m',
   cyan: '\x1b[36m',
+  magenta: '\x1b[35m',
   gray: '\x1b[90m',
 };
 const useColor = process.stdout.isTTY;
@@ -368,8 +382,21 @@ function makeRl() {
   return rl;
 }
 
+// The open prompt's cancel switch: night mode may answer a question while its readline
+// prompt is still open, and that prompt must go away or the next one stacks on it.
+let promptAbort = null;
+const NIGHT_ANSWERED = 'NIGHT_ANSWERED';
+
 function question(rl, q) {
-  return new Promise((res) => rl.question(q, (a) => res(a)));
+  const signal = promptAbort?.signal;
+  if (!signal) return new Promise((res) => rl.question(q, (a) => res(a)));
+  return new Promise((res, rej) => {
+    // An aborted readline question never calls its callback: settle here instead.
+    const cancel = () => rej(Object.assign(new Error('answered by night mode'), { code: NIGHT_ANSWERED }));
+    if (signal.aborted) { cancel(); return; }
+    signal.addEventListener('abort', cancel, { once: true });
+    rl.question(q, { signal }, (a) => { signal.removeEventListener('abort', cancel); res(a); });
+  });
 }
 
 /**
@@ -485,112 +512,7 @@ async function askWorkflow(rl, workflow) {
   }
 }
 
-/** The answer field a P1 error path names: `notes`, `steps[1].verdict` -> `steps`. */
-function fieldOfPath(path) {
-  return String(path || '').split(/[.[]/)[0] || '';
-}
-
-/** The answer schema for ONE field, or null (a stale layout, or a display widget). */
-function fieldSchemaOf(ask, name) {
-  const props = ask && ask.answerSchema && ask.answerSchema.properties;
-  return props && Object.hasOwn(props, name) ? props[name] : null;
-}
-
-/**
- * Read ONE entry for `f` until it coerces and validates. Returns the value, or
- * `undefined` for an optional field the user left empty. Coercion is P1's
- * coerceInput (ruling X7) — the CLI only prints and decides requiredness.
- */
-async function readFormEntry(rl, f, prompt, indent = '') {
-  for (;;) {
-    const got = coerceInput(f, await question(rl, c('cyan', `${indent}${prompt}`)));
-    if (!got.ok) { out(c('red', `${indent}${formatCoerceError(f, got)}`)); continue; }
-    // coerceInput returns `undefined` for an empty entry meaning "use the default";
-    // applying it is the caller's job, and so is requiredness.
-    if (got.value === undefined) {
-      if (f.default !== undefined) return f.default;
-      if (f.required) { out(c('red', `${indent}  ${f.label || f.field} is required`)); continue; }
-      return undefined;
-    }
-    return got.value;
-  }
-}
-
-/** Prompt ONE field and write it into `values`. */
-async function askFormField(rl, ask, f, values) {
-  const { lines, prompt } = formatFormField(f);
-  for (const line of lines) out(line);
-  for (;;) {
-    const value = await readFormEntry(rl, f, prompt);
-    if (value === undefined) { delete values[f.field]; return; }
-    const schema = fieldSchemaOf(ask, f.field);
-    if (schema) {
-      const v = validate(schema, value);
-      if (!v.ok) {
-        for (const line of formatFormErrors(v.errors.map((e) => ({ ...e, path: e.path || f.field })))) out(c('red', line));
-        continue;
-      }
-    }
-    values[f.field] = value;
-    return;
-  }
-}
-
-/** A review-list: one row per bound item, each row prompting the field's itemFields. */
-async function askReviewList(rl, f, values) {
-  const { lines } = formatFormField(f);
-  for (const line of lines) out(line);
-  const rows = [];
-  for (const item of (Array.isArray(f.items) ? f.items : [])) {
-    out(`  ${item.label || item.id}`);
-    const row = { id: item.id };
-    for (const sub of (Array.isArray(f.itemFields) ? f.itemFields : [])) {
-      const { lines: subLines, prompt } = formatFormField(sub);
-      for (const line of subLines) out(`  ${line}`);
-      const value = await readFormEntry(rl, sub, prompt, '  ');
-      if (value !== undefined) row[sub.field] = value;
-    }
-    rows.push(row);
-  }
-  values[f.field] = rows;
-}
-
-/**
- * Ask ONE kind:'form' question interactively (spec §8). Prints P1's text projection
- * — display widgets as text, files as `rel (mime, size)` — then prompts field by
- * field in LAYOUT order, honouring `when` as answers accumulate (a field that
- * becomes hidden loses its value and is not required). Each entry goes through P1's
- * coerceInput + validate; the whole set through collectAnswer, which drops hidden
- * fields, strips unknown keys and treats "" as missing. Returns { values }.
- * Re-offers from the first offending field, at most FORM_REPROMPT_MAX times.
- */
-async function askForm(rl, ask) {
-  out('');
-  const projected = projectForm(ask).split('\n');
-  out(c('bold', `? ${projected[0]}`));
-  for (const line of projected.slice(1)) out(line);
-  const fields = promptFields(ask);
-  const values = {};
-  let from = 0;
-  for (let pass = 1; ; pass++) {
-    for (let i = from; i < fields.length; i++) {
-      const f = fields[i];
-      if (!whenOk(f.when, values)) { delete values[f.field]; continue; }
-      if (f.widget === 'review-list') await askReviewList(rl, f, values);
-      else await askFormField(rl, ask, f, values);
-    }
-    const collected = collectAnswer(ask, ask.answerSchema, values);
-    if (!collected.errors.length) return { values: collected.values };
-    for (const line of formatFormErrors(collected.errors)) out(c('red', line));
-    if (pass >= FORM_REPROMPT_MAX) {
-      throw new Error(`form "${ask.form}" is still invalid after ${FORM_REPROMPT_MAX} attempts`);
-    }
-    const bad = new Set(collected.errors.map((e) => fieldOfPath(e.path)));
-    const first = fields.findIndex((f) => bad.has(f.field) && whenOk(f.when, values));
-    from = first >= 0 ? first : 0;
-    for (let i = from; i < fields.length; i++) delete values[fields[i].field];
-  }
-}
+const { askForm } = createFormAsker({ out, c, question });
 
 // ── shared drive loop ────────────────────────────────────────────────────────────
 
@@ -734,6 +656,9 @@ async function attachAndDrive(orch, flags, start) {
     const { id, kind, questions, issues, recovery, agent } = payload;
     if (flags.auto || !rl) return; // auto mode resolves internally
     answering = true;
+    const ctrl = new AbortController();
+    promptAbort = ctrl;
+    promptAbort.questionId = id;
     try {
       if (kind === 'clarify') {
         const answer = await askClarify(rl, questions || []);
@@ -789,6 +714,8 @@ async function attachAndDrive(orch, flags, start) {
         }
       }
     } catch (err) {
+      // Night mode answered while the prompt was open: nothing to answer, nothing failed.
+      if (err?.code === NIGHT_ANSWERED) { out(''); return; }
       process.stderr.write(`Failed to read answer: ${err?.message || err}\n`);
       // Never swallow: orch.answer() was not called, so the ask stays open and the
       // run would hang on it (or be abandoned at EOF with its row left `running`
@@ -799,7 +726,17 @@ async function attachAndDrive(orch, flags, start) {
       abandonAnswer(err);
     } finally {
       answering = false;
+      if (promptAbort === ctrl) promptAbort = null;
     }
+  });
+
+  orch.on('night-decision', ({ id, kind, record }) => {
+    // Close the readline prompt night mode just made moot.
+    if (promptAbort && promptAbort.questionId === id && !record?.guardrail) promptAbort.abort();
+    const what = record?.guardrail
+      ? `paused: ${String(record.rationale || record.guardrail).replace(/^Paused:\s*/, '')}`
+      : `answered ${kindLabel(kind)} ${id}: ${String(record?.choice).slice(0, 120)}`;
+    out(c('magenta', `Away mode ${what}${record?.flagged && !record?.guardrail ? ' (please check)' : ''}`));
   });
 
   // Ctrl+C: 1st -> graceful pause (falls back to stop when not pausable);
@@ -1455,6 +1392,7 @@ async function cmdResume(argv) {
     }
   }
 
+  const { createOrchestratorFor } = await import('../core/engine-select.mjs');
   const orch = await createOrchestratorFor({
     projectDir,
     ...(workspace ? { workspace } : {}),
@@ -1606,6 +1544,7 @@ function contribSummary(x) {
     [n(b.scripts), 'script', 'scripts'],
     [n(b.skills), 'skill', 'skills'],
     [n(b.workflows), 'workflow', 'workflows'],
+    [n(b.mcpServers), 'MCP server', 'MCP servers'],
   ]
     .filter(([count]) => count > 0)
     .map(([count, one, many]) => `${count} ${count === 1 ? one : many}`);
@@ -1641,6 +1580,7 @@ async function printInventory(inv) {
   if (summary) out(`  ${summary}`);
   const notice = await pythonNoticeFor(i.scripts);
   if (notice) out(c('yellow', `  ${notice}`));
+  for (const s of i.mcpServers || []) out(`  MCP server: ${s.name} (${s.type}) — ${s.command || s.url}`);
   for (const s of i.skills || []) out(`  skill: ${s}`);
   for (const w of i.workflows || []) out(`  workflow: ${w}`);
   if (i.depCount != null) out(`  npm dependencies: ${i.depCount}`);
@@ -1939,6 +1879,13 @@ async function cmdPlugin(argv) {
   const store = await import('../core/plugin-store.mjs');
   const repoMod = await import('../core/plugin-repo.mjs');
   const manifestMod = await import('../core/plugin-manifest.mjs');
+  // MCP registry (§4.4): persist the bases of servers that became honoured with
+  // no install event. Never fails the command; the next start or write retries.
+  try {
+    await (await import('../core/mcp/catalog.mjs')).reconcileMcpStore();
+  } catch (err) {
+    process.stderr.write(`warning: MCP registry reconcile skipped: ${err?.message || err}\n`);
+  }
 
   try {
     switch (verb) {
@@ -1955,7 +1902,7 @@ async function cmdPlugin(argv) {
         const name = a._[0];
         if (!name) fail('Usage: worca plugin install <name> [--repo <url>] [--marketplace <id>] [--ref <sha>] [--yes]');
         const mkt = await import('../core/marketplaces.mjs');
-        try { mkt.seedBuiltinMarketplace(); } catch { /* non-checkout install */ }
+        try { mkt.seedBuiltinMarketplace(); } catch { /* registry unwritable: go on without the builtin */ }
         let repoUrl = a.repo;
         let marketplace = a.marketplace || null;
         if (!repoUrl && marketplace) {
@@ -1998,6 +1945,11 @@ async function cmdPlugin(argv) {
         for (const s of m.taskSources || []) {
           const secrets = (s.configSchema || []).filter((f) => f.secret).map((f) => f.key);
           out(`  task source: ${s.id} (${s.displayName})${secrets.length ? ` — requests secrets: ${secrets.join(', ')}` : ''}`);
+        }
+        // MCP servers (registry §13): the honoured block is knowable before export too.
+        for (const n of Object.keys(m.mcpServers || {}).sort()) {
+          const s = store.mcpInventoryRow(n, m.mcpServers[n]);
+          out(`  MCP server: ${s.name} (${s.type}) — ${s.command || s.url}`);
         }
         if (m.setup?.node) out('  setup: npm ci --prefix <versionDir> --ignore-scripts --omit=dev');
         if (m.setup?.python) out('  setup: uv sync --project <versionDir>');
@@ -2046,6 +1998,7 @@ async function cmdPlugin(argv) {
         for (const s of delta.newTaskSources || []) out(c('yellow', `  new task source: ${s}`));
         for (const ag of delta.newAgents || []) out(c('yellow', `  new agent: ${ag}`));
         if (delta.setupChanged) out(c('yellow', '  setup commands changed'));
+        for (const l of delta.mcpLines || []) out(c(l.red ? 'red' : 'yellow', `  ${l.text}`));
         if (a.diff && cand.diffFull) out(cand.diffFull);
         if (!(await confirmPlugin('Update?', !!a.yes))) {
           out('aborted (still pinned)');
@@ -2289,7 +2242,7 @@ async function cmdMarketplace(argv) {
     return 0;
   }
   const mkt = await import('../core/marketplaces.mjs');
-  try { mkt.seedBuiltinMarketplace(); } catch { /* non-checkout install: skip */ }
+  try { mkt.seedBuiltinMarketplace(); } catch { /* registry unwritable: go on without the builtin */ }
   try {
     switch (verb) {
       case 'add': {
@@ -3022,7 +2975,7 @@ async function cmdPolicy(argv) {
   if (!verb || verb === 'help') { process.stdout.write(POLICY_HELP); return 0; }
   const sync = await import('../core/policy/sync.mjs');
   const { effectiveRows } = await import('../core/policy/effective.mjs');
-  const { localSnapshot, pluginRequirements, marketplaceSeedCandidates, seedPolicyMarketplaces } = await import('../core/policy/local.mjs');
+  const { localSnapshot, withMcpLocal, pluginRequirements, marketplaceSeedCandidates, seedPolicyMarketplaces } = await import('../core/policy/local.mjs');
   try {
     switch (verb) {
       case 'show': {
@@ -3034,7 +2987,7 @@ async function cmdPolicy(argv) {
           else out(`no team policy for ${projectDir}: ${r.detail || r.reason}`);
           return r.reason === 'not-enabled' || r.reason === 'no-origin' ? 0 : 1;
         }
-        const rows = effectiveRows({ doc: r.doc, workspaceRun: false, local: localSnapshot(projectDir) });
+        const rows = effectiveRows({ doc: r.doc, workspaceRun: false, local: await withMcpLocal(localSnapshot(projectDir), { slug: r.home, sha: r.sha, doc: r.doc }) });
         if (a.json) { out(JSON.stringify({ home: r.home, sha: r.sha, delegated: r.delegated, from: r.from, doc: r.doc, rows }, null, 2)); return 0; }
         out(c('bold', `team policy ${r.home}${r.sha ? ` @ ${String(r.sha).slice(0, 7)}` : ''}${r.delegated ? ` (followed by ${r.from})` : ''}`));
         if (r.doc.title) out(`  ${r.doc.title}${r.doc.updatedBy ? ` · updated by ${r.doc.updatedBy}` : ''}${r.doc.updatedAt ? ` · ${r.doc.updatedAt}` : ''}`);
@@ -3122,7 +3075,7 @@ async function drainMetricsFlushes() {
 
 // ── main ──────────────────────────────────────────────────────────────────────────
 
-const SUBCOMMANDS = new Set(['add', 'list', 'remove', 'resume', 'runs', 'doctor', 'plugin', 'marketplace', 'config', 'ui', 'workflow', 'metrics', 'script', 'policy', 'schedule', 'models', 'container', 'broker']);
+const SUBCOMMANDS = new Set(['add', 'list', 'remove', 'resume', 'runs', 'logs', 'stop', 'pause', 'doctor', 'plugin', 'marketplace', 'config', 'ui', 'workflow', 'metrics', 'script', 'policy', 'schedule', 'models', 'container', 'broker']);
 
 /** Levenshtein distance, two-row. Only ever called on short argv tokens. */
 function editDistance(a, b) {
@@ -3165,6 +3118,10 @@ function nearestSubcommand(token) {
 }
 
 async function main() {
+  // Outbound calls (pipelines, `worca broker`) honor HTTP(S)_PROXY / NO_PROXY (src/core/env-proxy.mjs).
+  // Only problems are printed: stdout belongs to the subcommand (some emit JSON).
+  const proxyLine = proxyNotice(useEnvProxy());
+  if (proxyLine?.level === 'warn') process.stderr.write(`worca: ${proxyLine.text}\n`);
   const sub = process.argv[2];
   // `worca help` is what every CLI user types first; it is not a subcommand and
   // not a near-miss of one, so without this line it became a PROMPT and ran a
@@ -3177,6 +3134,8 @@ async function main() {
     if (sub === 'remove') return cmdRemove(rest);
     if (sub === 'resume') return cmdResume(rest);
     if (sub === 'runs') return cmdRuns(rest, { out, c, fail });
+    if (sub === 'logs') return cmdLogs(rest, { out, c, fail });
+    if (sub === 'stop' || sub === 'pause') return cmdControl(sub, rest, { out, c, fail });
     if (sub === 'doctor') return cmdDoctor();
     if (sub === 'plugin') return cmdPlugin(rest);
     if (sub === 'marketplace') return cmdMarketplace(rest);
@@ -3326,7 +3285,7 @@ async function main() {
     if (!flags.wait) return 0;
     waitTicketId = made.ticket.id;
   }
-  const buildOrch = () => createOrchestratorFor({
+  const buildOrch = async () => (await import('../core/engine-select.mjs')).createOrchestratorFor({
     projectDir,
     prompt: flags.prompt || undefined,
     promptFile: flags.file || undefined,
@@ -3343,6 +3302,7 @@ async function main() {
     },
     auto: flags.auto,
     humanInLoop: flags.humanInLoop === false ? false : undefined,
+    ...(flags.nightMode ? { nightMode: true } : {}),
   });
 
   if (waitTicketId) {

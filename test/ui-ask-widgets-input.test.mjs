@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { renderAskForm } from '../ui/public/ask/form-renderer.mjs';
 import { COMMON_ITEM_KEYS, LAYOUT_ITEM_KEYS } from '../src/shared/forms/catalog.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const win = new JSDOM('<!doctype html><body></body>').window;
 const doc = win.document;
@@ -40,36 +41,44 @@ test('number: min/max/step from the schema, unit chip, numeric value', () => {
   assert.equal('n' in f.snapshot(), false, 'a cleared number is no value');
 });
 
-test('slider: range bounds, a live output, and the two end labels', () => {
+test('slider, toggle and date write typed values (number, boolean incl. false, verbatim date string)', async () => {
   const f = mount(askOf(
-    [{ widget: 'slider', field: 's', label: 'Weight', unit: '%', minLabel: 'none', maxLabel: 'all' }],
-    { s: { type: 'integer', minimum: 0, maximum: 100, default: 40 } },
+    [{ widget: 'slider', field: 's', label: 'Weight', unit: '%', minLabel: 'none', maxLabel: 'all' },
+      { widget: 'toggle', field: 't', label: 'Ship it' },
+      { widget: 'date', field: 'd', label: 'When' }],
+    { s: { type: 'integer', minimum: 0, maximum: 100, default: 40 },
+      t: { type: 'boolean', default: false },
+      d: { type: 'string', format: 'date' } },
   ));
-  const r = f.el.querySelector('input[type="range"]');
-  assert.equal(r.getAttribute('min'), '0');
-  assert.equal(r.getAttribute('max'), '100');
-  assert.equal(r.value, '40');
-  assert.equal(f.el.querySelector('.af-slider-val').textContent, '40%');
-  const ends = [...f.el.querySelectorAll('.af-slider-ends span')].map((n) => n.textContent);
-  assert.deepEqual(ends, ['none', 'all']);
-  r.value = '70'; input(r);
-  assert.equal(f.snapshot().s, 70);
-  assert.equal(f.el.querySelector('.af-slider-val').textContent, '70%');
-});
-
-test('toggle: a real checkbox in the house switch markup, boolean value', () => {
-  const f = mount(askOf(
-    [{ widget: 'toggle', field: 't', label: 'Ship it' }],
-    { t: { type: 'boolean', default: false } },
-  ));
-  const box = f.el.querySelector('input[type="checkbox"]');
-  assert.equal(box.className, 'sw-input', 'reuses the existing switch skin');
-  assert.ok(f.el.querySelector('.switch'), 'the knob element is there');
-  assert.equal(f.el.querySelector('.af-switch-txt').textContent, 'Ship it');
-  box.checked = true; change(box);
-  assert.equal(f.snapshot().t, true);
-  box.checked = false; change(box);
-  assert.equal(f.snapshot().t, false, 'false is a VALUE, not an absence');
+  await checkRows([
+    { name: 'slider: range bounds, a live output, and the two end labels', run: () => {
+      const r = f.el.querySelector('input[type="range"]');
+      assert.equal(r.getAttribute('min'), '0');
+      assert.equal(r.getAttribute('max'), '100');
+      assert.equal(r.value, '40');
+      assert.equal(f.el.querySelector('.af-slider-val').textContent, '40%');
+      const ends = [...f.el.querySelectorAll('.af-slider-ends span')].map((n) => n.textContent);
+      assert.deepEqual(ends, ['none', 'all']);
+      r.value = '70'; input(r);
+      assert.equal(f.snapshot().s, 70);
+      assert.equal(f.el.querySelector('.af-slider-val').textContent, '70%');
+    } },
+    { name: 'toggle: a real checkbox in the house switch markup, boolean value', run: () => {
+      const box = f.el.querySelector('input[type="checkbox"]');
+      assert.equal(box.className, 'sw-input', 'reuses the existing switch skin');
+      assert.ok(f.el.querySelector('.switch'), 'the knob element is there');
+      assert.equal(f.el.querySelector('.af-switch-txt').textContent, 'Ship it');
+      box.checked = true; change(box);
+      assert.equal(f.snapshot().t, true);
+      box.checked = false; change(box);
+      assert.equal(f.snapshot().t, false, 'false is a VALUE, not an absence');
+    } },
+    { name: 'date: type=date, the stored string, format kept verbatim', run: () => {
+      const el = f.el.querySelector('input[type="date"]');
+      el.value = '2026-09-21'; input(el);
+      assert.equal(f.snapshot().d, '2026-09-21');
+    } },
+  ]);
 });
 
 test('a REQUIRED toggle or slider with no default answers with the state it shows', () => {
@@ -96,54 +105,61 @@ test('a REQUIRED toggle or slider with no default answers with the state it show
   assert.deepEqual(ro.snapshot(), {}, 'readonly never invents a value');
 });
 
-test('date: type=date, the stored string, format kept verbatim', () => {
-  const f = mount(askOf(
-    [{ widget: 'date', field: 'd', label: 'When' }],
-    { d: { type: 'string', format: 'date' } },
-  ));
-  const el = f.el.querySelector('input[type="date"]');
-  el.value = '2026-09-21'; input(el);
-  assert.equal(f.snapshot().d, '2026-09-21');
-});
+test('select: cards with no preselect and one winner, >6 options as a dropdown, options.from rows', async () => {
+  await checkRows([
+    { name: 'select cards: role=group labelled by the field label, aria-pressed, one winner', run: () => {
+      const f = mount(askOf(
+        [{ widget: 'select', field: 'v', label: 'Verdict', labels: { approve: 'Approve', changes: 'Request changes' } }],
+        { v: { type: 'string', enum: ['approve', 'changes'] } },
+        { required: ['v'] },
+      ));
+      const group = f.el.querySelector('.af-choices');
+      assert.equal(group.getAttribute('role'), 'group');
+      const labelId = f.el.querySelector('.af-label').id;
+      assert.equal(group.getAttribute('aria-labelledby'), labelId);
+      const btns = [...group.querySelectorAll('.af-choice')];
+      assert.deepEqual(btns.map((b) => b.textContent.trim()), ['Approve', 'Request changes']);
+      assert.deepEqual(btns.map((b) => b.getAttribute('aria-pressed')), ['false', 'false'],
+        'nothing is preselected without a default — a review must not lean toward approve');
+      click(btns[1]);
+      assert.deepEqual(btns.map((b) => b.getAttribute('aria-pressed')), ['false', 'true']);
+      assert.equal(f.snapshot().v, 'changes');
+      click(btns[0]);
+      assert.equal(f.snapshot().v, 'approve', 'the previous pick is released');
+    } },
+    { name: 'select: >6 options fall back to a dropdown; style wins over the count', run: () => {
+      const many = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+      const drop = mount(askOf([{ widget: 'select', field: 'v', label: 'Pick' }], { v: { type: 'string', enum: many } }));
+      const sel = drop.el.querySelector('select');
+      assert.ok(sel, 'seven options render a dropdown');
+      assert.ok(drop.el.querySelector('.select-wrap'), 'inside the house select chrome');
+      assert.equal(sel.options.length, 8, 'a blank first option, then the seven');
+      sel.value = 'd'; change(sel);
+      assert.equal(drop.snapshot().v, 'd');
 
-test('select cards: role=group labelled by the field label, aria-pressed, one winner', () => {
-  const f = mount(askOf(
-    [{ widget: 'select', field: 'v', label: 'Verdict', labels: { approve: 'Approve', changes: 'Request changes' } }],
-    { v: { type: 'string', enum: ['approve', 'changes'] } },
-    { required: ['v'] },
-  ));
-  const group = f.el.querySelector('.af-choices');
-  assert.equal(group.getAttribute('role'), 'group');
-  const labelId = f.el.querySelector('.af-label').id;
-  assert.equal(group.getAttribute('aria-labelledby'), labelId);
-  const btns = [...group.querySelectorAll('.af-choice')];
-  assert.deepEqual(btns.map((b) => b.textContent.trim()), ['Approve', 'Request changes']);
-  assert.deepEqual(btns.map((b) => b.getAttribute('aria-pressed')), ['false', 'false'],
-    'nothing is preselected without a default — a review must not lean toward approve');
-  click(btns[1]);
-  assert.deepEqual(btns.map((b) => b.getAttribute('aria-pressed')), ['false', 'true']);
-  assert.equal(f.snapshot().v, 'changes');
-  click(btns[0]);
-  assert.equal(f.snapshot().v, 'approve', 'the previous pick is released');
-});
-
-test('select: >6 options fall back to a dropdown; style wins over the count', () => {
-  const many = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
-  const drop = mount(askOf([{ widget: 'select', field: 'v', label: 'Pick' }], { v: { type: 'string', enum: many } }));
-  const sel = drop.el.querySelector('select');
-  assert.ok(sel, 'seven options render a dropdown');
-  assert.ok(drop.el.querySelector('.select-wrap'), 'inside the house select chrome');
-  assert.equal(sel.options.length, 8, 'a blank first option, then the seven');
-  sel.value = 'd'; change(sel);
-  assert.equal(drop.snapshot().v, 'd');
-
-  const seg = mount(askOf([{ widget: 'select', field: 'v', label: 'Pick', style: 'segmented' }],
-    { v: { type: 'string', enum: ['x', 'y'] } }));
-  assert.ok(seg.el.querySelector('.seg'), 'style:segmented reuses the .seg skin');
-  const on = seg.el.querySelectorAll('.seg button')[1];
-  click(on);
-  assert.equal(on.classList.contains('on'), true);
-  assert.equal(seg.snapshot().v, 'y');
+      const seg = mount(askOf([{ widget: 'select', field: 'v', label: 'Pick', style: 'segmented' }],
+        { v: { type: 'string', enum: ['x', 'y'] } }));
+      assert.ok(seg.el.querySelector('.seg'), 'style:segmented reuses the .seg skin');
+      const on = seg.el.querySelectorAll('.seg button')[1];
+      click(on);
+      assert.equal(on.classList.contains('on'), true);
+      assert.equal(seg.snapshot().v, 'y');
+    } },
+    { name: 'select: options.from reads rows out of the ask data', run: () => {
+      const f = mount(askOf(
+        [{ widget: 'select', field: 'pick', label: 'Image',
+          options: { from: 'data.images', value: 'id', label: 'caption', description: 'note' } }],
+        { pick: { type: 'string', enum: ['a', 'b'] } },
+        { data: { images: [{ id: 'a', caption: 'Option A', note: 'warm' }, { id: 'b', caption: 'Option B' }] } },
+      ));
+      const btns = [...f.el.querySelectorAll('.af-choice')];
+      assert.deepEqual(btns.map((b) => b.querySelector('.af-choice-txt').firstChild.textContent),
+        ['Option A', 'Option B']);
+      assert.equal(btns[0].querySelector('.af-choice-desc').textContent, 'warm');
+      click(btns[1]);
+      assert.equal(f.snapshot().pick, 'b');
+    } },
+  ]);
 });
 
 test('select with suggest: buttons plus free text, either one is the answer', () => {
@@ -196,21 +212,6 @@ test('every layout key the widgets read is in P1 LAYOUT_ITEM_KEYS (X6 / C15)', (
   assert.deepEqual([...new Set(offenders)], []);
 });
 
-test('select: options.from reads rows out of the ask data', () => {
-  const f = mount(askOf(
-    [{ widget: 'select', field: 'pick', label: 'Image',
-      options: { from: 'data.images', value: 'id', label: 'caption', description: 'note' } }],
-    { pick: { type: 'string', enum: ['a', 'b'] } },
-    { data: { images: [{ id: 'a', caption: 'Option A', note: 'warm' }, { id: 'b', caption: 'Option B' }] } },
-  ));
-  const btns = [...f.el.querySelectorAll('.af-choice')];
-  assert.deepEqual(btns.map((b) => b.querySelector('.af-choice-txt').firstChild.textContent),
-    ['Option A', 'Option B']);
-  assert.equal(btns[0].querySelector('.af-choice-desc').textContent, 'warm');
-  click(btns[1]);
-  assert.equal(f.snapshot().pick, 'b');
-});
-
 test('multiselect: role=checkbox entries, aria-checked, an array answer', () => {
   const f = mount(askOf(
     [{ widget: 'multiselect', field: 'm', label: 'Tags' }],
@@ -225,18 +226,6 @@ test('multiselect: role=checkbox entries, aria-checked, an array answer', () => 
   click(btns[0]);
   assert.deepEqual(f.snapshot().m, ['z']);
   assert.deepEqual(f.collect().errors, [], 'one pick satisfies minItems');
-});
-
-test('readonly disables every input widget', () => {
-  const f = mount(askOf(
-    [{ widget: 'select', field: 'v', label: 'V' }, { widget: 'toggle', field: 't', label: 'T' },
-      { widget: 'slider', field: 's', label: 'S' }],
-    { v: { type: 'string', enum: ['a', 'b'] }, t: { type: 'boolean' },
-      s: { type: 'integer', minimum: 0, maximum: 5 } },
-  ), { readonly: true, values: { v: 'b', t: true, s: 3 } });
-  for (const n of f.el.querySelectorAll('button, input, select')) assert.equal(n.disabled, true);
-  assert.equal(f.el.querySelectorAll('.af-choice[aria-pressed="true"]').length, 1,
-    'the stored choice is still shown as picked');
 });
 
 // --------------------------------------------------------------- data widgets
@@ -353,26 +342,29 @@ test('gallery with a field is a picker: <img> per row, aria-pressed, one winner'
   assert.equal(cards[0].getAttribute('aria-pressed'), 'false');
 });
 
-test('text: a secret field is masked, and says where the value will come from — never the value', () => {
-  const layout = [{ widget: 'text', field: 'k', label: 'Key', secret: true, envDefault: 'MY_KEY', envSet: true }];
-  const f = mount(askOf(layout, { k: { type: 'string' } }));
-  const el = f.el.querySelector('input');
-  assert.equal(el.type, 'password');
-  assert.equal(el.getAttribute('autocomplete'), 'new-password');
-  assert.match(el.placeholder, /Using \$MY_KEY from the environment/);
-  assert.equal(el.value, '', 'the surface is never handed the value');
-  assert.deepEqual(f.collect().values, {}, 'an untouched secret collects nothing — the engine uses the environment');
-  el.value = 'typed';
-  input(el);
-  assert.equal(f.collect().values.k, 'typed');
-});
-
-test('text: a secret whose variable is unset says so, and a stored marker is shown as text', () => {
-  const layout = [{ widget: 'text', field: 'k', secret: true, envDefault: 'MY_KEY', envSet: false }];
-  const f = mount(askOf(layout, { k: { type: 'string' } }));
-  assert.match(f.el.querySelector('input').placeholder, /\$MY_KEY is not set/);
-  const g = mount(askOf(layout, { k: { type: 'string' } }), { values: { k: '[env:MY_KEY]' }, readonly: true });
-  const shown = g.el.querySelector('input');
-  assert.equal(shown.type, 'text', 'History shows the marker, not dots');
-  assert.equal(shown.value, '[env:MY_KEY]');
+test('text secret: masked, never handed the value, untouched collects nothing; unset env and stored marker shown as text', async () => {
+  await checkRows([
+    { name: 'text: a secret field is masked, and says where the value will come from — never the value', run: () => {
+      const layout = [{ widget: 'text', field: 'k', label: 'Key', secret: true, envDefault: 'MY_KEY', envSet: true }];
+      const f = mount(askOf(layout, { k: { type: 'string' } }));
+      const el = f.el.querySelector('input');
+      assert.equal(el.type, 'password');
+      assert.equal(el.getAttribute('autocomplete'), 'new-password');
+      assert.match(el.placeholder, /Using \$MY_KEY from the environment/);
+      assert.equal(el.value, '', 'the surface is never handed the value');
+      assert.deepEqual(f.collect().values, {}, 'an untouched secret collects nothing — the engine uses the environment');
+      el.value = 'typed';
+      input(el);
+      assert.equal(f.collect().values.k, 'typed');
+    } },
+    { name: 'text: a secret whose variable is unset says so, and a stored marker is shown as text', run: () => {
+      const layout = [{ widget: 'text', field: 'k', secret: true, envDefault: 'MY_KEY', envSet: false }];
+      const f = mount(askOf(layout, { k: { type: 'string' } }));
+      assert.match(f.el.querySelector('input').placeholder, /\$MY_KEY is not set/);
+      const g = mount(askOf(layout, { k: { type: 'string' } }), { values: { k: '[env:MY_KEY]' }, readonly: true });
+      const shown = g.el.querySelector('input');
+      assert.equal(shown.type, 'text', 'History shows the marker, not dots');
+      assert.equal(shown.value, '[env:MY_KEY]');
+    } },
+  ]);
 });

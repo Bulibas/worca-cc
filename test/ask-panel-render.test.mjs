@@ -3,6 +3,7 @@
 // row click → switchThread → GET /api/ask/threads/:id.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 
 import { makePanel, sizeDock } from './helpers/ask-panel-harness.mjs';
 
@@ -64,96 +65,106 @@ test('ask-panel-render (#398): an image attachment block renders as a thumbnail 
   assert.ok(pill && /spec\.pdf/.test(pill.textContent), 'pdf keeps the name pill');
 });
 
-test('ask-panel-render: user bubble + attachment pills, assistant answer plain fallback', async () => {
-  const snap = snapBody([
-    userRow('askm_u0000001', 1, 'what changed in run 4e1f?', [{ kind: 'attachment', id: 'att_00000001', name: 'notes.md', bytes: 41000 }]),
-    asstRow('askm_00000001', 2),
+test('ask-panel-render: user bubble + attachment pills, plain-fallback answer, activity head (dot, elapsed, meter; stopped keeps its label)', async () => {
+  await checkRows([
+    { name: 'ask-panel-render: user bubble + attachment pills, assistant answer plain fallback', run: async () => {
+      const snap = snapBody([
+        userRow('askm_u0000001', 1, 'what changed in run 4e1f?', [{ kind: 'attachment', id: 'att_00000001', name: 'notes.md', bytes: 41000 }]),
+        asstRow('askm_00000001', 2),
+      ]);
+      const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+      await openThread(ctx);
+      const user = ctx.doc.querySelector('.ask-msg-user');
+      assert.ok(user);
+      assert.match(user.textContent, /what changed in run 4e1f\?/);
+      const pill = user.querySelector('.extra-pill');
+      assert.ok(pill, 'attachment renders as an extra-pill');
+      assert.match(pill.textContent, /notes\.md/);
+      // documentary fence — cannot fail unless the builder grows the feature
+      assert.equal(pill.querySelector('.extra-pill-x'), null, 'no × on transcript pills');
+      const answer = ctx.doc.querySelector('.ask-answer');
+      assert.match(answer.textContent, /the answer/);
+      assert.equal(ctx.doc.querySelector('.ask-title').textContent, 'My thread', 'header shows the thread title');
+    } },
+    { name: 'ask-panel-render: activity head — dot, elapsed, meter; stopped keeps its label', run: async () => {
+      const snap = snapBody([
+        asstRow('askm_00000001', 1),
+        asstRow('askm_00000002', 2, { status: 'stopped', reason: 'max_turns', durationMs: 72000, blocks: [{ kind: 'notice', text: 'Stopped: reached the 40-turn limit (Settings → Ask Worca)' }] }),
+      ]);
+      const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+      await openThread(ctx);
+      const heads = [...ctx.doc.querySelectorAll('.ask-activity-head')];
+      assert.ok(!/Worked for/.test(heads[0].textContent), 'a clean turn is Done, a grey dot and its numbers');
+      assert.equal(heads[0].querySelector('.ask-activity-label').textContent, 'Done');
+      assert.equal(heads[0].firstElementChild.className, 'ask-activity-label', 'the word leads, the dot follows');
+      assert.match(heads[0].textContent, /6\.4s/);
+      assert.match(heads[0].textContent, /2\.0k ctx/, 'the turn meter shows the turn-end context fill');
+      assert.ok(!/tok/.test(heads[0].textContent), 'no cumulative token figure');
+      assert.match(heads[0].textContent, /\$0\.14/);
+      assert.ok(heads[0].querySelector('.ask-dot-done'));
+      assert.match(heads[1].textContent, /Stopped after/);
+      assert.ok(!/Done/.test(heads[1].textContent), 'a stopped turn keeps only its own word');
+      assert.match(heads[1].textContent, /1m 12s/);
+      assert.match(ctx.doc.querySelectorAll('.ask-notice')[0].textContent, /Stopped: reached the 40-turn limit/);
+    } },
   ]);
-  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-  await openThread(ctx);
-  const user = ctx.doc.querySelector('.ask-msg-user');
-  assert.ok(user);
-  assert.match(user.textContent, /what changed in run 4e1f\?/);
-  const pill = user.querySelector('.extra-pill');
-  assert.ok(pill, 'attachment renders as an extra-pill');
-  assert.match(pill.textContent, /notes\.md/);
-  // documentary fence — cannot fail unless the builder grows the feature
-  assert.equal(pill.querySelector('.extra-pill-x'), null, 'no × on transcript pills');
-  const answer = ctx.doc.querySelector('.ask-answer');
-  assert.match(answer.textContent, /the answer/);
-  assert.equal(ctx.doc.querySelector('.ask-title').textContent, 'My thread', 'header shows the thread title');
 });
 
-test('ask-panel-render: activity head — dot, elapsed, meter; stopped keeps its label', async () => {
-  const snap = snapBody([
-    asstRow('askm_00000001', 1),
-    asstRow('askm_00000002', 2, { status: 'stopped', reason: 'max_turns', durationMs: 72000, blocks: [{ kind: 'notice', text: 'Stopped: reached the 40-turn limit (Settings → Ask Worca)' }] }),
+test('ask-panel-render: agent row — name · model · tokens · ≈$ · status, ctx fill (or cumulative tokens), "fill / window ctx" when known; expand survives update', async () => {
+  await checkRows([
+    { name: 'ask-panel-render: agent row carries name · model · tokens · ≈$ · status; expand survives update', run: async () => {
+      const agent = { kind: 'agent', id: 'toolu_1', label: 'count runs', type: 'general-purpose', model: 'claude-haiku-4-5', tokens: 5321, usage: { input: 10, output: 69, cacheRead: 4564, cacheCreation: 678 }, costUsd: 0.0017, estimated: true, status: 'done', durationMs: 2861, log: [{ t: 0, text: '→ list_runs {}' }, { t: 61000, text: '← ok 0.0s' }] };
+      const snap = snapBody([asstRow('askm_00000001', 1, { blocks: [agent] })]);
+      const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+      await openThread(ctx);
+      const row = ctx.doc.querySelector('.ask-agent-row');
+      assert.match(row.textContent, /count runs/);
+      assert.match(row.textContent, /claude-haiku-4-5/);
+      assert.match(row.textContent, /5\.3k tok/);
+      assert.match(row.textContent, /≈\$0\.00/);
+      assert.match(row.textContent, /done/);
+      assert.equal(ctx.doc.querySelector('.ask-agent-log'), null, 'collapsed by default');
+      row.click();
+      const log = ctx.doc.querySelector('.ask-agent-log');
+      assert.ok(log, 'expanded on click');
+      assert.match(log.textContent, /00:00/);
+      assert.match(log.textContent, /01:01/);
+      assert.match(log.textContent, /→ list_runs \{\}/);
+      // a FULL re-render (re-selecting the thread rebuilds the transcript from a
+      // fresh model) keeps the expansion — st.expandedAgents is panel-level (§10.5)
+      ctx.doc.querySelector('[data-ask-threads-btn]').click();
+      await ctx.tick();
+      ctx.doc.querySelector('.ask-pop [role="menuitem"]').click();
+      await ctx.tick();
+      await ctx.tick();
+      ctx.flush();
+      assert.ok(ctx.doc.querySelector('.ask-agent-log'), 'expanded state survives a re-render');
+    } },
+    { name: 'ask-panel-render: an agent block with ctx shows the fill; without ctx it falls back to the cumulative tokens', run: async () => {
+      const withCtx = { kind: 'agent', id: 'toolu_1', label: 'count runs', type: 'general-purpose', model: 'claude-haiku-4-5', tokens: 25321, ctx: 11645, usage: null, costUsd: 0.0017, estimated: true, status: 'done', durationMs: 2861, log: [] };
+      const noCtx = { kind: 'agent', id: 'toolu_2', label: 'old agent', type: 'general-purpose', model: 'claude-haiku-4-5', tokens: 5321, usage: null, costUsd: 0.001, estimated: true, status: 'done', durationMs: 100, log: [] };
+      const snap = snapBody([asstRow('askm_00000001', 1, { blocks: [withCtx, noCtx] })]);
+      const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+      await openThread(ctx);
+      const rows = [...ctx.doc.querySelectorAll('.ask-agent-row')];
+      assert.match(rows[0].textContent, /11\.6k ctx/, 'ctx wins over the cumulative figure');
+      assert.ok(!/25\.3k tok/.test(rows[0].textContent));
+      assert.match(rows[1].textContent, /5\.3k tok/, 'a legacy block keeps the cumulative fallback');
+    } },
+    { name: 'ask-panel-render: an agent row with a known window shows "fill / window ctx", coloured, with a hover; the context popover\'s Agents list shows it too', run: async () => {
+      const agent = { kind: 'agent', id: 'toolu_1', label: 'scan logs', type: 'general-purpose', model: 'claude-haiku-4-5-20251001', tokens: 160000, ctx: 160000, ctxWindow: 200000, usage: { input: 10, output: 69, cacheRead: 4564, cacheCreation: 678 }, costUsd: 0.0017, estimated: true, status: 'done', durationMs: 2861, log: [] };
+      const snap = snapBody([asstRow('askm_00000001', 1, { blocks: [agent] })]);
+      const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+      await openThread(ctx);
+      const fill = ctx.doc.querySelector('.ask-agent-row .ask-agent-tokens');
+      assert.equal(fill.textContent, '160.0k / 200k ctx');
+      assert.ok(fill.classList.contains('is-ctx-high'), '160k of a 167k trigger: red');
+      assert.match(fill.getAttribute('title'), /^Compaction soon\. 80% of the 200k context window/);
+      ctx.doc.querySelector('[data-ask-ctx-btn]').click();
+      await ctx.tick();
+      assert.match(ctx.doc.querySelector('.ask-ctx-agents .ask-runinfo-sub').textContent, /160\.0k \/ 200k ctx/);
+    } },
   ]);
-  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-  await openThread(ctx);
-  const heads = [...ctx.doc.querySelectorAll('.ask-activity-head')];
-  assert.ok(!/Worked for/.test(heads[0].textContent), 'a clean turn is Done, a grey dot and its numbers');
-  assert.equal(heads[0].querySelector('.ask-activity-label').textContent, 'Done');
-  assert.equal(heads[0].firstElementChild.className, 'ask-activity-label', 'the word leads, the dot follows');
-  assert.match(heads[0].textContent, /6\.4s/);
-  assert.match(heads[0].textContent, /2\.0k ctx/, 'the turn meter shows the turn-end context fill');
-  assert.ok(!/tok/.test(heads[0].textContent), 'no cumulative token figure');
-  assert.match(heads[0].textContent, /\$0\.14/);
-  assert.ok(heads[0].querySelector('.ask-dot-done'));
-  assert.match(heads[1].textContent, /Stopped after/);
-  assert.ok(!/Done/.test(heads[1].textContent), 'a stopped turn keeps only its own word');
-  assert.match(heads[1].textContent, /1m 12s/);
-  assert.match(ctx.doc.querySelectorAll('.ask-notice')[0].textContent, /Stopped: reached the 40-turn limit/);
-});
-
-test('ask-panel-render: tool rows — op, target with input preview, note', async () => {
-  const snap = snapBody([asstRow('askm_00000001', 1, {
-    blocks: [
-      { kind: 'tool', id: 't1', name: 'mcp__worca__list_runs', input: { limit: 20 }, status: 'done', durationMs: 800 },
-      { kind: 'tool', id: 't2', name: 'mcp__worca__get_run_diff', input: { _truncated: true, preview: '{"id":"4e1f2a9b"…' }, status: 'error', durationMs: 120, error: 'boom' },
-    ],
-  })]);
-  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-  await openThread(ctx);
-  const rows = [...ctx.doc.querySelectorAll('.ask-tool-row')];
-  assert.equal(rows.length, 2);
-  assert.equal(rows[0].querySelector('.ask-tool-op').textContent, 'list');
-  assert.match(rows[0].querySelector('.ask-tool-target').textContent, /runs/);
-  assert.match(rows[0].querySelector('.ask-tool-target').textContent, /"limit":20/);
-  assert.equal(rows[0].querySelector('.ask-tool-note').textContent, '0.8s');
-  assert.equal(rows[1].querySelector('.ask-tool-op').textContent, 'get');
-  assert.match(rows[1].querySelector('.ask-tool-target').textContent, /run diff/);
-  assert.match(rows[1].querySelector('.ask-tool-target').textContent, /4e1f2a9b/, 'the preview string renders verbatim');
-  assert.equal(rows[1].querySelector('.ask-tool-note').textContent, 'error');
-});
-
-test('ask-panel-render: agent row carries name · model · tokens · ≈$ · status; expand survives update', async () => {
-  const agent = { kind: 'agent', id: 'toolu_1', label: 'count runs', type: 'general-purpose', model: 'claude-haiku-4-5', tokens: 5321, usage: { input: 10, output: 69, cacheRead: 4564, cacheCreation: 678 }, costUsd: 0.0017, estimated: true, status: 'done', durationMs: 2861, log: [{ t: 0, text: '→ list_runs {}' }, { t: 61000, text: '← ok 0.0s' }] };
-  const snap = snapBody([asstRow('askm_00000001', 1, { blocks: [agent] })]);
-  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-  await openThread(ctx);
-  const row = ctx.doc.querySelector('.ask-agent-row');
-  assert.match(row.textContent, /count runs/);
-  assert.match(row.textContent, /claude-haiku-4-5/);
-  assert.match(row.textContent, /5\.3k tok/);
-  assert.match(row.textContent, /≈\$0\.00/);
-  assert.match(row.textContent, /done/);
-  assert.equal(ctx.doc.querySelector('.ask-agent-log'), null, 'collapsed by default');
-  row.click();
-  const log = ctx.doc.querySelector('.ask-agent-log');
-  assert.ok(log, 'expanded on click');
-  assert.match(log.textContent, /00:00/);
-  assert.match(log.textContent, /01:01/);
-  assert.match(log.textContent, /→ list_runs \{\}/);
-  // a FULL re-render (re-selecting the thread rebuilds the transcript from a
-  // fresh model) keeps the expansion — st.expandedAgents is panel-level (§10.5)
-  ctx.doc.querySelector('[data-ask-threads-btn]').click();
-  await ctx.tick();
-  ctx.doc.querySelector('.ask-pop [role="menuitem"]').click();
-  await ctx.tick();
-  await ctx.tick();
-  ctx.flush();
-  assert.ok(ctx.doc.querySelector('.ask-agent-log'), 'expanded state survives a re-render');
 });
 
 test('ask-panel-render: markdown answers render once the real pins load; code highlighted', async () => {
@@ -171,126 +182,161 @@ test('ask-panel-render: markdown answers render once the real pins load; code hi
   assert.ok(answer.querySelector('code .hljs-keyword'), 'terminal answers get highlighted');
 });
 
-test('ask-panel-render: error rows show the red line with a fallback text', async () => {
-  const snap = snapBody([
-    asstRow('askm_00000001', 1, { status: 'error', text: 'partial', errorMessage: undefined, blocks: [] }),
+test('ask-panel-render: error rows show the red line (fallback text); a ~0 s error turn says Stopped, not "Stopped after"', async () => {
+  await checkRows([
+    { name: 'ask-panel-render: error rows show the red line with a fallback text', run: async () => {
+      const snap = snapBody([
+        asstRow('askm_00000001', 1, { status: 'error', text: 'partial', errorMessage: undefined, blocks: [] }),
+      ]);
+      const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+      await openThread(ctx);
+      assert.match(ctx.doc.querySelector('.ask-error-line').textContent, /This turn ended with an error\./);
+    } },
+    { name: 'ask-panel-render: an error turn with no (or a ~0 s) duration says Stopped, not a dangling "Stopped after"', run: async () => {
+      for (const durationMs of [null, 0, 20]) {
+        const snap = snapBody([
+          asstRow('askm_00000001', 1, { status: 'error', text: '', blocks: [], durationMs, errorMessage: 'claude exited with code 1: boom' }),
+        ]);
+        const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+        await openThread(ctx);
+        assert.equal(ctx.doc.querySelector('.ask-activity-label').textContent, 'Stopped', `durationMs ${durationMs}`);
+        assert.equal(ctx.doc.querySelector('.ask-activity-elapsed').textContent, '');
+      }
+    } },
   ]);
-  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-  await openThread(ctx);
-  assert.match(ctx.doc.querySelector('.ask-error-line').textContent, /This turn ended with an error\./);
 });
 
-test('ask-panel-render: an error turn with no (or a ~0 s) duration says Stopped, not a dangling "Stopped after"', async () => {
-  for (const durationMs of [null, 0, 20]) {
-    const snap = snapBody([
-      asstRow('askm_00000001', 1, { status: 'error', text: '', blocks: [], durationMs, errorMessage: 'claude exited with code 1: boom' }),
-    ]);
-    const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-    await openThread(ctx);
-    assert.equal(ctx.doc.querySelector('.ask-activity-label').textContent, 'Stopped', `durationMs ${durationMs}`);
-    assert.equal(ctx.doc.querySelector('.ask-activity-elapsed').textContent, '');
-  }
-});
-
-test('ask-panel-render: a signed-out Claude error shows one line whose Sign in… link opens Connect Claude Code', async () => {
-  const snap = snapBody([
-    asstRow('askm_00000001', 1, { status: 'error', text: '', blocks: [], errorMessage: 'claude exited with code 1: Not logged in · Please run /login', errorCode: 'claude-signed-out' }),
+test('ask-panel-render: in-app links — a notice href and the signed-out Claude error\'s Sign in… link', async () => {
+  await checkRows([
+    { name: 'ask-panel-render: a signed-out Claude error shows one line whose Sign in… link opens Connect Claude Code', run: async () => {
+      const snap = snapBody([
+        asstRow('askm_00000001', 1, { status: 'error', text: '', blocks: [], errorMessage: 'claude exited with code 1: Not logged in · Please run /login', errorCode: 'claude-signed-out' }),
+      ]);
+      let opened = 0;
+      const ctx = makePanel({ fetchHandler: handlerFor(snap), deps: { openClaudeSetup: () => { opened += 1; } } });
+      await openThread(ctx);
+      const line = ctx.doc.querySelector('.ask-error-line');
+      assert.equal(line.textContent, "Claude Code isn't signed in. Sign in…");
+      line.querySelector('a').dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true, cancelable: true }));
+      assert.equal(opened, 1);
+    } },
+    { name: 'ask-panel-render: notice with href renders an in-app link', run: async () => {
+      const snap = snapBody([asstRow('askm_00000001', 1, { blocks: [{ kind: 'notice', text: 'Run started — "Fix login"', href: '#running/abc-123' }] })]);
+      const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+      await openThread(ctx);
+      const a = ctx.doc.querySelector('.ask-notice a');
+      assert.equal(a.getAttribute('href'), '#running/abc-123');
+    } },
   ]);
-  let opened = 0;
-  const ctx = makePanel({ fetchHandler: handlerFor(snap), deps: { openClaudeSetup: () => { opened += 1; } } });
-  await openThread(ctx);
-  const line = ctx.doc.querySelector('.ask-error-line');
-  assert.equal(line.textContent, "Claude Code isn't signed in. Sign in…");
-  line.querySelector('a').dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true, cancelable: true }));
-  assert.equal(opened, 1);
 });
 
-test('ask-panel-render: a classified notice renders the human line, raw detail expert-only', async () => {
-  const detail = 'claude exited with code 1: [claude-code:unrecognized_model] {"model":"claude-opus-5-5","query_source":"sdk"}';
-  const snap = snapBody([
-    asstRow('askm_00000001', 1, {
-      status: 'error',
-      text: 'partial',
-      errorMessage: undefined,
-      blocks: [{
-        kind: 'notice',
-        text: "This model isn't available in your environment — try another model.",
-        errorClass: 'model',
-        detail,
-      }],
-    }),
+test('ask-panel-render: a classified notice renders the human line (raw detail expert-only) and survives a reload', async () => {
+  await checkRows([
+    { name: 'ask-panel-render: a classified notice renders the human line, raw detail expert-only', run: async () => {
+      const detail = 'claude exited with code 1: [claude-code:unrecognized_model] {"model":"claude-opus-5-5","query_source":"sdk"}';
+      const snap = snapBody([
+        asstRow('askm_00000001', 1, {
+          status: 'error',
+          text: 'partial',
+          errorMessage: undefined,
+          blocks: [{
+            kind: 'notice',
+            text: "This model isn't available in your environment — try another model.",
+            errorClass: 'model',
+            detail,
+          }],
+        }),
+      ]);
+      const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+      await openThread(ctx);
+      // No raw red line: the classified notice IS the explanation.
+      assert.equal(ctx.doc.querySelector('.ask-error-line'), null);
+      const notice = ctx.doc.querySelector('.ask-notice');
+      assert.ok(notice, 'the classified notice renders');
+      const det = notice.querySelector('details.ask-error-details');
+      assert.equal(det.dataset.minLevel, 'expert', 'the raw detail is gated to expert');
+      assert.match(det.querySelector('.ask-error-detail-text').textContent, /unrecognized_model/);
+      assert.equal(notice.querySelector('.ask-error-action'), null, 'no inline action hijacks the notice');
+    } },
+    { name: 'ask-panel-render: a classified notice survives a reload untouched (persisted block)', run: async () => {
+      const snap = snapBody([
+        asstRow('askm_00000001', 1, {
+          status: 'error',
+          blocks: [{ kind: 'notice', text: 'The endpoint was unreachable — check your connection and retry.', errorClass: 'network', detail: 'connection reset' }],
+        }),
+      ]);
+      const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+      await openThread(ctx);
+      // openThread already IS the reload path (GET → load(snapshot) → render), so
+      // this asserts the re-derived render from the persisted block alone.
+      assert.ok(ctx.doc.querySelector('.ask-notice'));
+      assert.equal(ctx.doc.querySelector('.ask-error-action'), null);
+      assert.equal(ctx.doc.querySelector('.ask-error-line'), null);
+    } },
   ]);
-  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-  await openThread(ctx);
-  // No raw red line: the classified notice IS the explanation.
-  assert.equal(ctx.doc.querySelector('.ask-error-line'), null);
-  const notice = ctx.doc.querySelector('.ask-notice');
-  assert.ok(notice, 'the classified notice renders');
-  const det = notice.querySelector('details.ask-error-details');
-  assert.equal(det.dataset.minLevel, 'expert', 'the raw detail is gated to expert');
-  assert.match(det.querySelector('.ask-error-detail-text').textContent, /unrecognized_model/);
-  assert.equal(notice.querySelector('.ask-error-action'), null, 'no inline action hijacks the notice');
 });
 
-test('ask-panel-render: a classified notice survives a reload untouched (persisted block)', async () => {
-  const snap = snapBody([
-    asstRow('askm_00000001', 1, {
-      status: 'error',
-      blocks: [{ kind: 'notice', text: 'The endpoint was unreachable — check your connection and retry.', errorClass: 'network', detail: 'connection reset' }],
-    }),
+test('ask-panel-render: scroll pinning drives the jump pill (also in a resized sheet), reopening re-pins, destroy unbinds resize', async () => {
+  await checkRows([
+    { name: 'ask-panel-render: scroll pinning with instrumented accessors + jump pill', run: async () => {
+      const snap = snapBody([asstRow('askm_00000001', 1)]);
+      const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+      await openThread(ctx);
+      const t = ctx.doc.querySelector('.ask-transcript');
+      Object.defineProperty(t, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(t, 'clientHeight', { value: 200, configurable: true });
+      t.scrollTop = 100; // far from the bottom
+      t.dispatchEvent(new ctx.window.Event('scroll'));
+      const jump = ctx.doc.querySelector('.ask-jump');
+      assert.equal(jump.hidden, false, 'unpinned shows the jump pill');
+      jump.click();
+      ctx.flush();
+      assert.equal(t.scrollTop, 1000, 'jump scrolls to the bottom');
+      assert.equal(jump.hidden, true);
+      // near the bottom counts as pinned (threshold 24)
+      t.scrollTop = 790;
+      t.dispatchEvent(new ctx.window.Event('scroll'));
+      assert.equal(jump.hidden, true);
+    } },
+    { name: 'ask-panel-render: reopening the sheet re-pins', run: async () => {
+      const snap = snapBody([asstRow('askm_00000001', 1)]);
+      const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+      await openThread(ctx);
+      const t = ctx.doc.querySelector('.ask-transcript');
+      Object.defineProperty(t, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(t, 'clientHeight', { value: 200, configurable: true });
+      t.scrollTop = 0;
+      t.dispatchEvent(new ctx.window.Event('scroll'));
+      assert.equal(ctx.doc.querySelector('.ask-jump').hidden, false);
+      ctx.panel.close();
+      ctx.panel.open();
+      ctx.flush();
+      assert.equal(t.scrollTop, 1000, 're-pinned on open');
+    } },
+    { name: 'ask-panel-render: scroll pinning still drives the jump pill inside a resized sheet; destroy unbinds resize', run: async () => {
+      const snap = snapBody([asstRow('askm_00000001', 1)]);
+      const ctx = makePanel({ fetchHandler: handlerFor(snap) });
+      ctx.storage.setItem('worca-cc.ask.size', JSON.stringify({ w: 1000, h: 800 }));
+      const ctx2 = makePanel({ fetchHandler: handlerFor(snap), storage: ctx.storage });
+      sizeDock(ctx2.doc, 1400, 1000);
+      await openThread(ctx2);
+      const sheet = ctx2.doc.querySelector('.ask-sheet');
+      assert.equal(sheet.style.height, '800px', 'the stored size survives the thread load');
+      const t = ctx2.doc.querySelector('.ask-transcript');
+      Object.defineProperty(t, 'scrollHeight', { value: 2000, configurable: true });
+      Object.defineProperty(t, 'clientHeight', { value: 700, configurable: true });
+      t.scrollTop = 0;
+      t.dispatchEvent(new ctx2.window.Event('scroll'));
+      assert.equal(ctx2.doc.querySelector('.ask-jump').hidden, false, 'the transcript is still the scrollport');
+      const removed = [];
+      const orig = ctx2.window.removeEventListener;
+      ctx2.window.removeEventListener = function (type, fn, opts) { removed.push(type); return orig.call(this, type, fn, opts); };
+      ctx2.panel.destroy();
+      assert.ok(removed.includes('resize'), 'destroy() unbinds the window resize listener');
+      ctx2.window.dispatchEvent(new ctx2.window.Event('resize'));
+      assert.equal(sheet.style.height, '800px', 'nothing runs after destroy');
+    } },
   ]);
-  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-  await openThread(ctx);
-  // openThread already IS the reload path (GET → load(snapshot) → render), so
-  // this asserts the re-derived render from the persisted block alone.
-  assert.ok(ctx.doc.querySelector('.ask-notice'));
-  assert.equal(ctx.doc.querySelector('.ask-error-action'), null);
-  assert.equal(ctx.doc.querySelector('.ask-error-line'), null);
-});
-
-test('ask-panel-render: notice with href renders an in-app link', async () => {
-  const snap = snapBody([asstRow('askm_00000001', 1, { blocks: [{ kind: 'notice', text: 'Run started — "Fix login"', href: '#running/abc-123' }] })]);
-  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-  await openThread(ctx);
-  const a = ctx.doc.querySelector('.ask-notice a');
-  assert.equal(a.getAttribute('href'), '#running/abc-123');
-});
-
-test('ask-panel-render: scroll pinning with instrumented accessors + jump pill', async () => {
-  const snap = snapBody([asstRow('askm_00000001', 1)]);
-  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-  await openThread(ctx);
-  const t = ctx.doc.querySelector('.ask-transcript');
-  Object.defineProperty(t, 'scrollHeight', { value: 1000, configurable: true });
-  Object.defineProperty(t, 'clientHeight', { value: 200, configurable: true });
-  t.scrollTop = 100; // far from the bottom
-  t.dispatchEvent(new ctx.window.Event('scroll'));
-  const jump = ctx.doc.querySelector('.ask-jump');
-  assert.equal(jump.hidden, false, 'unpinned shows the jump pill');
-  jump.click();
-  ctx.flush();
-  assert.equal(t.scrollTop, 1000, 'jump scrolls to the bottom');
-  assert.equal(jump.hidden, true);
-  // near the bottom counts as pinned (threshold 24)
-  t.scrollTop = 790;
-  t.dispatchEvent(new ctx.window.Event('scroll'));
-  assert.equal(jump.hidden, true);
-});
-
-test('ask-panel-render: reopening the sheet re-pins', async () => {
-  const snap = snapBody([asstRow('askm_00000001', 1)]);
-  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-  await openThread(ctx);
-  const t = ctx.doc.querySelector('.ask-transcript');
-  Object.defineProperty(t, 'scrollHeight', { value: 1000, configurable: true });
-  Object.defineProperty(t, 'clientHeight', { value: 200, configurable: true });
-  t.scrollTop = 0;
-  t.dispatchEvent(new ctx.window.Event('scroll'));
-  assert.equal(ctx.doc.querySelector('.ask-jump').hidden, false);
-  ctx.panel.close();
-  ctx.panel.open();
-  ctx.flush();
-  assert.equal(t.scrollTop, 1000, 're-pinned on open');
 });
 
 test('ask-panel-render: a 404 thread clears the stored id and renders nothing', async () => {
@@ -303,94 +349,4 @@ test('ask-panel-render: a 404 thread clears the stored id and renders nothing', 
   await openThread(ctx);
   assert.equal(ctx.doc.querySelector('.ask-msg-user'), null);
   assert.equal(ctx.storage.getItem('worca-cc.ask.thread'), null, 'stored id dropped on 404');
-});
-
-test('ask-panel-render: an agent block with ctx shows the fill; without ctx it falls back to the cumulative tokens', async () => {
-  const withCtx = { kind: 'agent', id: 'toolu_1', label: 'count runs', type: 'general-purpose', model: 'claude-haiku-4-5', tokens: 25321, ctx: 11645, usage: null, costUsd: 0.0017, estimated: true, status: 'done', durationMs: 2861, log: [] };
-  const noCtx = { kind: 'agent', id: 'toolu_2', label: 'old agent', type: 'general-purpose', model: 'claude-haiku-4-5', tokens: 5321, usage: null, costUsd: 0.001, estimated: true, status: 'done', durationMs: 100, log: [] };
-  const snap = snapBody([asstRow('askm_00000001', 1, { blocks: [withCtx, noCtx] })]);
-  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-  await openThread(ctx);
-  const rows = [...ctx.doc.querySelectorAll('.ask-agent-row')];
-  assert.match(rows[0].textContent, /11\.6k ctx/, 'ctx wins over the cumulative figure');
-  assert.ok(!/25\.3k tok/.test(rows[0].textContent));
-  assert.match(rows[1].textContent, /5\.3k tok/, 'a legacy block keeps the cumulative fallback');
-});
-
-test('ask-panel-render: a window resize re-clamps the open sheet; close/reopen restores the preference', () => {
-  const seed = makePanel();
-  seed.storage.setItem('worca-cc.ask.size', JSON.stringify({ w: 900, h: 700 }));
-  const ctx = makePanel({ storage: seed.storage });
-  const sheet = ctx.doc.querySelector('.ask-sheet');
-  sizeDock(ctx.doc, 1200, 900);
-  ctx.panel.open();
-  assert.equal(sheet.style.width, '900px');
-  sizeDock(ctx.doc, 800, 600);                          // the window shrank: inner 744 × 554
-  ctx.window.dispatchEvent(new ctx.window.Event('resize'));
-  assert.equal(sheet.style.width, '744px');
-  assert.equal(sheet.style.height, '554px');
-  sizeDock(ctx.doc, 1200, 900);
-  ctx.window.dispatchEvent(new ctx.window.Event('resize'));
-  assert.equal(sheet.style.width, '900px', 'the stored preference comes back when there is room again');
-  ctx.panel.close();
-  sizeDock(ctx.doc, 1000, 700);                         // inner 944 × 654
-  ctx.window.dispatchEvent(new ctx.window.Event('resize'));
-  assert.equal(sheet.style.width, '900px', 'a hidden sheet is left alone — nothing to clamp against');
-  ctx.panel.open();
-  assert.equal(sheet.style.width, '900px');
-  assert.equal(sheet.style.height, '654px', 'reopen re-clamps against the current dock');
-  assert.deepEqual(JSON.parse(seed.storage.getItem('worca-cc.ask.size')), { w: 900, h: 700 });
-});
-
-test('ask-panel-render: scroll pinning still drives the jump pill inside a resized sheet; destroy unbinds resize', async () => {
-  const snap = snapBody([asstRow('askm_00000001', 1)]);
-  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-  ctx.storage.setItem('worca-cc.ask.size', JSON.stringify({ w: 1000, h: 800 }));
-  const ctx2 = makePanel({ fetchHandler: handlerFor(snap), storage: ctx.storage });
-  sizeDock(ctx2.doc, 1400, 1000);
-  await openThread(ctx2);
-  const sheet = ctx2.doc.querySelector('.ask-sheet');
-  assert.equal(sheet.style.height, '800px', 'the stored size survives the thread load');
-  const t = ctx2.doc.querySelector('.ask-transcript');
-  Object.defineProperty(t, 'scrollHeight', { value: 2000, configurable: true });
-  Object.defineProperty(t, 'clientHeight', { value: 700, configurable: true });
-  t.scrollTop = 0;
-  t.dispatchEvent(new ctx2.window.Event('scroll'));
-  assert.equal(ctx2.doc.querySelector('.ask-jump').hidden, false, 'the transcript is still the scrollport');
-  const removed = [];
-  const orig = ctx2.window.removeEventListener;
-  ctx2.window.removeEventListener = function (type, fn, opts) { removed.push(type); return orig.call(this, type, fn, opts); };
-  ctx2.panel.destroy();
-  assert.ok(removed.includes('resize'), 'destroy() unbinds the window resize listener');
-  ctx2.window.dispatchEvent(new ctx2.window.Event('resize'));
-  assert.equal(sheet.style.height, '800px', 'nothing runs after destroy');
-});
-
-test('ask-panel-render: the script tools show the key and what came back (§9.3)', async () => {
-  const snap = snapBody([asstRow('askm_00000001', 1, {
-    blocks: [
-      { kind: 'tool', id: 't1', name: 'mcp__worca__save_script', input: { _truncated: true, preview: '{"key":"runTests","meta":{},"source":"npm test' }, status: 'done', durationMs: 120, script: { key: 'runTests', saved: 'created' } },
-      { kind: 'tool', id: 't2', name: 'mcp__worca__test_script', input: { key: 'runTests' }, status: 'done', durationMs: 4200, script: { key: 'runTests', status: 'blocking', exitCode: 1 } },
-      { kind: 'tool', id: 't3', name: 'mcp__worca__list_scripts', input: {}, status: 'running', durationMs: null, script: { key: '' } },
-      { kind: 'tool', id: 't4', name: 'mcp__worca__get_script', input: { key: 'runTests' }, status: 'error', durationMs: 30, error: 'no script' },
-    ],
-  })]);
-  const ctx = makePanel({ fetchHandler: handlerFor(snap) });
-  await openThread(ctx);
-  const rows = [...ctx.doc.querySelectorAll('.ask-tool-row')];
-  assert.equal(rows.length, 4);
-  // The op column is a fixed 38 px uppercase cell (style.css .ask-tool-op): the verb stays
-  // there, the key and the outcome go in the target column.
-  assert.equal(rows[0].querySelector('.ask-tool-op').textContent, 'save');
-  assert.equal(rows[0].querySelector('.ask-tool-target').textContent, 'script runTests → created');
-  assert.equal(rows[0].querySelector('.ask-tool-target').textContent.includes('npm test'), false, 'the source preview is not the row');
-  assert.equal(rows[1].querySelector('.ask-tool-op').textContent, 'test');
-  assert.equal(rows[1].querySelector('.ask-tool-target').textContent, 'script runTests → blocking, exit 1');
-  assert.equal(rows[1].querySelector('.ask-tool-note').textContent, '4.2s');
-  assert.equal(rows[2].querySelector('.ask-tool-op').textContent, 'list');
-  assert.equal(rows[2].querySelector('.ask-tool-target').textContent, 'scripts', 'no key, nothing back yet');
-  assert.equal(rows[2].querySelector('.ask-tool-note').textContent, '…');
-  assert.equal(rows[3].querySelector('.ask-tool-target').textContent, 'script runTests', 'a call without a stamp still reads the key off the input');
-  assert.equal(rows[3].querySelector('.ask-tool-note').textContent, 'error');
-  for (const r of rows) assert.equal(r.dataset.minLevel, 'advanced', 'tool rows stay an Advanced-level detail');
 });

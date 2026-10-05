@@ -18,9 +18,10 @@
 // protocols are unchanged across 1 -> 2 -> 3 -> 4, so a connector-only
 // ">=1 <2" plugin and a chat plugin's ">=2 <3" keep negotiating 1 and 2 and
 // keep working untouched. The set is what makes that possible: never collapse
-// it to a single integer.
-export const WORCA_PLUGIN_API = 4;
-export const WORCA_PLUGIN_APIS = [1, 2, 3, 4];
+// it to a single integer. API 5 adds ONE thing: the manifest's `mcpServers`
+// block (MCP registry) is honoured; nothing else changes.
+export const WORCA_PLUGIN_API = 5;
+export const WORCA_PLUGIN_APIS = [1, 2, 3, 4, 5];
 
 /** The API whose DATA contract agent sidecars and pipeline templates must meet:
  *  meta v2 (typed ports) + version-2 graphs. Introduced by API 3, UNCHANGED by
@@ -33,3 +34,8 @@ export const WORCA_AGENT_DATA_API = 3;
  *  stripped at load and reported as an ignored contribution; the agent keeps
  *  working with generic questions (ask-forms spec §10). */
 export const WORCA_ASK_FORMS_API = 4;
+
+/** The API a plugin must NEGOTIATE for its manifest `mcpServers` block to be
+ *  honoured. Below it the block is stripped at load (normalizeManifest), left
+ *  out of consent, and reported with MCP_NEEDS_API_5 (MCP registry spec §4.1). */
+export const WORCA_MCP_API = 5;

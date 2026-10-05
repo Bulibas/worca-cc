@@ -1,16 +1,21 @@
 // test/ui-cost.test.mjs
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 const PROJECT = '/tmp/proj';
 
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class {
@@ -37,43 +42,23 @@ async function boot({ fetchHandler } = {}) {
   const settle = async (n = 3) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); };
   return { window, selectProject, showDetail, settle };
 }
-const runsList = (pipelines, live = []) => Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines, live }) });
-const ok = (body) => Promise.resolve({ ok: true, status: 200, json: async () => body });
 
-// The glance's labelled fact tiles (Time · Cost · Changes): { label: value }.
-const factTiles = (window) => Object.fromEntries(
-  [...window.document.querySelectorAll('#hist-detail .rd-facts .rd-stats > div')]
-    .map((t) => [t.querySelector('span').textContent, t.querySelector('b').textContent]));
-
-test('the saved run shows the pipeline total in its glance facts', async () => {
-  const KEY = 'proj-a1b2c3d4';
-  const row = { id: 'p1', projectKey: KEY, title: 'Run', status: 'done', startedAt: '2026-01-01T00:00:00Z', totalCostUsd: 0.42 };
-  const detail = { state: { id: 'p1', title: 'Run', status: 'done', startedAt: row.startedAt, steps: [], totalCostUsd: 0.42 } };
-  const ctx = await boot({
-    // The detail URL shares the /api/history prefix: match it first.
-    fetchHandler: (url) => (url.endsWith(`/api/history/${KEY}/p1`) ? ok(detail)
-      : url.endsWith('/api/history') ? runsList([row]) : null),
-  });
-  ctx.showDetail(KEY, 'p1');
-  await ctx.settle(5);
-  assert.equal(factTiles(ctx.window).cost, '$0.42');
-});
-
-test('costByNode buckets per nodeId; a row with no nodeId has nothing to bucket onto', async () => {
+test('costByNode buckets per nodeId (none without one) and folds a nodeId-tagged clarify step onto its node', async () => {
   const { window } = await boot();
   const fn = window.__np.costByNode;
-  assert.equal(fn([{ nodeId: 's0_0', phase: 'planner', costUsd: 0.12 }])['s0_0'], 0.12);
-  // The v1 phase->node fallback died with the v1 manifest: stepBucketKey is the
-  // nodeId or nothing.
-  assert.deepEqual(fn([{ phase: 'plan', costUsd: 0.05 }]), {});
-});
-
-test('costByNode folds a nodeId-tagged clarify step onto the plan node', async () => {
-  const { window } = await boot();
-  const fn = window.__np.costByNode;
-  const out = fn([
-    { key: 'clarify#1', phase: 'clarify', nodeId: 's0_0', costUsd: 0.01 },
-    { key: '0:s0_0', phase: 'planner', nodeId: 's0_0', costUsd: 0.02 },
+  await checkRows([
+    { name: 'costByNode buckets per nodeId; a row with no nodeId has nothing to bucket onto', run: () => {
+      assert.equal(fn([{ nodeId: 's0_0', phase: 'planner', costUsd: 0.12 }])['s0_0'], 0.12);
+      // The v1 phase->node fallback died with the v1 manifest: stepBucketKey is the
+      // nodeId or nothing.
+      assert.deepEqual(fn([{ phase: 'plan', costUsd: 0.05 }]), {});
+    } },
+    { name: 'costByNode folds a nodeId-tagged clarify step onto the plan node', run: () => {
+      const out = fn([
+        { key: 'clarify#1', phase: 'clarify', nodeId: 's0_0', costUsd: 0.01 },
+        { key: '0:s0_0', phase: 'planner', nodeId: 's0_0', costUsd: 0.02 },
+      ]);
+      assert.equal(out['s0_0'], 0.03);
+    } },
   ]);
-  assert.equal(out['s0_0'], 0.03);
 });

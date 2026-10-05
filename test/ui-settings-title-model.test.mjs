@@ -5,11 +5,17 @@
 // warn hint, the env-override note, Save/Use default posting exactly
 // { titleModel }, and Test hitting POST /api/models/:id/test. Boot copied from
 // test/ui-settings-debug-spawn.test.mjs. Fetch-stubbed only — no disk.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { cardAlertOf, lastToast, edit, fieldErrorText } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -30,7 +36,7 @@ const GET_BODY = ({ titleModel = null, titleModelEffective = { model: null, sour
 });
 
 async function boot({ initial = {}, catalog = CATALOG, postResponse, testResponse } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
@@ -81,36 +87,40 @@ async function boot({ initial = {}, catalog = CATALOG, postResponse, testRespons
 
 const optionsOf = ($) => [...$('#titleModel').options].map((o) => ({ value: o.value, text: o.textContent, group: o.parentElement.tagName === 'OPTGROUP' ? o.parentElement.label : null, disabled: o.disabled }));
 
-test('ui-settings-title-model: default paints "Same as the run\'s model" selected + the three optgroups, legacy project models excluded', async () => {
-  const { $, openSettings } = await boot();
-  await openSettings();
-  const sel = $('#titleModel');
-  assert.ok(sel, 'card rendered');
-  assert.equal(sel.value, '');
-  const opts = optionsOf($);
-  assert.deepEqual(opts[0], { value: '', text: "Same as the run's model", group: null, disabled: false });
-  assert.deepEqual(opts.filter((o) => o.group).map((o) => [o.group, o.value]), [
-    ['Your models', 'corp-model'], ['From plugins', 'plug-model'], ['Built-in', 'claude-haiku-4-5'], ['Built-in', 'claude-opus-5-5'],
+// One boot per stored value and catalog (cuts the count, not the time).
+test('the title model select: "Same as the run\'s model" default, three optgroups, legacy project models excluded; a stored id is selected and hidden built-ins appear only when stored', async () => {
+  await checkRows([
+    { name: 'ui-settings-title-model: default paints "Same as the run\'s model" selected + the three optgroups, legacy project models excluded', run: async () => {
+      const { $, openSettings } = await boot();
+      await openSettings();
+      const sel = $('#titleModel');
+      assert.ok(sel, 'card rendered');
+      assert.equal(sel.value, '');
+      const opts = optionsOf($);
+      assert.deepEqual(opts[0], { value: '', text: "Same as the run's model", group: null, disabled: false });
+      assert.deepEqual(opts.filter((o) => o.group).map((o) => [o.group, o.value]), [
+        ['Your models', 'corp-model'], ['From plugins', 'plug-model'], ['Built-in', 'claude-haiku-4-5'], ['Built-in', 'claude-opus-5-5'],
+      ]);
+      assert.equal(opts.find((o) => o.value === 'plug-model').text, 'Plug (vendor)', 'plugin provenance suffix');
+      assert.ok(!opts.some((o) => o.value === 'legacy-model'), 'legacy per-project models are not global');
+      assert.equal($('#titleModelTest').disabled, true, 'nothing to test on the default');
+      assert.equal($('#titleModelEnvNote').textContent, '');
+    } },
+    { name: 'ui-settings-title-model: a stored id is selected; hidden built-ins leave the list unless stored', run: async () => {
+      const catalog = CATALOG.map((m) => (m.custom === false ? { ...m, hidden: true } : m));
+      const { $, openSettings } = await boot({ initial: { titleModel: 'claude-opus-5-5', titleModelEffective: { model: 'claude-opus-5-5', source: 'settings', stale: null } }, catalog });
+      await openSettings();
+      assert.equal($('#titleModel').value, 'claude-opus-5-5');
+      const opts = optionsOf($);
+      assert.ok(opts.some((o) => o.value === 'claude-opus-5-5' && o.group === 'Built-in'), 'the stored built-in stays');
+      assert.ok(!opts.some((o) => o.value === 'claude-haiku-4-5'), 'other hidden built-ins are gone');
+      assert.equal($('#titleModelTest').disabled, false);
+    } },
   ]);
-  assert.equal(opts.find((o) => o.value === 'plug-model').text, 'Plug (vendor)', 'plugin provenance suffix');
-  assert.ok(!opts.some((o) => o.value === 'legacy-model'), 'legacy per-project models are not global');
-  assert.equal($('#titleModelTest').disabled, true, 'nothing to test on the default');
-  assert.equal($('#titleModelEnvNote').textContent, '');
 });
 
-test('ui-settings-title-model: a stored id is selected; hidden built-ins leave the list unless stored', async () => {
-  const catalog = CATALOG.map((m) => (m.custom === false ? { ...m, hidden: true } : m));
-  const { $, openSettings } = await boot({ initial: { titleModel: 'claude-opus-5-5', titleModelEffective: { model: 'claude-opus-5-5', source: 'settings', stale: null } }, catalog });
-  await openSettings();
-  assert.equal($('#titleModel').value, 'claude-opus-5-5');
-  const opts = optionsOf($);
-  assert.ok(opts.some((o) => o.value === 'claude-opus-5-5' && o.group === 'Built-in'), 'the stored built-in stays');
-  assert.ok(!opts.some((o) => o.value === 'claude-haiku-4-5'), 'other hidden built-ins are gone');
-  assert.equal($('#titleModelTest').disabled, false);
-});
-
-test('ui-settings-title-model: a stale stored id paints disabled + "not installed" and a warn hint; Save refuses it', async () => {
-  const { $, posts, openSettings, tick } = await boot({ initial: { titleModel: 'gone-model', titleModelEffective: { model: null, source: 'run', stale: 'gone-model' } } });
+test('ui-settings-title-model: a stale stored id paints disabled + "not installed" and a warn hint; Save stays disabled on the clean card', async () => {
+  const { window, $, posts, openSettings, tick } = await boot({ initial: { titleModel: 'gone-model', titleModelEffective: { model: null, source: 'run', stale: 'gone-model' } } });
   await openSettings();
   const sel = $('#titleModel');
   assert.equal(sel.value, 'gone-model');
@@ -119,52 +129,71 @@ test('ui-settings-title-model: a stale stored id paints disabled + "not installe
   assert.match($('#titleModelEnvNote').textContent, /"gone-model" is no longer in the catalog — titles fall back to the run's model/);
   assert.ok($('#titleModelEnvNote').className.includes('warn'));
   assert.equal($('#titleModelTest').disabled, true);
+  assert.equal($('#titleModelSave').disabled, true, 'a freshly painted card is clean');
   $('#titleModelSave').click();
   await tick();
   assert.equal(posts.length, 0, 'a not-installed id is never posted');
-  assert.match($('#titleModelMsg').textContent, /no longer installed/);
-});
-
-test('ui-settings-title-model: env override note', async () => {
-  const { $, openSettings } = await boot({ initial: { titleModel: 'corp-model', titleModelEffective: { model: 'env-model', source: 'env', stale: null } } });
-  await openSettings();
-  assert.match($('#titleModelEnvNote').textContent, /WORCA_TITLE_MODEL is set in the environment: titles use env-model regardless/);
+  edit(window, sel, 'corp-model');
+  assert.equal($('#titleModelSave').disabled, false);
+  edit(window, sel, 'gone-model');
+  assert.equal($('#titleModelSave').disabled, true, 'picked back: clean again');
 });
 
 test('ui-settings-title-model: Save posts exactly { titleModel }, Use default posts { titleModel: "" }, and the card repaints', async () => {
-  const { $, posts, openSettings, tick } = await boot();
+  const { window, $, posts, openSettings, tick } = await boot();
   await openSettings();
-  $('#titleModel').value = 'corp-model';
-  $('#titleModel').dispatchEvent(new (globalThis.window.Event)('change'));
+  assert.equal($('#titleModelSave').disabled, true, 'Save starts disabled');
+  edit(window, $('#titleModel'), 'corp-model');
   assert.equal($('#titleModelTest').disabled, false, 'Test enables on a real pick');
   $('#titleModelSave').click();
+  assert.equal($('#titleModelSave').textContent, 'Saving…');
   await tick(); await tick(); await tick();
   assert.deepEqual(posts, [{ titleModel: 'corp-model' }]);
   assert.equal($('#titleModel').value, 'corp-model');
-  assert.match($('#titleModelMsg').textContent, /Saved\. Applies to the next title/);
+  assert.equal($('#titleModelSave').textContent, 'Saved');
+  assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Saved', detail: 'Applies to the next title.', action: '' });
+  assert.equal($('#titleModelMsg').textContent, '', 'no grey "Saved." line');
   $('#titleModelReset').click();
   await tick(); await tick(); await tick();
   assert.deepEqual(posts[1], { titleModel: '' });
   assert.equal($('#titleModel').value, '');
 });
 
-test('ui-settings-title-model: a 400 from the server surfaces in the hint', async () => {
-  const { $, openSettings, tick } = await boot({ postResponse: { ok: false, status: 400, json: async () => ({ error: 'unknown model "corp-model" — pick one from the catalog' }) } });
-  await openSettings();
-  $('#titleModel').value = 'corp-model';
-  $('#titleModelSave').click();
-  await tick(); await tick();
-  assert.match($('#titleModelMsg').textContent, /unknown model "corp-model"/);
-  assert.ok($('#titleModelMsg').className.includes('err'));
+// One boot per server response (cuts the count, not the time).
+test('a server 400 is a card alert above the buttons, or lands on the select when it names titleModel', async () => {
+  await checkRows([
+    { name: 'ui-settings-title-model: a 400 from the server is a card alert above the buttons', run: async () => {
+      const { window, $, openSettings, tick } = await boot({ postResponse: { ok: false, status: 400, json: async () => ({ error: 'unknown model "corp-model" — pick one from the catalog' }) } });
+      await openSettings();
+      edit(window, $('#titleModel'), 'corp-model');
+      $('#titleModelSave').click();
+      await tick(); await tick();
+      assert.deepEqual(cardAlertOf($('#title-model-settings-card')), { title: 'Not saved', detail: 'unknown model "corp-model" — pick one from the catalog' });
+      assert.equal($('#titleModelSave').disabled, false, 'still dirty: Save is offered again');
+    } },
+    { name: 'ui-settings-title-model: a server error naming titleModel lands on the select', run: async () => {
+      const { window, $, openSettings, tick } = await boot({ postResponse: { ok: false, status: 400, json: async () => ({ error: 'Pick a model from the catalog.', field: 'titleModel' }) } });
+      await openSettings();
+      edit(window, $('#titleModel'), 'corp-model');
+      $('#titleModelSave').click();
+      await tick(); await tick();
+      assert.equal($('#titleModel').getAttribute('aria-invalid'), 'true');
+      assert.equal(fieldErrorText($('#titleModel')), 'Pick a model from the catalog.');
+    } },
+  ]);
 });
 
 test('ui-settings-title-model: Test posts to /api/models/:id/test and paints the reply / the hint', async () => {
   const ok = await boot({ initial: { titleModel: 'corp-model', titleModelEffective: { model: 'corp-model', source: 'settings', stale: null } } });
   await ok.openSettings();
   ok.$('#titleModelTest').click();
+  assert.equal(ok.$('#titleModelTest').textContent, 'Testing…');
   await ok.tick(); await ok.tick();
   assert.deepEqual(ok.tests, ['corp-model']);
-  assert.match(ok.$('#titleModelMsg').textContent, /✓ corp-model replied: OK/);
+  assert.equal(ok.$('#titleModelTest').textContent, 'Works');
+  assert.ok(ok.$('#titleModelTest').classList.contains('is-done'));
+  assert.equal(ok.$('#titleModelMsg').textContent, 'corp-model replied: OK');
+  assert.equal(ok.$('#titleModelMsg').className, 'hint ok');
   assert.equal(ok.$('#titleModelTest').disabled, false, 're-enabled after the call');
 
   const bad = await boot({
@@ -174,6 +203,21 @@ test('ui-settings-title-model: Test posts to /api/models/:id/test and paints the
   await bad.openSettings();
   bad.$('#titleModelTest').click();
   await bad.tick(); await bad.tick();
-  assert.match(bad.$('#titleModelMsg').textContent, /✗ authentication failed/);
-  assert.ok(bad.$('#titleModelMsg').className.includes('err'));
+  assert.deepEqual(cardAlertOf(bad.$('#title-model-settings-card')), { title: 'corp-model did not answer', detail: 'authentication failed — check the token/secret for this model' });
+  assert.equal(bad.$('#titleModelMsg').textContent, '');
+  assert.equal(bad.$('#titleModelTest').textContent, 'Test', 'a failure skips "Works"');
+});
+
+test('ui-settings-title-model: on the Models tab (no loadSettings) the painted card is clean, also after a window focus', async () => {
+  const { window, $, tick } = await boot({ initial: { titleModel: 'corp-model', titleModelEffective: { model: 'corp-model', source: 'settings', stale: null } } });
+  window.location.hash = 'settings/models';
+  window.dispatchEvent(new window.Event('hashchange'));
+  for (let i = 0; i < 10; i++) await tick();
+  assert.equal($('#titleModel').value, 'corp-model', 'paintHelperModelCards ran');
+  assert.equal($('#titleModelSave').disabled, true);
+  assert.equal($('#title-model-settings-card .dirty-mark').hidden, true);
+  window.dispatchEvent(new window.Event('focus'));
+  for (let i = 0; i < 10; i++) await tick();
+  assert.equal($('#titleModelSave').disabled, true);
+  assert.equal($('#title-model-settings-card .dirty-mark').hidden, true);
 });

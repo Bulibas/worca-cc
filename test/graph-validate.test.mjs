@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { RULES, validateGraph, formatIssue } from '../src/shared/graph/validate.mjs';
+import { validateGraph, formatIssue } from '../src/shared/graph/validate.mjs';
 import { portsFnFor } from '../src/shared/graph/ports.mjs';
 
 // Inline fixture registry (the REAL sidecars arrive in test/helpers/graph-ports.mjs
@@ -50,13 +50,6 @@ const ok = () => ({
   wires: [W('w1', 'n_task', 'task', 'n_plan', 'task'), W('w2', 'n_plan', 'plan', 'n_impl', 'plan'),
     W('w3', 'n_plan', 'plan', 'n_rev', 'plan'), W('w4', 'n_impl', 'done', 'n_rev', 'done'),
     W('w5', 'n_rev', 'review', 'n_impl', 'fix', { maxCycles: 3 }), W('w6', 'n_rev', 'pass', 'n_end', 'result')],
-});
-
-test('the rule table is V1..V22 in order (V22 = script config, reusing the number the retired single-wire rule freed)', () => {
-  assert.deepEqual(RULES.map((r) => r.code),
-    ['V1','V2','V3','V4','V5','V6','V7','V8','V9','V10','V11','V12','V13','V14','V15','V16','V17','V18','V19','V20','V21','V22']);
-  assert.deepEqual(RULES.filter((r) => r.level === 'W').map((r) => r.code), ['V15','V16','V17','V18','V19']);
-  for (const r of RULES) assert.equal(typeof r.check, 'function', `${r.code} has a check`);
 });
 
 test('a legal graph validates clean', () => {

@@ -10,6 +10,7 @@ import {
   copilotHeaders, githubHeaders, copilotApiHost, bodyHasImage, requestInitiator,
   normalizeCopilotModel, catalogEntryForCopilotModel, copilotApiFor, listCopilotModels, copilotUsage, GITHUB_CLIENT_ID,
 } from '../src/core/bridge/providers/copilot.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const jsonRes = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body, text: async () => JSON.stringify(body), headers: new Map() });
 function stub(routes) {
@@ -96,14 +97,29 @@ test('headers: the editor identity, X-Initiator, vision flag, account hosts', ()
   assert.equal(copilotApiHost('individual'), 'https://api.githubcopilot.com');
 });
 
-test('initiator + vision detection from a Messages body', () => {
-  assert.equal(requestInitiator({ messages: [{ role: 'user', content: 'x' }] }), 'user');
-  assert.equal(requestInitiator({ messages: [{ role: 'assistant', content: 'x' }] }), 'agent');
-  assert.equal(requestInitiator({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'a', content: 'b' }] }] }), 'agent');
-  assert.equal(requestInitiator({}), 'user');
-  assert.equal(bodyHasImage({ messages: [{ role: 'user', content: [{ type: 'image', source: {} }] }] }), true);
-  assert.equal(bodyHasImage({ messages: [{ role: 'user', content: [{ type: 'tool_result', content: [{ type: 'image' }] }] }] }), true);
-  assert.equal(bodyHasImage({ messages: [{ role: 'user', content: 'no' }] }), false);
+test('initiator + vision detection from a Messages body, incl. trailing system reminders after a tool-loop continuation', async () => {
+  await checkRows([
+    { name: 'initiator + vision detection from a Messages body', run: async () => {
+      assert.equal(requestInitiator({ messages: [{ role: 'user', content: 'x' }] }), 'user');
+      assert.equal(requestInitiator({ messages: [{ role: 'assistant', content: 'x' }] }), 'agent');
+      assert.equal(requestInitiator({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'a', content: 'b' }] }] }), 'agent');
+      assert.equal(requestInitiator({}), 'user');
+      assert.equal(bodyHasImage({ messages: [{ role: 'user', content: [{ type: 'image', source: {} }] }] }), true);
+      assert.equal(bodyHasImage({ messages: [{ role: 'user', content: [{ type: 'tool_result', content: [{ type: 'image' }] }] }] }), true);
+      assert.equal(bodyHasImage({ messages: [{ role: 'user', content: 'no' }] }), false);
+    } },
+    { name: 'initiator: the CLI\'s trailing system reminders do not turn a tool-loop continuation into a user turn', run: async () => {
+      const call = { role: 'assistant', content: [{ type: 'thinking', thinking: 't', signature: 's' }, { type: 'tool_use', id: 't1', name: 'Read', input: {} }] };
+      const result = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] };
+      const reminder = { role: 'system', content: [{ type: 'text', text: '<total_tokens>14999970 tokens left</total_tokens>' }] };
+      // The shape of both captured CLI continuations: … assistant > user(tool_result) > system.
+      assert.equal(requestInitiator({ messages: [{ role: 'user', content: 'go' }, { role: 'system', content: 'deferred tools' }, call, result, reminder] }), 'agent');
+      assert.equal(requestInitiator({ messages: [{ role: 'user', content: 'go' }, call, reminder, { role: 'system', content: 'more' }] }), 'agent');
+      // A new prompt stays a user turn, with or without a reminder after it.
+      assert.equal(requestInitiator({ messages: [{ role: 'user', content: 'go' }, reminder] }), 'user');
+      assert.equal(requestInitiator({ messages: [reminder] }), 'user');
+    } },
+  ]);
 });
 
 test('models: normalization, vendor routing and the import entry', async () => {
@@ -190,16 +206,4 @@ test('models: supported_endpoints and effort lists drive the api, the reasoning 
   assert.equal('reasoningEfforts' in catalogEntryForCopilotModel(legacy).upstream.capabilities, false);
   const claude = normalizeCopilotModel({ id: 'claude-sonnet-5', name: 'Claude Sonnet 5', vendor: 'Anthropic', capabilities: { type: 'chat', supports: { reasoning_effort: ['low', 'high'] } } });
   assert.equal('reasoningEfforts' in catalogEntryForCopilotModel(claude).upstream.capabilities, false);   // passthrough: the CLI speaks effort itself
-});
-
-test('initiator: the CLI\'s trailing system reminders do not turn a tool-loop continuation into a user turn', () => {
-  const call = { role: 'assistant', content: [{ type: 'thinking', thinking: 't', signature: 's' }, { type: 'tool_use', id: 't1', name: 'Read', input: {} }] };
-  const result = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] };
-  const reminder = { role: 'system', content: [{ type: 'text', text: '<total_tokens>14999970 tokens left</total_tokens>' }] };
-  // The shape of both captured CLI continuations: … assistant > user(tool_result) > system.
-  assert.equal(requestInitiator({ messages: [{ role: 'user', content: 'go' }, { role: 'system', content: 'deferred tools' }, call, result, reminder] }), 'agent');
-  assert.equal(requestInitiator({ messages: [{ role: 'user', content: 'go' }, call, reminder, { role: 'system', content: 'more' }] }), 'agent');
-  // A new prompt stays a user turn, with or without a reminder after it.
-  assert.equal(requestInitiator({ messages: [{ role: 'user', content: 'go' }, reminder] }), 'user');
-  assert.equal(requestInitiator({ messages: [reminder] }), 'user');
 });

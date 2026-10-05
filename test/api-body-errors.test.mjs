@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // MIN-108: express.json() used to be mounted BEFORE the DNS-rebinding guard, so a
 // malformed body answered with express's default HTML error page — thrown stack,
@@ -68,16 +69,19 @@ test('a malformed JSON body answers 400 { error } as JSON, not an HTML stack tra
   assert.deepEqual(assertCleanJson(r), { error: 'malformed JSON body' });
 });
 
-test('the loopback guard runs BEFORE the body parser: a bad Host 403s even on a malformed body', async () => {
-  const r = await raw('{ not json', { Host: 'evil.example.com' });
-  assert.equal(r.status, 403, 'the guard, not the parser, answers');
-  assert.deepEqual(assertCleanJson(r), { error: 'forbidden: worca is a localhost-only tool' });
-});
-
-test('the guard keeps its Origin half: a bad Origin 403s on a malformed body too', async () => {
-  const r = await raw('{ not json', { Origin: 'http://evil.example.com' });
-  assert.equal(r.status, 403);
-  assert.deepEqual(assertCleanJson(r), { error: 'forbidden: worca is a localhost-only tool' });
+test('the loopback guard runs BEFORE the body parser: a bad Host or a bad Origin 403s even on a malformed body', async () => {
+  await checkRows([
+    { name: 'the loopback guard runs BEFORE the body parser: a bad Host 403s even on a malformed body', run: async () => {
+      const r = await raw('{ not json', { Host: 'evil.example.com' });
+      assert.equal(r.status, 403, 'the guard, not the parser, answers');
+      assert.deepEqual(assertCleanJson(r), { error: 'forbidden: worca is a localhost-only tool' });
+    } },
+    { name: 'the guard keeps its Origin half: a bad Origin 403s on a malformed body too', run: async () => {
+      const r = await raw('{ not json', { Origin: 'http://evil.example.com' });
+      assert.equal(r.status, 403);
+      assert.deepEqual(assertCleanJson(r), { error: 'forbidden: worca is a localhost-only tool' });
+    } },
+  ]);
 });
 
 test('a body past the 8mb cap answers 413 { error } as JSON', async () => {

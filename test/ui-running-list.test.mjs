@@ -6,18 +6,23 @@
 // boot() is a deliberate local copy of test/ui-running-order.test.mjs:14-50 and
 // go() of test/ui-history-routing.test.mjs:93-96; live() is copied from
 // test/ui-pipeline-tabs.test.mjs:38-41. The suites do not import each other.
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath  = fileURLToPath(new URL('../ui/public/app.js',   import.meta.url));
 const PROJECT = '/tmp/proj';
 
 async function boot() {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};   // jsdom has no layout
   let lastWs = null;
@@ -87,57 +92,45 @@ test('workspace scans and agent generations are not listed as runs', async () =>
     'only kind run | workspace-run render — the live rows are pipelines only');
 });
 
-test('a lone scan leaves the runs list on its empty note', async () => {
+// One boot: each hello re-lists the runs (upsert), then question-resolved frames.
+test('Needs you: absent while nothing waits; leads the list with its count; runs leave it as their questions resolve and stay in their project groups', async () => {
   const { window, recv, tick } = await boot();
   go(window, 'runs');
-  recv({ type: 'hello', runs: [live('scan-1', { kind: 'scan' })] });
-  await tick();
-  assert.equal(window.document.querySelectorAll('#runs-list .runs-row').length, 0);
-  const note = window.document.querySelector('#runs-list .runs-note');
-  assert.ok(note, 'the empty note renders');
-  assert.match(note.textContent, /^No runs yet/);
-});
+  await checkRows([
+    { name: 'Needs you stays absent while nothing is waiting', run: async () => {
+      recv({ type: 'hello', runs: [live('pipe-1')] });
+      await tick();
+      assert.deepEqual(rowIds(window), ['pipe-1'], 'the run is listed');
+      assert.equal(needsOf(window), null, 'no Needs-you group without a question or a pause');
+    } },
+    { name: 'one waiting pipeline is listed under Needs you, at the top of the list', run: async () => {
+      recv({ type: 'hello', runs: [live('pipe-1', { pendingQuestion: QUESTION }), live('pipe-2')] });
+      await tick();
+      const needs = needsOf(window);
+      assert.ok(needs, 'the Needs-you group renders');
+      assert.equal(needs, window.document.getElementById('runs-list').firstElementChild, 'it leads the list');
+      assert.deepEqual(needsIds(window), ['pipe-1'], 'only the asking run');
+      assert.equal(needs.querySelector('.runs-needs-head .runs-count').textContent, '1');
+      assert.deepEqual(rowIds(window).sort(), ['pipe-1', 'pipe-2'], 'both stay in their project group');
+    } },
+    { name: 'two waiting pipelines are both listed, and they leave Needs you as they are answered', run: async () => {
+      recv({ type: 'hello', runs: [
+        live('pipe-1', { pendingQuestion: QUESTION }),
+        live('pipe-2', { pendingQuestion: { ...QUESTION, id: 'q2' } }),
+      ] });
+      await tick();
+      assert.deepEqual(needsIds(window).sort(), ['pipe-1', 'pipe-2']);
+      assert.equal(needsOf(window).querySelector('.runs-count').textContent, '2');
 
-test('Needs you stays absent while nothing is waiting', async () => {
-  const { window, recv, tick } = await boot();
-  go(window, 'runs');
-  recv({ type: 'hello', runs: [live('pipe-1')] });
-  await tick();
-  assert.deepEqual(rowIds(window), ['pipe-1'], 'the run is listed');
-  assert.equal(needsOf(window), null, 'no Needs-you group without a question or a pause');
-});
+      recv({ type: 'question-resolved', runId: 'pipe-1', id: 'q1' });
+      await tick();
+      assert.deepEqual(needsIds(window), ['pipe-2']);
+      assert.equal(needsOf(window).querySelector('.runs-count').textContent, '1');
 
-test('one waiting pipeline is listed under Needs you, at the top of the list', async () => {
-  const { window, recv, tick } = await boot();
-  go(window, 'runs');
-  recv({ type: 'hello', runs: [live('pipe-1', { pendingQuestion: QUESTION }), live('pipe-2')] });
-  await tick();
-  const needs = needsOf(window);
-  assert.ok(needs, 'the Needs-you group renders');
-  assert.equal(needs, window.document.getElementById('runs-list').firstElementChild, 'it leads the list');
-  assert.deepEqual(needsIds(window), ['pipe-1'], 'only the asking run');
-  assert.equal(needs.querySelector('.runs-needs-head .runs-count').textContent, '1');
-  assert.deepEqual(rowIds(window).sort(), ['pipe-1', 'pipe-2'], 'both stay in their project group');
-});
-
-test('two waiting pipelines are both listed, and they leave Needs you as they are answered', async () => {
-  const { window, recv, tick } = await boot();
-  go(window, 'runs');
-  recv({ type: 'hello', runs: [
-    live('pipe-1', { pendingQuestion: QUESTION }),
-    live('pipe-2', { pendingQuestion: { ...QUESTION, id: 'q2' } }),
-  ] });
-  await tick();
-  assert.deepEqual(needsIds(window).sort(), ['pipe-1', 'pipe-2']);
-  assert.equal(needsOf(window).querySelector('.runs-count').textContent, '2');
-
-  recv({ type: 'question-resolved', runId: 'pipe-1', id: 'q1' });
-  await tick();
-  assert.deepEqual(needsIds(window), ['pipe-2']);
-  assert.equal(needsOf(window).querySelector('.runs-count').textContent, '1');
-
-  recv({ type: 'question-resolved', runId: 'pipe-2', id: 'q2' });
-  await tick();
-  assert.equal(needsOf(window), null, 'the group goes once nothing is waiting');
-  assert.deepEqual(rowIds(window).sort(), ['pipe-1', 'pipe-2'], 'the runs stay listed');
+      recv({ type: 'question-resolved', runId: 'pipe-2', id: 'q2' });
+      await tick();
+      assert.equal(needsOf(window), null, 'the group goes once nothing is waiting');
+      assert.deepEqual(rowIds(window).sort(), ['pipe-1', 'pipe-2'], 'the runs stay listed');
+    } },
+  ]);
 });

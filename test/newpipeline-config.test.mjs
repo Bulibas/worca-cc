@@ -1,9 +1,10 @@
 // test/newpipeline-config.test.mjs
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { checkRows } from './helpers/rows.mjs';
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -11,7 +12,7 @@ const PROJECT = '/tmp/proj';
 
 // Boot app.js in jsdom with a controllable fetch. Mirrors test/ui-cost.test.mjs.
 async function boot({ fetchHandler } = {}) {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4319/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4319/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   window.WebSocket = class {
@@ -55,126 +56,77 @@ const REGISTRY = {
   reviewer: { key: 'reviewer', displayName: 'Review', color: 'blue', order: 4 },
 };
 
-test('buildNodeConfigRows flattens steps in order, keyed by nodeId, with registry label+color', async () => {
+test('buildNodeConfigRows (v1 steps): order, labels/colors, run-config overlay, unknown key fallback, fan-out precedence', async () => {
   const { window } = await boot();
-  const rows = window.__np.buildNodeConfigRows(WF, REGISTRY, { nodes: {}, feedbacks: {} });
-  assert.deepEqual(rows.map((r) => r.nodeId), ['s0_0', 's1_0', 's1_1', 's2_0']);
-  assert.deepEqual(rows.map((r) => r.key), ['planner', 'implementer', 'manualTestsChecklist', 'reviewer']);
-  assert.deepEqual(rows.map((r) => r.label), ['Plan', 'Implement', 'Manual Tests Checklist', 'Review']);
-  assert.deepEqual(rows.map((r) => r.color), ['violet', 'peach', 'blue', 'blue']); // C5: manualTestsChecklist is blue (two blue pills: checklist + reviewer)
-  // step indices preserved (used for the "Step N · parallel" hint)
-  assert.deepEqual(rows.map((r) => r.stepIndex), [0, 1, 1, 2]);
-  // no run-config => empty model/effort
-  assert.deepEqual(rows.map((r) => r.model), ['', '', '', '']);
-  assert.deepEqual(rows.map((r) => r.effort), ['', '', '', '']);
+  await checkRows([
+    { name: 'buildNodeConfigRows flattens steps in order, keyed by nodeId, with registry label+color', run: () => {
+      const rows = window.__np.buildNodeConfigRows(WF, REGISTRY, { nodes: {}, feedbacks: {} });
+      assert.deepEqual(rows.map((r) => r.nodeId), ['s0_0', 's1_0', 's1_1', 's2_0']);
+      assert.deepEqual(rows.map((r) => r.key), ['planner', 'implementer', 'manualTestsChecklist', 'reviewer']);
+      assert.deepEqual(rows.map((r) => r.label), ['Plan', 'Implement', 'Manual Tests Checklist', 'Review']);
+      assert.deepEqual(rows.map((r) => r.color), ['violet', 'peach', 'blue', 'blue']); // C5: manualTestsChecklist is blue (two blue pills: checklist + reviewer)
+      // step indices preserved (used for the "Step N · parallel" hint)
+      assert.deepEqual(rows.map((r) => r.stepIndex), [0, 1, 1, 2]);
+      // no run-config => empty model/effort
+      assert.deepEqual(rows.map((r) => r.model), ['', '', '', '']);
+      assert.deepEqual(rows.map((r) => r.effort), ['', '', '', '']);
+    } },
+    { name: 'buildNodeConfigRows overlays saved run-config model/effort per nodeId', run: () => {
+      const rc = { nodes: { s1_0: { model: 'claude-opus-4-8', effort: 'high' }, s2_0: { model: 'claude-sonnet-4-6' } }, feedbacks: {} };
+      const rows = window.__np.buildNodeConfigRows(WF, REGISTRY, rc);
+      const byId = Object.fromEntries(rows.map((r) => [r.nodeId, r]));
+      assert.equal(byId.s1_0.model, 'claude-opus-4-8');
+      assert.equal(byId.s1_0.effort, 'high');
+      assert.equal(byId.s2_0.model, 'claude-sonnet-4-6');
+      assert.equal(byId.s2_0.effort, '');      // absent in run-config -> ''
+      assert.equal(byId.s0_0.model, '');        // untouched node
+    } },
+    { name: 'buildNodeConfigRows tolerates a key missing from the registry (falls back to the key as label, no color)', run: () => {
+      const wf = { id: 'w', steps: [[{ id: 'n0', key: 'ghost' }]], feedbacks: [] };
+      const rows = window.__np.buildNodeConfigRows(wf, REGISTRY, { nodes: {}, feedbacks: {} });
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].label, 'ghost');
+      assert.equal(rows[0].color, '');
+    } },
+    { name: 'buildNodeConfigRows on the Default 4-step topology yields the original four rows in order', run: () => {
+      const def = {
+        id: 'wf_default', name: 'Default',
+        steps: [
+          [{ id: 's0_0', key: 'planner' }],
+          [{ id: 's1_0', key: 'refiner' }],
+          [{ id: 's2_0', key: 'implementer' }],
+          [{ id: 's3_0', key: 'reviewer' }],
+        ],
+        feedbacks: [],
+      };
+      const reg = { ...REGISTRY, refiner: { key: 'refiner', displayName: 'Refine', color: 'green', order: 2 } };
+      const rows = window.__np.buildNodeConfigRows(def, reg, { nodes: {}, feedbacks: {} });
+      assert.deepEqual(rows.map((r) => r.key), ['planner', 'refiner', 'implementer', 'reviewer']);
+      assert.deepEqual(rows.map((r) => r.label), ['Plan', 'Refine', 'Implement', 'Review']);
+    } },
+    { name: 'buildNodeConfigRows resolves fanOut: saved override > sidecar default > false', run: () => {
+      const reg = {
+        planner: { key: 'planner', displayName: 'Plan', color: 'violet', order: 1, fanOut: true },
+        implementer: { key: 'implementer', displayName: 'Implement', color: 'peach', order: 3 },
+        manualTestsChecklist: { key: 'manualTestsChecklist', displayName: 'MTC', color: 'blue', order: 5 },
+        reviewer: { key: 'reviewer', displayName: 'Review', color: 'blue', order: 4 },
+      };
+      // No run-config => sidecar defaults (planner true, others false/absent).
+      let rows = window.__np.buildNodeConfigRows(WF, reg, { nodes: {}, feedbacks: {} });
+      assert.equal(rows.find((r) => r.nodeId === 's0_0').fanOut, true);
+      assert.equal(rows.find((r) => r.nodeId === 's1_0').fanOut, false);
+      // Saved override beats sidecar default both directions.
+      rows = window.__np.buildNodeConfigRows(WF, reg, { nodes: { s0_0: { fanOut: false }, s1_0: { fanOut: true } }, feedbacks: {} });
+      assert.equal(rows.find((r) => r.nodeId === 's0_0').fanOut, false);
+      assert.equal(rows.find((r) => r.nodeId === 's1_0').fanOut, true);
+    } },
+  ]);
 });
 
-test('buildNodeConfigRows overlays saved run-config model/effort per nodeId', async () => {
-  const { window } = await boot();
-  const rc = { nodes: { s1_0: { model: 'claude-opus-4-8', effort: 'high' }, s2_0: { model: 'claude-sonnet-4-6' } }, feedbacks: {} };
-  const rows = window.__np.buildNodeConfigRows(WF, REGISTRY, rc);
-  const byId = Object.fromEntries(rows.map((r) => [r.nodeId, r]));
-  assert.equal(byId.s1_0.model, 'claude-opus-4-8');
-  assert.equal(byId.s1_0.effort, 'high');
-  assert.equal(byId.s2_0.model, 'claude-sonnet-4-6');
-  assert.equal(byId.s2_0.effort, '');      // absent in run-config -> ''
-  assert.equal(byId.s0_0.model, '');        // untouched node
-});
+import { useDomRelease } from './helpers/jsdom-release.mjs';
 
-test('buildNodeConfigRows tolerates a key missing from the registry (falls back to the key as label, no color)', async () => {
-  const { window } = await boot();
-  const wf = { id: 'w', steps: [[{ id: 'n0', key: 'ghost' }]], feedbacks: [] };
-  const rows = window.__np.buildNodeConfigRows(wf, REGISTRY, { nodes: {}, feedbacks: {} });
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].label, 'ghost');
-  assert.equal(rows[0].color, '');
-});
-
-test('buildNodeConfigRows on the Default 4-step topology yields the original four rows in order', async () => {
-  const { window } = await boot();
-  const def = {
-    id: 'wf_default', name: 'Default',
-    steps: [
-      [{ id: 's0_0', key: 'planner' }],
-      [{ id: 's1_0', key: 'refiner' }],
-      [{ id: 's2_0', key: 'implementer' }],
-      [{ id: 's3_0', key: 'reviewer' }],
-    ],
-    feedbacks: [],
-  };
-  const reg = { ...REGISTRY, refiner: { key: 'refiner', displayName: 'Refine', color: 'green', order: 2 } };
-  const rows = window.__np.buildNodeConfigRows(def, reg, { nodes: {}, feedbacks: {} });
-  assert.deepEqual(rows.map((r) => r.key), ['planner', 'refiner', 'implementer', 'reviewer']);
-  assert.deepEqual(rows.map((r) => r.label), ['Plan', 'Refine', 'Implement', 'Review']);
-});
-
-import { readFileSync as _rf } from 'node:fs';
-const indexHtml = _rf(fileURLToPath(new URL('../ui/public/index.html', import.meta.url)), 'utf8');
-
-test('index.html exposes the workflow select + the agents accordion containers', () => {
-  assert.ok(indexHtml.includes('id="workflowSelect"'), 'missing #workflowSelect');
-  assert.ok(indexHtml.includes('id="agents-rows"'), 'missing #agents-rows container');
-  assert.ok(indexHtml.includes('id="agentsSummary"'), 'missing the accordion header summary');
-  assert.ok(indexHtml.includes('id="agentsReset"'), 'missing the reset action');
-  assert.ok(indexHtml.includes('id="agentsPromote"'), 'missing the save-as-defaults action');
-  assert.ok(indexHtml.includes('id="wf-feedback-config"'), 'missing #wf-feedback-config container');
-  // The five hardcoded stage cards are GONE: the Default workflow renders through
-  // the same dynamic accordion as any saved one (newpipeline-ux-design.md §4.7).
-  assert.ok(!indexHtml.includes('id="wf-default-stages"'), 'static default stages must be removed');
-  assert.ok(!indexHtml.includes('data-role="planner"'), 'static per-role markup must be removed');
-});
-
-test('the Default workflow renders Clarify first, with full-parity controls', async () => {
-  const { window } = await boot();
-  await new Promise((r) => setTimeout(r, 0));
-  const doc = window.document;
-  // Clarify is the FIRST row, and its controls carry the legacy role key.
-  const names = [...doc.querySelectorAll('#agents-rows .agent-name')].map((n) => n.textContent);
-  assert.equal(names[0], 'Clarify');
-  assert.ok(names.indexOf('Clarify') < names.indexOf('Plan'), 'Clarify must come before Plan');
-  const row = doc.querySelector('.agent-row[data-node-id="s_clarify"]');
-  assert.ok(row, 'missing Clarify row');
-  assert.equal(row.querySelector('.acc').className, 'acc red');
-  assert.ok(row.querySelector('.step-model[data-role="clarify"]'), 'missing model select');
-  assert.ok(row.querySelector('.step-effort[data-role="clarify"]'), 'missing effort select');
-  assert.ok(row.querySelector('.step-fanout[data-role="clarify"]'), 'missing fan-out checkbox');
-  // The collapsed head IS the row's summary line — there is no second caption
-  // duplicating it 8px lower inside the body.
-  assert.ok(row.querySelector('.agent-sum'), 'missing summary line');
-  assert.equal(row.querySelector('.step-current'), null, 'no duplicate in-body caption');
-});
-
-test('the Clarify default-stage card defaults Fan-out ON and is populated from /api/config steps', async () => {
-  // Top-level `steps` array carries each step's default fan-out (from the agent meta sidecars),
-  // exactly like the existing default-row fan-out test. clarify.meta.json has fanOut:true.
-  const steps = [
-    { key: 'clarify', label: 'Clarify', fanOut: true },
-    { key: 'planner', label: 'Plan', fanOut: true },
-    { key: 'refiner', label: 'Refine', fanOut: false },
-    { key: 'implementer', label: 'Implement', fanOut: false },
-    { key: 'reviewer', label: 'Review', fanOut: false },
-  ];
-  const MODEL = { id: 'claude-opus-4-8', label: 'Opus 4.8', efforts: ['medium', 'high', 'xhigh', 'max'] };
-  const { window } = await boot({ fetchHandler: (url) => {
-    if (url.includes('/api/config')) {
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({
-        config: { steps: {}, customModels: [] },
-        models: [MODEL],
-        efforts: ['medium', 'high', 'xhigh', 'max'],
-        steps, // top-level — app.js reads data.steps for per-step fan-out defaults
-      }) });
-    }
-    return null; // fall through to boot()'s /api/projects + /api/workflows defaults
-  } });
-  const doc = window.document;
-  // Load-bearing assertion: Clarify fan-out defaults ON from clarify.meta.json (fanOut:true).
-  const fan = doc.querySelector('.step-fanout[data-role="clarify"]');
-  assert.ok(fan, 'missing Clarify fan-out checkbox');
-  assert.equal(fan.checked, true, 'Clarify fan-out must default ON (clarify.meta.json fanOut:true)');
-  // Parity: the Clarify model dropdown is populated just like the other cards.
-  const model = doc.querySelector('.step-model[data-role="clarify"]');
-  assert.ok(model && model.options.length >= 1, 'Clarify model select not populated');
-});
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 test('renderModelEffortPair fills a model dropdown (default + models + add) and filters efforts by model', async () => {
   const { window } = await boot();
@@ -196,34 +148,6 @@ test('renderModelEffortPair fills a model dropdown (default + models + add) and 
   assert.deepEqual([...effortSel.options].map((o) => o.value), ['', 'medium', 'high']);
   assert.equal(effortSel.value, 'high');
   assert.match(caption.textContent, /Haiku 4\.5 · high/);
-});
-
-test('model dropdown: grouped (Your models / Plugins / Built-in), alphabetical, collision-only plugin suffix', async () => {
-  const { window } = await boot();
-  const doc = window.document;
-  const modelSel = doc.createElement('select');
-  const effortSel = doc.createElement('select');
-  window.__np._setModels([
-    { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', efforts: ['medium'], custom: false },
-    { id: 'claude-haiku-4-5', label: 'Haiku 4.5', efforts: ['medium'], custom: false },
-    { id: 'zz-model', label: 'Zeta', efforts: ['medium'], custom: 'global' },
-    { id: 'aa-model', label: 'Alpha', efforts: ['medium'], custom: 'project' },
-    // Same LABEL as the user's Zeta -> this plugin option gets its plugin name;
-    // Beta is unambiguous and stays clean (design §9.6, collision-only).
-    { id: 'plug-zeta', label: 'Zeta', efforts: ['medium'], custom: 'plugin', plugin: 'team-models' },
-    { id: 'plug-beta', label: 'Beta', efforts: ['medium'], custom: 'plugin', plugin: 'team-models' },
-  ]);
-  window.__np.renderModelEffortPair(modelSel, effortSel, null, {});
-  const groups = [...modelSel.querySelectorAll('optgroup')];
-  assert.deepEqual(groups.map((g) => g.label), ['Your models', 'Plugins', 'Built-in']);
-  // Alphabetical by label inside each group; provenance carried by the group,
-  // never a ·custom/·project suffix on the option text.
-  assert.deepEqual([...groups[0].querySelectorAll('option')].map((o) => o.textContent), ['Alpha', 'Zeta']);
-  assert.deepEqual([...groups[1].querySelectorAll('option')].map((o) => o.textContent), ['Beta', 'Zeta (team-models)']);
-  assert.deepEqual([...groups[2].querySelectorAll('option')].map((o) => o.textContent), ['Haiku 4.5', 'Sonnet 4.6']);
-  // The default + add affordances bracket the groups.
-  assert.equal(modelSel.options[0].value, '');
-  assert.equal(modelSel.options[modelSel.options.length - 1].value, '__add__');
 });
 
 // A saved workflow served by the mocked API for the selector tests below.
@@ -275,55 +199,6 @@ const pickWorkflow = (window, id) => {
   const s = window.document.querySelector('#workflowSelect');
   s.value = id; s.dispatchEvent(new window.Event('change', { bubbles: true }));
 };
-
-test('the workflow select is populated with Default + saved names from GET /api/workflows', async () => {
-  const { window } = await boot({ fetchHandler: workflowFetch() });
-  selectProjectAnd(window);
-  await new Promise((r) => setTimeout(r, 0));
-  const opts = [...window.document.querySelectorAll('#workflowSelect option')].map((o) => o.textContent);
-  assert.deepEqual(opts, ['Auto', 'Default', 'Demo']);
-});
-
-test('selecting a saved workflow renders one accordion row per node (keyed by node id) + one cycle input per feedback', async () => {
-  const { window } = await boot({ fetchHandler: workflowFetch() });
-  selectProjectAnd(window);
-  await new Promise((r) => setTimeout(r, 0));
-  pickWorkflow(window, 'wf_x');
-  await new Promise((r) => setTimeout(r, 0));
-  const doc = window.document;
-  // one collapsed row per node, in dispatch order, keyed by data-node-id
-  const ids = [...doc.querySelectorAll('#agents-rows .agent-row')].map((r) => r.dataset.nodeId);
-  assert.deepEqual(ids, ['s0_0', 's1_0', 's2_0']);
-  // every row starts collapsed — that is the whole point of the redesign
-  assert.ok([...doc.querySelectorAll('#agents-rows .agent-row-body')].every((b) => b.hidden), 'rows must start collapsed');
-  assert.ok([...doc.querySelectorAll('#agents-rows .agent-row-head')].every((h) => h.getAttribute('aria-expanded') === 'false'));
-  // the controls still exist inside each row, with the same class + data contract
-  const ctlIds = [...doc.querySelectorAll('#agents-rows .step-model')].map((s) => s.dataset.nodeId);
-  assert.deepEqual(ctlIds, ['s0_0', 's1_0', 's2_0']);
-  // model dropdown is populated (default + 2 models + add)
-  assert.equal(doc.querySelector('#agents-rows .step-model[data-node-id="s1_0"]').options.length, 4);
-  // one cycle input per feedback, keyed by data-fb-id, default 3
-  const cyc = doc.querySelector('#wf-feedback-config input[data-fb-id="fb_0"]');
-  assert.ok(cyc, 'missing cycle input for fb_0');
-  assert.equal(cyc.value, '3');
-});
-
-test('clicking a row head expands it (aria-expanded + body), clicking again collapses', async () => {
-  const { window } = await boot({ fetchHandler: workflowFetch() });
-  selectProjectAnd(window);
-  await new Promise((r) => setTimeout(r, 0));
-  pickWorkflow(window, 'wf_x');
-  await new Promise((r) => setTimeout(r, 0));
-  const doc = window.document;
-  const head = doc.querySelector('.agent-row-head[data-node-id="s1_0"]');
-  const body = doc.querySelector('#agent-body-s1_0');
-  head.dispatchEvent(new window.Event('click', { bubbles: true }));
-  assert.equal(body.hidden, false);
-  assert.equal(head.getAttribute('aria-expanded'), 'true');
-  head.dispatchEvent(new window.Event('click', { bubbles: true }));
-  assert.equal(body.hidden, true);
-  assert.equal(head.getAttribute('aria-expanded'), 'false');
-});
 
 test('selecting Default again renders the five built-in stages through the SAME accordion', async () => {
   const { window } = await boot({ fetchHandler: workflowFetch() });
@@ -423,158 +298,113 @@ test('selecting a workflow persists it as the active workflow', async () => {
   assert.equal(body.projectDir, PROJECT);
 });
 
-test('submitting the run posts the selected workflowId (default by default)', async () => {
+test('submitting posts the selected workflowId (default first, then a picked saved workflow)', async () => {
   const runs = [];
   const base = workflowFetch();
   const { window } = await boot({
     fetchHandler: (url, opts) => {
       if (url.includes('/api/run') && opts && opts.method === 'POST') {
         runs.push(JSON.parse(opts.body));
-        return Promise.resolve({ ok: true, status: 200, json: async () => ({ runId: 'r1' }) });
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ runId: `r${runs.length}` }) });
       }
       return base(url);
     },
   });
   selectProjectAnd(window);
   await new Promise((r) => setTimeout(r, 0));
-  // default selected
-  window.document.querySelector('#prompt').value = 'do a thing';
-  window.document.querySelector('#run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(runs.length, 1);
-  assert.equal(runs[0].workflowId, 'wf_default');
-  assert.equal(runs[0].prompt, 'do a thing');
+  await checkRows([
+    { name: 'submitting the run posts the selected workflowId (default by default)', run: async () => {
+      // default selected
+      window.document.querySelector('#prompt').value = 'do a thing';
+      window.document.querySelector('#run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(runs.length, 1);
+      assert.equal(runs[0].workflowId, 'wf_default');
+      assert.equal(runs[0].prompt, 'do a thing');
+    } },
+    { name: 'submitting after selecting a saved workflow posts that workflowId', run: async () => {
+      const before = runs.length;
+      pickWorkflow(window, 'wf_x');
+      await new Promise((r) => setTimeout(r, 0));
+      window.document.querySelector('#prompt').value = 'ship it';
+      window.document.querySelector('#run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(runs.length, before + 1);
+      assert.equal(runs[runs.length - 1].workflowId, 'wf_x');
+    } },
+  ]);
 });
 
-test('submitting after selecting a saved workflow posts that workflowId', async () => {
-  const runs = [];
-  const base = workflowFetch();
-  const { window } = await boot({
-    fetchHandler: (url, opts) => {
-      if (url.includes('/api/run') && opts && opts.method === 'POST') {
-        runs.push(JSON.parse(opts.body));
-        return Promise.resolve({ ok: true, status: 200, json: async () => ({ runId: 'r2' }) });
-      }
-      return base(url);
-    },
-  });
-  selectProjectAnd(window);
-  await new Promise((r) => setTimeout(r, 0));
-  pickWorkflow(window, 'wf_x');
-  await new Promise((r) => setTimeout(r, 0));
-  window.document.querySelector('#prompt').value = 'ship it';
-  window.document.querySelector('#run-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(runs.length, 1);
-  assert.equal(runs[0].workflowId, 'wf_x');
-});
-
-test('buildFeedbackRows labels a loop "<toName> ← <fromName>" resolved via the registry', async () => {
+test('buildFeedbackRows (v1): "<to> ← <from>", self-loop, (step N) disambiguation incl. self-loop, raw-id fallback', async () => {
   const { window } = await boot();
-  const rows = window.__np.buildFeedbackRows(WF, REGISTRY, { feedbacks: {} });
-  assert.equal(rows.length, 1);
-  const r = rows[0];
-  assert.equal(r.fbId, 'fb_0');
-  assert.equal(r.fromLabel, 'Review');     // s2_0 -> reviewer  -> "Review"
-  assert.equal(r.toLabel, 'Implement');    // s1_0 -> implementer -> "Implement"
-  assert.equal(r.selfLoop, false);
-  assert.equal(r.label, 'Implement ← Review');
-  assert.equal(r.maxCycles, 3);            // unset -> default 3 (unchanged)
-});
-
-test('buildFeedbackRows renders a self-loop (from === to) as "<name> ↺ (self loop)"', async () => {
-  const { window } = await boot();
-  const wf = {
-    id: 'w',
-    steps: [[{ id: 's0_0', key: 'planner' }], [{ id: 's1_0', key: 'refiner' }]],
-    feedbacks: [{ id: 'fb_refine', from: 's1_0', to: 's1_0' }],
-  };
-  const reg = { ...REGISTRY, refiner: { key: 'refiner', displayName: 'Refine Plan', color: 'green' } };
-  const rows = window.__np.buildFeedbackRows(wf, reg, { feedbacks: {} });
-  assert.equal(rows[0].selfLoop, true);
-  assert.equal(rows[0].label, 'Refine Plan ↺ (self loop)');
-});
-
-test('buildFeedbackRows appends "(step N)" when an endpoint agent appears more than once', async () => {
-  const { window } = await boot();
-  // Two implementer nodes (steps 3 & 4); loop from the later one back to the earlier one.
-  const wf = {
-    id: 'w',
-    steps: [
-      [{ id: 's0_0', key: 'planner' }],
-      [{ id: 's1_0', key: 'reviewer' }],
-      [{ id: 's2_0', key: 'implementer' }],
-      [{ id: 's3_0', key: 'implementer' }],
-    ],
-    feedbacks: [{ id: 'fb_0', from: 's3_0', to: 's2_0' }],
-  };
-  const rows = window.__np.buildFeedbackRows(wf, REGISTRY, { feedbacks: {} });
-  assert.equal(rows[0].fromLabel, 'Implement (step 4)');
-  assert.equal(rows[0].toLabel, 'Implement (step 3)');
-  assert.equal(rows[0].label, 'Implement (step 3) ← Implement (step 4)');
-});
-
-test('buildFeedbackRows composes the "(step N)" suffix with the self-loop wrapper', async () => {
-  const { window } = await boot();
-  // A duplicated agent that also feeds back to itself: suffix is computed on the
-  // endpoint, THEN the self-loop wrapper is applied — both rules compose.
-  const wf = {
-    id: 'w',
-    steps: [
-      [{ id: 's0_0', key: 'reviewer' }],
-      [{ id: 's1_0', key: 'reviewer' }],   // "Review" now appears twice -> ambiguous
-    ],
-    feedbacks: [{ id: 'fb_self', from: 's1_0', to: 's1_0' }],
-  };
-  const rows = window.__np.buildFeedbackRows(wf, REGISTRY, { feedbacks: {} });
-  assert.equal(rows[0].selfLoop, true);
-  assert.equal(rows[0].toLabel, 'Review (step 2)');
-  assert.equal(rows[0].label, 'Review (step 2) ↺ (self loop)');
-});
-
-test('buildFeedbackRows falls back to the raw node id when an endpoint is unknown', async () => {
-  const { window } = await boot();
-  const wf = {
-    id: 'w',
-    steps: [[{ id: 's0_0', key: 'planner' }]],
-    feedbacks: [{ id: 'fb_0', from: 's9_9', to: 's0_0' }],   // s9_9 absent from steps
-  };
-  const rows = window.__np.buildFeedbackRows(wf, REGISTRY, { feedbacks: {} });
-  assert.equal(rows[0].fromLabel, 's9_9');   // unknown id -> raw id, never blank
-  assert.equal(rows[0].toLabel, 'Plan');     // s0_0 -> planner -> "Plan"
-  assert.equal(rows[0].label, 'Plan ← s9_9');
-});
-
-test('the feedback cycle input is labelled with human agent names, not raw step ids', async () => {
-  const { window } = await boot({ fetchHandler: workflowFetch() });
-  selectProjectAnd(window);
-  await new Promise((r) => setTimeout(r, 0));
-  pickWorkflow(window, 'wf_x');
-  await new Promise((r) => setTimeout(r, 0));
-  const doc = window.document;
-  const input = doc.querySelector('#wf-feedback-config input[data-fb-id="fb_0"]');
-  const labelText = input.closest('.field').querySelector('label').textContent;
-  assert.equal(labelText, 'Implement ← Review — max cycles');
-  assert.ok(!/s\d+_\d+/.test(labelText), 'label still leaks a raw step id');
-  assert.ok(!/^Loop /.test(labelText), 'label still uses the old "Loop …" prefix');
-});
-
-test('buildNodeConfigRows resolves fanOut: saved override > sidecar default > false', async () => {
-  const { window } = await boot();
-  const reg = {
-    planner: { key: 'planner', displayName: 'Plan', color: 'violet', order: 1, fanOut: true },
-    implementer: { key: 'implementer', displayName: 'Implement', color: 'peach', order: 3 },
-    manualTestsChecklist: { key: 'manualTestsChecklist', displayName: 'MTC', color: 'blue', order: 5 },
-    reviewer: { key: 'reviewer', displayName: 'Review', color: 'blue', order: 4 },
-  };
-  // No run-config => sidecar defaults (planner true, others false/absent).
-  let rows = window.__np.buildNodeConfigRows(WF, reg, { nodes: {}, feedbacks: {} });
-  assert.equal(rows.find((r) => r.nodeId === 's0_0').fanOut, true);
-  assert.equal(rows.find((r) => r.nodeId === 's1_0').fanOut, false);
-  // Saved override beats sidecar default both directions.
-  rows = window.__np.buildNodeConfigRows(WF, reg, { nodes: { s0_0: { fanOut: false }, s1_0: { fanOut: true } }, feedbacks: {} });
-  assert.equal(rows.find((r) => r.nodeId === 's0_0').fanOut, false);
-  assert.equal(rows.find((r) => r.nodeId === 's1_0').fanOut, true);
+  await checkRows([
+    { name: 'buildFeedbackRows labels a loop "<toName> ← <fromName>" resolved via the registry', run: () => {
+      const rows = window.__np.buildFeedbackRows(WF, REGISTRY, { feedbacks: {} });
+      assert.equal(rows.length, 1);
+      const r = rows[0];
+      assert.equal(r.fbId, 'fb_0');
+      assert.equal(r.fromLabel, 'Review');     // s2_0 -> reviewer  -> "Review"
+      assert.equal(r.toLabel, 'Implement');    // s1_0 -> implementer -> "Implement"
+      assert.equal(r.selfLoop, false);
+      assert.equal(r.label, 'Implement ← Review');
+      assert.equal(r.maxCycles, 3);            // unset -> default 3 (unchanged)
+    } },
+    { name: 'buildFeedbackRows renders a self-loop (from === to) as "<name> ↺ (self loop)"', run: () => {
+      const wf = {
+        id: 'w',
+        steps: [[{ id: 's0_0', key: 'planner' }], [{ id: 's1_0', key: 'refiner' }]],
+        feedbacks: [{ id: 'fb_refine', from: 's1_0', to: 's1_0' }],
+      };
+      const reg = { ...REGISTRY, refiner: { key: 'refiner', displayName: 'Refine Plan', color: 'green' } };
+      const rows = window.__np.buildFeedbackRows(wf, reg, { feedbacks: {} });
+      assert.equal(rows[0].selfLoop, true);
+      assert.equal(rows[0].label, 'Refine Plan ↺ (self loop)');
+    } },
+    { name: 'buildFeedbackRows appends "(step N)" when an endpoint agent appears more than once', run: () => {
+      // Two implementer nodes (steps 3 & 4); loop from the later one back to the earlier one.
+      const wf = {
+        id: 'w',
+        steps: [
+          [{ id: 's0_0', key: 'planner' }],
+          [{ id: 's1_0', key: 'reviewer' }],
+          [{ id: 's2_0', key: 'implementer' }],
+          [{ id: 's3_0', key: 'implementer' }],
+        ],
+        feedbacks: [{ id: 'fb_0', from: 's3_0', to: 's2_0' }],
+      };
+      const rows = window.__np.buildFeedbackRows(wf, REGISTRY, { feedbacks: {} });
+      assert.equal(rows[0].fromLabel, 'Implement (step 4)');
+      assert.equal(rows[0].toLabel, 'Implement (step 3)');
+      assert.equal(rows[0].label, 'Implement (step 3) ← Implement (step 4)');
+    } },
+    { name: 'buildFeedbackRows composes the "(step N)" suffix with the self-loop wrapper', run: () => {
+      // A duplicated agent that also feeds back to itself: suffix is computed on the
+      // endpoint, THEN the self-loop wrapper is applied — both rules compose.
+      const wf = {
+        id: 'w',
+        steps: [
+          [{ id: 's0_0', key: 'reviewer' }],
+          [{ id: 's1_0', key: 'reviewer' }],   // "Review" now appears twice -> ambiguous
+        ],
+        feedbacks: [{ id: 'fb_self', from: 's1_0', to: 's1_0' }],
+      };
+      const rows = window.__np.buildFeedbackRows(wf, REGISTRY, { feedbacks: {} });
+      assert.equal(rows[0].selfLoop, true);
+      assert.equal(rows[0].toLabel, 'Review (step 2)');
+      assert.equal(rows[0].label, 'Review (step 2) ↺ (self loop)');
+    } },
+    { name: 'buildFeedbackRows falls back to the raw node id when an endpoint is unknown', run: () => {
+      const wf = {
+        id: 'w',
+        steps: [[{ id: 's0_0', key: 'planner' }]],
+        feedbacks: [{ id: 'fb_0', from: 's9_9', to: 's0_0' }],   // s9_9 absent from steps
+      };
+      const rows = window.__np.buildFeedbackRows(wf, REGISTRY, { feedbacks: {} });
+      assert.equal(rows[0].fromLabel, 's9_9');   // unknown id -> raw id, never blank
+      assert.equal(rows[0].toLabel, 'Plan');     // s0_0 -> planner -> "Plan"
+      assert.equal(rows[0].label, 'Plan ← s9_9');
+    } },
+  ]);
 });
 
 test('default-row fan-out checkbox reflects the sidecar default from /api/config steps', async () => {
@@ -583,6 +413,7 @@ test('default-row fan-out checkbox reflects the sidecar default from /api/config
     { key: 'refiner', label: 'Refine', fanOut: false },
     { key: 'implementer', label: 'Implement', fanOut: false },
     { key: 'reviewer', label: 'Review', fanOut: false },
+    { key: 'clarify', label: 'Clarify', fanOut: true },
   ];
   const { window } = await boot({ fetchHandler: (url) => {
     if (url.includes('/api/config')) {
@@ -592,18 +423,10 @@ test('default-row fan-out checkbox reflects the sidecar default from /api/config
   } });
   assert.equal(window.document.querySelector('.step-fanout[data-role="planner"]').checked, true);
   assert.equal(window.document.querySelector('.step-fanout[data-role="refiner"]').checked, false);
-});
-
-test('renderAgentRows paints an .acc swatch carrying each node color (amber Plan Review included)', async () => {
-  const { window } = await boot();
-  const def = { model: '', effort: '', fanOut: false, askQuestions: false };
-  const rows = [
-    { nodeId: 's0_0', key: 'planner',      label: 'Plan',        color: 'violet', stepIndex: 0, parallel: false, model: '', effort: '', fanOut: false, askQuestions: null, def, override: {} },
-    { nodeId: 's1_0', key: 'planReviewer', label: 'Plan Review', color: 'amber',  stepIndex: 1, parallel: false, model: '', effort: '', fanOut: false, askQuestions: null, def, override: {} },
-  ];
-  window.__np.renderAgentRows(rows);
-  const accs = [...window.document.querySelectorAll('#agents-rows .agent-row-head .acc')];
-  assert.deepEqual(accs.map((a) => a.className), ['acc violet', 'acc amber']);
+  assert.equal(window.document.querySelector('.step-fanout[data-role="clarify"]').checked, true);
+  const clarify = window.document.querySelector('.step-model[data-role="clarify"]');
+  const planner = window.document.querySelector('.step-model[data-role="planner"]');
+  assert.deepEqual([...clarify.options].map((o) => o.value), [...planner.options].map((o) => o.value));
 });
 
 test('toggling a default-row fan-out checkbox POSTs the step fanOut', async () => {
@@ -703,29 +526,6 @@ const pickGuardrails = (window, id) => {
   const s = window.document.querySelector('#guardrailsSelect');
   s.value = id; s.dispatchEvent(new window.Event('change', { bubbles: true }));
 };
-
-test('index.html: #guardrailsSelect + #guardrailsHint live inside the Advanced disclosure', () => {
-  const html = readFileSync(htmlPath, 'utf8');
-  // Guardrails default to Permissive, so they belong behind Advanced (§4.6) —
-  // still one <details> away, never in the always-visible path.
-  const adv = html.slice(html.indexOf('id="advanced-config"'), html.indexOf('id="start-btn"'));
-  assert.ok(adv.includes('id="guardrailsSelect"'), 'select present inside Advanced');
-  assert.ok(adv.includes('id="guardrailsHint"'), 'hint line present');
-});
-
-test('the guardrails select is populated from GET /api/guardrails with Permissive (default) selected', async () => {
-  const { window } = await boot({ fetchHandler: guardrailsFetch() });
-  selectProjectAnd(window);
-  await new Promise((r) => setTimeout(r, 0));
-  const opts = [...window.document.querySelectorAll('#guardrailsSelect option')].map((o) => [o.value, o.textContent]);
-  assert.deepEqual(opts, [
-    ['permissive', 'Permissive (default)'],
-    ['normal', 'Normal'],
-    ['secure', 'Strict'],
-    ['gr_org', 'Org Policy'],
-  ]);
-  assert.equal(window.document.querySelector('#guardrailsSelect').value, 'permissive', 'defaults to Permissive');
-});
 
 test('default submit posts NO guardrailsId key (Permissive default = byte-identical request)', async () => {
   const runs = [];

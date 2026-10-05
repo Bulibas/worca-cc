@@ -4,9 +4,10 @@
 // P1's projectForm — this module never formats it. Pure: no WORCA_HOME, no fs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 
 import {
-  PROMPT_PROJECTION_MAX, CHAT_PROJECTION_MAX, askValuesText, askProgress,
+  PROMPT_PROJECTION_MAX, askValuesText, askProgress,
 } from '../src/core/ask-projection.mjs';
 
 /** A PERSISTED form ask (P2 E13 / X3): the envelope minus `id`, with `values` merged.
@@ -32,63 +33,63 @@ function persistedAsk(over = {}) {
   };
 }
 
-test('the caps are the pinned numbers', () => {
-  assert.equal(PROMPT_PROJECTION_MAX, 2000);
-  assert.equal(CHAT_PROJECTION_MAX, 1400);
-});
-
-test('askValuesText: labels and promptFields ORDER, not the values key order', () => {
-  assert.equal(askValuesText(persistedAsk()),
-    'Verdict: changes\nWhat should change?: tighten the spacing');
-});
-
-test('askValuesText: an unanswered or absent ask is the empty string, never "undefined"', () => {
-  assert.equal(askValuesText(persistedAsk({ values: null })), '');
-  assert.equal(askValuesText(persistedAsk({ values: {} })), '');
-  assert.equal(askValuesText(null), '');
-  assert.equal(askValuesText(undefined), '');
-  assert.equal(askValuesText({}), '');
-});
-
-test('askValuesText: arrays, rank orders and review-list rows all render as text', () => {
-  const ask = persistedAsk({
-    layout: [
-      { widget: 'multiselect', field: 'tags', label: 'Tags' },
-      { widget: 'rank', field: 'order', label: 'Order', bind: 'data.images' },
-      { widget: 'review-list', field: 'reviews', label: 'Per image', bind: 'data.images' },
-      { widget: 'toggle', field: 'ship', label: 'Ship it' },
-      { widget: 'number', field: 'count', label: 'Count' },
-    ],
-    answerSchema: { type: 'object', properties: {
-      tags: { type: 'array', items: { type: 'string', enum: ['spacing', 'colour'] } },
-      order: { type: 'array', items: { type: 'string' } },
-      reviews: { type: 'array', items: { type: 'object', properties: {
-        id: { type: 'string' }, verdict: { type: 'string', enum: ['approve', 'changes'] },
-        note: { type: 'string' } } } },
-      ship: { type: 'boolean' },
-      count: { type: 'integer' },
+test('askValuesText: order and labels, arrays/rank/review-list as text, unanswered "", unknown keys by name', async () => {
+  await checkRows([
+    { name: 'askValuesText: promptFields order and labels, unanswered → "", unknown keys printed by field name', run: async () => {
+      await checkRows([
+        { name: 'askValuesText: labels and promptFields ORDER, not the values key order', run: () => {
+          assert.equal(askValuesText(persistedAsk()),
+            'Verdict: changes\nWhat should change?: tighten the spacing');
+        } },
+        { name: 'askValuesText: an unanswered or absent ask is the empty string, never "undefined"', run: () => {
+          assert.equal(askValuesText(persistedAsk({ values: null })), '');
+          assert.equal(askValuesText(persistedAsk({ values: {} })), '');
+          assert.equal(askValuesText(null), '');
+          assert.equal(askValuesText(undefined), '');
+          assert.equal(askValuesText({}), '');
+        } },
+        { name: 'askValuesText: a value with no matching input field still prints, by field name', run: () => {
+          const ask = persistedAsk({ values: { verdict: 'approve', legacyLeftover: 'x' } });
+          const out = askValuesText(ask);
+          assert.match(out, /^Verdict: approve$/m);
+          assert.match(out, /^legacyLeftover: x$/m, 'a key promptFields does not know is named, not dropped');
+        } },
+      ]);
     } },
-    values: {
-      tags: ['spacing', 'colour'], order: ['b', 'a'],
-      reviews: [{ id: 'a', verdict: 'approve' }, { id: 'b', verdict: 'changes', note: 'too dark' }],
-      ship: true, count: 3,
-    },
-  });
-  const out = askValuesText(ask);
-  assert.match(out, /^Tags: spacing, colour$/m);
-  assert.match(out, /^Order: b, a$/m);
-  assert.match(out, /^Per image: a: approve; b: changes \(too dark\)$/m);
-  assert.match(out, /^Ship it: true$/m);
-  assert.match(out, /^Count: 3$/m);
-  assert.equal(out.includes('[object Object]'), false, out);
-  assert.equal(out.includes('undefined'), false, out);
-});
-
-test('askValuesText: a value with no matching input field still prints, by field name', () => {
-  const ask = persistedAsk({ values: { verdict: 'approve', legacyLeftover: 'x' } });
-  const out = askValuesText(ask);
-  assert.match(out, /^Verdict: approve$/m);
-  assert.match(out, /^legacyLeftover: x$/m, 'a key promptFields does not know is named, not dropped');
+    { name: 'askValuesText: arrays, rank orders and review-list rows all render as text', run: async () => {
+      const ask = persistedAsk({
+        layout: [
+          { widget: 'multiselect', field: 'tags', label: 'Tags' },
+          { widget: 'rank', field: 'order', label: 'Order', bind: 'data.images' },
+          { widget: 'review-list', field: 'reviews', label: 'Per image', bind: 'data.images' },
+          { widget: 'toggle', field: 'ship', label: 'Ship it' },
+          { widget: 'number', field: 'count', label: 'Count' },
+        ],
+        answerSchema: { type: 'object', properties: {
+          tags: { type: 'array', items: { type: 'string', enum: ['spacing', 'colour'] } },
+          order: { type: 'array', items: { type: 'string' } },
+          reviews: { type: 'array', items: { type: 'object', properties: {
+            id: { type: 'string' }, verdict: { type: 'string', enum: ['approve', 'changes'] },
+            note: { type: 'string' } } } },
+          ship: { type: 'boolean' },
+          count: { type: 'integer' },
+        } },
+        values: {
+          tags: ['spacing', 'colour'], order: ['b', 'a'],
+          reviews: [{ id: 'a', verdict: 'approve' }, { id: 'b', verdict: 'changes', note: 'too dark' }],
+          ship: true, count: 3,
+        },
+      });
+      const out = askValuesText(ask);
+      assert.match(out, /^Tags: spacing, colour$/m);
+      assert.match(out, /^Order: b, a$/m);
+      assert.match(out, /^Per image: a: approve; b: changes \(too dark\)$/m);
+      assert.match(out, /^Ship it: true$/m);
+      assert.match(out, /^Count: 3$/m);
+      assert.equal(out.includes('[object Object]'), false, out);
+      assert.equal(out.includes('undefined'), false, out);
+    } },
+  ]);
 });
 
 test('askProgress: a persisted form round is { projection, values }; a legacy round is null', () => {

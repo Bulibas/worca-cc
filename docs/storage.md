@@ -24,6 +24,11 @@ project's working tree, so nothing is ever committed to your repo.
                          rows (diff_comments), never files; ask_card_comments carries
                          a proposal's comment ids from propose_run through to launch.
                          Archiving a run deletes its comments with its artifacts.
+                         The pipelines row itself is only soft-deleted (`archived_at`):
+                         the run stays viewable under Runs › Archived and can be
+                         restored there, minus the reclaimed artifacts. A restored run
+                         never resumes (its resume point is dropped; a paused one comes
+                         back interrupted).
   store/workspaces/<workspaceId>/       a workspace's runs, laid out like a project's store, plus
                                         workspace-graph.json — the last scan's merged cross-project
                                         graph (see workspace-map.md); the map itself and its reviews
@@ -61,6 +66,17 @@ project's working tree, so nothing is ever committed to your repo.
   policy/
     repos/<owner~repo>/                  git worktree of the project repo, detached at origin/worca-policy
     locks/<owner~repo>.lock              cross-process lock for enable / follow / publish
+  mcp/                                  the MCP registry: servers for worca only, never written to
+                                        ~/.claude.json or .mcp.json; every file mode 0600, written
+                                        atomically under mcp/.lock; a file with schema > 1 stops the
+                                        registry ("MCP registry files need a newer Worca")
+    servers.json                         manual definitions, consented team-policy definitions, and
+                                         the persisted base name of every server id (never reassigned)
+    sets.json                            user sets (General is implicit until first edited), retired set
+                                         ids, Team set state per policy home, project assignments
+    secrets.json                         set secrets — the only place a registry secret value is stored;
+                                         runs and chats get them as spawn env, never in a file
+    tests.json                           the last Test per set and server (tools, stale fingerprint)
   plugins/                              installed plugin checkouts
   agents/                               installed agent registry checkouts
   workflows/                            saved workflow templates

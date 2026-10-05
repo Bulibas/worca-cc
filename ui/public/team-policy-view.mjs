@@ -90,7 +90,7 @@ export function renderProjectTpChip(s, { doc = globalThis.document, now = Date.n
   chip.dataset.key = s.key;
   const sum = projectTpSummary(s, { now });
   chip.dataset.kind = sum.kind;
-  if (sum.tone !== 'muted') chip.append(dot(doc, sum.tone));
+  chip.append(dot(doc, sum.tone));   // muted = a hollow dot: the list lines its dots up in one column
   const state = h(doc, 'span', `pl-team-state${sum.tone === 'muted' ? ' muted' : ''}`);
   state.append(withRef(doc, sum.short, sum.ref));
   chip.append(h(doc, 'span', 'pl-team-name', 'Policy'), ' ', state);
@@ -418,7 +418,6 @@ export function renderPolicyPluginsPanel(payload, { doc = globalThis.document } 
   head.append(actions);
   card.append(head);
   card.append(h(doc, 'small', 'hint tp-plugins-hint', 'Installing shows the plugin\'s source, commit and what it ships, and waits for your click. Nothing installs on its own unless you trust the policy home on the Plugins page.'));
-  card.append(h(doc, 'p', 'form-msg tp-plugins-msg'));
   if (!reqs.length) card.append(h(doc, 'div', 'hist-empty', 'This policy expects no plugins.'));
   else {
     const table = h(doc, 'table', 'tm-tbl tp-tbl tp-plugins-tbl');
@@ -745,13 +744,53 @@ function valueControl(doc, meta, entry, row) {
       add.append(role, model, sw, b); wrap.append(add);
       break;
     }
+    case 'criteria': {
+      // Night mode criteria weights (0-10); a blank input keeps that criterion's default.
+      for (const c of ['matchesMemory', 'reversible', 'smallestScope', 'codebaseConventions', 'cost']) {
+        const lab = h(doc, 'label', 'tp-crit', `${c} `);
+        const inp = h(doc, 'input', 'input input-mini tp-crit-val'); inp.type = 'number'; inp.min = '0'; inp.max = '10'; inp.step = '0.5';
+        inp.dataset.crit = c; inp.setAttribute('aria-label', `${meta.label}: ${c}`);
+        if (v && Number.isFinite(v[c])) inp.value = String(v[c]);
+        lab.append(inp); wrap.append(lab);
+      }
+      break;
+    }
+    case 'mcpServers': {
+      // One chip per entry; + Add opens a JSON box for one entry, checked on blur (the full rules run
+      // at publish, POST /api/policy/validate).
+      writeItems(row, Array.isArray(v) ? v : []);
+      wrap.append(h(doc, 'div', 'tp-list'));
+      const add = h(doc, 'button', 'btn btn-ghost btn-mini tp-mcp-add', '+ Add'); add.type = 'button';
+      const box = h(doc, 'textarea', 'textarea mono tp-mcp-json'); box.rows = 4; box.hidden = true;
+      box.placeholder = '{ "plugin": "acme-tools", "server": "sentry" } or { "name": "github", "type": "stdio", "command": "npx", … }';
+      box.setAttribute('aria-label', 'One MCP server entry as JSON');
+      const err = h(doc, 'small', 'hint err tp-mcp-err'); err.hidden = true;
+      wrap.append(add, box, err);
+      break;
+    }
     default: wrap.append(h(doc, 'span', 'muted', '—'));
   }
   return wrap;
 }
 
+const clipTo = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+/** "github · inline stdio · npx -y …" / "sentry · acme-tools" (MCP registry spec §11.1). */
+const mcpChip = (e) => (e.plugin ? `${e.server} · ${e.plugin}`
+  : clipTo(`${e.name} · inline ${e.type} · ${e.type === 'stdio' ? [e.command, ...(Array.isArray(e.args) ? e.args : []).filter((a) => typeof a === 'string')].join(' ') : typeof e.url === 'string' ? e.url : 'url with fields'}`, 60));
 const chipLabel = (meta) => (it) => (meta.type === 'plugins' ? `${it.name}${it.minVersion ? ` ≥ ${it.minVersion}` : ''}${it.marketplace ? ` (${it.marketplace})` : ''}`
-  : meta.type === 'steps' ? `${it.role} ${it.model || '·'}${it.effort ? ` / ${it.effort}` : ''}` : String(it));
+  : meta.type === 'steps' ? `${it.role} ${it.model || '·'}${it.effort ? ` / ${it.effort}` : ''}` : meta.type === 'mcpServers' ? mcpChip(it) : String(it));
+const LIST_TYPES = ['string[]', 'plugins', 'steps', 'mcpServers'];
+const MCP_SHAPE_ERR = 'an entry is { "plugin", "server", "values"? } or an inline definition with "name" and "type"';
+/** The JSON box's check: parses, and has the shape of a plugin reference or an inline definition (what a chip shows). */
+function mcpEntryFromJson(text) {
+  let v; try { v = JSON.parse(text); } catch { return { error: 'not valid JSON' }; }
+  const str = (x) => typeof x === 'string' && x.trim() !== '';
+  const ok = !!v && typeof v === 'object' && !Array.isArray(v)
+    && (v.plugin !== undefined ? str(v.plugin) && str(v.server) : str(v.name) && str(v.type));
+  if (!ok) return { error: MCP_SHAPE_ERR };
+  if (v.args !== undefined && !Array.isArray(v.args)) return { error: '"args" must be a list' };
+  return { value: v };
+}
 
 function editorRow(doc, meta, entry, scope) {
   const row = h(doc, 'div', 'tp-edit-row');
@@ -794,7 +833,7 @@ function editorRow(doc, meta, entry, scope) {
     sw.append(sel); lab.append(sw); extra.append(lab, h(doc, 'span', 'tp-src', 'always warn'));
   } else extra.hidden = true;
   row.append(extra);
-  if (meta.type === 'string[]' || meta.type === 'plugins' || meta.type === 'steps') listChips(doc, row, readItems(row), chipLabel(meta));
+  if (LIST_TYPES.includes(meta.type)) listChips(doc, row, readItems(row), chipLabel(meta));
   return row;
 }
 
@@ -821,7 +860,7 @@ function wireEditor(doc, root, registry) {
       const row = unset.closest('.tp-edit-row');
       row.querySelectorAll('.tp-kind-btn').forEach((b) => b.classList.remove('on'));
       const meta = metaOf(row.dataset.key);
-      if (meta.type === 'string[]' || meta.type === 'plugins' || meta.type === 'steps') { writeItems(row, []); listChips(doc, row, [], chipLabel(meta)); }
+      if (LIST_TYPES.includes(meta.type)) { writeItems(row, []); listChips(doc, row, [], chipLabel(meta)); }
       else if (meta.type === 'bool') { const cb = row.querySelector('.tp-val'); cb.checked = false; cb.dispatchEvent(new (doc.defaultView.Event)('change')); }
       else { const v = row.querySelector('.tp-val'); if (v) v.value = ''; const n = row.querySelector('.tp-null'); if (n) n.checked = false; }
       root.dispatchEvent(new (doc.defaultView.Event)('tp-change', { bubbles: true }));
@@ -838,6 +877,8 @@ function wireEditor(doc, root, registry) {
       root.dispatchEvent(new (doc.defaultView.Event)('tp-change', { bubbles: true }));
       return;
     }
+    const mcpAdd = e.target.closest && e.target.closest('.tp-mcp-add');
+    if (mcpAdd) { const box = mcpAdd.closest('.tp-edit-row').querySelector('.tp-mcp-json'); box.hidden = false; box.focus(); return; }
     const envAdd = e.target.closest && e.target.closest('.tp-env-add');
     if (envAdd) { const r = envRow(doc); envAdd.closest('.tp-cat-env').querySelector('.tp-env-rows').append(r); r.querySelector('.tp-env-key').focus(); return; }
     const envRm = e.target.closest && e.target.closest('.tp-env-rm');
@@ -897,6 +938,22 @@ function wireEditor(doc, root, registry) {
       ensureKind(row);
       root.dispatchEvent(new (doc.defaultView.Event)('tp-change', { bubbles: true }));
     }
+  });
+  // The mcp.required JSON box: checked when it loses focus; a good entry becomes a chip.
+  root.addEventListener('focusout', (e) => {
+    const box = e.target.closest && e.target.closest('.tp-mcp-json');
+    if (!box) return;
+    const row = box.closest('.tp-edit-row'); const err = row.querySelector('.tp-mcp-err');
+    const text = box.value.trim();
+    const got = text ? mcpEntryFromJson(text) : null;
+    err.hidden = !got?.error; err.textContent = got?.error || '';
+    // An error, or an emptied box, is a change too: Publish reads whether an entry is still pending in a box.
+    if (!got || got.error) { if (!text) box.hidden = true; root.dispatchEvent(new (doc.defaultView.Event)('tp-change', { bubbles: true })); return; }
+    const items = readItems(row); items.push(got.value);
+    writeItems(row, items); listChips(doc, row, items, chipLabel(metaOf(row.dataset.key)));
+    box.value = ''; box.hidden = true;
+    ensureKind(row);
+    root.dispatchEvent(new (doc.defaultView.Event)('tp-change', { bubbles: true }));
   });
   root.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
@@ -994,7 +1051,7 @@ export function renderPolicyEditor(policyDoc, { registry = [], doc = globalThis.
   const ws = h(doc, 'section', 'card tp-ws-card');
   const wsHead = h(doc, 'div', 'card-head'); wsHead.append(h(doc, 'h2', null, 'For workspace runs'), h(doc, 'small', 'hint', 'Values here replace the ones on the other tabs for pipelines that target a workspace following this home. A field left unset keeps the project-run value.'));
   ws.append(wsHead);
-  for (const m of registry.filter((x) => !x.advisory && x.key !== 'plugins.marketplaces' && x.key !== 'plugins.required' && x.key !== 'plugins.blocked' && x.key !== 'worca.minVersion' && x.key !== 'metrics.record')) {
+  for (const m of registry.filter((x) => !x.advisory && x.workspaceRuns !== false && x.key !== 'plugins.marketplaces' && x.key !== 'plugins.required' && x.key !== 'plugins.blocked' && x.key !== 'worca.minVersion' && x.key !== 'metrics.record')) {
     ws.append(editorRow(doc, m, src.workspaceRuns?.[m.key] || null, 'workspaceRuns'));
   }
   wsSec.append(ws);
@@ -1053,7 +1110,11 @@ export function renderPolicyEditor(policyDoc, { registry = [], doc = globalThis.
   const refresh = () => {
     const dirty = editorDirty(root, src, { registry });
     count.textContent = dirty ? `${changedKeys(root, src, { registry })} change${changedKeys(root, src, { registry }) === 1 ? '' : 's'}` : 'no changes';
-    publish.disabled = !dirty;
+    // An mcp.required entry still in its JSON box (an error, or not checked yet) holds Publish back: a click would
+    // publish the policy without it and close the editor, and the typed entry would be gone (MCP registry spec §11.1).
+    const pending = [...root.querySelectorAll('.tp-mcp-json')].some((b) => b.value.trim() !== '');
+    publish.disabled = !dirty || pending;
+    publish.title = pending ? 'Fix or clear the MCP server entry first' : '';
     if (!pre.hidden) pre.textContent = JSON.stringify(docFromEditor(root, { registry }), null, 2);
     for (const t of tabs) { const n = t.count(); t.badge.textContent = String(n); t.badge.hidden = !n; }
   };
@@ -1070,8 +1131,9 @@ function rowValue(row, meta) {
     case 'enum': return row.querySelector('.tp-val').value;
     case 'string': case 'semver': { const s = row.querySelector('.tp-val').value.trim(); return s === '' ? undefined : s; }
     case 'string[]': return readItems(row);
-    case 'plugins': return readItems(row);
+    case 'plugins': case 'mcpServers': return readItems(row);
     case 'steps': { const out = {}; for (const it of readItems(row)) { const s = {}; if (it.model) s.model = it.model; if (it.effort) s.effort = it.effort; out[it.role] = s; } return out; }
+    case 'criteria': { const out = {}; for (const i of row.querySelectorAll('.tp-crit-val')) { const t = i.value.trim(); const n = Number(t); if (t !== '' && Number.isFinite(n)) out[i.dataset.crit] = n; } return Object.keys(out).length ? out : undefined; }
     default: return undefined;
   }
 }
@@ -1087,7 +1149,7 @@ export function docFromEditor(root, { registry = [] } = {}) {
     const meta = metaOf(row.dataset.key);
     const value = rowValue(row, meta);
     if (value === undefined) continue;
-    if ((meta.type === 'string[]' || meta.type === 'plugins') && !value.length) continue;
+    if ((meta.type === 'string[]' || meta.type === 'plugins' || meta.type === 'mcpServers') && !value.length) continue;
     if (meta.type === 'steps' && !Object.keys(value).length) continue;
     const entry = { kind, value };
     // An attribute at its default is written only when the document already carried it: a fresh
@@ -1356,7 +1418,97 @@ export function renderRequiredStrip(requirements = [], blockedPlugins = [], { do
   return root;
 }
 
-export function renderSetupChecklist({ home, requirements = [], seeds = [], trusted = false }, { doc = globalThis.document } = {}) {
+// ---- MCP requirements (MCP registry spec §11.3): checklist rows, the MCP strip, the consent dialog ----
+// `r` = one /api/policy/scopes → mcpRequirements[] row. A button carries data-home / data-server /
+// data-action, and data-consent="1" when the consent dialog opens first; app.js posts { expectHash: r.hash }.
+const MCP_ROW = {   // state → [tone, badge, action, consent dialog first]
+  'not-installed': ['amber', 'Not installed', 'install', true],
+  'needs-plugin': ['grey', null, null, false],        // the plugin's own required row is the action
+  'never-consented': ['amber', 'Off', 'turn-on', true],
+  changed: ['blue', 'Team definition changed', 'update', true],
+  off: ['grey', 'Off', 'turn-on', false],
+  skipped: ['red', null, 'set', false],        // a §5.7 problem: the badge is the resolver's reason
+  ok: ['green', 'On', null, false],
+};
+const MCP_ACTION_LABEL = { install: 'Install', 'turn-on': 'Turn on', update: 'Update' };
+function mcpRowParts(doc, r) {
+  const [tone, text, action, consent] = MCP_ROW[r.state];
+  const state = h(doc, 'span', `badge ${tone} tp-mcp-state`, r.state === 'needs-plugin' ? `Needs plugin ${r.plugin}` : r.state === 'skipped' ? r.problem : text);
+  const sub = r.state === 'skipped' ? `${r.field || r.name} in ${r.setName}` : r.plugin ? `from ${r.plugin}` : `team definition · ${r.type}`;
+  let button = null;
+  if (action) {
+    button = btn(doc, 'tp-mcp-act', action === 'set' ? (r.field ? `Set ${r.field}` : 'Open card') : MCP_ACTION_LABEL[action], action === 'install');
+    // `state`: the row as painted — app.js repaints instead of acting when the row has moved on since.
+    Object.assign(button.dataset, { home: r.home, server: r.serverId, action, state: r.state });
+    if (consent) button.dataset.consent = '1';
+  }
+  return { tone, state, sub, button };
+}
+
+/** The MCP tab's strip (the renderRequiredStrip family): MCP requirements only; null when none is open. */
+export function renderMcpStrip(rows = [], { doc = globalThis.document } = {}) {
+  const open = (rows || []).filter((r) => r.state !== 'ok');
+  if (!open.length) return null;
+  const root = h(doc, 'section', 'card pl-required-card tp-mcp-strip');
+  const head = h(doc, 'div', 'card-head');
+  const homes = [...new Set(open.map((r) => r.home))].join(', ');
+  head.append(h(doc, 'span', 'badge blue', 'team policy'), h(doc, 'b', null, `${homes}: ${open.length} MCP item${open.length === 1 ? '' : 's'} to set up`));
+  const actions = h(doc, 'div', 'pl-required-actions'); actions.append(btn(doc, 'pl-policy-setup', 'Set up…'));
+  head.append(actions);
+  root.append(head);
+  const list = h(doc, 'div', 'pl-required-list');
+  for (const r of open) {
+    const { tone, state, sub, button } = mcpRowParts(doc, r);
+    const row = h(doc, 'div', 'pl-required'); row.dataset.server = r.serverId;
+    const text = h(doc, 'span', 'pl-required-text'); text.append(h(doc, 'b', 'mono', r.name), h(doc, 'small', 'hint', sub));
+    const act = h(doc, 'span', 'pl-required-act'); if (button) act.append(button);
+    row.append(dot(doc, tone), text, state, act);
+    list.append(row);
+  }
+  root.append(list);
+  return root;
+}
+
+const mcpPart = (p) => (typeof p === 'string' ? p : `${p.prefix || ''}{${p.field}}${p.suffix || ''}`);
+/** One definition as consent facts: what runs, what it is given, what each teammate fills, the set it joins. */
+function mcpDefFacts(doc, r, def, values) {
+  const facts = h(doc, 'dl', 'tp-facts tp-mcp-facts');
+  const fact = (label, ...parts) => { const dd = h(doc, 'dd'); dd.append(...parts); facts.append(h(doc, 'dt', null, label), dd); };
+  const fields = new Map((def.fields || []).map((f) => [f.key, f]));
+  // A part as the team seeds it: a secret never shows a value; a field with no value and no default reads `{field}`.
+  const textOf = (p) => {
+    if (typeof p === 'string') return p;
+    const f = fields.get(p.field);
+    const v = f?.secret ? null : Object.hasOwn(values, p.field) ? values[p.field] : f?.default;
+    return v != null ? `${p.prefix || ''}${v}${p.suffix || ''}` : mcpPart(p);
+  };
+  const valueOf = (p) => (typeof p !== 'string' && fields.get(p.field)?.secret ? h(doc, 'span', 'badge amber', 'secret · you set it next') : code(doc, textOf(p)));
+  const pairs = (map) => Object.entries(map).flatMap(([k, v], i) => [...(i ? [' · '] : []), code(doc, k), ' ', valueOf(v)]);
+  fact('NAME', code(doc, r.name));
+  fact('FROM', `${r.home} · worca-policy @ ${String(r.sha || '').slice(0, 7)}`);
+  if (r.plugin) fact('PLUGIN', code(doc, r.plugin));
+  fact('TYPE', def.type);
+  // §4.1 consent screens: a plugin server's `./` paths read `<plugin-dir>/…`.
+  const shownPath = (s) => (r.plugin && typeof s === 'string' && s.startsWith('./') ? `<plugin-dir>/${s.slice(2)}` : s);
+  if (def.type === 'stdio') fact('RUNS', code(doc, [shownPath(def.command), ...(def.args || []).map((a) => shownPath(textOf(a)))].join(' ')));
+  else fact('URL', code(doc, [].concat(def.url).map(textOf).join('')));
+  if (def.env && Object.keys(def.env).length) fact('ENVIRONMENT', ...pairs(def.env));
+  if (def.headers && Object.keys(def.headers).length) fact('HEADERS', ...pairs(def.headers));
+  if (def.fields?.length) fact('EACH TEAMMATE FILLS', def.fields.map((f) => `${f.label} (${f.secret ? 'secret' : Object.hasOwn(values, f.key) ? `team value ${values[f.key]}` : f.default != null ? `default ${f.default}` : 'you set it'})`).join(' · '));
+  fact('JOINS', `${r.setName} set`);
+  return facts;
+}
+
+/** The consent dialog body for Install / Turn on / Update (board 12); Update shows before and after. */
+export function renderMcpConsent(r, action, { doc = globalThis.document } = {}) {
+  const root = h(doc, 'div', 'tp-mcp-consent');
+  if (r.base && r.base !== r.name) root.append(h(doc, 'p', 'hint tp-mcp-base', `Runs as ${r.base} on this machine: the name ${r.name} is taken.`));
+  if (action === 'update' && r.before) root.append(h(doc, 'h3', null, 'Now (the definition you consented to)'), mcpDefFacts(doc, r, r.before.def, r.before.values), h(doc, 'h3', null, 'The team definition'));
+  root.append(mcpDefFacts(doc, r, r.def, r.values));
+  return root;
+}
+
+export function renderSetupChecklist({ home, requirements = [], seeds = [], trusted = false, mcp = [] }, { doc = globalThis.document } = {}) {
   const root = h(doc, 'div', 'tp-setup');
   root.append(h(doc, 'div', 'hint', 'The policy expects the items below on this machine. Nothing here runs without your click, and nothing blocks a run while an item is open.'));
   const list = h(doc, 'div', 'tp-setup-list');
@@ -1385,11 +1537,17 @@ export function renderSetupChecklist({ home, requirements = [], seeds = [], trus
       row('grey', cfg, r.state === 'missing' ? `available once ${r.name} is installed` : 'opens the plugin\'s settings', c);
     }
   }
-  if (!seeds.length && !requirements.length) list.append(h(doc, 'div', 'hist-empty', 'Nothing to set up.'));
+  for (const r of mcp) {
+    const { tone, state, sub, button } = mcpRowParts(doc, r);
+    const main = h(doc, 'span'); main.append(h(doc, 'span', 'tp-mcp-kind', 'MCP '), h(doc, 'b', 'mono', r.name));
+    const action = doc.createDocumentFragment(); action.append(state); if (button) action.append(button);
+    row(tone, main, sub, action).classList.add('tp-mcp-row');
+  }
+  if (!seeds.length && !requirements.length && !mcp.length) list.append(h(doc, 'div', 'hist-empty', 'Nothing to set up.'));
   root.append(list);
   const trust = h(doc, 'label', 'switch-row tp-trust-row');
   const cb = h(doc, 'input', 'sw-input tp-trust'); cb.type = 'checkbox'; cb.checked = !!trusted; cb.dataset.home = home || '';
-  const txt = h(doc, 'span', 'txt'); txt.append(h(doc, 'b', null, 'Trust this policy home'), h(doc, 'small', 'hint', `Install and update required plugins from ${home || 'this home'} automatically on this machine, without this checklist. Plugins run with your user privileges. You can turn this off on the Plugins page at any time.`));
+  const txt = h(doc, 'span', 'txt'); txt.append(h(doc, 'b', null, 'Trust this policy home'), h(doc, 'small', 'hint', `Install and update required plugins from ${home || 'this home'} automatically on this machine, without this checklist. Plugins run with your user privileges. MCP servers are never installed or turned on automatically. You can turn this off on the Plugins page at any time.`));
   trust.append(cb, h(doc, 'span', 'switch switch-sm'), txt);
   root.append(trust);
   // One footer action: the modal's own Close is the way out (a "Later" here said the same twice).

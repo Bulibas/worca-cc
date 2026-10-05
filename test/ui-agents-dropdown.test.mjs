@@ -2,19 +2,25 @@
 // "Agents" and now lists EVERY main agent that ran (incl. graphify/skill-only and
 // zero-sub agents), each with its header pills and a muted "No sub-agents spawned"
 // placeholder when it spawned none. Boots app.js under JSDOM and drives the
-// test-only internals on window.__np. boot() copied from ui-subagent-views.test.mjs.
-import { test } from 'node:test';
+// test-only internals on window.__np. boot() copied from the former ui-subagent-views
+// suite (its tests now live in ui-subagent-state.test.mjs).
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
+
+// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
+const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 const PROJECT = '/tmp/proj';
 
 async function boot() {
-  const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' });
+  const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
   let lastWs = null;
@@ -47,36 +53,37 @@ const STEPPER = { version: 1, steps: [
   { kind: 'done', nodes: [{ id: 'done', label: 'Done' }] },
 ], feedbacks: [] };
 
-test('subsGroupsForRender lists every agent step (∪ sub groups), [] when no subs, skips preflight/done', async () => {
+test('subsGroupsForRender: agent steps in order (∪ sub groups), [] when no subs, bookends skipped, stray sub group appended', async () => {
   const { window } = await boot();
   const { subsGroupsForRender } = window.__np;
-  const subAgents = [
-    { id: 'a1', nodeId: 'plan', cycle: 0, label: 'research', status: 'finished' },
-  ];
-  const steps = [
-    { key: 'preflight', nodeId: 'preflight', cycle: 0, status: 'done' }, // excluded (not kind:'agents')
-    { key: 'clarify', nodeId: 'clarify', cycle: 0, status: 'done' },     // ran, NO subs
-    { key: 'plan', nodeId: 'plan', cycle: 0, status: 'done' },           // ran, HAS subs
-    { key: 'review#1', nodeId: 'review', cycle: 1, status: 'start' },    // ran, NO subs
-    { key: 'done', nodeId: 'done', cycle: 0, status: 'done' },           // excluded
-  ];
-  const groups = subsGroupsForRender(subAgents, steps, STEPPER);
-  assert.deepEqual(Object.keys(groups), ['clarify|0', 'plan|0', 'review|1'], 'agent steps only, in step order');
-  assert.equal(groups['clarify|0'].length, 0, 'no-sub agent -> empty array');
-  assert.deepEqual(groups['plan|0'].map((s) => s.id), ['a1'], 'sub-bearing agent keeps its rows');
-  assert.equal(groups['review|1'].length, 0);
-});
-
-test('subsGroupsForRender appends a sub-group with no matching step (defensive)', async () => {
-  const { window } = await boot();
-  const { subsGroupsForRender } = window.__np;
-  const groups = subsGroupsForRender(
-    [{ id: 'x', nodeId: 'ghost', cycle: 0, status: 'finished' }],
-    [{ key: 'plan', nodeId: 'plan', cycle: 0, status: 'done' }],
-    STEPPER,
-  );
-  assert.deepEqual(Object.keys(groups), ['plan|0', 'ghost|0'], 'step groups first, stray sub group appended');
-  assert.equal(groups['ghost|0'].length, 1);
+  await checkRows([
+    { name: 'subsGroupsForRender lists every agent step (∪ sub groups), [] when no subs, skips preflight/done', run: async () => {
+      const subAgents = [
+        { id: 'a1', nodeId: 'plan', cycle: 0, label: 'research', status: 'finished' },
+      ];
+      const steps = [
+        { key: 'preflight', nodeId: 'preflight', cycle: 0, status: 'done' }, // excluded (not kind:'agents')
+        { key: 'clarify', nodeId: 'clarify', cycle: 0, status: 'done' },     // ran, NO subs
+        { key: 'plan', nodeId: 'plan', cycle: 0, status: 'done' },           // ran, HAS subs
+        { key: 'review#1', nodeId: 'review', cycle: 1, status: 'start' },    // ran, NO subs
+        { key: 'done', nodeId: 'done', cycle: 0, status: 'done' },           // excluded
+      ];
+      const groups = subsGroupsForRender(subAgents, steps, STEPPER);
+      assert.deepEqual(Object.keys(groups), ['clarify|0', 'plan|0', 'review|1'], 'agent steps only, in step order');
+      assert.equal(groups['clarify|0'].length, 0, 'no-sub agent -> empty array');
+      assert.deepEqual(groups['plan|0'].map((s) => s.id), ['a1'], 'sub-bearing agent keeps its rows');
+      assert.equal(groups['review|1'].length, 0);
+    } },
+    { name: 'subsGroupsForRender appends a sub-group with no matching step (defensive)', run: async () => {
+      const groups = subsGroupsForRender(
+        [{ id: 'x', nodeId: 'ghost', cycle: 0, status: 'finished' }],
+        [{ key: 'plan', nodeId: 'plan', cycle: 0, status: 'done' }],
+        STEPPER,
+      );
+      assert.deepEqual(Object.keys(groups), ['plan|0', 'ghost|0'], 'step groups first, stray sub group appended');
+      assert.equal(groups['ghost|0'].length, 1);
+    } },
+  ]);
 });
 
 test('stepStatusByKey maps agent step status -> group status (skips non-agents)', async () => {
@@ -103,4 +110,3 @@ test('cycleAwareLabel adds "· cycle N" across rendered group keys (even sub-les
   // Legacy 2-arg call (no keys) keeps sub-derived behavior: single sub cycle -> no suffix.
   assert.equal(cycleAwareLabel(STEPPER, subAgents)('review|2'), 'Review');
 });
-

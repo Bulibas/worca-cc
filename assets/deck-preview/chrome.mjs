@@ -43,7 +43,7 @@ export function findChrome({ env = process.env, platform = process.platform, exi
  *  throwaway profile, so an open desktop Chrome does not lock it out. */
 export function screenshotArgs({ htmlPath, pngPath, width, height, noSandbox = false }) {
   return [
-    '--headless=new', '--disable-gpu', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check',
+    '--headless=new', '--disable-gpu', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check', '--use-mock-keychain',
     '--force-device-scale-factor=1', '--virtual-time-budget=3000',
     `--window-size=${width},${height}`, `--screenshot=${pngPath}`,
     ...(noSandbox ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
