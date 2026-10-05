@@ -15,7 +15,7 @@ import { app } from '../ui/server.mjs';
 import { _testing as gitInfo } from '../src/core/git-info.mjs';
 import { _testing as gitSync } from '../src/core/git-sync.mjs';
 import { projectKey } from '../src/core/store.mjs';
-import { _resetForTests } from '../src/core/db.mjs';
+import { _resetForTests, getDb } from '../src/core/db.mjs';
 import { writeStoreMeta, persistPrState, readPrState, createPipeline, writeState } from '../src/core/artifacts.mjs';
 import { _testing as prDesc, PR_BODY_MAX } from '../src/core/pr-description.mjs';
 import * as azurePr from '../src/core/pr/azure.mjs';
@@ -300,7 +300,7 @@ test('POST /api/pr cross-repo: pushes to the fork, opens the PR in the base repo
   assert.equal(r.status, 200);
   const j = await r.json();
   assert.equal(j.url, 'https://github.com/up/repo/pull/7');
-  assert.deepEqual(Object.keys(j).sort(), ['existed', 'mergeable', 'ok', 'url'], 'the response shape is unchanged');
+  assert.deepEqual(Object.keys(j).sort(), ['draft', 'existed', 'mergeable', 'ok', 'url'], 'the response shape is unchanged');
   assert.deepEqual(seen.find((c) => c[1] === 'push'), ['git', 'push', '-u', 'origin', FEATURE]);
   assert.deepEqual(seen.find((c) => c[2] === 'create'),
     ['gh', 'pr', 'create', '--repo', 'up/repo', '--base', 'main', '--head', `me:${FEATURE}`, '--title', 'My feature', '--body', 'My feature']);
@@ -401,7 +401,7 @@ test('POST /api/pr baseBranch reaches gh pr create --base; the response shape an
   stubForkRepo(seen);
   const r = await post({ projectKey: betaKey, id: betaId, pushRemote: 'origin', baseRemote: 'upstream', baseBranch: 'dev' });
   assert.equal(r.status, 200);
-  assert.deepEqual(Object.keys(await r.json()).sort(), ['existed', 'mergeable', 'ok', 'url']);
+  assert.deepEqual(Object.keys(await r.json()).sort(), ['draft', 'existed', 'mergeable', 'ok', 'url']);
   assert.deepEqual(seen.find((c) => c[2] === 'create'),
     ['gh', 'pr', 'create', '--repo', 'up/repo', '--base', 'dev', '--head', `me:${FEATURE}`, '--title', 'My feature', '--body', 'My feature']);
   assert.deepEqual(readPrRemotePrefs(betaRepo), { pushRemote: 'origin', baseRemote: 'upstream' }, 'the base branch is per run, never remembered');
@@ -727,4 +727,121 @@ test('POST /api/pr/describe drafts for the PR host the modal names', async () =>
   assert.match(seen[0].systemPrompt, /Azure DevOps/);
   assert.doesNotMatch(seen[1].systemPrompt, /Azure DevOps/, 'anything else is GitHub');
   assert.doesNotMatch(seen[2].systemPrompt, /Azure DevOps/);
+});
+
+
+// ---------------------------------------------------------------------------
+// Draft PRs and the source issue's closing line.
+// ---------------------------------------------------------------------------
+const ISSUE_URL = 'https://github.com/up/repo/issues/42';
+// An issue-sourced run (the sourceMeta shape src/core/sources.mjs builds for github-source:
+// taskId is the connector's 'owner/repo#N' id), started by grace so the footer shows.
+// Same production-writer pattern as the existing attribution test.
+async function seedIssueRun({ url = ISSUE_URL, feature = 'worca-cc/issue-run' } = {}) {
+  const { id, dir } = await createPipeline(betaRepo, { prompt: 'p', title: 'Issue feature', startedBy: 'grace@example.com',
+    sourceMeta: { plugin: 'github-source', sourceId: 'github-issues', taskId: 'up/repo#42', url, title: 'Bug' } });
+  await writeState(dir, { projectKey: betaKey, id, title: 'Issue feature', status: 'done',
+    branch: { source: 'main', feature, branchKept: true } });
+  return id;
+}
+const prAudit = (id) => getDb().prepare("SELECT text FROM pipeline_events WHERE pipeline_id = ? AND text LIKE 'Pull request %' ORDER BY id").all(id).map((r) => r.text);
+const FORK = { pushRemote: 'origin', baseRemote: 'upstream' };   // base repo = up/repo
+
+test('POST /api/pr refuses a non-boolean draft with 400 before anything is pushed', async () => {
+  for (const bad of ['yes', 'true', 1, 0, null, {}, []]) {
+    const seen = [];
+    stubForkRepo(seen);
+    const r = await post({ projectKey: betaKey, id: betaId, draft: bad });
+    assert.equal(r.status, 400, JSON.stringify(bad));
+    assert.deepEqual(await r.json(), { error: 'draft must be a boolean' });
+    assert.ok(!seen.some((c) => c[1] === 'push'), 'nothing was pushed');
+  }
+});
+
+test('POST /api/pr draft: true reaches gh pr create --draft, says (draft) in the audit and the response', async () => {
+  const id = await seedIssueRun({ feature: 'worca-cc/draft-run' });
+  const seen = [];
+  stubForkRepo(seen);
+  const r = await post({ projectKey: betaKey, id, draft: true, ...FORK });
+  assert.equal(r.status, 200, await r.clone().text());
+  const j = await r.json();
+  assert.equal(j.draft, true);
+  assert.equal(seen.find((c) => c[2] === 'create').at(-1), '--draft');
+  assert.deepEqual(prAudit(id), ['Pull request opened (draft): https://github.com/up/repo/pull/7']);
+});
+
+test('POST /api/pr draft: false or absent -> no --draft, draft:false, the audit line unchanged', async () => {
+  for (const extra of [{}, { draft: false }]) {
+    const id = await seedIssueRun({ feature: `worca-cc/nodraft-${Object.keys(extra).length}` });
+    const seen = [];
+    stubForkRepo(seen);
+    const j = await (await post({ projectKey: betaKey, id, ...FORK, ...extra })).json();
+    assert.equal(j.draft, false);
+    assert.ok(!seen.find((c) => c[2] === 'create').includes('--draft'));
+    assert.deepEqual(prAudit(id), ['Pull request opened: https://github.com/up/repo/pull/7']);
+  }
+});
+
+test('POST /api/pr draft: true on an existing PR changes nothing: draft:false, "linked" audit (D6)', async () => {
+  const id = await seedIssueRun({ feature: 'worca-cc/existing-run' });
+  const seen = [];
+  gitInfo.setRunner((cmd, args) => {
+    seen.push([cmd, ...args]);
+    if (cmd === 'git' && args[0] === 'remote') return Promise.resolve({ ok: true, stdout: REMOTES_V, stderr: '', code: 0 });
+    if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'create')
+      return Promise.resolve({ ok: false, stdout: '', stderr: 'a pull request already exists:\nhttps://github.com/up/repo/pull/3', code: 1 });
+    if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'view') return Promise.resolve({ ok: true, stdout: 'https://github.com/up/repo/pull/3\n', stderr: '', code: 0 });
+    return Promise.resolve({ ok: true, stdout: 'gh 2.x', stderr: '', code: 0 });
+  });
+  const j = await (await post({ projectKey: betaKey, id, draft: true, ...FORK })).json();
+  assert.equal(j.existed, true);
+  assert.equal(j.draft, false);
+  assert.deepEqual(prAudit(id), ['Pull request linked: https://github.com/up/repo/pull/3']);
+});
+
+test('POST /api/pr body order: description -> Closes line -> attribution footer', async () => {
+  const id = await seedIssueRun({ feature: 'worca-cc/order-run' });
+  let seen = [];
+  stubForkRepo(seen);
+  assert.equal((await post({ projectKey: betaKey, id, body: 'Did the thing.', ...FORK })).status, 200);
+  assert.equal(bodyArg(seen), 'Did the thing.\n\nCloses #42\n\n---\nStarted by grace@example.com via worca');
+  seen = [];
+  stubForkRepo(seen);
+  assert.equal((await post({ projectKey: betaKey, id, ...FORK })).status, 200);
+  assert.equal(bodyArg(seen), 'Issue feature\n\nCloses #42\n\n---\nStarted by grace@example.com via worca', 'no description: title, then the line');
+  seen = [];
+  stubForkRepo(seen);
+  assert.equal((await post({ projectKey: betaKey, id, body: 'x', pushRemote: 'origin', baseRemote: 'origin' })).status, 200);
+  assert.equal(bodyArg(seen), 'x\n\nCloses up/repo#42\n\n---\nStarted by grace@example.com via worca', 'a PR into me/repo names the repo');
+});
+
+test('POST /api/pr adds no Closes line for a prompt run, a PR-URL source, or a description that already closes the issue', async () => {
+  let seen = [];
+  stubForkRepo(seen);
+  assert.equal((await post({ projectKey: betaKey, id: betaId, body: 'Did it.', ...FORK })).status, 200);
+  assert.equal(bodyArg(seen), 'Did it.', 'prompt-sourced: byte-identical to today');
+
+  const prSourced = await seedIssueRun({ url: 'https://github.com/up/repo/pull/42', feature: 'worca-cc/prsrc-run' });
+  seen = [];
+  stubForkRepo(seen);
+  assert.equal((await post({ projectKey: betaKey, id: prSourced, body: 'Did it.', ...FORK })).status, 200);
+  assert.equal(bodyArg(seen), 'Did it.\n\n---\nStarted by grace@example.com via worca');
+
+  const id = await seedIssueRun({ feature: 'worca-cc/fixes-run' });
+  seen = [];
+  stubForkRepo(seen);
+  assert.equal((await post({ projectKey: betaKey, id, body: 'Fixes #42', ...FORK })).status, 200);
+  assert.equal(bodyArg(seen), 'Fixes #42\n\n---\nStarted by grace@example.com via worca');
+});
+
+test('GET /api/pr/remotes carries the run\'s source issue (null for a prompt run)', async () => {
+  stubForkRepo([]);
+  stubSyncRepo([]);
+  const id = await seedIssueRun({ feature: 'worca-cc/remotes-issue-run' });
+  assert.deepEqual((await (await getRemotes({ projectKey: betaKey, id })).json()).issue, { slug: 'up/repo', number: 42 });
+  assert.equal((await (await getRemotes({ projectKey: betaKey, id: betaId })).json()).issue, null);
+  stubForkRepo([], { remotesOk: false });
+  const failed = await getRemotes({ projectKey: betaKey, id });
+  assert.equal(failed.status, 500);
+  assert.deepEqual((await failed.json()).issue, { slug: 'up/repo', number: 42 }, 'still offered when git fails, like chain');
 });

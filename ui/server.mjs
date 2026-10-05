@@ -256,7 +256,7 @@ import {
 } from '../src/core/project-sync.mjs';
 import { mapWithCap, fanoutCap } from '../src/core/fanout.mjs';
 import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, listRemoteBranches, sameRepo, readPrBody, editPrBody, branchPushedTo,
-  prProviderFor, prHostsAvailable, anyPrHost } from '../src/core/git-info.mjs';
+  prProviderFor, prHostsAvailable, anyPrHost, issueClosingLine, parseGithubIssueUrl } from '../src/core/git-info.mjs';
 import { prNumberFromUrl } from '../src/core/forge.mjs';
 import { forkRefusal, workItemIdFromSourceRef } from '../src/core/pr/azure.mjs';
 import { workspaceMembers as prStateMembers, memberPrTarget, relatedPrsBlock, withRelatedPrsBlock } from '../src/core/workspace-prs.mjs';
@@ -6305,6 +6305,30 @@ async function resolvePrPipeline(src, res) {
   return { id, state };
 }
 
+// The run's task-source URL (pipelines.source_ref.url), read narrowly for the PR routes —
+// rowToState does not map source_ref (same read as metrics/record.mjs#readSource). null when absent.
+function runSourceUrl(pipelineId) {
+  let row;
+  try { row = findPipelineRowById(pipelineId); } catch { return null; }
+  if (!row || !row.source_ref) return null;
+  try { const meta = JSON.parse(row.source_ref); return typeof meta?.url === 'string' ? meta.url : null; } catch { return null; }
+}
+
+/**
+ * The GitHub issue a run's PR closes on merge ({ slug, number }), else null: the run came from a
+ * GitHub issue and the base remote is not Azure DevOps (a Closes line means nothing there). In a
+ * workspace run only the member whose base repo IS the issue's repo closes it — every member's PR
+ * carrying the line would close the issue at the first merge. Also the dialog's "Will close" line.
+ */
+function runSourceIssue(pipelineId, { baseRemote = null, memberKey = null } = {}) {
+  const i = parseGithubIssueUrl(runSourceUrl(pipelineId));
+  if (!i) return null;
+  if (baseRemote && prProviderFor(baseRemote).forge === 'azure') return null;
+  const slug = `${i.owner}/${i.repo}`;
+  if (memberKey && String(baseRemote?.slug || '').toLowerCase() !== slug.toLowerCase()) return null;
+  return { slug, number: i.number };
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/pr/remotes?id=&projectKey=|projectDir=  -> the project's git remotes for
 // the ship-it dialog plus the defaults POST /api/pr applies when the body names
@@ -6319,9 +6343,11 @@ async function resolvePrPipeline(src, res) {
 // Each remote carries its PR host (`prHost`: GitHub | Azure DevOps | null for other hosts,
 // which still use gh) and whether PRs can be opened there now (`prSupported`, else `prReason`).
 // -> { ok, remotes:[{name,fetchUrl,pushUrl,host,owner,repo,slug,forge,org,project,prHost,prSupported,prReason?}],
+// `issue` is the run's GitHub issue the PR would close (the dialog's "Will close" line), on failure too.
 //      defaults:{pushRemote,baseRemote}, remembered:{pushRemote,baseRemote}|null,
 //      chain:[branch], defaultBase:branch|null, branches:{[remote]:[branch]},
-//      baseStatus:{base, remote, movedSinceRun:number|null, fetchedAt, stale} }
+//      baseStatus:{base, remote, movedSinceRun:number|null, fetchedAt, stale},
+//      issue:{slug,number}|null }
 // ---------------------------------------------------------------------------
 app.get('/api/pr/remotes', async (req, res) => {
   const resolved = await resolvePrPipeline(req.query || {}, res);
@@ -6336,10 +6362,15 @@ app.get('/api/pr/remotes', async (req, res) => {
   const chain = (walked.length ? walked : (source ? [source] : [])).filter((b) => b !== feature);
   const defaultBase = chain[0] || null;
   const rl = await listRemotes(repoDir);
-  if (!rl.ok) return res.status(500).json({ error: `git remote failed: ${rl.error}`, chain, defaultBase });
+  const pipelineId = resolved.state.id || resolved.id;
+  if (!rl.ok) {
+    const issue = runSourceIssue(pipelineId, { memberKey: target.memberKey });
+    return res.status(500).json({ error: `git remote failed: ${rl.error}`, chain, defaultBase, issue });
+  }
   const remembered = readPrRemotePrefs(repoDir);
   const defaults = defaultPrRemotes(rl.remotes, remembered);
   const baseRemote = defaults.baseRemote;
+  const issue = runSourceIssue(pipelineId, { baseRemote: rl.remotes.find((r) => r.name === baseRemote) || null, memberKey: target.memberKey });
   const runBranch = resolved.state.branch || {};
   // Measure from the remote tip recorded at start only when it is the SAME ref we compare
   // against: a fork's base remote is `upstream` and a chained run's base is the chain root,
@@ -6364,7 +6395,7 @@ app.get('/api/pr/remotes', async (req, res) => {
     return { ...r, prHost: r.forge ? p.label : null, prSupported: a.ok, ...(a.ok ? {} : { prReason: a.reason }) };
   }));
   res.json({ ok: true, remotes, defaults, remembered,
-    chain, defaultBase, branches, baseStatus });
+    chain, defaultBase, branches, baseStatus, issue });
 });
 
 // ---------------------------------------------------------------------------
@@ -6373,7 +6404,7 @@ app.get('/api/pr/remotes', async (req, res) => {
 // forge: Azure DevOps over REST (no forks: 422 before the push), every other host
 // via the GitHub CLI. 409 { error, forge } when that forge is not usable here.
 // Mergeability is read back only here (never during list rendering).
-// body: { id, projectDir?, projectKey?, memberKey?, pushRemote?, baseRemote?, baseBranch?, body? } —
+// body: { id, projectDir?, projectKey?, memberKey?, pushRemote?, baseRemote?, baseBranch?, body?, draft? } —
 // a workspace run (projectKey 'workspaces/<wks-…>') REQUIRES memberKey (the member repo
 // to ship; its PR is recorded per member and the response echoes memberKey) —
 // remote names are validated against the repo's real remote list (never trusted
@@ -6381,7 +6412,9 @@ app.get('/api/pr/remotes', async (req, res) => {
 // branch (whether the base repo has it is gh's call, its error surfaces as usual).
 // `body` is the "Ship it?" modal's PR description (a string of at most PR_BODY_MAX
 // characters): it becomes the PR body, the attribution footer after it. Absent,
-// null or blank keeps the title-only body exactly as before.
+// null or blank keeps the title-only body exactly as before. `draft` (boolean) opens a
+// new PR as a draft; the run's GitHub issue source adds a `Closes` line between the
+// description and the footer.
 // ---------------------------------------------------------------------------
 app.post('/api/pr', async (req, res) => {
   const body = req.body || {};
@@ -6392,6 +6425,10 @@ app.post('/api/pr', async (req, res) => {
     if (body.body.length > PR_BODY_MAX) return badRequest(res, `body must be at most ${PR_BODY_MAX} characters`);
     description = body.body.trim() ? body.body.trimEnd() : '';
   }
+  if (!(body.draft === undefined || body.draft === true || body.draft === false)) {
+    return badRequest(res, 'draft must be a boolean');
+  }
+  const draft = body.draft === true;
   if (!(await anyPrHost())) {
     return res.status(409).json({ error: 'No pull request host is available: install the GitHub CLI (gh), or set WORCA_ADO_TOKEN for Azure DevOps' });
   }
@@ -6470,16 +6507,22 @@ app.post('/api/pr', async (req, res) => {
   // A run from the Azure Boards source links its work item to the PR.
   const workItemId = provider.forge === 'azure'
     ? workItemIdFromSourceRef(findPipelineRowById(pipelineIdForPr)?.source_ref ?? null, baseR) : null;
+  // The run's GitHub issue, closed on merge: after the description, before the footer.
+  const closing = runSourceIssue(pipelineIdForPr, { baseRemote: baseR, memberKey })
+    ? issueClosingLine({ sourceUrl: runSourceUrl(pipelineIdForPr), baseRepo: repo, body: description }) : '';
+  const lead = description || state.title || feature;
+  const prBody = description || closing || footer ? `${lead}${closing ? `\n\n${closing}` : ''}${footer}` : '';
   const pr = await createPr({
     projectDir: repoDir, base, head: feature, title: state.title || feature, repo, headOwner,
-    baseRemote: baseR, pushRemote: pushR, workItemId,
-    ...(description ? { body: `${description}${footer}` }
-      : footer ? { body: `${state.title || feature}${footer}` } : {}),
+    baseRemote: baseR, pushRemote: pushR, workItemId, draft,
+    ...(prBody ? { body: prBody } : {}),
   });
   if (!pr.ok) {
     return res.status(pr.kind === 'unsupported' ? 422 : 500)
       .json({ error: `${provider.label} pull request failed: ${pr.error}`, ...(pr.kind ? { kind: pr.kind } : {}) });
   }
+  // D6: draft only describes a PR this call created; an existing one is linked as-is.
+  const newDraft = draft && !pr.existed;
 
   // Persist the PR facts we just learned, so History/stats survive a gh outage.
   if (pipelineIdForPr) {
@@ -6490,7 +6533,7 @@ app.post('/api/pr', async (req, res) => {
     // Who clicked Create PR (the footer names who STARTED the run; this names who shipped it).
     const prBy = actorOf(req);
     const where = memberKey ? ` in \`${target.memberName}\`` : '';
-    appendAuditById(pipelineIdForPr, `Pull request ${pr.existed ? 'linked' : 'opened'}${where}${byActor(prBy)}: ${pr.url}`, { actor: prBy });
+    appendAuditById(pipelineIdForPr, `Pull request ${pr.existed ? 'linked' : (newDraft ? 'opened (draft)' : 'opened')}${where}${byActor(prBy)}: ${pr.url}`, { actor: prBy });
   }
   // Remember the choice for this project (only once a PR was actually created).
   if (remotes.length) {
@@ -6499,7 +6542,7 @@ app.post('/api/pr', async (req, res) => {
 
   const mergeable = await prMergeable({ projectDir: repoDir, head: feature, repo, headOwner, prUrl: pr.url || null, baseRemote: baseR });
   // Single-project response shape is pinned by pr-api.test; the workspace arm echoes its member.
-  res.json({ ok: true, url: pr.url, mergeable, existed: !!pr.existed, ...(memberKey ? { memberKey } : {}) });
+  res.json({ ok: true, url: pr.url, mergeable, existed: !!pr.existed, draft: newDraft, ...(memberKey ? { memberKey } : {}) });
 });
 
 // ---------------------------------------------------------------------------

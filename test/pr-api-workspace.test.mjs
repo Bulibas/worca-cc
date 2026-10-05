@@ -102,7 +102,7 @@ test('POST /api/pr with memberKey pushes + opens in THAT member repo, records it
   const r = await json('/api/pr', { projectKey: KEY, id: runId, memberKey: 'web-00000002' });
   assert.equal(r.status, 200);
   const j = await r.json();
-  assert.deepEqual(j, { ok: true, url: 'https://github.com/o/web/pull/2', mergeable: 'MERGEABLE', existed: false, memberKey: 'web-00000002' });
+  assert.deepEqual(j, { ok: true, url: 'https://github.com/o/web/pull/2', mergeable: 'MERGEABLE', existed: false, draft: false, memberKey: 'web-00000002' });
   const push = seen.find((c) => c.argv[1] === 'push');
   assert.deepEqual(push.argv, ['git', 'push', '-u', 'origin', 'worca-cc/feat-web']);
   assert.equal(push.cwd, webDir);
@@ -179,5 +179,5 @@ test('crosslink refuses a single-project run; single-project /api/pr shape is un
   const seen = []; stubWs(seen);
   assert.equal((await json('/api/pr/crosslink', { projectKey: s.key, id: s.id })).status, 400);
   const j = await (await json('/api/pr', { projectKey: s.key, id: s.id, memberKey: 'ignored' })).json();
-  assert.deepEqual(Object.keys(j).sort(), ['existed', 'mergeable', 'ok', 'url']);
+  assert.deepEqual(Object.keys(j).sort(), ['draft', 'existed', 'mergeable', 'ok', 'url']);
 });

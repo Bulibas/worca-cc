@@ -201,6 +201,17 @@ test('fork argv: pushBranch remote (default origin); createPr no repo / same-rep
       await createPr({ projectDir: '/repo', base: 'main', head: 'feat/x', title: 'T' });
       assert.deepEqual(seen[0], ['gh', 'pr', 'create', '--base', 'main', '--head', 'feat/x', '--title', 'T', '--body', 'T']);
     } },
+    { name: 'createPr appends --draft only when draft: true; nothing else in the argv changes', run: async () => {
+      const seen = [];
+      gitInfo.setRunner((cmd, args) => { seen.push([cmd, ...args]); return okOut('https://github.com/up/repo/pull/5\n'); });
+      await createPr({ projectDir: '/repo', base: 'main', head: 'feat/x', title: 'T', repo: 'up/repo', draft: true });
+      await createPr({ projectDir: '/repo', base: 'main', head: 'feat/x', title: 'T', repo: 'up/repo', draft: false });
+      await createPr({ projectDir: '/repo', base: 'main', head: 'feat/x', title: 'T', repo: 'up/repo' });
+      const plain = ['gh', 'pr', 'create', '--repo', 'up/repo', '--base', 'main', '--head', 'feat/x', '--title', 'T', '--body', 'T'];
+      assert.deepEqual(seen[0], [...plain, '--draft']);
+      assert.deepEqual(seen[1], plain);
+      assert.deepEqual(seen[2], plain);
+    } },
   ]);
 });
 
@@ -249,6 +260,19 @@ test('createPr "already exists": recovered via gh pr view owner:branch --repo, e
       assert.deepEqual(r, { ok: true, url: 'https://github.com/up/repo/pull/9', existed: true });
       gitInfo.setRunner(() => fail('boom'));
       assert.deepEqual(await createPr({ projectDir: '/repo', base: 'main', head: 'feat/x', title: 'T' }), { ok: false, error: 'boom' });
+    } },
+    { name: 'createPr with draft: true on "already exists" still recovers the open PR (existed: true)', run: async () => {
+      const seen = [];
+      gitInfo.setRunner((cmd, args) => {
+        seen.push([cmd, ...args]);
+        if (args[1] === 'create') return fail('a pull request for branch "feat/x" into branch "main" already exists:\nhttps://github.com/up/repo/pull/3');
+        return okOut('https://github.com/up/repo/pull/3\n');
+      });
+      const r = await createPr({ projectDir: '/repo', base: 'main', head: 'feat/x', title: 'T', repo: 'up/repo', draft: true });
+      assert.deepEqual(r, { ok: true, url: 'https://github.com/up/repo/pull/3', existed: true });
+      assert.ok(seen[0].includes('--draft'));
+      assert.deepEqual(seen[1].slice(0, 3), ['gh', 'pr', 'view'], 'the recovery view never carries --draft');
+      assert.ok(!seen[1].includes('--draft'));
     } },
   ]);
 });

@@ -19897,6 +19897,8 @@ async function loadShipItRemotes(modal, record, gen, isClosed) {
   branchSel.innerHTML = '';
   setShipItRemotesDisabled(modal, true);
   modal.querySelector('.shipit-remotes-hint').textContent = '';
+  const closes = modal.querySelector('.shipit-closes');
+  closes.hidden = true; closes.textContent = '';
   // #527: the modal is reused, so the base-moved note from a previous open goes first.
   const baseWarn = modal.querySelector('#shipit-base-warn');
   if (baseWarn) { baseWarn.hidden = true; baseWarn.textContent = ''; }
@@ -19907,6 +19909,12 @@ async function loadShipItRemotes(modal, record, gen, isClosed) {
     const res = await fetch(`/api/pr/remotes?${qs}`);
     const data = await safeJson(res);
     if (gen !== shipItRemotesGen || isClosed()) return;              // stale: cancelled or re-opened since
+    // The run's GitHub issue source: merging the PR closes it (the server adds the Closes line).
+    const issue = data && data.issue;
+    if (issue && typeof issue.slug === 'string' && Number.isInteger(issue.number)) {
+      closes.textContent = `Will close ${issue.slug}#${issue.number}`;
+      closes.hidden = false;
+    }
     const remotes = res.ok && Array.isArray(data.remotes) ? data.remotes.filter((r) => r && r.name) : [];
     modal._remotes = remotes;
     const names =(list) => (Array.isArray(list) ? list.filter((b) => typeof b === 'string' && b) : []);
@@ -20011,6 +20019,7 @@ function openShipItModal(record, data) {
   const card = q('.shipit-actions').parentElement;
   cardAlert(card, null);
   resetShipItDesc(modal);
+  q('.shipit-draft-input').checked = false;          // D1: draft is opt-in per ship, never remembered
   const okBtn = q('.shipit-ok');
   okBtn.disabled = false; okBtn.textContent = 'Open pull request';
   modal.classList.remove('hidden');
@@ -20124,6 +20133,8 @@ function openShipItModal(record, data) {
     // The description as it reads NOW; blank sends nothing (the PR body is the title).
     const description = descInput.value;
     if (description.trim()) payload.body = description;
+    // Draft only when ticked; unticked sends nothing (the server's default is not a draft).
+    if (q('.shipit-draft-input').checked) payload.draft = true;
     try {
       const res = await fetch('/api/pr', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
