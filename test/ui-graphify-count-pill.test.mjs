@@ -1,11 +1,13 @@
 // test/ui-graphify-count-pill.test.mjs — per-sub-agent + per-group graphify-use count
-// badge. Present only when count > 0. bootLive() copied from ui-subagent-type-pill.test.mjs.
+// bookkeeping. bootLive() copied from the former ui-subagent-type-pill suite (its tests
+// now live in ui-subagent-state.test.mjs).
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -40,39 +42,27 @@ async function bootLive() {
   return { window };
 }
 
-test('graphifyCountPillHtml: count badge when > 0, empty string otherwise', async () => {
+test('graphify counts: onSubagent merges graphifyCount, onStepGraphify records by nodeId|cycle, stepGraphifyFromSteps derives the map', async () => {
   const { window } = await bootLive();
-  const { graphifyCountPillHtml } = window.__np;
-  assert.equal(graphifyCountPillHtml(3), '<span class="graphify-pill">graphify ×3</span>');
-  assert.equal(graphifyCountPillHtml(1), '<span class="graphify-pill">graphify ×1</span>');
-  assert.equal(graphifyCountPillHtml(0), '');
-  assert.equal(graphifyCountPillHtml(null), '');
-  assert.equal(graphifyCountPillHtml(undefined), '');
-});
-
-test('onSubagent merges graphifyCount onto the run record', async () => {
-  const { window } = await bootLive();
-  const { makeRun, onSubagent } = window.__np;
-  const r = makeRun({ runId: 'run1' });
-  onSubagent(r, { id: 'a1', nodeId: 'n1', cycle: 1, status: 'running', graphifyCount: 2 });
-  assert.equal(r.subAgents.find((s) => s.id === 'a1').graphifyCount, 2);
-});
-
-test('onStepGraphify records the MAIN-agent count by nodeId|cycle group key', async () => {
-  const { window } = await bootLive();
-  const { makeRun, onStepGraphify } = window.__np;
-  const r = makeRun({ runId: 'run1' });
-  onStepGraphify(r, { nodeId: 'n1', cycle: 1, graphifyCount: 5 });
-  assert.equal(r.stepGraphify['n1|1'], 5);
-});
-
-test('stepGraphifyFromSteps derives {groupKey: count}, skipping steps with no graphify', async () => {
-  const { window } = await bootLive();
-  const { stepGraphifyFromSteps } = window.__np;
-  const map = stepGraphifyFromSteps([
-    { nodeId: 'n1', cycle: 1, graphifyCount: 3 },
-    { nodeId: 'n2', cycle: 1, graphifyCount: 0 },
-    { nodeId: 'n3', cycle: 1 },
+  const { makeRun, onSubagent, onStepGraphify, stepGraphifyFromSteps } = window.__np;
+  await checkRows([
+    { name: 'onSubagent merges graphifyCount onto the run record', run: () => {
+      const r = makeRun({ runId: 'run1' });
+      onSubagent(r, { id: 'a1', nodeId: 'n1', cycle: 1, status: 'running', graphifyCount: 2 });
+      assert.equal(r.subAgents.find((s) => s.id === 'a1').graphifyCount, 2);
+    } },
+    { name: 'onStepGraphify records the MAIN-agent count by nodeId|cycle group key', run: () => {
+      const r = makeRun({ runId: 'run1' });
+      onStepGraphify(r, { nodeId: 'n1', cycle: 1, graphifyCount: 5 });
+      assert.equal(r.stepGraphify['n1|1'], 5);
+    } },
+    { name: 'stepGraphifyFromSteps derives {groupKey: count}, skipping steps with no graphify', run: () => {
+      const map = stepGraphifyFromSteps([
+        { nodeId: 'n1', cycle: 1, graphifyCount: 3 },
+        { nodeId: 'n2', cycle: 1, graphifyCount: 0 },
+        { nodeId: 'n3', cycle: 1 },
+      ]);
+      assert.deepEqual(map, { 'n1|1': 3 });
+    } },
   ]);
-  assert.deepEqual(map, { 'n1|1': 3 });
 });

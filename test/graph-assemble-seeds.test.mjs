@@ -11,6 +11,7 @@ import { SEED_TEMPLATES } from '../src/core/graph/seed-templates.mjs';
 import { GRAPH_DEFAULT_WORKFLOW } from '../src/core/graph/builtin-workflows.mjs';
 import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
 import { registryPortsFn } from '../src/core/graph/registry-ports.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const REG = loadAgentRegistry(undefined, { userAgentsDir: null, includePlugins: false });
 const PORTS = registryPortsFn(REG);
@@ -28,15 +29,18 @@ const SEED_SHAPES = {
   'wf_clarify-quick-fix': { stages: [S('clarify'), S('planner'), S('implementer'), S('reviewer')] },
 };
 
-for (const [id, shape] of Object.entries(SEED_SHAPES)) {
-  test(`${id} is reproduced by the assembler (isomorphic, zero errors, zero warnings)`, () => {
-    const seedTpl = id === 'wf_default' ? GRAPH_DEFAULT_WORKFLOW : SEED_TEMPLATES.find((t) => t.id === id);
-    const { template, warnings } = assembleShape(shape, { registry: REG });
-    const report = validateGraph(template, PORTS);
-    assert.deepEqual(report.errors, []);
-    assert.deepEqual(warnings, [], `${id}: the seeds carry no warnings`);
-    assert.equal(template.nodes.length, seedTpl.nodes.length);
-    assert.equal(template.wires.length, seedTpl.wires.length);
-    assert.ok(isomorphic(template, seedTpl), `${id}: topology differs`);
-  });
-}
+test('every seed shape is reproduced by the assembler (isomorphic, zero errors, zero warnings)', async () => {
+  await checkRows(Object.entries(SEED_SHAPES).map(([id, shape]) => ({
+    name: `${id} is reproduced by the assembler (isomorphic, zero errors, zero warnings)`,
+    run: () => {
+      const seedTpl = id === 'wf_default' ? GRAPH_DEFAULT_WORKFLOW : SEED_TEMPLATES.find((t) => t.id === id);
+      const { template, warnings } = assembleShape(shape, { registry: REG });
+      const report = validateGraph(template, PORTS);
+      assert.deepEqual(report.errors, []);
+      assert.deepEqual(warnings, [], `${id}: the seeds carry no warnings`);
+      assert.equal(template.nodes.length, seedTpl.nodes.length);
+      assert.equal(template.wires.length, seedTpl.wires.length);
+      assert.ok(isomorphic(template, seedTpl), `${id}: topology differs`);
+    },
+  })));
+});

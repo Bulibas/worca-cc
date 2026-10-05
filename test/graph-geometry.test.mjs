@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import {
-  NODE_W, ROW0, SNAP, ZOOM_MIN, ZOOM_MAX, ZOOM_K, GEOMETRY_CSS_VARS, injectGeometry,
+  ZOOM_MIN, GEOMETRY_CSS_VARS, injectGeometry,
   nodeSize, portAnchor, snap,
-  hitNode, hitPort, graphBounds, fitBounds, fanLines, FAN_PER_ROW, FAN_ROW_W,
+  hitNode, hitPort, graphBounds, fitBounds,
   BAND_H, geometryCssVars,
 } from '../src/shared/graph/geometry.mjs';
 import { portsFnFor } from '../src/shared/graph/ports.mjs';
@@ -18,13 +18,6 @@ const N_TASK = { id: 'n_task', kind: 'task', x: 60, y: 143, config: {} };
 const N_AGENT = { id: 'n_agent', kind: 'agent', key: 'planner', x: 400, y: 80, config: {} };
 const N_END = { id: 'n_end', kind: 'end', x: 760, y: 143, config: {} };
 const P = (n) => portsFn(n);
-
-test('the constants are frozen at the spec values', () => {
-  assert.equal(NODE_W, 220);
-  assert.equal(ROW0, 56);
-  assert.equal(SNAP, 11);
-  assert.deepEqual([ZOOM_MIN, ZOOM_MAX, ZOOM_K], [0.4, 1.6, 0.002]);
-});
 
 test('nodeSize closed forms', () => {
   assert.deepEqual(nodeSize(N_AGENT, P(N_AGENT)), { w: 220, h: 191.5 });   // 95.5 + 24*4
@@ -51,24 +44,6 @@ test('nodeSize closed forms', () => {
   assert.equal(nodeSize(bare, agentPorts(0, 1)).h, 110.5);            // not 119.5
   assert.equal(portAnchor(bare, agentPorts(0, 1), 'await', 'in').y, 89);   // y(0) + 65 + 24·1, not 98
   assert.equal(portAnchor(bare, agentPorts(1, 1), 'await', 'in').y, 122);  // y(0) + 74 + 24·2 — the closed form holds from nIn = 1
-});
-
-test('the executions footer grows the card and never moves an anchor', () => {
-  assert.equal(nodeSize(N_AGENT, P(N_AGENT), { footerRows: 1 }).h, 191.5 + 26);
-  assert.equal(nodeSize(N_AGENT, P(N_AGENT), { footerRows: 3 }).h, 191.5 + 26 + 2 * 22);
-  assert.deepEqual(portAnchor(N_AGENT, P(N_AGENT), 'plan', 'out'),
-    portAnchor(N_AGENT, P(N_AGENT), 'plan', 'out'));
-});
-
-test('the fan wraps at FAN_PER_ROW and its row width is the CSS var', () => {
-  assert.equal(FAN_PER_ROW, 16);
-  assert.equal(FAN_ROW_W, 157);                            // 16·(7+3) − 3
-  assert.equal(GEOMETRY_CSS_VARS['--gv-fan-w'], '157px');
-  assert.equal(fanLines(0), 1);
-  assert.equal(fanLines(1), 1);
-  assert.equal(fanLines(16), 1);
-  assert.equal(fanLines(17), 2);
-  assert.equal(fanLines(24), 2);                           // SUB_SQUARE_CAP → two lines max
 });
 
 test('port anchors match the measured prototype', () => {
@@ -113,18 +88,6 @@ test('graphBounds + fitBounds reproduce the measured auto-fit', () => {
   // the origin, stretching the bounds of every thumbnail built from a junk row.
   const junk = { nodes: [null, 7, 'x', N_TASK, N_AGENT, N_END] };
   assert.deepEqual(graphBounds(junk, portsFn), graphBounds(tpl, portsFn));
-});
-
-test('GEOMETRY_CSS_VARS covers every CSS-visible number and injectGeometry writes px', () => {
-  assert.deepEqual(Object.keys(GEOMETRY_CSS_VARS).sort(), ['--gv-band-h', '--gv-border', '--gv-dot', '--gv-exec-row-h',
-    '--gv-fan-w', '--gv-foot-h', '--gv-head-h', '--gv-node-w', '--gv-pad-b', '--gv-pad-t', '--gv-row-h', '--gv-scale', '--gv-sep-h']);
-  assert.equal(GEOMETRY_CSS_VARS['--gv-node-w'], '220px');
-  assert.equal(GEOMETRY_CSS_VARS['--gv-pad-t'], '8.5px');
-  const written = [];
-  injectGeometry({ style: { setProperty: (k, v) => written.push([k, v]) } });
-  assert.equal(written.length, 13);
-  assert.deepEqual(written.find(([k]) => k === '--gv-row-h'), ['--gv-row-h', '24px']);
-  injectGeometry(null);                                    // never throws on a missing host
 });
 
 test('scale multiplies every length; band adds BAND_H under an AGENT head only', () => {

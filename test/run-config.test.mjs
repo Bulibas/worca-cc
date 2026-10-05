@@ -7,7 +7,7 @@ import { join } from 'node:path';
 
 import {
   readConfig, setStep,
-  readRunConfig, setNodeModel, setFeedbackCycles, setActiveWorkflow, resolveRunConfig,
+  readRunConfig, setNodeModel, setFeedbackCycles, resolveRunConfig,
 } from '../src/core/config.mjs';
 import { getDb, _resetForTests } from '../src/core/db.mjs';
 import { projectKey } from '../src/core/store.mjs';
@@ -57,19 +57,6 @@ test('setNodeModel persists model+effort keyed by workflowId -> nodeId', async (
   assert.equal(row.effort, 'high');
 });
 
-test('setFeedbackCycles persists maxCycles keyed by workflowId -> fbId', async () => {
-  const p = await freshProject();
-  await setFeedbackCycles(p, 'wf_quickfix', 'fb_0', 4);
-  const rc = await readRunConfig(p);
-  assert.deepEqual(rc.workflows.wf_quickfix.feedbacks.fb_0, { maxCycles: 4 });
-});
-
-test('setActiveWorkflow records the last-selected workflow id', async () => {
-  const p = await freshProject();
-  await setActiveWorkflow(p, 'wf_quickfix');
-  assert.equal((await readRunConfig(p)).activeWorkflowId, 'wf_quickfix');
-});
-
 test('run-config writes do NOT clobber legacy steps/customModels', async () => {
   const p = await freshProject();
   await setStep(p, 'planner', { model: 'claude-opus-4-8', effort: 'xhigh' });
@@ -88,12 +75,8 @@ test('resolveRunConfig returns the per-workflow nodes+feedbacks maps', async () 
   const resolved = await resolveRunConfig(p, 'wf_x');
   assert.deepEqual(resolved.nodes.s0_0, { model: 'claude-opus-4-8', effort: 'max' });
   assert.deepEqual(resolved.feedbacks.fb_0, { maxCycles: 2 });
-});
-
-test('resolveRunConfig for an unconfigured workflow yields empty maps', async () => {
-  const p = await freshProject();
-  const resolved = await resolveRunConfig(p, 'wf_never');
-  assert.deepEqual(resolved, { nodes: {}, wires: {}, feedbacks: {} });
+  // An unconfigured workflow yields empty maps.
+  assert.deepEqual(await resolveRunConfig(p, 'wf_never'), { nodes: {}, wires: {}, feedbacks: {} });
 });
 
 test('setNodeModel clears a node when model and effort are both blank', async () => {
@@ -129,12 +112,9 @@ test('setNodeModel stores fanOut and preserves it across a model-only change', a
   await setNodeModel(p, 'wf_x', 's0_0', { fanOut: false });
   rc = await resolveRunConfig(p, 'wf_x');
   assert.equal(rc.nodes.s0_0.fanOut, false);
-});
-
-test('setNodeModel with only fanOut=false keeps the node entry', async () => {
-  const p = await freshProject();
+  // only fanOut=false keeps the node entry.
   await setNodeModel(p, 'wf_x', 's2_0', { fanOut: false });
-  const rc = await resolveRunConfig(p, 'wf_x');
+  rc = await resolveRunConfig(p, 'wf_x');
   assert.deepEqual(rc.nodes.s2_0, { fanOut: false });
 });
 

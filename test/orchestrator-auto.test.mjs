@@ -30,6 +30,8 @@ after(async () => {
 const S = (agent, extra = {}) => ({ agent, ...extra });
 const PLAN_PARTIAL = { name: 'Plan, refine, implement + review', taskKind: 'plan-partial', reasoning: 'a sketch', stages: [S('planner'), S('refiner', { selfLoop: true }), S('implementer'), S('reviewer')] };
 const QUICK = { name: 'Quick fix', taskKind: 'prompt', stages: [S('planner'), S('implementer'), S('reviewer')] };
+/** One agent, for the tests that assert nothing about the stages (the cheapest run to done). */
+const IMPL = { name: 'Implement only', taskKind: 'prompt', stages: [S('implementer')] };
 const DEFAULT_SHAPE = { name: 'Standard', taskKind: 'prompt', stages: [S('clarify'), S('planner'), S('refiner', { selfLoop: true }), S('implementer'), S('reviewer')] };
 const ASKING_SHAPE = { name: 'Asking', taskKind: 'prompt', stages: [S('clarify'), S('planner', { askQuestions: true }), S('refiner', { selfLoop: true }), S('implementer', { askQuestions: true }), S('reviewer')] };
 
@@ -187,7 +189,7 @@ test('human out of the loop: no proposal, no clarifier, every askQuestions force
 });
 
 test('a malformed answer is IGNORED and the proposal stays open (no re-ask); the next well-formed answer is taken', { timeout: 120000 }, async () => {
-  const orch = orchFor({ classify: scripted([QUICK]).classify });
+  const orch = orchFor({ classify: scripted([IMPL]).classify });
   const results = [];
   const seen = [];
   orch.on('question', (q) => {
@@ -205,7 +207,7 @@ test('a malformed answer is IGNORED and the proposal stays open (no re-ask); the
 });
 
 test('--yes: the proposal is accepted internally and the run completes', { timeout: 120000 }, async () => {
-  const orch = orchFor({ classify: scripted([QUICK]).classify, auto: true });
+  const orch = orchFor({ classify: scripted([IMPL]).classify, auto: true });
   const seen = answerer(orch, () => { throw new Error('must not be asked'); });
   const res = await orch.run();
   assert.equal(res.status, 'done', res.error);
@@ -260,7 +262,10 @@ test('under mock with no injected classifier the recipes answer and a saved work
   const res = await auto.run();
   assert.equal(res.status, 'done', res.error);
   assert.equal(auto.getState().stepper.auto.status, 'decided');
-  const saved = createOrchestrator({ projectDir: gitDir('saved'), workflowId: 'wf_default', prompt: 'demo', claude: { mock: true }, auto: true });
+  // A minimal saved workflow: any saved id skips the decision, so one agent is enough.
+  const REG = loadAgentRegistry(undefined, { userAgentsDir: null, includePlugins: false });
+  await writeGraphWorkflow({ ...assembleShape(IMPL, { registry: REG }).template, id: 'wf_saved-one', name: 'Saved one', domain: 'coding' });
+  const saved = createOrchestrator({ projectDir: gitDir('saved'), workflowId: 'wf_saved-one', prompt: 'demo', claude: { mock: true }, auto: true });
   const r2 = await saved.run();
   assert.equal(r2.status, 'done', r2.error);
   assert.equal(saved.getState().stepper.auto, undefined);

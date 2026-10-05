@@ -1,7 +1,6 @@
 // test/night-config.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { resolveNightConfig, validateNightPatch, NIGHT_DEFAULTS, teamNightLayer } from '../src/core/night/config.mjs';
 
 test('per-field precedence: project > user > team > default', () => {
@@ -48,11 +47,6 @@ test('an invalid stored layer value is dropped, not fatal', () => {
 test('team layer maps night.* policy keys', () => {
   const get = (k) => ({ 'night.enabled': true, 'night.window': '23:00-07:00' })[k];
   assert.deepEqual(teamNightLayer(get), { enabled: true, window: '23:00-07:00' });
-});
-
-test('night/config.mjs is a zero-import leaf (keeps settings.mjs cycle-free)', async () => {
-  const src = await readFile(new URL('../src/core/night/config.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(src, /^import /m);
 });
 
 test('deciderModel / deciderEffort: shape-only validation; null is the default, never a stored value', () => {

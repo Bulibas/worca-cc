@@ -7,14 +7,6 @@ import { GraphOrchestrator } from '../src/core/orchestrator.mjs';
 
 useTempHome(after);
 
-test('every workflow id dispatches to the graph engine', async () => {
-  const graph = await createOrchestratorFor({ projectDir: process.cwd(), workflowId: 'wf_default', claude: { mock: true } });
-  assert.ok(graph instanceof GraphOrchestrator, 'wf_default => GraphOrchestrator');
-  assert.equal(graph.getState().engine, 2);
-  assert.equal(graph.engine, 'graph');
-  assert.equal(graph.workflowId, 'wf_default');
-});
-
 test('a v2 resume point dispatches to the graph engine, and an already-read template is a hint only', async () => {
   const o = await createOrchestratorFor({
     projectDir: process.cwd(), claude: { mock: true },

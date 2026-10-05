@@ -13,6 +13,7 @@ import { GUARDRAIL_PRESETS } from '../src/core/guardrails.mjs';
 import { entryId } from '../src/shared/workspace-map/ids.mjs';
 import { LIMITS } from '../src/shared/workspace-map/limits.mjs';
 import { makeRepos } from './helpers/wsmap-p1-repos.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const json = (o) => JSON.stringify(o, null, 2) + '\n';
 const ws = await makeRepos({
@@ -66,50 +67,50 @@ test('termsOf / displayOf: per-kind search terms and display text', () => {
   assert.equal(displayOf('other', 'shared bucket', 'S3'), 'S3');
 });
 
-test('survey facts are verified: re-anchored, or rejected with a reason (D4)', () => {
-  const topic = cat.entries.find((e) => e.id === TOPIC);
-  assert.deepEqual(topic.evidence, [{ file: 'src/routes.ts', line: 4, match: "topic: 'orders.created'" }], 'line 1 re-anchored to 4');
-  assert.deepEqual(topic.sources, ['survey']);
-  const reasons = cat.rejected.map((r) => `${r.member}: ${r.reason}`);
-  assert.ok(reasons.includes('billing-api: match not found'), reasons.join('\n'));
-  assert.ok(reasons.includes('billing-api: members.billing-api.provides[3]: file must be member-relative'), reasons.join('\n'));
-  assert.ok(reasons.includes('ghost: members.ghost: unknown member'), reasons.join('\n'));
-  assert.ok(!cat.entries.some((e) => e.norm.includes('/ghost') || e.norm.includes('/escape')));
-});
-
-test('entries: provides only, non-test, stable ids, terms, sorted', () => {
-  assert.deepEqual(cat.entries.map((e) => e.id), [HTTP, PKG, TOPIC, entryId('web', 'pkg', 'pkg:npm:@acme/web')]);
-  const http = cat.entries.find((e) => e.id === HTTP);
-  assert.deepEqual([http.member, http.kind, http.display, http.terms], ['billing-api', 'http', 'GET /invoices/:id', ['/invoices']]);
-  assert.deepEqual(cat.entries.map((e) => e.confidence), [null, 'exact', null, 'exact'], 'a static provide carries its confidence; a survey-only one none');
-});
-
-test('alias index: a survey alias counts only for a member whose needs list aliases, so `api` names ops alone', () => {
-  assert.deepEqual(cat.ambiguousAliases, {}, 'billing-api is partial (its needs do not list aliases): its survey alias `api` is no claim');
-  assert.equal(cat.aliasIndex.api, 'ops');
-  assert.equal(cat.aliasIndex.billing, 'billing-api');
-  assert.equal(cat.aliasIndex['@acme/web'], 'web');
-  assert.equal(cat.aliasIndex.ops, 'ops');
-  const svc = cat.consumes.web.find((c) => c.kind === 'service');
-  assert.deepEqual([svc.entry, svc.toMember], [null, 'ops'], 'the host names the one member whose claim counts');
-});
-
-test('static resolution: exact norm in one other member → entry; a URL key resolves by norm', () => {
-  const byNorm = Object.fromEntries(cat.consumes.web.map((c) => [c.norm, c]));
-  assert.deepEqual([byNorm['pkg:npm:@acme/billing'].entry, byNorm['pkg:npm:@acme/billing'].toMember], [PKG, 'billing-api']);
-  assert.deepEqual([byNorm['pkg:npm:react'].entry, byNorm['pkg:npm:react'].toMember], [null, null]);
-  assert.deepEqual([byNorm['http:GET /invoices/{}'].entry, byNorm['http:GET /invoices/{}'].source], [HTTP, 'survey']);
-});
-
-test('candidate scan: literal / path hits, test files and statically resolved entries skipped', () => {
-  assert.deepEqual(cat.candidates.web, [
-    { entry: TOPIC, file: 'src/api.ts', line: 3, match: 'orders.created', via: 'literal' },
-    { entry: TOPIC, file: 'src/more.ts', line: 1, match: 'orders.created', via: 'literal' },
-    { entry: TOPIC, file: 'src/more.ts', line: 2, match: 'orders.created', via: 'literal' },
-    { entry: TOPIC, file: 'src/more.ts', line: 3, match: 'orders.created', via: 'literal' },
+test('the shared catalog: survey facts verified, entries, alias index, static resolution and candidate hits', async () => {
+  await checkRows([
+    { name: 'survey facts are verified: re-anchored, or rejected with a reason (D4)', run: () => {
+      const topic = cat.entries.find((e) => e.id === TOPIC);
+      assert.deepEqual(topic.evidence, [{ file: 'src/routes.ts', line: 4, match: "topic: 'orders.created'" }], 'line 1 re-anchored to 4');
+      assert.deepEqual(topic.sources, ['survey']);
+      const reasons = cat.rejected.map((r) => `${r.member}: ${r.reason}`);
+      assert.ok(reasons.includes('billing-api: match not found'), reasons.join('\n'));
+      assert.ok(reasons.includes('billing-api: members.billing-api.provides[3]: file must be member-relative'), reasons.join('\n'));
+      assert.ok(reasons.includes('ghost: members.ghost: unknown member'), reasons.join('\n'));
+      assert.ok(!cat.entries.some((e) => e.norm.includes('/ghost') || e.norm.includes('/escape')));
+    } },
+    { name: 'entries: provides only, non-test, stable ids, terms, sorted', run: () => {
+      assert.deepEqual(cat.entries.map((e) => e.id), [HTTP, PKG, TOPIC, entryId('web', 'pkg', 'pkg:npm:@acme/web')]);
+      const http = cat.entries.find((e) => e.id === HTTP);
+      assert.deepEqual([http.member, http.kind, http.display, http.terms], ['billing-api', 'http', 'GET /invoices/:id', ['/invoices']]);
+      assert.deepEqual(cat.entries.map((e) => e.confidence), [null, 'exact', null, 'exact'], 'a static provide carries its confidence; a survey-only one none');
+    } },
+    { name: 'alias index: a survey alias counts only for a member whose needs list aliases, so `api` names ops alone', run: () => {
+      assert.deepEqual(cat.ambiguousAliases, {}, 'billing-api is partial (its needs do not list aliases): its survey alias `api` is no claim');
+      assert.equal(cat.aliasIndex.api, 'ops');
+      assert.equal(cat.aliasIndex.billing, 'billing-api');
+      assert.equal(cat.aliasIndex['@acme/web'], 'web');
+      assert.equal(cat.aliasIndex.ops, 'ops');
+      const svc = cat.consumes.web.find((c) => c.kind === 'service');
+      assert.deepEqual([svc.entry, svc.toMember], [null, 'ops'], 'the host names the one member whose claim counts');
+    } },
+    { name: 'static resolution: exact norm in one other member → entry; a URL key resolves by norm', run: () => {
+      const byNorm = Object.fromEntries(cat.consumes.web.map((c) => [c.norm, c]));
+      assert.deepEqual([byNorm['pkg:npm:@acme/billing'].entry, byNorm['pkg:npm:@acme/billing'].toMember], [PKG, 'billing-api']);
+      assert.deepEqual([byNorm['pkg:npm:react'].entry, byNorm['pkg:npm:react'].toMember], [null, null]);
+      assert.deepEqual([byNorm['http:GET /invoices/{}'].entry, byNorm['http:GET /invoices/{}'].source], [HTTP, 'survey']);
+    } },
+    { name: 'candidate scan: literal / path hits, test files and statically resolved entries skipped', run: () => {
+      assert.deepEqual(cat.candidates.web, [
+        { entry: TOPIC, file: 'src/api.ts', line: 3, match: 'orders.created', via: 'literal' },
+        { entry: TOPIC, file: 'src/more.ts', line: 1, match: 'orders.created', via: 'literal' },
+        { entry: TOPIC, file: 'src/more.ts', line: 2, match: 'orders.created', via: 'literal' },
+        { entry: TOPIC, file: 'src/more.ts', line: 3, match: 'orders.created', via: 'literal' },
+      ]);
+      assert.deepEqual(cat.candidates.ops, [{ entry: HTTP, file: 'scripts/smoke.js', line: 1, match: 'https://billing.internal/api/invoices/42', via: 'path' }]);
+      assert.deepEqual(cat.candidates['billing-api'], []);
+    } },
   ]);
-  assert.deepEqual(cat.candidates.ops, [{ entry: HTTP, file: 'scripts/smoke.js', line: 1, match: 'https://billing.internal/api/invoices/42', via: 'path' }]);
-  assert.deepEqual(cat.candidates['billing-api'], []);
 });
 
 test('candidate caps: per entry and per member', async () => {

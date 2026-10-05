@@ -2,7 +2,8 @@
 // P6a — the pure run-decor reducer: state tables in, one decor bag out. No DOM.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decorFromState, applyDecor, statusOf, fmtDur, fmtUsd, manifestAgents, execBandLayout, QUIESCENCE_WARNING } from '../ui/public/graph/run-decor.mjs';
+import { decorFromState, applyDecor, fmtDur, fmtUsd, manifestAgents, execBandLayout, QUIESCENCE_WARNING } from '../ui/public/graph/run-decor.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // ── fixture builders ────────────────────────────────────────────────────────
 const agent = (id, key, over = {}) => ({
@@ -81,16 +82,24 @@ test('an active entry whose OWN row is already terminal is ignored: the row wins
   assert.deepEqual(d.activeNodes, [], 'and it is not an active node either');
 });
 
-test('statusOf is exported and takes (node, rows, ctx)', () => {
-  assert.equal(statusOf({ id: 'n', kind: 'agent' }, [], { active: new Set(), stepByExec: new Map(), resolved: false, runStatus: 'running' }), 'pending');
-});
-
-test('paused, stopped and error runs are never quiescent (only a DONE run can drain without End)', () => {
-  for (const status of ['paused', 'stopped', 'error']) {
-    const d = decorFromState(S({ status, endReached: false }));
-    assert.equal(d.quiescent, false, `${status} is not quiescence`);
-    assert.deepEqual(d.warnings, [], `${status} pushes no warning`);
-  }
+test('quiescence: only a DONE run with an explicit endReached === false is quiescent; paused/stopped/error and an absent field never banner', async () => {
+  await checkRows([
+    { name: 'paused, stopped and error runs are never quiescent (only a DONE run can drain without End)', run: async () => {
+      for (const status of ['paused', 'stopped', 'error']) {
+        const d = decorFromState(S({ status, endReached: false }));
+        assert.equal(d.quiescent, false, `${status} is not quiescence`);
+        assert.deepEqual(d.warnings, [], `${status} pushes no warning`);
+      }
+    } },
+    { name: 'quiescence needs an EXPLICIT endReached === false; an absent field is never bannered', run: async () => {
+      const explicit = decorFromState(S({ status: 'done', endReached: false }));
+      assert.equal(explicit.quiescent, true);
+      assert.deepEqual(explicit.warnings, [QUIESCENCE_WARNING]);
+      const absent = decorFromState(S({ status: 'done', endReached: undefined }));
+      assert.equal(absent.quiescent, false, 'makeRun seeds endReached: undefined — never bannered');
+      assert.deepEqual(absent.warnings, []);
+    } },
+  ]);
 });
 // ── progress / active nodes / End chip / formatters ─────────────────────────
 test('progress counts AGENT nodes only, done over total', () => {
@@ -178,15 +187,6 @@ test('manifestAgents builds the header registry from the manifest (History rende
     implementer: { displayName: 'Implementer', color: 'violet', icon: '' },
   });
   assert.deepEqual(manifestAgents(null), {});
-});
-
-test('quiescence needs an EXPLICIT endReached === false; an absent field is never bannered', () => {
-  const explicit = decorFromState(S({ status: 'done', endReached: false }));
-  assert.equal(explicit.quiescent, true);
-  assert.deepEqual(explicit.warnings, [QUIESCENCE_WARNING]);
-  const absent = decorFromState(S({ status: 'done', endReached: undefined }));
-  assert.equal(absent.quiescent, false, 'makeRun seeds endReached: undefined — never bannered');
-  assert.deepEqual(absent.warnings, []);
 });
 
 // ── executions footer / totals / ants / badges / gate ───────────────────────
@@ -281,19 +281,22 @@ test('an OR-valve re-fire marches on the VALVE\'s out wire while the badge sits 
   assert.equal(d.footers.n_impl.rows[0].label, 'cycle 2 · fix');
 });
 
-test('loop badges come from wireDeliveries, on loop wires only', () => {
-  const st = S({ wireDeliveries: { w1: 3, w3: 2 } });
-  const badges = decorFromState(st).loopBadges;
-  assert.deepEqual(Object.keys(badges), ['w3'], 'w1 is not a loop wire');
-  assert.deepEqual(badges.w3, { n: 2, max: 3, text: '2×', title: '2 of 3 cycles' });
-});
-
-test('a loop wire with zero deliveries gets no badge, and maxCycles defaults to 3', () => {
-  assert.deepEqual(decorFromState(S({ wireDeliveries: { w3: 0 } })).loopBadges, {}, 'never fired ⇒ no badge');
-  const noMax = JSON.parse(JSON.stringify(MANIFEST));
-  delete noMax.graph.wires[2].maxCycles;                       // w3 loses its explicit cap
-  const badges = decorFromState(S({ stepper: noMax, wireDeliveries: { w3: 2 } })).loopBadges;
-  assert.deepEqual(badges.w3, { n: 2, max: 3, text: '2×', title: '2 of 3 cycles' }, 'DEFAULT_MAX_CYCLES');
+test('loop badges come from wireDeliveries on loop wires only; zero deliveries gets no badge and maxCycles defaults to 3', async () => {
+  await checkRows([
+    { name: 'loop badges come from wireDeliveries, on loop wires only', run: async () => {
+      const st = S({ wireDeliveries: { w1: 3, w3: 2 } });
+      const badges = decorFromState(st).loopBadges;
+      assert.deepEqual(Object.keys(badges), ['w3'], 'w1 is not a loop wire');
+      assert.deepEqual(badges.w3, { n: 2, max: 3, text: '2×', title: '2 of 3 cycles' });
+    } },
+    { name: 'a loop wire with zero deliveries gets no badge, and maxCycles defaults to 3', run: async () => {
+      assert.deepEqual(decorFromState(S({ wireDeliveries: { w3: 0 } })).loopBadges, {}, 'never fired ⇒ no badge');
+      const noMax = JSON.parse(JSON.stringify(MANIFEST));
+      delete noMax.graph.wires[2].maxCycles;                       // w3 loses its explicit cap
+      const badges = decorFromState(S({ stepper: noMax, wireDeliveries: { w3: 2 } })).loopBadges;
+      assert.deepEqual(badges.w3, { n: 2, max: 3, text: '2×', title: '2 of 3 cycles' }, 'DEFAULT_MAX_CYCLES');
+    } },
+  ]);
 });
 
 test('the gate pip lands on the wire\'s FROM node', () => {

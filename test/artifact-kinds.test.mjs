@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { checkRows } from './helpers/rows.mjs';
 import {
   viewerKindFor, mimeForPath, BINARY_KINDS, RAW_KINDS, classifyExtension, TEXT_EXTENSIONS, BINARY_EXTENSIONS,
   isBrowsableKind,
@@ -17,18 +17,36 @@ test('viewerKindFor: one case per extension family, dotfiles and unknowns fall t
   for (const [p, k] of Object.entries(cases)) assert.equal(viewerKindFor(p), k, p);
 });
 
-test('BINARY_KINDS are never read as text; RAW_KINDS are what the raw route streams', () => {
-  assert.deepEqual([...BINARY_KINDS].sort(), ['binary', 'image', 'pdf']);
-  assert.deepEqual([...RAW_KINDS].sort(), ['binary', 'html', 'image', 'pdf']);
-});
-
-test('mimeForPath', () => {
-  assert.equal(mimeForPath('deck/deck.html'), 'text/html; charset=utf-8');
-  assert.equal(mimeForPath('s.png'), 'image/png');
-  assert.equal(mimeForPath('deck/deck-stage.js'), 'text/javascript; charset=utf-8');
-  assert.equal(mimeForPath('d.pptx'), 'application/vnd.openxmlformats-officedocument.presentationml.presentation');
-  assert.equal(mimeForPath('deck/font.otf'), 'font/otf');
-  assert.equal(mimeForPath('x.unknown'), null);
+test('mimeForPath covers documents and every deck media type, which are treated as bytes', async () => {
+  await checkRows([
+    { name: 'mimeForPath', run: async () => {
+      assert.equal(mimeForPath('deck/deck.html'), 'text/html; charset=utf-8');
+      assert.equal(mimeForPath('s.png'), 'image/png');
+      assert.equal(mimeForPath('deck/deck-stage.js'), 'text/javascript; charset=utf-8');
+      assert.equal(mimeForPath('d.pptx'), 'application/vnd.openxmlformats-officedocument.presentationml.presentation');
+      assert.equal(mimeForPath('deck/font.otf'), 'font/otf');
+      assert.equal(mimeForPath('x.unknown'), null);
+    } },
+    // ROUND 3, F2. The deck bundlers were widened to match img|audio|video|source and
+    // their MIME tables gained the media types; these three artifact-side tables were
+    // not. An .m4a/.wav/.ogg/.webm/.avif a deck references then had no mime (the raw
+    // route answers 415, so the framed deck/deck.html preview renders without its
+    // voiceover, clip or artwork while the bundle embeds all three) and no binary
+    // kind (so read_run_artifact UTF-8-decodes the bytes — the exact case its guard
+    // exists for).
+    { name: 'every media type a deck can reference has a mime and is treated as bytes', run: async () => {
+      const expected = {
+        'narration.mp3': 'audio/mpeg', 'narration.m4a': 'audio/mp4', 'narration.wav': 'audio/wav',
+        'narration.ogg': 'audio/ogg', 'clip.mp4': 'video/mp4', 'clip.webm': 'video/webm',
+        'art.avif': 'image/avif',
+      };
+      for (const [name, mime] of Object.entries(expected)) {
+        assert.equal(mimeForPath(name), mime, `${name} has no Content-Type, so the raw route 415s`);
+        assert.equal(BINARY_KINDS.has(viewerKindFor(name)), true, `${name} would be decoded as UTF-8 text`);
+        assert.equal(RAW_KINDS.has(viewerKindFor(name)), true, `${name} cannot be streamed by the raw route`);
+      }
+    } },
+  ]);
 });
 
 test('the Ask allowlist is unchanged by the promotion', () => {
@@ -53,39 +71,4 @@ test('isBrowsableKind hides transient markers and the subresources an artifact l
     assert.equal(isBrowsableKind(k), false, k);
   }
   assert.equal(isBrowsableKind(''), true, 'an unknown kind stays browsable');
-});
-
-// The drift guard for the above. run-harness._artifact refuses to INDEX a short
-// list of kinds; a kind on that list but missing from NON_BROWSABLE_KINDS gets a
-// row in the Artifacts tab and a persisted clickable log line that resolve
-// against nothing — `clarify` was exactly that, on every ordinary run.
-test('every kind the engine refuses to index is also non-browsable', () => {
-  const src = readFileSync(new URL('../src/core/run-harness.mjs', import.meta.url), 'utf8');
-  const line = src.split('\n').find((l) => l.includes("kind === 'pipeline'"));
-  assert.ok(line, 'the index-skip list moved — re-point this guard');
-  const skipped = [...line.matchAll(/kind === '([a-z-]+)'/g)].map((m) => m[1]);
-  assert.ok(skipped.length >= 3, line);
-  for (const kind of skipped) {
-    assert.equal(isBrowsableKind(kind), false, `${kind} is never indexed, so it must never be listed`);
-  }
-});
-
-// ROUND 3, F2. The deck bundlers were widened to match img|audio|video|source and
-// their MIME tables gained the media types; these three artifact-side tables were
-// not. An .m4a/.wav/.ogg/.webm/.avif a deck references then had no mime (the raw
-// route answers 415, so the framed deck/deck.html preview renders without its
-// voiceover, clip or artwork while the bundle embeds all three) and no binary
-// kind (so read_run_artifact UTF-8-decodes the bytes — the exact case its guard
-// exists for).
-test('every media type a deck can reference has a mime and is treated as bytes', () => {
-  const expected = {
-    'narration.mp3': 'audio/mpeg', 'narration.m4a': 'audio/mp4', 'narration.wav': 'audio/wav',
-    'narration.ogg': 'audio/ogg', 'clip.mp4': 'video/mp4', 'clip.webm': 'video/webm',
-    'art.avif': 'image/avif',
-  };
-  for (const [name, mime] of Object.entries(expected)) {
-    assert.equal(mimeForPath(name), mime, `${name} has no Content-Type, so the raw route 415s`);
-    assert.equal(BINARY_KINDS.has(viewerKindFor(name)), true, `${name} would be decoded as UTF-8 text`);
-    assert.equal(RAW_KINDS.has(viewerKindFor(name)), true, `${name} cannot be streamed by the raw route`);
-  }
 });

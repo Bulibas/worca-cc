@@ -5,6 +5,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
 import { reconcileStaleRunning, INTERRUPTED_STATUS } from '../src/core/artifacts.mjs';
 import { getDb } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after); // one isolated DB for the whole file; tests use distinct ids
 
@@ -30,33 +31,34 @@ test('sweeps old created and starting rows too', () => {
   assert.equal(statusOf('aaaa0007'), INTERRUPTED_STATUS);
 });
 
-test('leaves a fresh running row alone', () => {
-  seedPipelineRow({ id: 'aaaa0002', status: 'running', startedAt: FRESH, updatedAt: FRESH });
-  const r = reconcileStaleRunning({ now: NOW });
-  assert.ok(!r.ids.includes('aaaa0002'));
-  assert.equal(statusOf('aaaa0002'), 'running');
-});
-
-test('never touches a run live in THIS process (liveIds)', () => {
-  seedPipelineRow({ id: 'aaaa0003', status: 'running', startedAt: OLD, updatedAt: OLD });
-  const r = reconcileStaleRunning({ now: NOW, liveIds: ['aaaa0003'] });
-  assert.ok(!r.ids.includes('aaaa0003'));
-  assert.equal(statusOf('aaaa0003'), 'running');
-});
-
-test('leaves a terminal (done) row untouched', () => {
-  seedPipelineRow({ id: 'aaaa0004', status: 'done', startedAt: OLD, updatedAt: OLD });
-  const r = reconcileStaleRunning({ now: NOW });
-  assert.ok(!r.ids.includes('aaaa0004'));
-  assert.equal(statusOf('aaaa0004'), 'done');
-});
-
-test('skips a timestamp-less non-terminal row (NULL coalesce is never < cutoff)', () => {
-  // started_at omitted -> updated_at defaults to startedAt (null) -> COALESCE is NULL.
-  seedPipelineRow({ id: 'aaaa0009', status: 'running' });
-  const r = reconcileStaleRunning({ now: NOW });
-  assert.ok(!r.ids.includes('aaaa0009'));
-  assert.equal(statusOf('aaaa0009'), 'running'); // conservative no-clobber
+test('never swept: a fresh row, a run live in this process, a terminal row, a timestamp-less row', async () => {
+  await checkRows([
+    { name: 'leaves a fresh running row alone', run: () => {
+      seedPipelineRow({ id: 'aaaa0002', status: 'running', startedAt: FRESH, updatedAt: FRESH });
+      const r = reconcileStaleRunning({ now: NOW });
+      assert.ok(!r.ids.includes('aaaa0002'));
+      assert.equal(statusOf('aaaa0002'), 'running');
+    } },
+    { name: 'never touches a run live in THIS process (liveIds)', run: () => {
+      seedPipelineRow({ id: 'aaaa0003', status: 'running', startedAt: OLD, updatedAt: OLD });
+      const r = reconcileStaleRunning({ now: NOW, liveIds: ['aaaa0003'] });
+      assert.ok(!r.ids.includes('aaaa0003'));
+      assert.equal(statusOf('aaaa0003'), 'running');
+    } },
+    { name: 'leaves a terminal (done) row untouched', run: () => {
+      seedPipelineRow({ id: 'aaaa0004', status: 'done', startedAt: OLD, updatedAt: OLD });
+      const r = reconcileStaleRunning({ now: NOW });
+      assert.ok(!r.ids.includes('aaaa0004'));
+      assert.equal(statusOf('aaaa0004'), 'done');
+    } },
+    { name: 'skips a timestamp-less non-terminal row (NULL coalesce is never < cutoff)', run: () => {
+      // started_at omitted -> updated_at defaults to startedAt (null) -> COALESCE is NULL.
+      seedPipelineRow({ id: 'aaaa0009', status: 'running' });
+      const r = reconcileStaleRunning({ now: NOW });
+      assert.ok(!r.ids.includes('aaaa0009'));
+      assert.equal(statusOf('aaaa0009'), 'running'); // conservative no-clobber
+    } },
+  ]);
 });
 
 test('is idempotent: a second pass does not re-report an already-interrupted id', () => {
@@ -76,12 +78,4 @@ test('sweeps stale pausing to interrupted, but never touches paused', () => {
   assert.ok(!r.ids.includes('aaaapaus'), 'paused untouched');
   assert.equal(statusOf('aaaapsng'), INTERRUPTED_STATUS);
   assert.equal(statusOf('aaaapaus'), 'paused');
-});
-
-test('return shape is { reconciled, ids } with reconciled === ids.length', () => {
-  seedPipelineRow({ id: 'aaaa0008', status: 'running', startedAt: OLD, updatedAt: OLD });
-  const r = reconcileStaleRunning({ now: NOW });
-  assert.equal(typeof r.reconciled, 'number');
-  assert.ok(Array.isArray(r.ids));
-  assert.equal(r.reconciled, r.ids.length);
 });

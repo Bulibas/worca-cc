@@ -10,10 +10,10 @@
 //   1. the STRUCTURAL audit — the writer switch's case labels and the
 //      MOCK_WRITER_ROLES export are the same set, and the 14 builtin sidecars pin
 //      roles that already exist in it;
-//   2. the BEHAVIOURAL audit — real graphs run to completion offline. Every seed
-//      graph and the graph default terminate because the mock verdicts get less
-//      severe each cycle, an ALL-CUSTOM graph reaches its End card with agents the
-//      engine has never heard of, and no flow card ever spawns a runner.
+//   2. the BEHAVIOURAL audit — real graphs run to completion offline. An ALL-CUSTOM
+//      graph reaches its End card with agents the engine has never heard of, and a
+//      verifier that writes no verdict passes loudly. Every seed graph and the graph
+//      default terminating under the mock is pinned by the seed-traces goldens.
 //
 // GENERICITY: the all-custom case is the load-bearing one. Every key in it is a user
 // sidecar, so if any part of the chain ever keys off a builtin agent name, that test
@@ -28,19 +28,12 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { runGraphOffline } from './helpers/graph-run.mjs';
 import { MOCK_WRITER_ROLES, MOCK_ROLE_CLARIFY, MOCK_ROLE_DECOMPOSER, runClaude, memoryDirsFromPrompt } from '../src/core/claude-runner.mjs';
 import { renderMemoryBlock } from '../src/core/memory-store.mjs';
-import { QUIESCENCE_WARNING, quiescenceDeadEnd } from '../src/core/graph/scheduler.mjs';
-import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
-import { registryPortsFn } from '../src/core/graph/registry-ports.mjs';
-import { SEED_TEMPLATES } from '../src/core/graph/seed-templates.mjs';
-import { GRAPH_DEFAULT_WORKFLOW } from '../src/core/graph/builtin-workflows.mjs';
 import { flowPorts } from '../src/shared/graph/ports.mjs';
 import { AWAIT_PORT } from '../src/shared/graph/constants.mjs';
 
 useTempHome(after);
 const REPO = fileURLToPath(new URL('..', import.meta.url));
 const AGENTS_DIR = join(REPO, 'agents');
-const REGISTRY = loadAgentRegistry(AGENTS_DIR, { userAgentsDir: null, includePlugins: false });
-const portsFn = registryPortsFn(REGISTRY);
 
 const scratch = [];
 const tmp = (p) => { const d = mkdtempSync(join(tmpdir(), p)); scratch.push(d); return d; };
@@ -158,51 +151,9 @@ test('memory-defrag mock: the "nothing to merge" boundary is ONE file — two fi
 
 // ── 2. behavioural audit: whole graphs, offline ──────────────────────────────
 
-const GRAPHS = [...SEED_TEMPLATES, GRAPH_DEFAULT_WORKFLOW];
-
-/** Seeds whose graph cannot reach End under the mock BY DESIGN: `wf_no-clarify`
- *  leaves webui.review unwired (its v1 row had no webui feedback), the webui mock
- *  blocks at ordinal 1, so the run quiesces with the §3 warning. */
-const QUIESCENT = new Set(['wf_no-clarify']);
-
 const clarifyAnswer = (a) => (a.kind === 'gate'
   ? 'continue'
   : { answers: (a.questions || []).map((q) => ({ id: q.id, choice: (q.options || ['ok'])[0] })) });
-
-for (const tpl of GRAPHS) {
-  test(`${tpl.id} completes offline${QUIESCENT.has(tpl.id) ? ' (quiesces by design)' : ' and reaches its End card'}`, { timeout: 120000 }, async () => {
-    const r = await runGraphOffline({
-      template: tpl, portsFn, registry: REGISTRY,
-      projectDir: tmp('worca-mockgraph-proj-'), pipelineDir: tmp('worca-mockgraph-pipe-'),
-      answer: clarifyAnswer,
-    });
-    assert.equal(r.result, 'done', `${tpl.id}: the run resolves done`);
-    if (QUIESCENT.has(tpl.id)) {
-      assert.equal(r.state.endReached, false, `${tpl.id}: webui blocks once and has no loop wire`);
-      assert.equal(r.state.result, null);
-      // wf_no-clarify's n_webui.review is deliberately unwired (v1 parity, user
-      // decision — the seed stays single-loop). MIN-58: the run now SAYS so instead
-      // of leaving "End not reached" unexplained.
-      assert.deepEqual(r.state.warnings,
-        [QUIESCENCE_WARNING, quiescenceDeadEnd(['n_webui.review'])]);
-    } else {
-      assert.equal(r.state.endReached, true, `${tpl.id}: a token reached End`);
-      assert.ok(r.state.result, `${tpl.id}: the End card carries a result`);
-      assert.deepEqual(r.state.warnings, [], `${tpl.id}: no quiescence warning`);
-    }
-    // Every loop closed at ordinal 2 (the verifier mocks' `cycle <= 1` gate), so no
-    // wire ever hit its budget and no gate was ever raised.
-    assert.equal(r.events.some((e) => e.name === 'gate'), false, `${tpl.id}: no gate was needed`);
-    for (const [wireId, n] of Object.entries(r.state.wireDeliveries)) {
-      assert.ok(n <= 1, `${tpl.id}: ${wireId} delivered ${n} times (loops close at ordinal 2)`);
-    }
-    // No flow card ever spawned a runner.
-    const flowExecs = r.events.filter((e) => e.name === 'exec' && e.agentKey === null && e.status === 'done');
-    assert.ok(flowExecs.length > 0, `${tpl.id}: flow cards executed`);
-    // Every agent row ended `done` — the mock never pauses or errors.
-    assert.ok(r.events.filter((e) => e.name === 'exec' && e.status === 'error').length === 0, `${tpl.id}: no error rows`);
-  });
-}
 
 test('an ALL-CUSTOM graph completes offline through the generic chain alone', { timeout: 60000 }, async () => {
   const CUSTOM = {

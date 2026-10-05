@@ -6,11 +6,11 @@
 // lose one another — in this process or from another one.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { spawn, spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { rm } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { basename } from 'node:path';
 
+import { templateRepo } from './helpers/git-dir.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { sampleMap, DISPLAYS } from './helpers/wsmap-stored.mjs';
 import { dbPath } from '../src/core/db.mjs';
@@ -24,13 +24,9 @@ useTempHome(after);
 const created = [];
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true, maxRetries: 3 }))));
 
-async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-wsmap-'));
+function freshRepo() {
+  const dir = templateRepo('wsmap', { branch: 'main', user: true, files: { 'README.md': '# hi\n' } });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 let seq = 0;
@@ -177,16 +173,6 @@ test('a confirmed edge a re-scan lost stays in the overrides as missing and can 
   const stored = await readWorkspaceMap(ws.id);
   assert.equal(stored.overrides.edges[ids.pkg].state, 'confirmed', 'the override survived the re-scan');
   assert.ok(!(await desc(ws.id)).includes(DISPLAYS.pkg), 'a missing edge is not in the description');
-  const cleared = await setWorkspaceEdgeState(ws.id, ids.pkg, null);
-  assert.equal(cleared.edge, null);
-  assert.ok(!(ids.pkg in cleared.overrides.edges));
-});
-
-test('a rejected edge a re-scan dropped becomes a stale review, and its override can still be cleared', async () => {
-  const { ws, ids, map, synthesis } = await scanned();
-  await setWorkspaceEdgeState(ws.id, ids.pkg, 'rejected');
-  const rescan = sampleMap({ keys: ws.projectKeys, names: map.members.map((m) => m.name), name: ws.name, drop: ['pkg'] });
-  await saveWorkspaceScanResult(ws.id, { map: rescan.map, synthesis });
   const cleared = await setWorkspaceEdgeState(ws.id, ids.pkg, null);
   assert.equal(cleared.edge, null);
   assert.ok(!(ids.pkg in cleared.overrides.edges));

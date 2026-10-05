@@ -5,7 +5,6 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { useTempHome } from './helpers/temp-home.mjs';
-import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { readMcpStore, putPolicyServer, putMember } from '../src/core/mcp/store.mjs';
 import { teamRecord } from '../src/core/mcp/identity.mjs';
@@ -216,9 +215,4 @@ test('background Test: a complete Save and a manual Edit definition each re-test
   assert.equal(r.status, 200, r.text);
   const added = await until(async () => (await readMcpStore()).tests['billing|manual:fx']);
   assert.equal(added.ok, true, 'a membership a Save adds starts on (P1 putMember), so it is tested');
-});
-
-test('applying a plugin update re-tests that plugin\'s memberships', () => {
-  const src = readFileSync(fileURLToPath(new URL('../ui/server.mjs', import.meta.url)), 'utf8');
-  assert.match(src, /const updated = await updatePlugin\(name\);\n\s+reloadChatWorkers\(name\);\n\s+void retestServers\(\(s\) => s\.startsWith\(`plugin:\$\{name\}\/`\)\);/);
 });

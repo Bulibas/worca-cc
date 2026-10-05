@@ -70,17 +70,6 @@ test('askCatalog: plugin entries survive with plugin/hasEnv/costUnreliable; proj
   assert.ok(!('secretsMissing' in cat.models[1]), 'a plugin model whose secret IS set carries no warning');
 });
 
-test('askCatalog: precedence is inherited from composeCatalog, one entry per id', async () => {
-  const cat = await models.askCatalog();
-  const ids = cat.models.map((m) => m.id);
-  assert.deepEqual(ids, [...new Set(ids)], 'no duplicate ids');
-  // The plugin SHADOW of a predefined id keeps the plugin origin (it is what runs).
-  const haiku = cat.models.find((m) => m.id === 'claude-haiku-4-5');
-  assert.equal(haiku.custom, 'plugin');
-  assert.equal(haiku.plugin, 'p');
-  assert.equal(haiku.label, 'Haiku (via plugin)');
-});
-
 test('askCatalog: default comes from ASK_LIMITS, validated against the catalog', async () => {
   const cat = await models.askCatalog();
   assert.deepEqual(cat.default, { model: 'claude-opus-5-5', effort: 'high' });

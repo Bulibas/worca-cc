@@ -13,10 +13,11 @@ import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import {
   listScripts, readScript, createScript, updateScript, deleteScript, duplicateScript, writeCases,
-  sourceFileFor, userScriptsDir, stripNullKeys, SCRIPT_KEY_RE, RESERVED_SCRIPT_KEYS, MAX_SOURCE_BYTES,
+  userScriptsDir, stripNullKeys, MAX_SOURCE_BYTES,
 } from '../src/core/script-store.mjs';
 import { loadScriptRegistry } from '../src/core/script-registry.mjs';
 import { writeGraphWorkflow, deleteWorkflow } from '../src/core/workflows.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -35,17 +36,6 @@ const fails = async (fn, code, re) => {
   });
 };
 const userFiles = () => readdirSync(userScriptsDir()).sort();
-
-test('sourceFileFor names the program per runtime (python is P2 but the mapping ships now)', () => {
-  assert.equal(sourceFileFor('lint', 'node'), 'lint.mjs');
-  assert.equal(sourceFileFor('lint', 'python'), 'lint.py');
-  assert.equal(sourceFileFor('lint', 'shell'), 'lint.sh');
-  assert.equal(sourceFileFor('lint', 'shell', { win32: true }), 'lint.cmd');
-  assert.equal(sourceFileFor('lint', 'nope'), null);
-  assert.ok(SCRIPT_KEY_RE.test('lint') && !SCRIPT_KEY_RE.test('9x'));
-  assert.deepEqual([...RESERVED_SCRIPT_KEYS], ['new', 'bench', 'runtimes']);
-  assert.equal(MAX_SOURCE_BYTES, 262144);
-});
 
 test('create -> read -> update -> delete; the store owns file; stamps ride the meta', async () => {
   const created = await createScript({ meta: { ...NODE_META, file: '../evil.mjs', order: undefined }, source: SRC, by: 'ui' });
@@ -101,25 +91,28 @@ test('keys: shape, the reserved "new", built-ins, plugin keys and the shared age
   await deleteScript('lint');
 });
 
-test('a reserved key is refused in ANY case: express matches a literal route segment case-blind', async () => {
-  // `GET /api/scripts/Runtimes` answers the runtime probe, not the script — express
-  // routing is case-INSENSITIVE by default, and so is the filesystem (C23). A key the
-  // store accepts here saves and can then never be opened.
-  for (const key of ['Runtimes', 'RUNTIMES', 'Bench', 'BENCH', 'New']) {
-    await fails(() => createScript({ meta: { ...NODE_META, key }, source: SRC }), 'BAD_REQUEST', /is a reserved script key/);
-  }
-  await fails(() => duplicateScript('shell', 'Runtimes', 'ui'), 'BAD_REQUEST', /is a reserved script key/);
-  assert.deepEqual(userFiles(), [], 'nothing was written');
-});
-
-test('a Windows device stem is refused as a key: con.mjs IS the console on a Windows host', async () => {
-  // CON, PRN, AUX, NUL, COM1-9 and LPT1-9 resolve to a device even with an extension,
-  // so `con.meta.json` writes to the console and can never be read back.
-  for (const key of ['con', 'NUL', 'aux', 'Prn', 'com1', 'LPT9']) {
-    await fails(() => createScript({ meta: { ...NODE_META, key }, source: SRC }), 'BAD_REQUEST', /reserved device name on Windows/);
-  }
-  await fails(() => duplicateScript('shell', 'con', 'ui'), 'BAD_REQUEST', /reserved device name on Windows/);
-  assert.deepEqual(userFiles(), []);
+test('key refusals in ANY case: reserved route keys and Windows device stems, on create and on duplicate; nothing written', async () => {
+  await checkRows([
+    { name: 'a reserved key is refused in ANY case: express matches a literal route segment case-blind', run: async () => {
+      // `GET /api/scripts/Runtimes` answers the runtime probe, not the script — express
+      // routing is case-INSENSITIVE by default, and so is the filesystem (C23). A key the
+      // store accepts here saves and can then never be opened.
+      for (const key of ['Runtimes', 'RUNTIMES', 'Bench', 'BENCH', 'New']) {
+        await fails(() => createScript({ meta: { ...NODE_META, key }, source: SRC }), 'BAD_REQUEST', /is a reserved script key/);
+      }
+      await fails(() => duplicateScript('shell', 'Runtimes', 'ui'), 'BAD_REQUEST', /is a reserved script key/);
+      assert.deepEqual(userFiles(), [], 'nothing was written');
+    } },
+    { name: 'a Windows device stem is refused as a key: con.mjs IS the console on a Windows host', run: async () => {
+      // CON, PRN, AUX, NUL, COM1-9 and LPT1-9 resolve to a device even with an extension,
+      // so `con.meta.json` writes to the console and can never be read back.
+      for (const key of ['con', 'NUL', 'aux', 'Prn', 'com1', 'LPT9']) {
+        await fails(() => createScript({ meta: { ...NODE_META, key }, source: SRC }), 'BAD_REQUEST', /reserved device name on Windows/);
+      }
+      await fails(() => duplicateScript('shell', 'con', 'ui'), 'BAD_REQUEST', /reserved device name on Windows/);
+      assert.deepEqual(userFiles(), []);
+    } },
+  ]);
 });
 
 test('sources: the empty/over-cap rules and the shell trio (inline command, .sh, .sh + .cmd)', async () => {

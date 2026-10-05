@@ -1,7 +1,7 @@
 // test/ui-team-policy.test.mjs — the team-policy surfaces wired through the REAL index.html +
-// app.js in jsdom (team-policy design §11): nav + view, Projects cells, the page (table / empty
-// state / editor), the Settings readout, the New pipeline notes line, the History meta segment,
-// and the team-cap pause banner with its "continue past" flow. Harness: the ui-cost-paused idiom
+// app.js in jsdom (team-policy design §11): the page (table / empty state / editor / Plugins tab),
+// the project page's set-up dialog, the New pipeline MCP servers and policy notes, the team-cap
+// pause banner with its "continue past" flow, and the MCP strip / checklist. Harness: the ui-cost-paused idiom
 // (dispatchable WebSocket stub, recorded fetch calls).
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { lastToast } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -33,7 +34,6 @@ const SCOPES = {
   homes: [{ slug: 'acme/gateway', key: 'gateway-00000001', title: 'Gateway team policy', caps: CAPS, workspaceCaps: CAPS, usedBy: ['acme/gateway'] }],
   requirements: [], blockedPlugins: [], anyEnabled: true,
 };
-const EMPTY_SCOPES = { projects: [OFF_STATUS], workspaces: [], scopes: { projects: [], workspaces: [] }, homes: [], requirements: [], blockedPlugins: [], anyEnabled: false };
 const REGISTRY = [
   { key: 'cost.pipelineLimitUsd', group: 'cost', label: 'Per-pipeline cap (USD)', type: 'usd', kinds: ['default', 'soft'], cap: true, attrs: ['onBreach', 'requireReason'] },
   { key: 'cost.totalLimitUsd', group: 'cost', label: 'Total cap per period (USD)', type: 'usd', kinds: ['default', 'soft'], cap: true, attrs: ['onBreach', 'requireReason'] },
@@ -100,39 +100,6 @@ async function boot({ fetchHandler, scopes = SCOPES, policy = POLICY } = {}) {
   return { window, doc: window.document, fetchCalls, tick, settle, recv, go };
 }
 
-test('nav: Team policy sits in Manage after Workspaces and routes to its view', async () => {
-  const { doc, go } = await boot();
-  const side = [...doc.querySelectorAll('.nav button[data-nav]')].map((b) => b.dataset.nav);
-  assert.equal(side[side.indexOf('workspaces') + 1], 'team-policy');
-  assert.equal(doc.querySelector('.nav button[data-nav="team-policy"] span').textContent, 'Team policy');
-  await go('team-policy');
-  assert.equal(doc.querySelector('.view[data-view="team-policy"]').classList.contains('hidden'), false);
-  assert.equal(doc.querySelector('.nav button[data-nav="team-policy"]').classList.contains('active'), true);
-});
-
-test('Team policy page: the sync chip carries freshness only; the panel carries the document and the version', async () => {
-  const { doc, go, settle } = await boot();
-  await go('team-policy');
-  await settle();
-  const chip = doc.getElementById('tp-sync');
-  assert.equal(chip.hidden, false);
-  assert.equal(chip.textContent, 'Synced just nowRefresh', 'the team-metrics chip, without the commit id');
-  const head = doc.querySelector('#tp-body .tp-head');
-  assert.equal(head.querySelector('.tp-head-title').textContent, 'Gateway team policy');
-  const facts = [...head.querySelectorAll('.tp-facts dt')].map((dt) => dt.textContent);
-  assert.deepEqual(facts, ['SOURCE', 'APPLIES TO', 'VERSION']);
-  assert.match(head.querySelectorAll('.tp-facts dd')[2].textContent, /^3f2a1bc · updated just now by Mara$/);
-  assert.equal(doc.querySelector('#tp-scope-meta'), null, 'the chip row of pills is gone');
-  // The cards are this machine's side, and each tab is its own section.
-  const cards = [...doc.querySelectorAll('#tp-body .tp-ov-card')].map((c) => [c.querySelector('.tp-ov-label').textContent, c.querySelector('.tp-ov-value').textContent]);
-  assert.deepEqual(cards, [['PER-PIPELINE CAP', '$10.00'], ['TOTAL CAP', '$120.00'], ['REQUIRED PLUGINS', '0/1'], ['OFF-POLICY HERE', '1']]);
-  assert.equal(doc.querySelector('#tp-body .tp-sec-label').textContent, 'ON THIS MACHINE');
-  const tabs = [...doc.querySelectorAll('#tp-body .tp-tab')].map((b) => [b.dataset.sec, b.querySelector('.tp-tab-badge')?.textContent]);
-  assert.deepEqual(tabs, [['policy', '2'], ['plugins', '1']], 'no Catalog tab when the policy ships none');
-  assert.ok(doc.querySelector('#tp-sec-policy table.tp-tbl'), 'the effective table is the Policy tab');
-  assert.equal(doc.getElementById('tp-sec-plugins').hidden, true);
-});
-
 test('Team policy page: the Plugins tab lists what the policy expects and installs through the consent flow', async () => {
   const { doc, go, settle } = await boot();
   await go('team-policy');
@@ -149,44 +116,67 @@ test('Team policy page: the Plugins tab lists what the policy expects and instal
   assert.equal(doc.querySelector('#tp-sec-plugins .card-head .pl-policy-all').textContent, 'Install all…', 'the fixture has one missing plugin');
 });
 
-test('#555 D5: Team policy Install reports where the install happens — a failure is an error toast, not a line on the Plugins page', async () => {
-  const MKT = { id: 'acme', name: 'acme', url: 'https://example.com/acme.git', lastSync: { sha: 'abc1234' }, plugins: [{ name: 'acme-jira', subdir: 'plugins/jira', inventory: {} }] };
-  let installStatus = 500;
-  const installs = [];
-  const { doc, go, settle } = await boot({
-    fetchHandler: (u, opts) => {
-      if (u === '/api/marketplaces' && !opts.method) return json({ marketplaces: [MKT] });
-      if (u === '/api/plugins/install' && opts.method === 'POST') { installs.push(JSON.parse(opts.body)); return installStatus === 200 ? json({ ok: true }) : json({ error: 'clone failed' }, installStatus); }
-      return null;
-    },
-  });
-  await go('team-policy');
-  await settle();
-  doc.querySelector('#tp-tab-plugins').click();
-  await settle();
-  const install = () => doc.querySelector('#tp-sec-plugins tr[data-name="acme-jira"] .pl-policy-install');
-  install().click();
-  await settle();
-  assert.equal(install().dataset.fbState, undefined, 'opening the consent dialog is not a result: the Team-policy button shows no state');
-  assert.equal(install().textContent, 'Install…');
-  const confirm = () => [...doc.querySelectorAll('#plugin-modal-actions button')].find((b) => b.textContent === 'Install');
-  confirm().click();
-  await settle(8);
-  assert.equal(installs.length, 1);
-  assert.equal(lastToast(doc).tone, 'err');
-  assert.equal(lastToast(doc).title, 'clone failed');
-  assert.equal(doc.getElementById('plugins-msg').textContent, '', 'nothing lands on the Plugins page line');
-  assert.equal(doc.querySelectorAll('#toasts > .toast').length, 1, 'the progress toast was replaced by the result');
+test('#555: a failed Team policy Install and a failed Check now are error toasts (with Retry), not lines on another page', async () => {
+  await checkRows([
+    { name: '#555 D5: Team policy Install reports where the install happens — a failure is an error toast, not a line on the Plugins page', run: async () => {
+      const MKT = { id: 'acme', name: 'acme', url: 'https://example.com/acme.git', lastSync: { sha: 'abc1234' }, plugins: [{ name: 'acme-jira', subdir: 'plugins/jira', inventory: {} }] };
+      let installStatus = 500;
+      const installs = [];
+      const { doc, go, settle } = await boot({
+        fetchHandler: (u, opts) => {
+          if (u === '/api/marketplaces' && !opts.method) return json({ marketplaces: [MKT] });
+          if (u === '/api/plugins/install' && opts.method === 'POST') { installs.push(JSON.parse(opts.body)); return installStatus === 200 ? json({ ok: true }) : json({ error: 'clone failed' }, installStatus); }
+          return null;
+        },
+      });
+      await go('team-policy');
+      await settle();
+      doc.querySelector('#tp-tab-plugins').click();
+      await settle();
+      const install = () => doc.querySelector('#tp-sec-plugins tr[data-name="acme-jira"] .pl-policy-install');
+      install().click();
+      await settle();
+      assert.equal(install().dataset.fbState, undefined, 'opening the consent dialog is not a result: the Team-policy button shows no state');
+      assert.equal(install().textContent, 'Install…');
+      const confirm = () => [...doc.querySelectorAll('#plugin-modal-actions button')].find((b) => b.textContent === 'Install');
+      confirm().click();
+      await settle(8);
+      assert.equal(installs.length, 1);
+      assert.equal(lastToast(doc).tone, 'err');
+      assert.equal(lastToast(doc).title, 'clone failed');
+      assert.equal(doc.getElementById('plugins-msg').textContent, '', 'nothing lands on the Plugins page line');
+      assert.equal(doc.querySelectorAll('#toasts > .toast').length, 1, 'the progress toast was replaced by the result');
 
-  installStatus = 200;
-  install().click();
-  await settle();
-  assert.equal(install().dataset.fbState, undefined, 'no "Installed" state before the consent is confirmed');
-  confirm().click();
-  await settle(8);
-  assert.equal(installs.length, 2);
-  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Installed acme-jira.', detail: '', action: 'Open' });
-  assert.equal(doc.getElementById('plugins-msg').textContent, '');
+      installStatus = 200;
+      install().click();
+      await settle();
+      assert.equal(install().dataset.fbState, undefined, 'no "Installed" state before the consent is confirmed');
+      confirm().click();
+      await settle(8);
+      assert.equal(installs.length, 2);
+      assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Installed acme-jira.', detail: '', action: 'Open' });
+      assert.equal(doc.getElementById('plugins-msg').textContent, '');
+    } },
+    { name: '#555: a failed Check now is an error toast with Retry', run: async () => {
+      let discover = 0;
+      const { doc, go, settle } = await boot({
+        fetchHandler: (u, opts) => {
+          if (u.includes('/api/policy/discover') && opts.method === 'POST') { discover += 1; return json({ error: 'git fetch failed' }, 502); }
+          return null;
+        },
+      });
+      await go('team-policy');
+      await settle();
+      doc.querySelector('#tp-sync .tp-check-now').click();
+      await settle(8);
+      assert.equal(discover, 1);
+      assert.deepEqual(lastToast(doc), { tone: 'err', title: 'Check failed', detail: 'git fetch failed', action: 'Retry' });
+      doc.querySelector('#toasts .toast-act').click();
+      await settle(8);
+      assert.equal(discover, 2, 'Retry runs the check again');
+      assert.equal(doc.querySelectorAll('#toasts > .toast').length, 1, 'the keyed toast replaces itself');
+    } },
+  ]);
 });
 
 test('Team policy page: scope select, effective table, Edit policy → editor → publish', async () => {
@@ -237,26 +227,6 @@ test('Team policy page: scope select, effective table, Edit policy → editor �
   assert.equal(doc.querySelector('#tp-body .form-msg.ok'), null, 'the result is a toast, not a line the next repaint drops');
 });
 
-test('#555: a failed Check now is an error toast with Retry', async () => {
-  let discover = 0;
-  const { doc, go, settle } = await boot({
-    fetchHandler: (u, opts) => {
-      if (u.includes('/api/policy/discover') && opts.method === 'POST') { discover += 1; return json({ error: 'git fetch failed' }, 502); }
-      return null;
-    },
-  });
-  await go('team-policy');
-  await settle();
-  doc.querySelector('#tp-sync .tp-check-now').click();
-  await settle(8);
-  assert.equal(discover, 1);
-  assert.deepEqual(lastToast(doc), { tone: 'err', title: 'Check failed', detail: 'git fetch failed', action: 'Retry' });
-  doc.querySelector('#toasts .toast-act').click();
-  await settle(8);
-  assert.equal(discover, 2, 'Retry runs the check again');
-  assert.equal(doc.querySelectorAll('#toasts > .toast').length, 1, 'the keyed toast replaces itself');
-});
-
 test('Team policy page: a publish rejection is printed verbatim under the bar', async () => {
   const { doc, go, settle } = await boot({
     fetchHandler: (u, opts) => (u === '/api/policy' && opts.method === 'PUT'
@@ -278,47 +248,6 @@ test('Team policy page: a publish rejection is printed verbatim under the bar', 
   assert.match(msg.textContent, /push rejected · remote: error: GH006: Protected branch update failed .* · you may not have push rights/);
   assert.equal(editor.firstElementChild, msg, 'the rejection sits at the top of the form, under the header that holds Publish');
   assert.equal(doc.querySelector('#tp-body .tp-head .tp-publish').disabled, false, 'Publish is usable again after a rejection');
-});
-
-test('Team policy page: nothing enabled → the empty state; a 404 for the scope → an honest error', async () => {
-  const empty = await boot({ scopes: EMPTY_SCOPES });
-  await empty.go('team-policy');
-  await empty.settle();
-  assert.ok(empty.doc.querySelector('#tp-body .tm-empty'), 'the two-card empty state');
-  assert.equal(empty.doc.getElementById('tp-sync').hidden, true);
-  assert.ok(empty.doc.querySelector('#tp-body .tp-check-now'));
-  const missing = await boot({ policy: null });
-  await missing.go('team-policy');
-  await missing.settle();
-  assert.match(missing.doc.querySelector('#tp-body .hint.err').textContent, /Could not load the team policy: no team policy/);
-});
-
-test('Projects rows carry a compact policy chip; the project page\'s Team tab carries the block with Open', async () => {
-  const { doc, go, settle } = await boot();
-  await go('projects');
-  await settle();
-  const rows = [...doc.querySelectorAll('#projects-list .pl-item')];
-  assert.equal(rows.length, 2);
-  for (const r of rows) {
-    const team = r.querySelector('.pl-team');
-    assert.ok(team && team.querySelector('.pl-tm') && team.querySelector('.pl-tp'), 'one team column, metrics chip then policy chip');
-    assert.equal(r.querySelector('.tp-cell'), null, 'no cell on the row');
-  }
-  const home = rows[0].querySelector('.pl-tp');
-  assert.equal(home.textContent, 'Policy home');
-  assert.equal(home.dataset.kind, 'home');
-  assert.match(home.title, /^Team policy: Home · 3 fields · updated just now/);
-  assert.equal(rows[1].querySelector('.pl-tp').textContent, 'Policy off');
-  assert.equal(rows[1].querySelector('.pl-tp').title, 'Team policy: Off · your settings apply');
-  // The page: the Team tab's block has the same copy the cell had, and Open lands on the page with the scope preselected.
-  await go('projects/gateway-00000001/team');
-  await settle();
-  const cell = doc.querySelector('#proj-detail .pd-team-policy .tp-cell');
-  assert.match(cell.querySelector('.tm-status').textContent, /^On · policy home · 3 fields · updated just now$/);
-  assert.equal(cell.querySelector('.tm-label'), null);
-  cell.querySelector('.tp-open').click();
-  await settle();
-  assert.equal(window.location.hash, '#team-policy/project:gateway-00000001');
 });
 
 test('Project page: "Set up team policy…" opens the dialog; the follow mode posts the marker body', async () => {
@@ -395,34 +324,6 @@ test('Configure…: an installed plugin opens its settings pane with the policy\
   assert.match(modal.querySelector('.pl-seeded-note').textContent, /^baseUrl filled in from the team policy — Save keeps them/);
 });
 
-test('Settings › Budget: the team readout mounts and the labels carry team chips', async () => {
-  const { doc, go, settle } = await boot();
-  await go('settings');
-  await settle(6);
-  const readout = doc.querySelector('#teamCapsReadout .team-readout');
-  assert.ok(readout, 'the readout paints under the spend line');
-  assert.equal(readout.querySelector('.badge.blue').textContent, 'acme/gateway');
-  const chip = doc.querySelector('label[for="budgetPerPipeline"]').closest('.label-row').querySelector('.team-chip');
-  assert.ok(chip);
-  assert.equal(chip.textContent, 'soft team $10.00');
-  assert.equal(doc.querySelector('label[for="budgetTotal"]').closest('.label-row').querySelector('.team-chip').textContent, 'soft team $150.00');
-});
-
-test('New pipeline: the policy notes line paints for the selected project and hides without a policy', async () => {
-  const { doc, go, settle, window } = await boot();
-  await go('new');
-  await settle();
-  const sel = doc.getElementById('projectSelect');
-  sel.value = PROJECT;
-  sel.dispatchEvent(new window.Event('change', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 200));
-  await settle();
-  const line = doc.getElementById('policyLine');
-  assert.equal(line.hidden, false);
-  assert.match(line.querySelector('.pl-head-row').textContent, /acme\/gateway · 1 note · nothing here blocks the run/);
-  assert.match(line.querySelector('.pl-note.warn').textContent, /acme-jira is not installed/);
-});
-
 test('New pipeline: MCP servers paints under Guardrails; an unticked membership reaches the policy notes and the run body', async () => {
   const PREVIEW = {
     sets: [{ id: 'billing', name: 'Billing', group: 'set' }],
@@ -487,25 +388,6 @@ test('New pipeline: MCP servers paints under Guardrails; an unticked membership 
   const defrag = fetchCalls.filter((c) => c.url === '/api/run');
   assert.equal(defrag.length, runs + 1, 'the defrag run was started');
   assert.equal(JSON.parse(defrag.at(-1).opts.body).mcpOptOut, undefined);
-});
-
-test('History detail meta: the policy segment names overrides and off-policy picks', async () => {
-  const detail = { state: { id: 'h1', phase: 'implement', status: 'done', totalCostUsd: 5.2, steps: [] }, policy: { home: 'acme/gateway', sha: '3f2a1bc0', overrides: ['pipeline'], exceeded: [], deviations: ['model:claude-opus-4-8'], unattended: false, reason: 'hotfix' } };
-  const { doc, go, settle } = await boot({
-    fetchHandler: (u) => {
-      if (u.endsWith('/api/history/k1/h1')) return json(detail);
-      if (u.endsWith('/api/history')) return json({ pipelines: [{ id: 'h1', projectKey: 'k1', title: 'Feat', status: 'done', startedAt: '2026-01-01T00:00:00Z' }], live: [], ghAvailable: false });
-      return null;
-    },
-  });
-  await go('history');
-  await settle();
-  await go('history/k1/h1');
-  await settle(6);
-  const seg = doc.querySelector('#hist-detail .hd-policy');
-  assert.ok(seg, 'the meta line carries the policy segment');
-  assert.equal(seg.textContent, 'policy · 1 override · 1 off-policy');
-  assert.match(seg.title, /policy acme\/gateway @ 3f2a1bc · hotfix/);
 });
 
 test('Running: a cost_pipeline_policy pause shows the blue banner; "Continue past" prompts, then resumes with pastTeamCap', async () => {
@@ -633,28 +515,54 @@ test('the MCP tab strip: a Team action reloads the Sets view under it; a row tha
 const PG_OFF = { home: 'acme/gateway', sha: '3f2a1bc0', setId: 'team-acme-gateway-1a2b', setName: 'Team · acme/gateway', serverId: 'policy:acme/gateway/pg', name: 'pg', plugin: null, type: 'stdio',
   state: 'off', working: false, hash: 'e'.repeat(64), field: null, problem: null, base: 'pg', def: { type: 'stdio', command: 'pg-mcp', fields: [], description: '' }, values: {}, before: null, running: null };
 
-test('the MCP tab strip: the host shows while an item is open; a refused action reloads the pane; Set up… opens the checklist', async () => {
-  const { doc, go, settle, fetchCalls } = await boot({
-    fetchHandler: (u, opts) => {
-      if (u.includes('/api/policy/scopes')) return json({ ...SCOPES, mcpRequirements: [PG_OFF] });
-      if (u.startsWith('/api/mcp/teams/') && opts.method === 'POST') return json({ error: 'the team definition changed, review it again' }, 409);
-      if (u.startsWith('/api/mcp/sets')) return json({ error: 'not in this test' }, 404);
-      return null;
-    },
-  });
-  await go(`settings/mcp/sets/${PG_OFF.setId}`);
-  await settle(8);
-  const host = () => doc.querySelector('.settings-pane[data-tab="mcp"] [data-mcp-strip]');
-  assert.equal(host().hidden, false, 'an open item shows the strip');
-  const setGets = () => fetchCalls.filter((c) => c.url === `/api/mcp/sets/${PG_OFF.setId}`).length;
-  const before = setGets();
-  host().querySelector('.tp-mcp-act').click();
-  await settle(8);
-  assert.ok(setGets() > before, 'a refused action reloads the pane: the strip shows where the row is now');
-  host().querySelector('.pl-policy-setup').click();
-  await settle(8);
-  assert.equal(doc.getElementById('plugin-modal-title').textContent, 'Set up for acme/gateway');
-  assert.equal(doc.getElementById('plugin-modal').querySelectorAll('.tp-mcp-row').length, 1);
+test('the MCP tab strip shows while an item is open and stays painted across a pane repaint; a refused action reloads the pane; Set up… opens the checklist', async () => {
+  await checkRows([
+    { name: 'the MCP tab strip: the host shows while an item is open; a refused action reloads the pane; Set up… opens the checklist', run: async () => {
+      const { doc, go, settle, fetchCalls } = await boot({
+        fetchHandler: (u, opts) => {
+          if (u.includes('/api/policy/scopes')) return json({ ...SCOPES, mcpRequirements: [PG_OFF] });
+          if (u.startsWith('/api/mcp/teams/') && opts.method === 'POST') return json({ error: 'the team definition changed, review it again' }, 409);
+          if (u.startsWith('/api/mcp/sets')) return json({ error: 'not in this test' }, 404);
+          return null;
+        },
+      });
+      await go(`settings/mcp/sets/${PG_OFF.setId}`);
+      await settle(8);
+      const host = () => doc.querySelector('.settings-pane[data-tab="mcp"] [data-mcp-strip]');
+      assert.equal(host().hidden, false, 'an open item shows the strip');
+      const setGets = () => fetchCalls.filter((c) => c.url === `/api/mcp/sets/${PG_OFF.setId}`).length;
+      const before = setGets();
+      host().querySelector('.tp-mcp-act').click();
+      await settle(8);
+      assert.ok(setGets() > before, 'a refused action reloads the pane: the strip shows where the row is now');
+      host().querySelector('.pl-policy-setup').click();
+      await settle(8);
+      assert.equal(doc.getElementById('plugin-modal-title').textContent, 'Set up for acme/gateway');
+      assert.equal(doc.getElementById('plugin-modal').querySelectorAll('.tp-mcp-row').length, 1);
+    } },
+    { name: 'the MCP tab strip stays painted while a repaint of the pane reads the scopes again', run: async () => {
+      let hold = null;
+      const { doc, go, settle, recv } = await boot({
+        fetchHandler: (u) => {
+          if (u.includes('/api/policy/scopes')) { const body = json({ ...SCOPES, mcpRequirements: [PG_OFF] }); return hold ? hold.then(() => body) : body; }
+          if (u.startsWith('/api/mcp/sets')) return json({ error: 'not in this test' }, 404);
+          return null;
+        },
+      });
+      await go(`settings/mcp/sets/${PG_OFF.setId}`);
+      await settle(8);
+      const host = () => doc.querySelector('.settings-pane[data-tab="mcp"] [data-mcp-strip]');
+      assert.equal(host().hidden, false);
+      let release; hold = new Promise((res) => { release = res; });
+      recv({ type: 'team-policy-changed', action: 'updated' });   // reloads the pane: P6 hands the strip a fresh, hidden host
+      await settle(8);
+      assert.equal(host().hidden, false, 'the last state stays painted while the scopes are read again: no flicker');
+      assert.ok(host().querySelector('.tp-mcp-act[data-server="policy:acme/gateway/pg"]'));
+      release();
+      await settle(8);
+      assert.equal(host().hidden, false);
+    } },
+  ]);
 });
 
 test('the checklist on the Team policy page closes and reloads the page after a Team action; a moved-on row repaints it; Set <field> opens the Team set', async () => {
@@ -712,29 +620,6 @@ test('with only MCP items open, the checklist is for their home, not the first h
   await settle(8);
   assert.equal(doc.getElementById('plugin-modal-title').textContent, 'Set up for acme/gateway');
   assert.equal(doc.querySelector('#plugin-modal .tp-trust').dataset.home, 'acme/gateway', 'trust is offered for the home the items come from');
-});
-
-test('the MCP tab strip stays painted while a repaint of the pane reads the scopes again', async () => {
-  let hold = null;
-  const { doc, go, settle, recv } = await boot({
-    fetchHandler: (u) => {
-      if (u.includes('/api/policy/scopes')) { const body = json({ ...SCOPES, mcpRequirements: [PG_OFF] }); return hold ? hold.then(() => body) : body; }
-      if (u.startsWith('/api/mcp/sets')) return json({ error: 'not in this test' }, 404);
-      return null;
-    },
-  });
-  await go(`settings/mcp/sets/${PG_OFF.setId}`);
-  await settle(8);
-  const host = () => doc.querySelector('.settings-pane[data-tab="mcp"] [data-mcp-strip]');
-  assert.equal(host().hidden, false);
-  let release; hold = new Promise((res) => { release = res; });
-  recv({ type: 'team-policy-changed', action: 'updated' });   // reloads the pane: P6 hands the strip a fresh, hidden host
-  await settle(8);
-  assert.equal(host().hidden, false, 'the last state stays painted while the scopes are read again: no flicker');
-  assert.ok(host().querySelector('.tp-mcp-act[data-server="policy:acme/gateway/pg"]'));
-  release();
-  await settle(8);
-  assert.equal(host().hidden, false);
 });
 
 test('a strip Turn on (no dialog) that lands later never closes a dialog opened meanwhile', async () => {

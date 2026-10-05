@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { checkRows } from './helpers/rows.mjs';
 
 const SRC = readFileSync(fileURLToPath(new URL('../assets/deck-kit/deck-enhance.js', import.meta.url)), 'utf8');
 
@@ -48,24 +49,19 @@ async function booted(opts) {
 const activeLabels = (win) => [...win.document.querySelectorAll('section.is-active')]
   .map((s) => s.getAttribute('data-label'));
 
-test('boot follows deck-stage\'s own active marker, not slide 1', async () => {
-  const win = await booted({ hash: '#7', activeIndex: 6 });
-  assert.deepEqual(activeLabels(win), ['07'], 'the stage is on slide 7, so deck-enhance must be too');
-});
-
-test('with no marker yet, boot follows the URL hash deck-stage restores from', async () => {
-  const win = await booted({ hash: '#4' });
-  assert.deepEqual(activeLabels(win), ['04']);
-});
-
-test('a bare load with no hash and no marker still starts on slide 1', async () => {
-  const win = await booted();
-  assert.deepEqual(activeLabels(win), ['01']);
-});
-
-test('an out-of-range hash falls back to slide 1 rather than nothing', async () => {
-  const win = await booted({ hash: '#99' });
-  assert.deepEqual(activeLabels(win), ['01']);
+test('boot picks the showing slide: active marker, then hash, else slide 1 (incl. out-of-range hash)', async () => {
+  // [row name, boot opts, expected active labels, assertion message]
+  const cases = [
+    ['boot follows deck-stage\'s own active marker, not slide 1', { hash: '#7', activeIndex: 6 }, ['07'],
+      'the stage is on slide 7, so deck-enhance must be too'],
+    ['with no marker yet, boot follows the URL hash deck-stage restores from', { hash: '#4' }, ['04']],
+    ['a bare load with no hash and no marker still starts on slide 1', undefined, ['01']],
+    ['an out-of-range hash falls back to slide 1 rather than nothing', { hash: '#99' }, ['01']],
+  ];
+  await checkRows(cases.map(([name, opts, want, message]) => ({ name, run: async () => {
+    const win = await booted(opts);
+    assert.deepEqual(activeLabels(win), want, message);
+  } })));
 });
 
 test('the step cursor starts on the slide actually showing, not on slide 1', async () => {
@@ -106,48 +102,51 @@ test('a re-broadcast of the same slide index does not rewind its reveals', async
     'an unrelated rail mutation leaves the reveals where they were');
 });
 
-// THE INDEX IS NOT A STABLE NAME FOR A SLIDE. _deleteSlide and _moveSlide
-// deliberately RENUMBER _index so the same section stays on screen across a rail
-// mutation, and the postMessage payload carries no `reason` — so an
-// index-equality test read "5 -> 4" as a navigation and blanked every built-up
-// reveal of the slide being presented the moment the user deleted or reordered
-// some OTHER thumbnail. Mid-presentation. Comparing the slide ELEMENT gets every
-// case right at once, including the one an index test cannot get right at all:
-// when the presented slide is itself deleted, a DIFFERENT section takes its index
-// and the reveals must zero (the test below this one).
-test('deleting another slide leaves the presented slide\'s reveals intact', async () => {
-  const win = await booted({ activeIndex: 4, steps: 3, stepsOn: 4 });
-  const sections = [...win.document.querySelectorAll('section')];
-  const presented = sections[4];
-  win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
-  win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
-  await new Promise((r) => setTimeout(r, 10));
-  const revealed = presented.querySelectorAll('[data-step].step-visible').length;
-  assert.ok(revealed > 0, `steps revealed to begin with: ${revealed}`);
+test('rail deletes keep the presented slide reveals; the heir of the index starts clean', async () => {
+  await checkRows([
+    // THE INDEX IS NOT A STABLE NAME FOR A SLIDE. _deleteSlide and _moveSlide
+    // deliberately RENUMBER _index so the same section stays on screen across a rail
+    // mutation, and the postMessage payload carries no `reason` — so an
+    // index-equality test read "5 -> 4" as a navigation and blanked every built-up
+    // reveal of the slide being presented the moment the user deleted or reordered
+    // some OTHER thumbnail. Mid-presentation. Comparing the slide ELEMENT gets every
+    // case right at once, including the one an index test cannot get right at all:
+    // when the presented slide is itself deleted, a DIFFERENT section takes its index
+    // and the reveals must zero (the row below this one).
+    { name: 'deleting another slide leaves the presented slide\'s reveals intact', run: async () => {
+      const win = await booted({ activeIndex: 4, steps: 3, stepsOn: 4 });
+      const sections = [...win.document.querySelectorAll('section')];
+      const presented = sections[4];
+      win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+      win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+      await new Promise((r) => setTimeout(r, 10));
+      const revealed = presented.querySelectorAll('[data-step].step-visible').length;
+      assert.ok(revealed > 0, `steps revealed to begin with: ${revealed}`);
 
-  // _deleteSlide(1), exactly as deck-stage performs it: the section leaves the
-  // DOM and _index goes 4 -> 3 so the same content stays on screen.
-  sections[1].remove();
-  win.postMessage({ slideIndexChanged: 3, deckTotal: 6, deckSkipped: [] }, '*');
-  await new Promise((r) => setTimeout(r, 10));
-  assert.equal(presented.querySelectorAll('[data-step].step-visible').length, revealed,
-    'deleting an unrelated thumbnail rewound the slide being presented');
-});
+      // _deleteSlide(1), exactly as deck-stage performs it: the section leaves the
+      // DOM and _index goes 4 -> 3 so the same content stays on screen.
+      sections[1].remove();
+      win.postMessage({ slideIndexChanged: 3, deckTotal: 6, deckSkipped: [] }, '*');
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(presented.querySelectorAll('[data-step].step-visible').length, revealed,
+        'deleting an unrelated thumbnail rewound the slide being presented');
+    } },
+    { name: 'the slide that inherits the index starts from nothing', run: async () => {
+      const win = await booted({ activeIndex: 4, steps: 3, stepsOn: 4 });
+      const sections = [...win.document.querySelectorAll('section')];
+      const heir = sections[5];
+      heir.innerHTML += '<p data-step="1" class="step-visible">stale</p>';
 
-test('the slide that inherits the index starts from nothing', async () => {
-  const win = await booted({ activeIndex: 4, steps: 3, stepsOn: 4 });
-  const sections = [...win.document.querySelectorAll('section')];
-  const heir = sections[5];
-  heir.innerHTML += '<p data-step="1" class="step-visible">stale</p>';
-
-  // _deleteSlide(4) on the slide being presented: the index does NOT move, so
-  // slide 6 slides into it and is now on screen — different content, and its
-  // reveals must not be inherited from whatever state it was left in.
-  sections[4].remove();
-  win.postMessage({ slideIndexChanged: 4, deckTotal: 6, deckSkipped: [] }, '*');
-  await new Promise((r) => setTimeout(r, 10));
-  assert.equal(heir.querySelectorAll('[data-step].step-visible').length, 0,
-    'the slide that took the index kept a stale reveal');
+      // _deleteSlide(4) on the slide being presented: the index does NOT move, so
+      // slide 6 slides into it and is now on screen — different content, and its
+      // reveals must not be inherited from whatever state it was left in.
+      sections[4].remove();
+      win.postMessage({ slideIndexChanged: 4, deckTotal: 6, deckSkipped: [] }, '*');
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(heir.querySelectorAll('[data-step].step-visible').length, 0,
+        'the slide that took the index kept a stale reveal');
+    } },
+  ]);
 });
 
 // This listener is on `window` with capture:true and every branch ends in

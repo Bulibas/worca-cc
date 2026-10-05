@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizePolicyDoc } from '../src/core/policy/registry.mjs';
 import { sha256Hex } from '../src/core/mcp/definitions.mjs';
-import { consentHash, entryHash, serverIdOf, seedValues, teamRows } from '../src/core/mcp/team.mjs';
+import { consentHash, entryHash, seedValues, teamRows } from '../src/core/mcp/team.mjs';
 import { hostContext } from '../src/core/mcp/registry.mjs';
 
 const HOME = 'acme/platform';
@@ -36,11 +36,6 @@ test('consent hash: sha256 of canonical { entry, values }; key order and default
   ];
   for (const e of changed) assert.notEqual(entryHash(entries(policy([e]))[0]), entryHash(a));
   assert.notEqual(entryHash({ plugin: 'acme-tools', server: 'sentry', values: { org: 'x' } }), entryHash({ plugin: 'acme-tools', server: 'sentry' }));
-});
-
-test('server ids: plugin:<plugin>/<server>, policy:<home>/<name>', () => {
-  assert.equal(serverIdOf(HOME, { plugin: 'acme-tools', server: 'sentry' }), 'plugin:acme-tools/sentry');
-  assert.equal(serverIdOf(HOME, { name: 'github' }), 'policy:acme/platform/github');
 });
 
 test('seeded values: absent or still the seed → follows the policy; changed by the user → kept', () => {

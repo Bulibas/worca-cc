@@ -5,6 +5,7 @@
 // event / notice text.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import {
   createPolicyChangeValidator, normalizeEditOps, applyEditOps, describeChanges, describeEntry,
   policyEventPrompt, policyNoticeText, POLICY_CHANGE_KINDS,
@@ -63,102 +64,110 @@ test('kinds and target rules', async () => {
   assert.match((await errs({ kind: 'workspace_home', workspaceId: 'wks-no-00000000' }))[0], /unknown workspaceId/);
 });
 
-test('enable here: a project with an origin and no branch; refusals for a carrier, a follower and no origin', async () => {
-  const r = await validate({ kind: 'enable', projectKey: 'ed-00000003', title: 'Edge policy', note: 'PM asked' });
-  assert.equal(r.ok, true);
-  assert.deepEqual([r.card.type, r.card.kind, r.card.mode, r.card.projectName, r.card.title, r.card.delegateTo, r.card.note], ['policy', 'enable', 'here', 'edge', 'Edge policy', null, 'PM asked']);
-  assert.equal(r.card.summary, 'Set up a team policy on edge — on its own worca-policy branch');
-  assert.match(r.card.effects[0], /orphan branch worca-policy/);
-  assert.match((await errs({ kind: 'enable', projectKey: 'gw-00000001' }))[0], /already carries its own team policy — propose kind "edit"/);
-  assert.match((await errs({ kind: 'enable', projectKey: 'bl-00000002' }))[0], /follows acme\/gateway; its branch is a marker/);
-  assert.match((await errs({ kind: 'enable', projectKey: 'lc-00000004' }))[0], /no origin remote/);
-  assert.match((await errs({ kind: 'enable', projectKey: 'ed-00000003', mode: 'both' }))[0], /mode must be/);
-});
-
-test('enable follow: new, re-point, and the refusals (bad slug, self, unknown / policy-less / following target, a carrier, the same target)', async () => {
-  const r = await validate({ kind: 'enable', projectKey: 'ed-00000003', mode: 'follow', delegateTo: 'Acme/Gateway' });
-  assert.equal(r.ok, true);
-  assert.deepEqual([r.card.delegateTo, r.card.change], ['acme/gateway', false]);
-  assert.equal(r.card.summary, "Make edge follow acme/gateway's team policy");
-  const re = await validate({ kind: 'enable', projectKey: 'bl-00000002', mode: 'follow', delegateTo: 'acme/platform' });
-  assert.equal(re.ok, true); assert.equal(re.card.change, true);
-  assert.equal(re.card.summary, "Re-point billing to follow acme/platform's team policy");
-  assert.match((await errs({ kind: 'enable', projectKey: 'ed-00000003', mode: 'follow', delegateTo: '' }))[0], /must be the slug/);
-  assert.match((await errs({ kind: 'enable', projectKey: 'ed-00000003', mode: 'follow', delegateTo: 'acme/nowhere' }))[0], /acme\/nowhere is not a project in Worca on this machine/);
-  assert.match((await errs({ kind: 'enable', projectKey: 'lc-00000004', mode: 'follow', delegateTo: 'acme/edge' }))[0], /no origin remote/);
-  assert.match((await errs({ kind: 'enable', projectKey: 'gw-00000001', mode: 'follow', delegateTo: 'acme/edge' }))[0], /carries its own team policy/);
-  assert.match((await errs({ kind: 'enable', projectKey: 'bl-00000002', mode: 'follow', delegateTo: 'acme/edge' }))[0], /acme\/edge carries no team policy/);
-  assert.match((await errs({ kind: 'enable', projectKey: 'ed-00000003', mode: 'follow', delegateTo: 'acme/billing' }))[0], /acme\/billing follows acme\/gateway; follow acme\/gateway directly/);
-  assert.match((await errs({ kind: 'enable', projectKey: 'ed-00000003', mode: 'follow', delegateTo: 'acme/edge' }))[0], /cannot follow itself/);
-  assert.match((await errs({ kind: 'enable', projectKey: 'gw-00000001', mode: 'follow', delegateTo: 'acme/other' }))[0], /carries its own team policy; it cannot be turned into a follower/);
-  assert.match((await errs({ kind: 'enable', projectKey: 'bl-00000002', mode: 'follow', delegateTo: 'acme/gateway' }))[0], /already follows acme\/gateway/);
-});
-
-test('edit: raising a cap keeps its kind and attributes; the card carries ops, the before → after line and the effects', async () => {
-  const r = await validate({ kind: 'edit', projectKey: 'bl-00000002', set: [{ key: 'cost.pipelineLimitUsd', value: 30 }], message: 'raise the cap for the Q4 push' });
-  assert.equal(r.ok, true, JSON.stringify(r));
-  const c = r.card;
-  assert.deepEqual([c.kind, c.home, c.baseSha, c.projectName, c.message], ['edit', 'acme/gateway', 'abc1234def', 'billing', 'raise the cap for the Q4 push']);
-  assert.deepEqual(c.ops.set, [{ key: 'cost.pipelineLimitUsd', block: 'fields', entry: { kind: 'soft', value: 30, onBreach: 'pause', requireReason: true } }]);
-  assert.deepEqual(c.changes, [{ key: 'cost.pipelineLimitUsd', block: 'fields', label: 'Per-pipeline cap (USD)', before: 'soft $25.00 · pause · reason required', after: 'soft $30.00 · pause · reason required', beforeValue: '$25.00', afterValue: '$30.00' }]);
-  assert.equal(c.summary, "Edit acme/gateway's team policy — Per-pipeline cap (USD): $25.00 → $30.00");
-  assert.match(c.effects[0], /One commit to acme\/gateway's worca-policy branch/);
-  assert.equal(c.effects[1], 'Governs acme/gateway and the projects that follow it: acme/billing');
-  assert.ok(c.effects.some((e) => /continue past it/.test(e)), 'a soft cap says a developer can continue past it');
-});
-
-test('edit: a new field needs its kind; hard is refused; the workspaceRuns block; unset; title and notes; several changes', async () => {
-  assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'cost.totalLimitUsd', value: 150 }] }))[0], /kind is required .*default \| soft/);
-  assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'cost.totalLimitUsd', value: 150, kind: 'hard' }] }))[0], /hard constraints are not enforced/);
-  assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'guardrails.minimum', value: 'strict' }] }))[0], /must be one of permissive \| normal \| secure/);
-  assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'bogus.field', value: 1 }] }))[0], /unknown field "bogus.field"/);
-  assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'cost.pipelineLimitUsd', value: -5 }] }))[0], /positive number/);
-  assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'cost.pipelineLimitUsd', value: 25 }] }))[0], /nothing changes/);
-  assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', unset: [{ key: 'run.humanInLoop' }] }))[0], /is not set in the policy/);
-  assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001' }))[0], /at least one of set, unset, title or notes/);
-  assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'cost.pipelineLimitUsd', value: 30 }, { key: 'cost.pipelineLimitUsd', value: 31 }] }))[0], /changed twice/);
-  assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'plugins.required', value: [{ name: 'jira', config: { token: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789' } }], kind: 'soft' }] }))[0], /looks like a secret/);
-  // A single-kind field needs no kind; the workspaceRuns block is its own key; several changes summarise as a count.
-  const r = await validate({ kind: 'edit', workspaceId: WS.id, title: 'Gateway policy (Q4)',
-    set: [{ key: 'guardrails.minimum', value: 'normal' }, { key: 'cost.pipelineLimitUsd', value: 50, forWorkspaceRuns: true }],
-    unset: [{ key: 'models.allowed' }] });
-  assert.equal(r.ok, true, JSON.stringify(r));
-  assert.deepEqual([r.card.workspaceId, r.card.workspaceName, r.card.projectKey], [WS.id, 'IoT', null]);
-  assert.equal(r.card.summary, "Edit acme/gateway's team policy — 4 changes");
-  assert.deepEqual(r.card.changes.map((c) => [c.label, c.before, c.after]), [
-    ['Minimum tier', null, 'soft Normal'],
-    ['Allowed models', 'soft claude-opus-5-5, claude-sonnet-5', null],
-    ['Per-pipeline cap (USD) (workspace runs)', 'soft $40.00', 'soft $50.00'],
-    ['Title', 'Gateway team policy', 'Gateway policy (Q4)'],
+test('enable here / follow: origins, re-point and every refusal', async () => {
+  await checkRows([
+    { name: 'enable here: a project with an origin and no branch; refusals for a carrier, a follower and no origin', run: async () => {
+      const r = await validate({ kind: 'enable', projectKey: 'ed-00000003', title: 'Edge policy', note: 'PM asked' });
+      assert.equal(r.ok, true);
+      assert.deepEqual([r.card.type, r.card.kind, r.card.mode, r.card.projectName, r.card.title, r.card.delegateTo, r.card.note], ['policy', 'enable', 'here', 'edge', 'Edge policy', null, 'PM asked']);
+      assert.equal(r.card.summary, 'Set up a team policy on edge — on its own worca-policy branch');
+      assert.match(r.card.effects[0], /orphan branch worca-policy/);
+      assert.match((await errs({ kind: 'enable', projectKey: 'gw-00000001' }))[0], /already carries its own team policy — propose kind "edit"/);
+      assert.match((await errs({ kind: 'enable', projectKey: 'bl-00000002' }))[0], /follows acme\/gateway; its branch is a marker/);
+      assert.match((await errs({ kind: 'enable', projectKey: 'lc-00000004' }))[0], /no origin remote/);
+      assert.match((await errs({ kind: 'enable', projectKey: 'ed-00000003', mode: 'both' }))[0], /mode must be/);
+    } },
+    { name: 'enable follow: new, re-point, and the refusals (bad slug, self, unknown / policy-less / following target, a carrier, the same target)', run: async () => {
+      const r = await validate({ kind: 'enable', projectKey: 'ed-00000003', mode: 'follow', delegateTo: 'Acme/Gateway' });
+      assert.equal(r.ok, true);
+      assert.deepEqual([r.card.delegateTo, r.card.change], ['acme/gateway', false]);
+      assert.equal(r.card.summary, "Make edge follow acme/gateway's team policy");
+      const re = await validate({ kind: 'enable', projectKey: 'bl-00000002', mode: 'follow', delegateTo: 'acme/platform' });
+      assert.equal(re.ok, true); assert.equal(re.card.change, true);
+      assert.equal(re.card.summary, "Re-point billing to follow acme/platform's team policy");
+      assert.match((await errs({ kind: 'enable', projectKey: 'ed-00000003', mode: 'follow', delegateTo: '' }))[0], /must be the slug/);
+      assert.match((await errs({ kind: 'enable', projectKey: 'ed-00000003', mode: 'follow', delegateTo: 'acme/nowhere' }))[0], /acme\/nowhere is not a project in Worca on this machine/);
+      assert.match((await errs({ kind: 'enable', projectKey: 'lc-00000004', mode: 'follow', delegateTo: 'acme/edge' }))[0], /no origin remote/);
+      assert.match((await errs({ kind: 'enable', projectKey: 'gw-00000001', mode: 'follow', delegateTo: 'acme/edge' }))[0], /carries its own team policy/);
+      assert.match((await errs({ kind: 'enable', projectKey: 'bl-00000002', mode: 'follow', delegateTo: 'acme/edge' }))[0], /acme\/edge carries no team policy/);
+      assert.match((await errs({ kind: 'enable', projectKey: 'ed-00000003', mode: 'follow', delegateTo: 'acme/billing' }))[0], /acme\/billing follows acme\/gateway; follow acme\/gateway directly/);
+      assert.match((await errs({ kind: 'enable', projectKey: 'ed-00000003', mode: 'follow', delegateTo: 'acme/edge' }))[0], /cannot follow itself/);
+      assert.match((await errs({ kind: 'enable', projectKey: 'gw-00000001', mode: 'follow', delegateTo: 'acme/other' }))[0], /carries its own team policy; it cannot be turned into a follower/);
+      assert.match((await errs({ kind: 'enable', projectKey: 'bl-00000002', mode: 'follow', delegateTo: 'acme/gateway' }))[0], /already follows acme\/gateway/);
+    } },
   ]);
 });
 
-test('edit: refused where the policy cannot be published from here, or the scope has none', async () => {
-  canPublish = false;
-  try { assert.match((await errs({ kind: 'edit', projectKey: 'bl-00000002', set: [{ key: 'cost.pipelineLimitUsd', value: 30 }] }))[0], /not checked out on this machine/); }
-  finally { canPublish = true; }
-  assert.match((await errs({ kind: 'edit', projectKey: 'ed-00000003', set: [{ key: 'cost.pipelineLimitUsd', value: 30 }] }))[0], /edge has no usable team policy .*propose kind "enable" first/);
+test('edit: kinds kept/required, hard refused, workspaceRuns, unset, title/notes, several changes; refused where it cannot be published', async () => {
+  await checkRows([
+    { name: 'edit: raising a cap keeps its kind and attributes; the card carries ops, the before → after line and the effects', run: async () => {
+      const r = await validate({ kind: 'edit', projectKey: 'bl-00000002', set: [{ key: 'cost.pipelineLimitUsd', value: 30 }], message: 'raise the cap for the Q4 push' });
+      assert.equal(r.ok, true, JSON.stringify(r));
+      const c = r.card;
+      assert.deepEqual([c.kind, c.home, c.baseSha, c.projectName, c.message], ['edit', 'acme/gateway', 'abc1234def', 'billing', 'raise the cap for the Q4 push']);
+      assert.deepEqual(c.ops.set, [{ key: 'cost.pipelineLimitUsd', block: 'fields', entry: { kind: 'soft', value: 30, onBreach: 'pause', requireReason: true } }]);
+      assert.deepEqual(c.changes, [{ key: 'cost.pipelineLimitUsd', block: 'fields', label: 'Per-pipeline cap (USD)', before: 'soft $25.00 · pause · reason required', after: 'soft $30.00 · pause · reason required', beforeValue: '$25.00', afterValue: '$30.00' }]);
+      assert.equal(c.summary, "Edit acme/gateway's team policy — Per-pipeline cap (USD): $25.00 → $30.00");
+      assert.match(c.effects[0], /One commit to acme\/gateway's worca-policy branch/);
+      assert.equal(c.effects[1], 'Governs acme/gateway and the projects that follow it: acme/billing');
+      assert.ok(c.effects.some((e) => /continue past it/.test(e)), 'a soft cap says a developer can continue past it');
+    } },
+    { name: 'edit: a new field needs its kind; hard is refused; the workspaceRuns block; unset; title and notes; several changes', run: async () => {
+      assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'cost.totalLimitUsd', value: 150 }] }))[0], /kind is required .*default \| soft/);
+      assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'cost.totalLimitUsd', value: 150, kind: 'hard' }] }))[0], /hard constraints are not enforced/);
+      assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'guardrails.minimum', value: 'strict' }] }))[0], /must be one of permissive \| normal \| secure/);
+      assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'bogus.field', value: 1 }] }))[0], /unknown field "bogus.field"/);
+      assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'cost.pipelineLimitUsd', value: -5 }] }))[0], /positive number/);
+      assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'cost.pipelineLimitUsd', value: 25 }] }))[0], /nothing changes/);
+      assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', unset: [{ key: 'run.humanInLoop' }] }))[0], /is not set in the policy/);
+      assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001' }))[0], /at least one of set, unset, title or notes/);
+      assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'cost.pipelineLimitUsd', value: 30 }, { key: 'cost.pipelineLimitUsd', value: 31 }] }))[0], /changed twice/);
+      assert.match((await errs({ kind: 'edit', projectKey: 'gw-00000001', set: [{ key: 'plugins.required', value: [{ name: 'jira', config: { token: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789' } }], kind: 'soft' }] }))[0], /looks like a secret/);
+      // A single-kind field needs no kind; the workspaceRuns block is its own key; several changes summarise as a count.
+      const r = await validate({ kind: 'edit', workspaceId: WS.id, title: 'Gateway policy (Q4)',
+        set: [{ key: 'guardrails.minimum', value: 'normal' }, { key: 'cost.pipelineLimitUsd', value: 50, forWorkspaceRuns: true }],
+        unset: [{ key: 'models.allowed' }] });
+      assert.equal(r.ok, true, JSON.stringify(r));
+      assert.deepEqual([r.card.workspaceId, r.card.workspaceName, r.card.projectKey], [WS.id, 'IoT', null]);
+      assert.equal(r.card.summary, "Edit acme/gateway's team policy — 4 changes");
+      assert.deepEqual(r.card.changes.map((c) => [c.label, c.before, c.after]), [
+        ['Minimum tier', null, 'soft Normal'],
+        ['Allowed models', 'soft claude-opus-5-5, claude-sonnet-5', null],
+        ['Per-pipeline cap (USD) (workspace runs)', 'soft $40.00', 'soft $50.00'],
+        ['Title', 'Gateway team policy', 'Gateway policy (Q4)'],
+      ]);
+    } },
+    { name: 'edit: refused where the policy cannot be published from here, or the scope has none', run: async () => {
+      canPublish = false;
+      try { assert.match((await errs({ kind: 'edit', projectKey: 'bl-00000002', set: [{ key: 'cost.pipelineLimitUsd', value: 30 }] }))[0], /not checked out on this machine/); }
+      finally { canPublish = true; }
+      assert.match((await errs({ kind: 'edit', projectKey: 'ed-00000003', set: [{ key: 'cost.pipelineLimitUsd', value: 30 }] }))[0], /edge has no usable team policy .*propose kind "enable" first/);
+    } },
+  ]);
 });
 
-test('workspace_home: set to a member that resolves a policy, clear, and the refusals', async () => {
-  const r = await validate({ kind: 'workspace_home', workspaceId: WS.id, homeProjectKey: 'bl-00000002' });
-  assert.equal(r.ok, true);
-  assert.deepEqual([r.card.homeProjectKey, r.card.homeProjectName, r.card.homePath, r.card.home], ['bl-00000002', 'billing', '/p/billing', 'acme/gateway']);
-  assert.equal(r.card.summary, 'Set the policy home of IoT to billing');
-  const clear = await validate({ kind: 'workspace_home', workspaceId: WS.id, homeProjectKey: '' });
-  assert.equal(clear.ok, true); assert.equal(clear.card.homePath, null); assert.equal(clear.card.summary, 'Clear the policy home of IoT');
-  assert.match((await errs({ kind: 'workspace_home', workspaceId: WS.id, homeProjectKey: 'gw-00000001' }))[0], /already the policy home/);
-  assert.match((await errs({ kind: 'workspace_home', workspaceId: WS.id, homeProjectKey: 'ed-00000003' }))[0], /no team policy of its own and follows none/);
-  assert.match((await errs({ kind: 'workspace_home', workspaceId: WS.id, homeProjectKey: 'lc-00000004' }))[0], /not a member/);
-  assert.match((await errs({ kind: 'workspace_home', workspaceId: WS_NONE.id }))[0], /already unset/);
-});
-
-test('route_members: needs a valid home', async () => {
-  const r = await validate({ kind: 'route_members', workspaceId: WS.id });
-  assert.equal(r.ok, true);
-  assert.equal(r.card.summary, "Route every member of IoT to acme/gateway's team policy");
-  assert.equal(r.card.homeProjectName, 'gateway');
-  assert.match((await errs({ kind: 'route_members', workspaceId: WS_NONE.id }))[0], /no valid policy home/);
+test('workspace_home: set to a member that resolves a policy, clear, refusals; route_members needs a valid home', async () => {
+  await checkRows([
+    { name: 'workspace_home: set to a member that resolves a policy, clear, and the refusals', run: async () => {
+      const r = await validate({ kind: 'workspace_home', workspaceId: WS.id, homeProjectKey: 'bl-00000002' });
+      assert.equal(r.ok, true);
+      assert.deepEqual([r.card.homeProjectKey, r.card.homeProjectName, r.card.homePath, r.card.home], ['bl-00000002', 'billing', '/p/billing', 'acme/gateway']);
+      assert.equal(r.card.summary, 'Set the policy home of IoT to billing');
+      const clear = await validate({ kind: 'workspace_home', workspaceId: WS.id, homeProjectKey: '' });
+      assert.equal(clear.ok, true); assert.equal(clear.card.homePath, null); assert.equal(clear.card.summary, 'Clear the policy home of IoT');
+      assert.match((await errs({ kind: 'workspace_home', workspaceId: WS.id, homeProjectKey: 'gw-00000001' }))[0], /already the policy home/);
+      assert.match((await errs({ kind: 'workspace_home', workspaceId: WS.id, homeProjectKey: 'ed-00000003' }))[0], /no team policy of its own and follows none/);
+      assert.match((await errs({ kind: 'workspace_home', workspaceId: WS.id, homeProjectKey: 'lc-00000004' }))[0], /not a member/);
+      assert.match((await errs({ kind: 'workspace_home', workspaceId: WS_NONE.id }))[0], /already unset/);
+    } },
+    { name: 'route_members: needs a valid home', run: async () => {
+      const r = await validate({ kind: 'route_members', workspaceId: WS.id });
+      assert.equal(r.ok, true);
+      assert.equal(r.card.summary, "Route every member of IoT to acme/gateway's team policy");
+      assert.equal(r.card.homeProjectName, 'gateway');
+      assert.match((await errs({ kind: 'route_members', workspaceId: WS_NONE.id }))[0], /no valid policy home/);
+    } },
+  ]);
 });
 
 test('the pure edit: normalise, apply (a copy), describe', () => {

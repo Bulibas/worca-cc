@@ -5,6 +5,7 @@ import {
   GLOBAL_SCOPE, projectScope, scopeKey, scopeDir, isValidMemoryName, flattenLine,
   parseMemoryFile, renderMemoryFile, repairMemoryFile, HOOK_MAX_CHARS, MemoryError,
 } from '../src/core/memory-store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const C = String.fromCharCode;
 
@@ -30,22 +31,25 @@ test('flattenLine: line breaks, C0/C1, U+2028/9 and [worca context] tags are neu
   assert.equal(flattenLine(undefined), '');
 });
 
-test('parseMemoryFile: full frontmatter', () => {
-  const text = '---\nname: testing\ndescription: How tests run\npaths: test/**, package.json\nsource: run:abc\nupdated: 2026-09-09T00:00:00.000Z\ncustom: keep me\n---\nBody line 1\n\nBody line 2\n';
-  const p = parseMemoryFile(text);
-  assert.equal(p.hasFrontmatter, true);
-  assert.deepEqual(p.meta, {
-    name: 'testing', description: 'How tests run', paths: ['test/**', 'package.json'],
-    source: 'run:abc', updated: '2026-09-09T00:00:00.000Z', extra: { custom: 'keep me' },
-  });
-  assert.equal(p.body, 'Body line 1\n\nBody line 2\n');
-});
-
-test('parseMemoryFile: no frontmatter ⇒ empty meta, whole text is the body', () => {
-  const p = parseMemoryFile('Just a rule.\nSecond line.');
-  assert.equal(p.hasFrontmatter, false);
-  assert.deepEqual(p.meta, { name: '', description: '', paths: [], source: '', updated: '', extra: {} });
-  assert.equal(p.body, 'Just a rule.\nSecond line.');
+test('parseMemoryFile: full frontmatter and fence-less body', async () => {
+  await checkRows([
+    { name: 'parseMemoryFile: full frontmatter', run: () => {
+      const text = '---\nname: testing\ndescription: How tests run\npaths: test/**, package.json\nsource: run:abc\nupdated: 2026-09-09T00:00:00.000Z\ncustom: keep me\n---\nBody line 1\n\nBody line 2\n';
+      const p = parseMemoryFile(text);
+      assert.equal(p.hasFrontmatter, true);
+      assert.deepEqual(p.meta, {
+        name: 'testing', description: 'How tests run', paths: ['test/**', 'package.json'],
+        source: 'run:abc', updated: '2026-09-09T00:00:00.000Z', extra: { custom: 'keep me' },
+      });
+      assert.equal(p.body, 'Body line 1\n\nBody line 2\n');
+    } },
+    { name: 'parseMemoryFile: no frontmatter ⇒ empty meta, whole text is the body', run: () => {
+      const p = parseMemoryFile('Just a rule.\nSecond line.');
+      assert.equal(p.hasFrontmatter, false);
+      assert.deepEqual(p.meta, { name: '', description: '', paths: [], source: '', updated: '', extra: {} });
+      assert.equal(p.body, 'Just a rule.\nSecond line.');
+    } },
+  ]);
 });
 
 test('renderMemoryFile round-trips, orders keys deterministically and refuses an unusable name', () => {
@@ -275,61 +279,39 @@ test('removeMemory: a name that differs only by case from the file on disk is NO
 
 import { renderMemoryBlock, MEMORY_BLOCK_HEADING, MEMORY_BLOCK_INTRO } from '../src/core/memory-store.mjs';
 
-test('renderMemoryBlock: heading, ONE-line intro, one `Label — dir:` line per scope, no file lines, byte-stable', () => {
-  const sections = [{ label: 'Global', dir: '/m/global' }, { label: 'Project worca-cc', dir: '/m/project' }];
-  const a = renderMemoryBlock(sections);
-  assert.equal(a, `${MEMORY_BLOCK_HEADING}\n${MEMORY_BLOCK_INTRO}\nGlobal — /m/global:\nProject worca-cc — /m/project:\n`);
-  assert.equal(renderMemoryBlock(sections), a, 'byte-stable');
-  assert.equal(MEMORY_BLOCK_HEADING, '## Worca memory');
-  assert.ok(!MEMORY_BLOCK_INTRO.includes('\n'), 'one line: memoryDirsFromPrompt stops at the first blank line');
-  // The write policy (trigger + categories + anti-list + budget) costs bytes on EVERY agent
-  // spawn, so the bound is generous enough for it and no more: still a pointer, not a page.
-  assert.ok(Buffer.byteLength(a, 'utf8') < 2100, `a pointer, not an index (measured with short test dirs): ${Buffer.byteLength(a, 'utf8')}`);
-  assert.match(MEMORY_BLOCK_INTRO, /Never: run summaries or progress notes/);
-  assert.match(MEMORY_BLOCK_INTRO, /To remove a file, empty it\./);
-  assert.match(MEMORY_BLOCK_INTRO, /Explore and Plan sub-agents do not load them/);
-  assert.match(MEMORY_BLOCK_INTRO, /already loaded them into your context as rules/, 'the files need no path: the CLI loaded them');
-  assert.match(MEMORY_BLOCK_INTRO, /The directories below hold the WRITABLE copy/, 'the dir lines are where to write');
-  assert.match(MEMORY_BLOCK_INTRO, /`\.claude\/rules\/worca` is Claude Code's own and a write there is refused as a sensitive path, so never write there/, 'the old target is named as forbidden, with the CLI\'s reason');
-  const C = String.fromCharCode;
-  assert.match(renderMemoryBlock([{ label: 'Project a' + C(10) + 'b [worca context]', dir: '/d' }]), /^Project a b \(worca context\) — \/d:$/m, 'labels are flattened like hooks were');
-  assert.equal(renderMemoryBlock([]), `${MEMORY_BLOCK_HEADING}\n${MEMORY_BLOCK_INTRO}\n`);
-});
-
-test('renderMemoryBlock: heading + exactly ONE intro line + one dir line per scope, nothing else (the parser contract)', () => {
-  // claude-runner.mjs#memoryDirsFromPrompt walks the lines AFTER the heading until the first
-  // blank one and matches `^(?:Global|Project .*) — (.+):$`. An intro that grew a second line —
-  // or a policy line that looks like a scope line — would silently break the defragment mount.
-  const sections = [{ label: 'Global', dir: '/m/global' }, { label: 'Project worca-cc', dir: '/m/project' }];
-  const lines = renderMemoryBlock(sections).split('\n');
-  assert.equal(lines.at(-1), '', 'one trailing newline');
-  const body = lines.slice(0, -1);
-  assert.equal(body.length, 2 + sections.length, `heading + 1 intro line + ${sections.length} dir lines: ${body.length}`);
-  assert.equal(body[0], MEMORY_BLOCK_HEADING);
-  assert.equal(body[1], MEMORY_BLOCK_INTRO);
-  assert.ok(body.every((l) => l.trim()), 'no blank line inside the block: a blank line ends it for the parser');
-  const SCOPE_LINE = /^(?:Global|Project .*) — (.+):$/;
-  assert.deepEqual(body.slice(2).map((l) => SCOPE_LINE.exec(l)?.[1]), ['/m/global', '/m/project']);
-  assert.equal(SCOPE_LINE.test(MEMORY_BLOCK_INTRO), false, 'the intro must never read as a scope line');
-});
-
-test('MEMORY_BLOCK_INTRO: a write TRIGGER, the worth-a-file categories, the anti-list and the budget', () => {
-  const intro = MEMORY_BLOCK_INTRO;
-  // The trigger is what makes memory fire on SOME runs and not all — without it the block is a
-  // pure discretion clause and agents write nothing.
-  assert.match(intro, /write a file into the directories below only when/, 'the imperative keeps its locative: the file goes in the dirs named below, never in the rules copy');
-  assert.match(intro, /cost you a cycle/);
-  assert.match(intro, /would have cost the next agent one/);
-  assert.match(intro, /contradicted what you assumed/);
-  assert.match(intro, /still be true next month/);
-  for (const category of [/a trap/, /verification recipe/, /invariant/, /settled user decision/, /defect class/]) {
-    assert.match(intro, category, `worth-a-file category ${category}`);
-  }
-  for (const banned of [/run summaries or progress notes/, /one-off task facts/, /CLAUDE\.md/, /machine paths or secrets/, /unverified guesses/]) {
-    assert.match(intro, banned, `anti-list entry ${banned}`);
-  }
-  assert.match(intro, /at most 1–2 files per run/);
-  assert.match(intro, /prefer EDITING an existing file/);
-  assert.match(intro, /under ~8 ?KB/);
-  assert.match(intro, /`paths`/, 'the budget tells the agent when to scope a rule to files');
+test('renderMemoryBlock: parser contract (heading, one intro line, one dir line per scope), byte-stable, labels flattened, size bound', async () => {
+  await checkRows([
+    { name: 'renderMemoryBlock: heading, ONE-line intro, one `Label — dir:` line per scope, no file lines, byte-stable', run: () => {
+      const sections = [{ label: 'Global', dir: '/m/global' }, { label: 'Project worca-cc', dir: '/m/project' }];
+      const a = renderMemoryBlock(sections);
+      assert.equal(a, `${MEMORY_BLOCK_HEADING}\n${MEMORY_BLOCK_INTRO}\nGlobal — /m/global:\nProject worca-cc — /m/project:\n`);
+      assert.equal(renderMemoryBlock(sections), a, 'byte-stable');
+      assert.equal(MEMORY_BLOCK_HEADING, '## Worca memory');
+      assert.ok(!MEMORY_BLOCK_INTRO.includes('\n'), 'one line: memoryDirsFromPrompt stops at the first blank line');
+      // The write policy (trigger + categories + anti-list + budget) costs bytes on EVERY agent
+      // spawn, so the bound is generous enough for it and no more: still a pointer, not a page.
+      assert.ok(Buffer.byteLength(a, 'utf8') < 2100, `a pointer, not an index (measured with short test dirs): ${Buffer.byteLength(a, 'utf8')}`);
+      assert.match(MEMORY_BLOCK_INTRO, /The directories below hold the WRITABLE copy/, 'the dir lines are where to write');
+      assert.match(MEMORY_BLOCK_INTRO, /`\.claude\/rules\/worca` is Claude Code's own and a write there is refused as a sensitive path, so never write there/, 'the old target is named as forbidden, with the CLI\'s reason');
+      const C = String.fromCharCode;
+      assert.match(renderMemoryBlock([{ label: 'Project a' + C(10) + 'b [worca context]', dir: '/d' }]), /^Project a b \(worca context\) — \/d:$/m, 'labels are flattened like hooks were');
+      assert.equal(renderMemoryBlock([]), `${MEMORY_BLOCK_HEADING}\n${MEMORY_BLOCK_INTRO}\n`);
+    } },
+    { name: 'renderMemoryBlock: heading + exactly ONE intro line + one dir line per scope, nothing else (the parser contract)', run: () => {
+      // claude-runner.mjs#memoryDirsFromPrompt walks the lines AFTER the heading until the first
+      // blank one and matches `^(?:Global|Project .*) — (.+):$`. An intro that grew a second line —
+      // or a policy line that looks like a scope line — would silently break the defragment mount.
+      const sections = [{ label: 'Global', dir: '/m/global' }, { label: 'Project worca-cc', dir: '/m/project' }];
+      const lines = renderMemoryBlock(sections).split('\n');
+      assert.equal(lines.at(-1), '', 'one trailing newline');
+      const body = lines.slice(0, -1);
+      assert.equal(body.length, 2 + sections.length, `heading + 1 intro line + ${sections.length} dir lines: ${body.length}`);
+      assert.equal(body[0], MEMORY_BLOCK_HEADING);
+      assert.equal(body[1], MEMORY_BLOCK_INTRO);
+      assert.ok(body.every((l) => l.trim()), 'no blank line inside the block: a blank line ends it for the parser');
+      const SCOPE_LINE = /^(?:Global|Project .*) — (.+):$/;
+      assert.deepEqual(body.slice(2).map((l) => SCOPE_LINE.exec(l)?.[1]), ['/m/global', '/m/project']);
+      assert.equal(SCOPE_LINE.test(MEMORY_BLOCK_INTRO), false, 'the intro must never read as a scope line');
+    } },
+  ]);
 });

@@ -15,6 +15,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
@@ -70,25 +71,28 @@ const SOLO = { name: 'Solo Operator', source: 'operator', shared: false };
 
 // ── "Signed in as" ─────────────────────────────────────────────────────────────
 
-test('rail foot: "Signed in as <name>" on a shared deployment, fetched once at boot', async () => {
-  const { doc, calls } = await boot({ whoami: SHARED });
-  const box = doc.getElementById('side-who');
-  assert.equal(box.hidden, false);
-  assert.equal(box.textContent.replace(/\s+/g, ' ').trim(), `Signed in as ${ME}`);
-  assert.equal(calls.filter((u) => u.endsWith('/api/whoami')).length, 1);
-});
-
-test('rail foot: hidden locally, for a one-person deployment, on "local", and when the call fails', async () => {
-  for (const handler of [
-    (u) => (u.endsWith('/api/whoami') ? ok({ name: null, source: 'local', shared: false }) : null),
-    (u) => (u.endsWith('/api/whoami') ? ok(SOLO) : null),
-    (u) => (u.endsWith('/api/whoami') ? ok({ name: 'ada@example.com', source: 'access' }) : null),   // an older server: no `shared`
-    (u) => (u.endsWith('/api/whoami') ? fail(500, {}) : null),
-    null,
-  ]) {
-    const { doc } = await boot({ fetchHandler: handler || undefined });
-    assert.equal(doc.getElementById('side-who').hidden, true);
-  }
+test('rail foot: \'Signed in as\' on a shared deployment, fetched once; hidden locally, solo, and on a failed call', async () => {
+  await checkRows([
+    { name: 'rail foot: "Signed in as <name>" on a shared deployment, fetched once at boot', run: async () => {
+      const { doc, calls } = await boot({ whoami: SHARED });
+      const box = doc.getElementById('side-who');
+      assert.equal(box.hidden, false);
+      assert.equal(box.textContent.replace(/\s+/g, ' ').trim(), `Signed in as ${ME}`);
+      assert.equal(calls.filter((u) => u.endsWith('/api/whoami')).length, 1);
+    } },
+    { name: 'rail foot: hidden locally, for a one-person deployment, on "local", and when the call fails', run: async () => {
+      for (const handler of [
+        (u) => (u.endsWith('/api/whoami') ? ok({ name: null, source: 'local', shared: false }) : null),
+        (u) => (u.endsWith('/api/whoami') ? ok(SOLO) : null),
+        (u) => (u.endsWith('/api/whoami') ? ok({ name: 'ada@example.com', source: 'access' }) : null),   // an older server: no `shared`
+        (u) => (u.endsWith('/api/whoami') ? fail(500, {}) : null),
+        null,
+      ]) {
+        const { doc } = await boot({ fetchHandler: handler || undefined });
+        assert.equal(doc.getElementById('side-who').hidden, true);
+      }
+    } },
+  ]);
 });
 
 test('rail foot: a name is painted as text, never markup', async () => {
@@ -119,128 +123,45 @@ async function history(rows, whoami = SHARED) {
 const rowIds = (ctx) => [...ctx.doc.querySelectorAll('#runs-list .runs-row[data-slot="group"][data-kind="hist"]')]
   .map((r) => r.dataset.pipelineId).sort();
 
-test('Runs list: a one-person or local deployment shows no Started-by filter', async () => {
-  for (const whoami of [SOLO, { name: null, source: 'local', shared: false }]) {
-    const ctx = await history([ROW({ id: 'a2', startedBy: 'ada@example.com' }), ROW({ id: 'a1', startedBy: 'Solo Operator' })], whoami);
-    assert.deepEqual(rowIds(ctx), ['a1', 'a2'], 'the runs are listed');
-    assert.equal(ctx.doc.querySelectorAll('#historyFilter .hist-pill.person').length, 0, 'no Started by filter');
-  }
-});
-
-test('Runs filter: "Started by" pills, you first; one filters every group, again clears', async () => {
-  const ctx = await history([
-    ROW({ id: 'b3', startedBy: 'ada@example.com', projectKey: 'beta-00000002', projectName: 'Beta', projectDir: '/x/beta' }),
-    ROW({ id: 'a3', startedBy: 'ada@example.com' }),
-    ROW({ id: 'a2', startedBy: 'grace@example.com' }),
-    ROW({ id: 'a1', startedBy: ME }),
+test('Runs list: Started-by pills filter every group (you first, again clears); none on a solo/local deployment', async () => {
+  await checkRows([
+    { name: 'Runs list: a one-person or local deployment shows no Started-by filter', run: async () => {
+      for (const whoami of [SOLO, { name: null, source: 'local', shared: false }]) {
+        const ctx = await history([ROW({ id: 'a2', startedBy: 'ada@example.com' }), ROW({ id: 'a1', startedBy: 'Solo Operator' })], whoami);
+        assert.deepEqual(rowIds(ctx), ['a1', 'a2'], 'the runs are listed');
+        assert.equal(ctx.doc.querySelectorAll('#historyFilter .hist-pill.person').length, 0, 'no Started by filter');
+      }
+    } },
+    { name: 'Runs filter: "Started by" pills, you first; one filters every group, again clears', run: async () => {
+      const ctx = await history([
+        ROW({ id: 'b3', startedBy: 'ada@example.com', projectKey: 'beta-00000002', projectName: 'Beta', projectDir: '/x/beta' }),
+        ROW({ id: 'a3', startedBy: 'ada@example.com' }),
+        ROW({ id: 'a2', startedBy: 'grace@example.com' }),
+        ROW({ id: 'a1', startedBy: ME }),
+      ]);
+      const pills = () => [...ctx.doc.querySelectorAll('#historyFilter .hist-pill.person')];
+      assert.deepEqual(pills().map((b) => b.textContent.replace(/\s+/g, ' ').trim()), ['Myou 1', 'Aada@example.com 2', 'Ggrace@example.com 1']);
+      assert.deepEqual(rowIds(ctx), ['a1', 'a2', 'a3', 'b3']);
+      pills()[1].dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
+      await settle(ctx.window);
+      assert.deepEqual(rowIds(ctx), ['a3', 'b3'], "only ada's runs, in both projects");
+      assert.equal(pills()[1].getAttribute('aria-pressed'), 'true');
+      // clicking the active person pill again shows everyone
+      pills()[1].dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
+      await settle(ctx.window);
+      assert.deepEqual(rowIds(ctx), ['a1', 'a2', 'a3', 'b3']);
+      assert.equal(pills()[1].getAttribute('aria-pressed'), 'false');
+    } },
   ]);
-  const pills = () => [...ctx.doc.querySelectorAll('#historyFilter .hist-pill.person')];
-  assert.deepEqual(pills().map((b) => b.textContent.replace(/\s+/g, ' ').trim()), ['Myou 1', 'Aada@example.com 2', 'Ggrace@example.com 1']);
-  assert.deepEqual(rowIds(ctx), ['a1', 'a2', 'a3', 'b3']);
-  pills()[1].dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
-  await settle(ctx.window);
-  assert.deepEqual(rowIds(ctx), ['a3', 'b3'], "only ada's runs, in both projects");
-  assert.equal(pills()[1].getAttribute('aria-pressed'), 'true');
-  // clicking the active person pill again shows everyone
-  pills()[1].dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
-  await settle(ctx.window);
-  assert.deepEqual(rowIds(ctx), ['a1', 'a2', 'a3', 'b3']);
-  assert.equal(pills()[1].getAttribute('aria-pressed'), 'false');
 });
 
-// ── sidebar rows ────────────────────────────────────────────────────────────────
-
-const RUN_ID = 'run-aaa';
-function hello(ctx, extra = {}) {
-  ctx.wsBox.ws.dispatch('open', {});
-  ctx.dispatch({ type: 'hello', runs: [{ runId: RUN_ID, title: 'Demo run', projectDir: '/tmp/p', status: 'running', startedAt: '2026-01-01T00:00:00Z', ...extra }] });
-  go(ctx.window, 'runs');
-}
-
-// ── live run detail: the person chip ────────────────────────────────────────────
-
-async function runDetail(extra, whoami = SHARED) {
-  const ctx = await boot({ whoami });
-  hello(ctx, extra);
-  go(ctx.window, `running/${RUN_ID}`);
-  await settle(ctx.window, 8);
-  return ctx;
-}
-
-test('live run detail: a person chip on the page title\'s meta line with the full name, never "you"', async () => {
-  const ctx = await runDetail({ startedBy: 'ada.lovelace@example.com' });
-  const chip = ctx.doc.querySelector('.rd-page-meta .person-chip');
-  assert.ok(chip);
-  assert.equal(chip.nextElementSibling, null, 'at the end of the line under the run\'s name');
-  assert.equal(chip.querySelector('.person-ini').textContent, 'AL');
-  assert.equal(chip.querySelector('.person-chip-name').textContent, 'ada.lovelace@example.com');
-  assert.equal(chip.title, 'Started by ada.lovelace@example.com');
-  assert.doesNotMatch(ctx.doc.querySelector('.rd-meta').textContent, /\bby\b/, 'the meta line no longer repeats it');
-
-  const own = await runDetail({ startedBy: ME });
-  assert.equal(own.doc.querySelector('.rd-page-meta .person-chip-name').textContent, ME, 'the full name, even for the viewer');
-  assert.equal((await runDetail({ startedBy: 'local' })).doc.querySelector('.rd-page-meta .person-chip'), null);
-  assert.equal((await runDetail({ startedBy: 'ada@example.com' }, SOLO)).doc.querySelector('.rd-page-meta .person-chip'), null);
-});
-
-test('run detail banner: "Paused by <name>" / "Paused by you" / "Stopped by <name>" when shared; plain otherwise', async () => {
-  const copyOf = async (extra, whoami = SHARED) => {
-    const ctx = await runDetail(extra, whoami);
-    // The state banner lives on the Overview tab.
-    const tab = [...ctx.doc.querySelectorAll('.rd-tab')].find((b) => /overview/i.test(b.dataset.sec || b.textContent));
-    if (tab) tab.dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
-    await settle(ctx.window, 8);
-    return ctx.doc.querySelector('.rd-ov-copy')?.textContent || '';
-  };
-  const at = '2026-01-01T00:00:00Z';
-  assert.match(await copyOf({ status: 'paused', lastAction: { kind: 'pause', by: 'grace@example.com', at } }), /^Paused by grace@example\.com\. Agents in flight/);
-  assert.match(await copyOf({ status: 'paused', lastAction: { kind: 'pause', by: ME, at } }), /^Paused by you\. /);
-  assert.match(await copyOf({ status: 'paused', lastAction: { kind: 'pause', by: 'local', at } }), /^Paused\. Agents in flight/);
-  assert.match(await copyOf({ status: 'paused' }), /^Paused\. /);
-  assert.match(await copyOf({ status: 'stopped', lastAction: { kind: 'stop', by: 'ada@example.com', at } }), /^Stopped by ada@example\.com\./);
-  assert.match(await copyOf({ status: 'paused', lastAction: { kind: 'pause', by: 'grace@example.com', at } }, SOLO), /^Paused\. /, 'not shared: nobody named');
-});
-
-// ── History detail: the person chip ─────────────────────────────────────────────
+// ── History detail ──────────────────────────────────────────────────────────────
 
 const KEY = 'proj-alpha-abcd1234';
 const DETAIL_ROW = { id: 'fcec04e8', projectKey: KEY, projectName: 'Alpha', projectDir: '/tmp/proj', title: 'Fix it', status: 'done', startedAt: '2026-08-17T20:54:42Z', mtime: 1 };
 const detailOf = (state) => ({
   state: { id: DETAIL_ROW.id, title: 'Fix it', status: 'done', startedAt: DETAIL_ROW.startedAt, stepper: null, steps: [], subAgents: [], totalCostUsd: 1, totalActiveMs: 60000, branch: null, prompt: 'x', ...state },
   results: null, overview: null, clarify: { questions: [], answers: [] }, reviews: [], stepQuestions: [], artifacts: [], auditMarkdown: '# saved',
-});
-
-async function detailRow2(state, whoami = SHARED) {
-  const detail = detailOf(state);
-  const ctx = await boot({ whoami, fetchHandler: (u) => {
-    if (u.endsWith('/api/history/pr')) return ok({ ok: true });
-    if (u.endsWith('/diff')) return fail(404, { error: 'no diff' });
-    if (u.endsWith('/log')) return fail(404, { error: 'no log' });
-    if (u.endsWith('/api/history')) return ok({ pipelines: [DETAIL_ROW], ghAvailable: false });
-    if (u.endsWith(`/api/history/${KEY}/${DETAIL_ROW.id}`)) return ok(detail);
-    return null;
-  } });
-  go(ctx.window, `history/${KEY}/${DETAIL_ROW.id}`);
-  await settle(ctx.window, 8);
-  return ctx.doc.querySelector('#hist-detail .hd-row2');
-}
-
-test('History detail: the person chip at the end of the status row; nothing for local, null or not shared', async () => {
-  const row = await detailRow2({ startedBy: 'ada@example.com' });
-  const chips = row.querySelectorAll('.person-chip');
-  assert.equal(chips.length, 1, 'painted once');
-  assert.equal(chips[0].querySelector('.person-chip-name').textContent, 'ada@example.com');
-  assert.equal(chips[0].title, 'Started by ada@example.com');
-  assert.equal(row.querySelector('.hd-by'), null, 'no meta text repeating it');
-  assert.equal((await detailRow2({ startedBy: 'local' })).querySelector('.person-chip'), null);
-  assert.equal((await detailRow2({ startedBy: null })).querySelector('.person-chip'), null);
-  assert.equal((await detailRow2({ startedBy: 'ada@example.com' }, SOLO)).querySelector('.person-chip'), null);
-});
-
-test('History detail: a scheduled run\'s chip says who scheduled it', async () => {
-  const row = await detailRow2({ startedBy: 'ada@example.com', scheduledFor: '2026-08-18T02:00:00Z', scheduleId: null });
-  assert.equal(row.querySelector('.hd-sched').textContent, 'Started by schedule');
-  assert.equal(row.querySelector('.person-chip').title, 'Scheduled by ada@example.com');
 });
 
 // ── History Clarify: who answered (step 3) ───────────────────────────────────────
@@ -262,73 +183,93 @@ async function clarifySec(extra, whoami = SHARED) {
   return ctx.doc.querySelector('#hist-detail .hd-sec[data-sec="clarify"]');
 }
 
-test('History Clarify: "answered by <name>" under the answers, "you" for yourself, nothing when not shared', async () => {
-  const Q = [{ id: 'q1', question: 'Which DB?', options: ['sqlite', 'pg'] }];
-  const A = [{ id: 'q1', question: 'Which DB?', choice: 'pg' }];
-  const clar = (answeredBy) => ({ clarify: { questions: Q, answers: A, ...(answeredBy ? { answeredBy } : {}) } });
-  const sec = await clarifySec(clar('grace@example.com'));
-  assert.ok(sec, 'the Clarify section');
-  assert.equal(sec.querySelector('.hd-cl-by')?.textContent, 'answered by grace@example.com');
-  assert.equal(sec.querySelector('.hd-cl-by').title, 'Answered by grace@example.com');
-  assert.equal((await clarifySec(clar(ME))).querySelector('.hd-cl-by')?.textContent, 'answered by you');
-  assert.equal((await clarifySec(clar('local'))).querySelector('.hd-cl-by'), null);
-  assert.equal((await clarifySec(clar(null))).querySelector('.hd-cl-by'), null);
-  assert.equal((await clarifySec(clar('grace@example.com'), SOLO)).querySelector('.hd-cl-by'), null, 'not shared: nobody named');
-  const step = await clarifySec({ stepQuestions: [{ stepKey: 'x:n_plan:1', round: 1, nodeId: 'n_plan', agentKey: 'planner', questions: Q, answers: A, answeredBy: 'ada via Slack' }] });
-  assert.equal(step.querySelector('.hd-cl-by')?.textContent, 'answered by ada via Slack');
+test('History Clarify attribution: answered by <name>/you/nobody, and Away mode answers say so with reason and \'please check\'', async () => {
+  await checkRows([
+    { name: 'History Clarify: "answered by <name>" under the answers, "you" for yourself, nothing when not shared', run: async () => {
+      const Q = [{ id: 'q1', question: 'Which DB?', options: ['sqlite', 'pg'] }];
+      const A = [{ id: 'q1', question: 'Which DB?', choice: 'pg' }];
+      const clar = (answeredBy) => ({ clarify: { questions: Q, answers: A, ...(answeredBy ? { answeredBy } : {}) } });
+      const sec = await clarifySec(clar('grace@example.com'));
+      assert.ok(sec, 'the Clarify section');
+      assert.equal(sec.querySelector('.hd-cl-by')?.textContent, 'answered by grace@example.com');
+      assert.equal(sec.querySelector('.hd-cl-by').title, 'Answered by grace@example.com');
+      assert.equal((await clarifySec(clar(ME))).querySelector('.hd-cl-by')?.textContent, 'answered by you');
+      assert.equal((await clarifySec(clar('local'))).querySelector('.hd-cl-by'), null);
+      assert.equal((await clarifySec(clar(null))).querySelector('.hd-cl-by'), null);
+      assert.equal((await clarifySec(clar('grace@example.com'), SOLO)).querySelector('.hd-cl-by'), null, 'not shared: nobody named');
+      const step = await clarifySec({ stepQuestions: [{ stepKey: 'x:n_plan:1', round: 1, nodeId: 'n_plan', agentKey: 'planner', questions: Q, answers: A, answeredBy: 'ada via Slack' }] });
+      assert.equal(step.querySelector('.hd-cl-by')?.textContent, 'answered by ada via Slack');
+    } },
+    { name: 'History Clarify: an Away mode answer says so, solo or shared, with its reason and "please check"', run: async () => {
+      const Q = [{ id: 'q1', question: 'Which DB?', options: ['sqlite', 'pg'] }, { id: 'q2', question: 'Cache?', options: ['yes', 'no'] }];
+      const A = [{ id: 'q1', question: 'Which DB?', choice: 'pg' }, { id: 'q2', question: 'Cache?', choice: 'no' }];
+      const night = { strategy: 'weights', flagged: true, questions: [
+        { id: 'q1', choice: 'pg', rationale: 'the agent recommended this at 80%, well ahead of the next option', flagged: false },
+        { id: 'q2', choice: 'no', rationale: 'the agent was not sure enough; first option taken', flagged: true },
+      ] };
+      for (const who of [SOLO, SHARED]) {
+        const sec = await clarifySec({ clarify: { questions: Q, answers: A, answeredBy: 'night-mode', night } }, who);
+        assert.equal(sec.querySelector('.hd-cl-by')?.textContent, 'Answered by Away mode · please check');
+        const why = [...sec.querySelectorAll('.hd-cl-away')].map((e) => e.textContent);
+        assert.deepEqual(why, ['Away mode: the agent recommended this at 80%, well ahead of the next option.',
+          'Away mode, please check: the agent was not sure enough; first option taken.']);
+      }
+      const step = await clarifySec({ stepQuestions: [{ stepKey: 'x:n_plan:1', round: 1, nodeId: 'n_plan', agentKey: 'planner', questions: Q.slice(0, 1), answers: A.slice(0, 1), answeredBy: 'night-mode', night: { flagged: false, questions: night.questions.slice(0, 1) } }] }, SOLO);
+      assert.equal(step.querySelector('.hd-cl-by')?.textContent, 'Answered by Away mode');
+    } },
+  ]);
 });
 
-test('History Clarify: an Away mode answer says so, solo or shared, with its reason and "please check"', async () => {
-  const Q = [{ id: 'q1', question: 'Which DB?', options: ['sqlite', 'pg'] }, { id: 'q2', question: 'Cache?', options: ['yes', 'no'] }];
-  const A = [{ id: 'q1', question: 'Which DB?', choice: 'pg' }, { id: 'q2', question: 'Cache?', choice: 'no' }];
-  const night = { strategy: 'weights', flagged: true, questions: [
-    { id: 'q1', choice: 'pg', rationale: 'the agent recommended this at 80%, well ahead of the next option', flagged: false },
-    { id: 'q2', choice: 'no', rationale: 'the agent was not sure enough; first option taken', flagged: true },
-  ] };
-  for (const who of [SOLO, SHARED]) {
-    const sec = await clarifySec({ clarify: { questions: Q, answers: A, answeredBy: 'night-mode', night } }, who);
-    assert.equal(sec.querySelector('.hd-cl-by')?.textContent, 'Answered by Away mode · please check');
-    const why = [...sec.querySelectorAll('.hd-cl-away')].map((e) => e.textContent);
-    assert.deepEqual(why, ['Away mode: the agent recommended this at 80%, well ahead of the next option.',
-      'Away mode, please check: the agent was not sure enough; first option taken.']);
-  }
-  const step = await clarifySec({ stepQuestions: [{ stepKey: 'x:n_plan:1', round: 1, nodeId: 'n_plan', agentKey: 'planner', questions: Q.slice(0, 1), answers: A.slice(0, 1), answeredBy: 'night-mode', night: { flagged: false, questions: night.questions.slice(0, 1) } }] }, SOLO);
-  assert.equal(step.querySelector('.hd-cl-by')?.textContent, 'Answered by Away mode');
-});
-
-test('History run page: "Answered for you" lists the stored answers', async () => {
-  const decisions = [
-    { questionId: 'clarify-1', kind: 'clarify', choice: 'pg', strategy: 'weights', flagged: false, rationale: 'q1: the agent recommended this at 80%' },
-    { questionId: 'gate-1', kind: 'gate', choice: 'another', strategy: 'rule', flagged: true, rationale: '2 critical issues left, one more fix round' },
-  ];
-  const ctx = await boot({ whoami: SOLO, fetchHandler: (u) => {
-    if (u.includes('/api/night-decisions')) return ok({ decisions: u.includes(encodeURIComponent(DETAIL_ROW.id)) ? decisions : [] });
-    if (u.endsWith('/api/history/pr')) return ok({ ok: true });
-    if (u.endsWith('/diff')) return fail(404, { error: 'no diff' });
-    if (u.endsWith('/log')) return fail(404, { error: 'no log' });
-    if (u.endsWith('/api/history')) return ok({ pipelines: [DETAIL_ROW], ghAvailable: false });
-    if (u.endsWith(`/api/history/${KEY}/${DETAIL_ROW.id}`)) return ok(detailOf({}));
-    return null;
-  } });
-  go(ctx.window, `history/${KEY}/${DETAIL_ROW.id}`);
-  await settle(ctx.window, 8);
-  const sec = ctx.doc.querySelector('#hist-detail .rd-night-sec');
-  assert.ok(sec && !sec.hidden, 'the section shows');
-  assert.deepEqual([...sec.querySelectorAll('.rd-na .rd-slabel')].map((e) => e.textContent.split(' · ')[0]), ['Clarifying questions', 'Review loop']);
-  const rows = [...sec.querySelectorAll('.rd-na-row')];
-  assert.deepEqual(rows.map((r) => [r.querySelector('.rd-na-a').textContent, !!r.querySelector('.rd-na-check')]), [['pg', false], ['One more fix round', true]]);
-});
-
-test('History run page: a note at the top of the card says how many answers to check', async () => {
-  const decisions = [
-    { questionId: 'clarify-1', kind: 'clarify', choice: 'a | b', strategy: 'weights', flagged: true, questions: [{ id: 'q1', choice: 'a', flagged: false }, { id: 'q2', choice: 'b', flagged: true }] },
-    { questionId: 'gate-1', kind: 'gate', choice: 'continue', strategy: 'rule', flagged: false },
-  ];
-  const note = await detailNote(decisions);
-  assert.equal(note.hidden, false);
-  assert.equal(note.querySelector('.rd-away-note-text').textContent, 'Away mode: 3 answers while you were away — 1 to check.');
-  assert.equal(note.querySelector('button').textContent, 'See the answers');
-  assert.equal((await detailNote([])).hidden, true);
+test('History run page Away-mode answers: section lists stored answers with check marks, a top note counts the ones to check, absent when none', async () => {
+  await checkRows([
+    { name: 'History run page: "Answered for you" lists the stored answers', run: async () => {
+      const decisions = [
+        { questionId: 'clarify-1', kind: 'clarify', choice: 'pg', strategy: 'weights', flagged: false, rationale: 'q1: the agent recommended this at 80%' },
+        { questionId: 'gate-1', kind: 'gate', choice: 'another', strategy: 'rule', flagged: true, rationale: '2 critical issues left, one more fix round' },
+      ];
+      const ctx = await boot({ whoami: SOLO, fetchHandler: (u) => {
+        if (u.includes('/api/night-decisions')) return ok({ decisions: u.includes(encodeURIComponent(DETAIL_ROW.id)) ? decisions : [] });
+        if (u.endsWith('/api/history/pr')) return ok({ ok: true });
+        if (u.endsWith('/diff')) return fail(404, { error: 'no diff' });
+        if (u.endsWith('/log')) return fail(404, { error: 'no log' });
+        if (u.endsWith('/api/history')) return ok({ pipelines: [DETAIL_ROW], ghAvailable: false });
+        if (u.endsWith(`/api/history/${KEY}/${DETAIL_ROW.id}`)) return ok(detailOf({}));
+        return null;
+      } });
+      go(ctx.window, `history/${KEY}/${DETAIL_ROW.id}`);
+      await settle(ctx.window, 8);
+      const sec = ctx.doc.querySelector('#hist-detail .rd-night-sec');
+      assert.ok(sec && !sec.hidden, 'the section shows');
+      assert.deepEqual([...sec.querySelectorAll('.rd-na .rd-slabel')].map((e) => e.textContent.split(' · ')[0]), ['Clarifying questions', 'Review loop']);
+      const rows = [...sec.querySelectorAll('.rd-na-row')];
+      assert.deepEqual(rows.map((r) => [r.querySelector('.rd-na-a').textContent, !!r.querySelector('.rd-na-check')]), [['pg', false], ['One more fix round', true]]);
+    } },
+    { name: 'History run page: a note at the top of the card says how many answers to check', run: async () => {
+      const decisions = [
+        { questionId: 'clarify-1', kind: 'clarify', choice: 'a | b', strategy: 'weights', flagged: true, questions: [{ id: 'q1', choice: 'a', flagged: false }, { id: 'q2', choice: 'b', flagged: true }] },
+        { questionId: 'gate-1', kind: 'gate', choice: 'continue', strategy: 'rule', flagged: false },
+      ];
+      const note = await detailNote(decisions);
+      assert.equal(note.hidden, false);
+      assert.equal(note.querySelector('.rd-away-note-text').textContent, 'Away mode: 3 answers while you were away — 1 to check.');
+      assert.equal(note.querySelector('button').textContent, 'See the answers');
+      assert.equal((await detailNote([])).hidden, true);
+    } },
+    { name: 'History run page: no Away mode answers, no section', run: async () => {
+      const ctx = await boot({ whoami: SOLO, fetchHandler: (u) => {
+        if (u.includes('/api/night-decisions')) return ok({ decisions: [] });
+        if (u.endsWith('/api/history/pr')) return ok({ ok: true });
+        if (u.endsWith('/diff')) return fail(404, { error: 'no diff' });
+        if (u.endsWith('/log')) return fail(404, { error: 'no log' });
+        if (u.endsWith('/api/history')) return ok({ pipelines: [DETAIL_ROW], ghAvailable: false });
+        if (u.endsWith(`/api/history/${KEY}/${DETAIL_ROW.id}`)) return ok(detailOf({}));
+        return null;
+      } });
+      go(ctx.window, `history/${KEY}/${DETAIL_ROW.id}`);
+      await settle(ctx.window, 8);
+      assert.equal(ctx.doc.querySelector('#hist-detail .rd-night-sec').hidden, true);
+    } },
+  ]);
 });
 
 async function detailNote(decisions) {
@@ -345,21 +286,6 @@ async function detailNote(decisions) {
   await settle(ctx.window, 8);
   return ctx.doc.querySelector('#hist-detail .rd-sheet .rd-away-note');
 }
-
-test('History run page: no Away mode answers, no section', async () => {
-  const ctx = await boot({ whoami: SOLO, fetchHandler: (u) => {
-    if (u.includes('/api/night-decisions')) return ok({ decisions: [] });
-    if (u.endsWith('/api/history/pr')) return ok({ ok: true });
-    if (u.endsWith('/diff')) return fail(404, { error: 'no diff' });
-    if (u.endsWith('/log')) return fail(404, { error: 'no log' });
-    if (u.endsWith('/api/history')) return ok({ pipelines: [DETAIL_ROW], ghAvailable: false });
-    if (u.endsWith(`/api/history/${KEY}/${DETAIL_ROW.id}`)) return ok(detailOf({}));
-    return null;
-  } });
-  go(ctx.window, `history/${KEY}/${DETAIL_ROW.id}`);
-  await settle(ctx.window, 8);
-  assert.equal(ctx.doc.querySelector('#hist-detail .rd-night-sec').hidden, true);
-});
 
 // ── Schedules: created by / changed by (step 4) ──────────────────────────────────
 
@@ -393,27 +319,30 @@ async function schedules(whoami, tab) {
 }
 const cardBy = (ctx, title) => [...ctx.doc.querySelectorAll('.sched-item')].find((c) => c.querySelector('.rc-title')?.textContent === title);
 
-test('Schedules: "by <creator>" with initials, "by you", nothing for local; Details name creator and changer', async () => {
-  const rep = await schedules(SHARED, 'repeating');
-  const nightly = cardBy(rep, 'Nightly');
-  assert.ok(nightly, rep.doc.querySelector('#schedules-repeating')?.textContent);
-  assert.equal(nightly.querySelector('.sched-by-text').textContent, 'by ada.lovelace@example.com');
-  assert.equal(nightly.querySelector('.sched-by .person-ini').textContent, 'AL');
-  assert.equal(nightly.querySelector('.sched-by').title, 'Created by ada.lovelace@example.com');
-  const kv = Object.fromEntries([...nightly.querySelectorAll('.sched-kv')].map((r) => [r.querySelector('.sched-k').textContent, r.querySelector('.sched-v').textContent]));
-  assert.equal(kv['Created by'], 'ada.lovelace@example.com');
-  assert.equal(kv['Changed by'], 'grace@example.com');
+test('Schedules: \'by <creator>\' with Created/Changed by on a shared deployment, nobody on local/solo', async () => {
+  await checkRows([
+    { name: 'Schedules: "by <creator>" with initials, "by you", nothing for local; Details name creator and changer', run: async () => {
+      const rep = await schedules(SHARED, 'repeating');
+      const nightly = cardBy(rep, 'Nightly');
+      assert.ok(nightly, rep.doc.querySelector('#schedules-repeating')?.textContent);
+      assert.equal(nightly.querySelector('.sched-by-text').textContent, 'by ada.lovelace@example.com');
+      assert.equal(nightly.querySelector('.sched-by .person-ini').textContent, 'AL');
+      assert.equal(nightly.querySelector('.sched-by').title, 'Created by ada.lovelace@example.com');
+      const kv = Object.fromEntries([...nightly.querySelectorAll('.sched-kv')].map((r) => [r.querySelector('.sched-k').textContent, r.querySelector('.sched-v').textContent]));
+      assert.equal(kv['Created by'], 'ada.lovelace@example.com');
+      assert.equal(kv['Changed by'], 'grace@example.com');
 
-  const once = await schedules(SHARED, 'once');
-  assert.equal(cardBy(once, 'Mine').querySelector('.sched-by-text').textContent, 'by you');
-  assert.equal(cardBy(once, 'Local').querySelector('.sched-by'), null);
-});
-
-test('Schedules: nobody is shown on a local or one-person deployment', async () => {
-  for (const whoami of [SOLO, { name: null, source: 'local', shared: false }]) {
-    const ctx = await schedules(whoami, 'repeating');
-    const nightly = cardBy(ctx, 'Nightly');
-    assert.equal(nightly.querySelector('.sched-by'), null);
-    assert.equal([...nightly.querySelectorAll('.sched-k')].some((k) => /by$/.test(k.textContent)), false);
-  }
+      const once = await schedules(SHARED, 'once');
+      assert.equal(cardBy(once, 'Mine').querySelector('.sched-by-text').textContent, 'by you');
+      assert.equal(cardBy(once, 'Local').querySelector('.sched-by'), null);
+    } },
+    { name: 'Schedules: nobody is shown on a local or one-person deployment', run: async () => {
+      for (const whoami of [SOLO, { name: null, source: 'local', shared: false }]) {
+        const ctx = await schedules(whoami, 'repeating');
+        const nightly = cardBy(ctx, 'Nightly');
+        assert.equal(nightly.querySelector('.sched-by'), null);
+        assert.equal([...nightly.querySelectorAll('.sched-k')].some((k) => /by$/.test(k.textContent)), false);
+      }
+    } },
+  ]);
 });

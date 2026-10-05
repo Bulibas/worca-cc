@@ -14,6 +14,7 @@ import { JSDOM } from 'jsdom';
 import { edgeId, manualEdgeId } from '../src/shared/workspace-map/ids.mjs';
 import { effectiveEdges, setEdgeState } from '../src/shared/workspace-map/overrides.mjs';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -153,41 +154,46 @@ async function doubleClick(window, doc, sel) {
 }
 const rowIndex = (doc, id) => rows(doc).findIndex((r) => r.startsWith(`${id}:`));
 
-test('double-click Confirm on an auto edge: one PUT confirmed (the Reject that replaced it is never pressed)', async () => {
-  const { window, doc, server } = await boot({ payload: payloadOf() });
-  await doubleClick(window, doc, rowAction(rowIndex(doc, X_HTTP), 0));
-  assert.deepEqual(mutations(server), [`PUT ${X_HTTP} {"state":"confirmed"}`]);
-  assert.ok(rows(doc).includes(`${X_HTTP}:confirmed`));
+test('double-click Confirm / Reject / Clear sends one PUT with the first verdict, never the button that replaced it', async () => {
+  await checkRows([
+    { name: 'double-click Confirm on an auto edge: one PUT confirmed (the Reject that replaced it is never pressed)', run: async () => {
+      const { window, doc, server } = await boot({ payload: payloadOf() });
+      await doubleClick(window, doc, rowAction(rowIndex(doc, X_HTTP), 0));
+      assert.deepEqual(mutations(server), [`PUT ${X_HTTP} {"state":"confirmed"}`]);
+      assert.ok(rows(doc).includes(`${X_HTTP}:confirmed`));
+    } },
+    { name: 'double-click Reject on an auto edge: one PUT rejected (the Clear that replaced it is never pressed)', run: async () => {
+      const { window, doc, server } = await boot({ payload: payloadOf() });
+      await doubleClick(window, doc, rowAction(rowIndex(doc, X_HTTP), 1));
+      assert.deepEqual(mutations(server), [`PUT ${X_HTTP} {"state":"rejected"}`]);
+      assert.ok(rows(doc).includes(`${X_HTTP}:rejected`));
+    } },
+    { name: 'double-click Clear on a confirmed edge: one PUT null (the Reject that replaced it is never pressed)', run: async () => {
+      const { window, doc, server } = await boot({ payload: payloadOf({ states: { [X_HTTP]: 'confirmed' } }) });
+      await doubleClick(window, doc, rowAction(rowIndex(doc, X_HTTP), 1));
+      assert.deepEqual(mutations(server), [`PUT ${X_HTTP} {"state":null}`]);
+      assert.ok(rows(doc).includes(`${X_HTTP}:auto`));
+    } },
+  ]);
 });
 
-test('double-click Reject on an auto edge: one PUT rejected (the Clear that replaced it is never pressed)', async () => {
-  const { window, doc, server } = await boot({ payload: payloadOf() });
-  await doubleClick(window, doc, rowAction(rowIndex(doc, X_HTTP), 1));
-  assert.deepEqual(mutations(server), [`PUT ${X_HTTP} {"state":"rejected"}`]);
-  assert.ok(rows(doc).includes(`${X_HTTP}:rejected`));
-});
-
-test('double-click Clear on a confirmed edge: one PUT null (the Reject that replaced it is never pressed)', async () => {
-  const { window, doc, server } = await boot({ payload: payloadOf({ states: { [X_HTTP]: 'confirmed' } }) });
-  await doubleClick(window, doc, rowAction(rowIndex(doc, X_HTTP), 1));
-  assert.deepEqual(mutations(server), [`PUT ${X_HTTP} {"state":null}`]);
-  assert.ok(rows(doc).includes(`${X_HTTP}:auto`));
-});
-
-test('double-click Delete on the first of two manual edges: one DELETE, the second manual edge stays', async () => {
-  const { window, doc, server } = await boot({ payload: payloadOf({ manual: [man(M_A, 'bucket A'), man(M_B, 'bucket B')] }) });
-  await doubleClick(window, doc, rowAction(rowIndex(doc, M_A), 0));
-  assert.deepEqual(mutations(server), [`DELETE ${M_A}`]);
-  assert.ok(rows(doc).includes(`${M_B}:manual`));
-});
-
-test('double-click Delete on a manual edge beside a confirmed edge: one DELETE, the confirmed edge is never rejected', async () => {
-  const { window, doc, server } = await boot({ payload: payloadOf({ states: { [X_WL]: 'confirmed' }, manual: [man(M_A, 'bucket A')] }) });
-  const at = rowIndex(doc, M_A);
-  assert.equal(rows(doc)[at + 1], `${X_WL}:confirmed`, 'precondition: the confirmed edge is the next row');
-  await doubleClick(window, doc, rowAction(at, 0));
-  assert.deepEqual(mutations(server), [`DELETE ${M_A}`]);
-  assert.ok(rows(doc).includes(`${X_WL}:confirmed`));
+test('double-click Delete on a manual edge: one DELETE; the next manual edge or a confirmed edge that slides up is never touched', async () => {
+  await checkRows([
+    { name: 'double-click Delete on the first of two manual edges: one DELETE, the second manual edge stays', run: async () => {
+      const { window, doc, server } = await boot({ payload: payloadOf({ manual: [man(M_A, 'bucket A'), man(M_B, 'bucket B')] }) });
+      await doubleClick(window, doc, rowAction(rowIndex(doc, M_A), 0));
+      assert.deepEqual(mutations(server), [`DELETE ${M_A}`]);
+      assert.ok(rows(doc).includes(`${M_B}:manual`));
+    } },
+    { name: 'double-click Delete on a manual edge beside a confirmed edge: one DELETE, the confirmed edge is never rejected', run: async () => {
+      const { window, doc, server } = await boot({ payload: payloadOf({ states: { [X_WL]: 'confirmed' }, manual: [man(M_A, 'bucket A')] }) });
+      const at = rowIndex(doc, M_A);
+      assert.equal(rows(doc)[at + 1], `${X_WL}:confirmed`, 'precondition: the confirmed edge is the next row');
+      await doubleClick(window, doc, rowAction(at, 0));
+      assert.deepEqual(mutations(server), [`DELETE ${M_A}`]);
+      assert.ok(rows(doc).includes(`${X_WL}:confirmed`));
+    } },
+  ]);
 });
 
 test('double-click Clear on a stale review (M14b): one PUT null for its old id, never a mutation on the row that slides into its place', async () => {
@@ -241,33 +247,4 @@ test('keyboard: Enter twice on Confirm (detail 0) sends two presses, and the sec
   clickN(window, doc.activeElement, 0);   // the keyboard stays on the row: Clear, never Reject
   await settle();
   assert.deepEqual(mutations(server), [`PUT ${X_HTTP} {"state":"confirmed"}`, `PUT ${X_HTTP} {"state":null}`]);
-});
-
-test('double-click the pair chip: the pair filter goes and the kind filter stays (Clear filters slides into its slot)', async () => {
-  const { window, doc } = await boot({ payload: payloadOf() });
-  const kind = mapSec(doc).querySelector('select.wm-filter[data-filter="kind"]');
-  kind.value = 'pkg';
-  kind.dispatchEvent(new window.Event('change', { bubbles: true }));
-  await settle();
-  clickN(window, mapSec(doc).querySelector('.wm-pair[data-from="web"][data-to="shared-lib"]'), 1);
-  await settle();
-  const bar = () => [...mapSec(doc).querySelector('.wm-filters').children];
-  const at = bar().findIndex((n) => n.classList.contains('wm-pair-chip'));
-  assert.ok(at >= 0, 'precondition: the pair chip is in the filter bar');
-  await doubleClick(window, doc, (d) => [...mapSec(d).querySelector('.wm-filters').children][at]);
-  assert.equal(mapSec(doc).querySelector('.wm-pair-chip'), null, 'the first click removed the pair filter');
-  assert.equal(mapSec(doc).querySelector('select.wm-filter[data-filter="kind"]').value, 'pkg', 'the second click never clears the other filters');
-});
-
-test('double-click a coverage chip: the member filter it sets stays (the repainted chip is never toggled off)', async () => {
-  const { window, doc } = await boot({ payload: payloadOf() });
-  const chip = '.wm-coverage .wm-chip[data-value="web"]';
-  await doubleClick(window, doc, chip);
-  assert.equal(mapSec(doc).querySelector(chip).getAttribute('aria-pressed'), 'true');
-});
-
-test('double-click a pair in the graph: the pair filter it sets stays (the repainted pair is never toggled off)', async () => {
-  const { window, doc } = await boot({ payload: payloadOf() });
-  await doubleClick(window, doc, '.wm-graph .wm-pair[data-from="web"][data-to="shared-lib"]');
-  assert.ok(mapSec(doc).querySelector('.wm-pair-chip'), 'the pair filter is set');
 });

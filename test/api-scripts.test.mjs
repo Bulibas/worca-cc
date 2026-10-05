@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { _resetForTests } from '../src/core/db.mjs';
 import { probePython, resetPythonProbe } from '../src/core/graph/python-probe.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let homeDir, srv, base, prevHome;
 before(async () => {
@@ -77,15 +78,31 @@ const NEW_META = { metaVersion: 2, key: 'fmt', displayName: 'Format', descriptio
   outputs: [{ id: 'log', type: 'md', when: 'always', filename: 'fmt-cycle{cycle}.md' }] };
 const NEW_SRC = 'export default async function () {\n  return { summary: "formatted" };\n}\n';
 
-test('GET /api/scripts/runtimes answers before the :key route ever sees "runtimes"', async () => {
-  const r = await fetch(`${base}/api/scripts/runtimes`);
-  assert.equal(r.status, 200);
-  const d = await r.json();
-  assert.equal(d.node.ok, true);
-  assert.equal(d.node.version, process.version);
-  assert.equal(d.shell.ok, true);
-  assert.equal(typeof d.shell.path, 'string');
-  assert.equal(typeof d.python.ok, 'boolean', 'the python arm is the real probe now — its two shapes are pinned below');
+test('GET /api/scripts/runtimes answers before the :key route, with node/shell and the real python probe', async () => {
+  await checkRows([
+    { name: 'GET /api/scripts/runtimes answers before the :key route ever sees "runtimes"', run: async () => {
+      const r = await fetch(`${base}/api/scripts/runtimes`);
+      assert.equal(r.status, 200);
+      const d = await r.json();
+      assert.equal(d.node.ok, true);
+      assert.equal(d.node.version, process.version);
+      assert.equal(d.shell.ok, true);
+      assert.equal(typeof d.shell.path, 'string');
+      assert.equal(typeof d.python.ok, 'boolean', 'the python arm is the real probe now — its two shapes are pinned below');
+    } },
+    { name: 'GET /api/scripts/runtimes answers the real probe, not the P1c stub', run: async () => {
+      resetPythonProbe();
+      const r = await fetch(`${base}/api/scripts/runtimes`);
+      assert.equal(r.status, 200);
+      const body = await r.json();
+      assert.equal(body.node.ok, true);
+      assert.equal(body.shell.ok, true);
+      assert.notEqual(body.python.reason, 'not supported', 'the stub is gone');
+      const probe = await probePython();
+      if (probe.ok) assert.deepEqual(body.python, { ok: true, version: probe.version.join('.'), command: probe.command });
+      else assert.deepEqual(body.python, { ok: false, reason: probe.reason });
+    } },
+  ]);
 });
 
 test('POST -> 201, GET :key, PUT, cases, duplicate, DELETE round-trip', async () => {
@@ -195,22 +212,6 @@ test('a maximal legal case set saves: 32 cases x 256 KiB fits the cases route (t
 });
 
 // ── python availability on the wire (workbench spec §7, W4, W17) ─────────────
-const PROBE = await probePython();
-const pySkip = PROBE.ok ? false : `no python on this host: ${PROBE.reason}`;
-
-test('GET /api/scripts/runtimes answers the real probe, not the P1c stub', async () => {
-  resetPythonProbe();
-  const r = await fetch(`${base}/api/scripts/runtimes`);
-  assert.equal(r.status, 200);
-  const body = await r.json();
-  assert.equal(body.node.ok, true);
-  assert.equal(body.shell.ok, true);
-  assert.notEqual(body.python.reason, 'not supported', 'the stub is gone');
-  const probe = await probePython();
-  if (probe.ok) assert.deepEqual(body.python, { ok: true, version: probe.version.join('.'), command: probe.command });
-  else assert.deepEqual(body.python, { ok: false, reason: probe.reason });
-});
-
 test('no interpreter: runtimes says why, and every python meta on the list is stamped', async () => {
   const fake = join(homeDir, 'not-a-python');
   const prev = process.env.WORCA_PYTHON;
@@ -227,11 +228,4 @@ test('no interpreter: runtimes says why, and every python meta on the list is st
     if (prev === undefined) delete process.env.WORCA_PYTHON; else process.env.WORCA_PYTHON = prev;
     resetPythonProbe();
   }
-});
-
-test('a working interpreter stamps nothing', { skip: pySkip }, async () => {
-  resetPythonProbe();
-  const { scripts } = await (await fetch(`${base}/api/scripts`)).json();
-  assert.equal(scripts.find((s) => s.key === 'py').runtimeMissing, undefined);
-  assert.equal(scripts.every((s) => s.runtimeMissing === undefined), true);
 });

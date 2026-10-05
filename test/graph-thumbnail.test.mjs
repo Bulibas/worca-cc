@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { thumbnailSvg } from '../src/shared/graph/thumbnail.mjs';
 import { portsFnFor } from '../src/shared/graph/ports.mjs';
 
@@ -26,14 +27,28 @@ test('thumbnailSvg: numbers only, wires under cards, deterministic', () => {
   assert.equal(svg.includes('fill="none"'), true, 'wire paths never fill');
 });
 
-test('thumbnailSvg degrades on empty / dangling input', () => {
-  assert.equal(thumbnailSvg({ nodes: [], wires: [] }, portsFn, { width: 40, height: 20 }),
-    '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20" role="img" aria-hidden="true"></svg>');
-  const dangling = { version: 2, nodes: TPL.nodes,
-    wires: [{ id: 'w9', from: { node: 'ghost', port: 'x' }, to: { node: 'n_end', port: 'result' } }] };
-  const svg = thumbnailSvg(dangling, portsFn, {});
-  assert.equal((svg.match(/<path /g) || []).length, 0);
-  assert.equal(svg.includes('NaN'), false);
+test('thumbnailSvg degrades on empty, dangling and malformed input (never throws, junk never reaches the markup)', async () => {
+  await checkRows([
+    { name: 'thumbnailSvg degrades on empty / dangling input', run: () => {
+      assert.equal(thumbnailSvg({ nodes: [], wires: [] }, portsFn, { width: 40, height: 20 }),
+        '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20" role="img" aria-hidden="true"></svg>');
+      const dangling = { version: 2, nodes: TPL.nodes,
+        wires: [{ id: 'w9', from: { node: 'ghost', port: 'x' }, to: { node: 'n_end', port: 'result' } }] };
+      const svg = thumbnailSvg(dangling, portsFn, {});
+      assert.equal((svg.match(/<path /g) || []).length, 0);
+      assert.equal(svg.includes('NaN'), false);
+    } },
+    { name: 'malformed nodes/wires entries never throw and never reach the markup', run: () => {
+      // `filter(Boolean)` kept `7` and indexed an id-less node under `undefined`, so
+      // a non-object wire found a `from` and threw on `w.from.port` (thumbnail.mjs:32).
+      const junk = { version: 2, nodes: [null, 7, {}, ...TPL.nodes], wires: [{}, 'junk', { id: 'w0' }, ...TPL.wires] };
+      const svg = thumbnailSvg(junk, portsFn, { width: 120, height: 64 });
+      assert.equal((svg.match(/<rect /g) || []).length, 3, 'only the three real cards are drawn');
+      assert.equal((svg.match(/<path /g) || []).length, 2);
+      assert.equal(svg.includes('NaN'), false);
+      assert.equal(svg, thumbnailSvg(TPL, portsFn, { width: 120, height: 64 }));
+    } },
+  ]);
 });
 
 test('a card astride the corridor detours in the tile, and no vertex is clipped out of it', () => {
@@ -59,15 +74,4 @@ test('a card astride the corridor detours in the tile, and no vertex is clipped 
     assert.ok(sx >= -0.5 && sx <= width + 0.5, `x ${sx} inside the tile`);
     assert.ok(sy >= -0.5 && sy <= height + 0.5, `y ${sy} inside the tile`);
   }
-});
-
-test('malformed nodes/wires entries never throw and never reach the markup', () => {
-  // `filter(Boolean)` kept `7` and indexed an id-less node under `undefined`, so
-  // a non-object wire found a `from` and threw on `w.from.port` (thumbnail.mjs:32).
-  const junk = { version: 2, nodes: [null, 7, {}, ...TPL.nodes], wires: [{}, 'junk', { id: 'w0' }, ...TPL.wires] };
-  const svg = thumbnailSvg(junk, portsFn, { width: 120, height: 64 });
-  assert.equal((svg.match(/<rect /g) || []).length, 3, 'only the three real cards are drawn');
-  assert.equal((svg.match(/<path /g) || []).length, 2);
-  assert.equal(svg.includes('NaN'), false);
-  assert.equal(svg, thumbnailSvg(TPL, portsFn, { width: 120, height: 64 }));
 });

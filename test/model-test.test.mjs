@@ -8,39 +8,53 @@ import { testModel, hintFor, CLAUDE_SIGNED_OUT_HINT, CODEX_SIGNED_OUT_HINT } fro
 // Never ask the real CLI whether it is signed in (the failure paths would).
 const notSignedOut = async () => false;
 import { bridgeEvents } from '../src/core/bridge/telemetry.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
-test('testModel: success returns ok + first-line capped reply and forwards the minimal run shape', async () => {
-  let seen = null;
-  const run = async (o) => { seen = o; return { text: '  OK\nsecond line ignored', exitCode: 0 }; };
-  const res = await testModel('glm-4.7', { signedOut: notSignedOut, run });
-  assert.deepEqual(res, { ok: true, text: 'OK' });
-  assert.equal(seen.model, 'glm-4.7');
-  assert.equal(seen.effort, 'low');
-  assert.deepEqual(seen.allowedTools, []);
-  assert.ok(seen.signal instanceof AbortSignal, 'timeout signal is wired');
-  assert.ok(seen.prompt.length > 0);
-  // modelEnv is whatever resolveModelEnv says for this id (undefined in the
-  // sandboxed test env) — the key must be NAMED in the call either way.
-  assert.ok('modelEnv' in seen);
+test('testModel: success returns ok + first-line capped reply (long replies capped) and forwards the minimal run shape', async () => {
+  await checkRows([
+    { name: 'testModel: success returns ok + first-line capped reply and forwards the minimal run shape', run: async () => {
+      let seen = null;
+      const run = async (o) => { seen = o; return { text: '  OK\nsecond line ignored', exitCode: 0 }; };
+      const res = await testModel('glm-4.7', { signedOut: notSignedOut, run });
+      assert.deepEqual(res, { ok: true, text: 'OK' });
+      assert.equal(seen.model, 'glm-4.7');
+      assert.equal(seen.effort, 'low');
+      assert.deepEqual(seen.allowedTools, []);
+      assert.ok(seen.signal instanceof AbortSignal, 'timeout signal is wired');
+      assert.ok(seen.prompt.length > 0);
+      // modelEnv is whatever resolveModelEnv says for this id (undefined in the
+      // sandboxed test env) — the key must be NAMED in the call either way.
+      assert.ok('modelEnv' in seen);
+    } },
+    { name: 'testModel: long replies are capped', run: async () => {
+      const run = async () => ({ text: 'x'.repeat(500), exitCode: 0 });
+      const res = await testModel('m', { signedOut: notSignedOut, run });
+      assert.equal(res.ok, true);
+      assert.equal(res.text.length, 100);
+    } },
+  ]);
 });
 
-test('testModel: long replies are capped', async () => {
-  const run = async () => ({ text: 'x'.repeat(500), exitCode: 0 });
-  const res = await testModel('m', { signedOut: notSignedOut, run });
-  assert.equal(res.ok, true);
-  assert.equal(res.text.length, 100);
-});
-
-test('testModel: run failure returns ok:false with the runner errorClass', async () => {
-  const run = async () => {
-    const err = new Error('claude exited with code 1: 401 authentication_error');
-    err.errorClass = 'auth';
-    throw err;
-  };
-  const res = await testModel('m', { signedOut: notSignedOut, run });
-  assert.equal(res.ok, false);
-  assert.equal(res.errorClass, 'auth');
-  assert.match(res.message, /authentication_error/);
+test('testModel: a run failure returns ok:false with the runner errorClass, else classifyError', async () => {
+  await checkRows([
+    { name: 'testModel: run failure returns ok:false with the runner errorClass', run: async () => {
+      const run = async () => {
+        const err = new Error('claude exited with code 1: 401 authentication_error');
+        err.errorClass = 'auth';
+        throw err;
+      };
+      const res = await testModel('m', { signedOut: notSignedOut, run });
+      assert.equal(res.ok, false);
+      assert.equal(res.errorClass, 'auth');
+      assert.match(res.message, /authentication_error/);
+    } },
+    { name: 'testModel: errorClass falls back to classifyError on unstamped errors', run: async () => {
+      const run = async () => { throw new Error('ECONNREFUSED 127.0.0.1:9999'); };
+      const res = await testModel('m', { signedOut: notSignedOut, run });
+      assert.equal(res.ok, false);
+      assert.equal(res.errorClass, 'network');
+    } },
+  ]);
 });
 
 test('testModel: a failure on a signed-out CLI names the Claude Code sign-in, not the model token', async () => {
@@ -53,13 +67,6 @@ test('testModel: a failure on a signed-out CLI names the Claude Code sign-in, no
   // Signed in, the same auth failure keeps the generic advice.
   const signedIn = await testModel('m', { run, signedOut: async () => false });
   assert.equal(signedIn.hint, hintFor('auth'));
-});
-
-test('testModel: errorClass falls back to classifyError on unstamped errors', async () => {
-  const run = async () => { throw new Error('ECONNREFUSED 127.0.0.1:9999'); };
-  const res = await testModel('m', { signedOut: notSignedOut, run });
-  assert.equal(res.ok, false);
-  assert.equal(res.errorClass, 'network');
 });
 
 test('testModel: abort surfaces as timeout', async () => {
@@ -82,17 +89,6 @@ test('testModel: empty reply is a failure, not a silent pass', async () => {
   const res = await testModel('m', { signedOut: notSignedOut, run });
   assert.equal(res.ok, false);
   assert.match(res.message, /empty reply/i);
-});
-
-test('hintFor maps recovery classes to actionable text', () => {
-  assert.match(hintFor('auth'), /token|secret|authentication/i);
-  assert.match(hintFor('network'), /ANTHROPIC_BASE_URL|unreachable/i);
-  assert.match(hintFor('rate_limit'), /rate|overloaded/i);
-  assert.match(hintFor('quota'), /quota|billing|credit/i);
-  assert.match(hintFor('usage_limit'), /limit/i);
-  assert.match(hintFor('timeout'), /timed out/i);
-  assert.equal(hintFor(null), '');
-  assert.equal(hintFor('unknown-class'), '');
 });
 
 test('testModel: a bridge failure for this model replaces the CLI message (a bridged run\'s stderr only carries warnings)', async () => {

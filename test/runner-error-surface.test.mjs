@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runClaude } from '../src/core/claude-runner.mjs';
 import { classifyError } from '../src/core/recoverable-error.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const POSIX_SHIM = { skip: process.platform === 'win32' ? 'fake claude shim is a POSIX shell script (no .exe stand-in on Windows)' : false };
 
@@ -112,61 +113,66 @@ test('stderr lines are emitted as stream:"err" events on a SUCCESSFUL run', POSI
   ]);
 });
 
-test('each stderr line is its own event, blank lines dropped', POSIX_SHIM, async () => {
-  const dir = await makeTmpDir();
-  const bin = await fakeShell(dir, [
-    `printf '%s\\n\\n%s\\n' 'first' 'second' 1>&2`,
-    'exit 0',
+test('stderr framing: one event per line, blank lines dropped, an unterminated final line flushed, CR updates framed live', POSIX_SHIM, async () => {
+  await checkRows([
+    { name: 'each stderr line is its own event, blank lines dropped', run: async () => {
+      const dir = await makeTmpDir();
+      const bin = await fakeShell(dir, [
+        `printf '%s\\n\\n%s\\n' 'first' 'second' 1>&2`,
+        'exit 0',
+      ]);
+      const events = [];
+      await runClaude({ bin, prompt: 'hi', cwd: dir, onEvent: (e) => events.push(e) });
+      assert.deepEqual(stderrEvents(events).map((e) => e.text), ['first', 'second']);
+    } },
+    { name: 'a final stderr line with NO trailing newline is still emitted', run: async () => {
+      const dir = await makeTmpDir();
+      // printf without \n: the line only exists in the carry buffer until close.
+      const bin = await fakeShell(dir, [`printf '%s' 'no trailing newline' 1>&2`, 'exit 0']);
+      const events = [];
+      await runClaude({ bin, prompt: 'hi', cwd: dir, onEvent: (e) => events.push(e) });
+      assert.deepEqual(stderrEvents(events).map((e) => e.text), ['no trailing newline']);
+    } },
+    { name: 'CR-rewriting progress output is framed live, one event per update', run: async () => {
+      const dir = await makeTmpDir();
+      const bin = await fakeShell(dir, [`printf '10%%\\r20%%\\r30%%\\n' 1>&2`, 'exit 0']);
+      const events = [];
+      await runClaude({ bin, prompt: 'hi', cwd: dir, onEvent: (e) => events.push(e) });
+      assert.deepEqual(stderrEvents(events).map((e) => e.text), ['10%', '20%', '30%']);
+    } },
   ]);
-  const events = [];
-  await runClaude({ bin, prompt: 'hi', cwd: dir, onEvent: (e) => events.push(e) });
-  assert.deepEqual(stderrEvents(events).map((e) => e.text), ['first', 'second']);
 });
 
-test('a final stderr line with NO trailing newline is still emitted', POSIX_SHIM, async () => {
-  const dir = await makeTmpDir();
-  // printf without \n: the line only exists in the carry buffer until close.
-  const bin = await fakeShell(dir, [`printf '%s' 'no trailing newline' 1>&2`, 'exit 0']);
-  const events = [];
-  await runClaude({ bin, prompt: 'hi', cwd: dir, onEvent: (e) => events.push(e) });
-  assert.deepEqual(stderrEvents(events).map((e) => e.text), ['no trailing newline']);
-});
-
-test('a line split across write boundaries is reassembled, not torn in two', POSIX_SHIM, async () => {
-  const dir = await makeTmpDir();
-  // Two writes, one logical line: the carry buffer must hold "one half " until
-  // the newline arrives with the second write.
-  const bin = await fakeShell(dir, [
-    `printf '%s' 'one half ' 1>&2`,
-    'sleep 0.2',
-    `printf '%s\\n' 'and the rest' 1>&2`,
-    'exit 0',
+test('chunk-split lines and multi-byte characters are reassembled, never torn', POSIX_SHIM, async () => {
+  await checkRows([
+    { name: 'a line split across write boundaries is reassembled, not torn in two', run: async () => {
+      const dir = await makeTmpDir();
+      // Two writes, one logical line: the carry buffer must hold "one half " until
+      // the newline arrives with the second write.
+      const bin = await fakeShell(dir, [
+        `printf '%s' 'one half ' 1>&2`,
+        'sleep 0.2',
+        `printf '%s\\n' 'and the rest' 1>&2`,
+        'exit 0',
+      ]);
+      const events = [];
+      await runClaude({ bin, prompt: 'hi', cwd: dir, onEvent: (e) => events.push(e) });
+      assert.deepEqual(stderrEvents(events).map((e) => e.text), ['one half and the rest']);
+    } },
+    { name: 'a multi-byte UTF-8 character split across write boundaries is not torn into U+FFFD', run: async () => {
+      const dir = await makeTmpDir();
+      // '…' is E2 80 A6: write E2 80, then A6 + newline in a second write.
+      const bin = await fakeShell(dir, [
+        `printf '\\342\\200' 1>&2`,
+        'sleep 0.2',
+        `printf '\\246\\n' 1>&2`,
+        'exit 0',
+      ]);
+      const events = [];
+      await runClaude({ bin, prompt: 'hi', cwd: dir, onEvent: (e) => events.push(e) });
+      assert.deepEqual(stderrEvents(events).map((e) => e.text), ['…']);
+    } },
   ]);
-  const events = [];
-  await runClaude({ bin, prompt: 'hi', cwd: dir, onEvent: (e) => events.push(e) });
-  assert.deepEqual(stderrEvents(events).map((e) => e.text), ['one half and the rest']);
-});
-
-test('a multi-byte UTF-8 character split across write boundaries is not torn into U+FFFD', POSIX_SHIM, async () => {
-  const dir = await makeTmpDir();
-  // '…' is E2 80 A6: write E2 80, then A6 + newline in a second write.
-  const bin = await fakeShell(dir, [
-    `printf '\\342\\200' 1>&2`,
-    'sleep 0.2',
-    `printf '\\246\\n' 1>&2`,
-    'exit 0',
-  ]);
-  const events = [];
-  await runClaude({ bin, prompt: 'hi', cwd: dir, onEvent: (e) => events.push(e) });
-  assert.deepEqual(stderrEvents(events).map((e) => e.text), ['…']);
-});
-
-test('CR-rewriting progress output is framed live, one event per update', POSIX_SHIM, async () => {
-  const dir = await makeTmpDir();
-  const bin = await fakeShell(dir, [`printf '10%%\\r20%%\\r30%%\\n' 1>&2`, 'exit 0']);
-  const events = [];
-  await runClaude({ bin, prompt: 'hi', cwd: dir, onEvent: (e) => events.push(e) });
-  assert.deepEqual(stderrEvents(events).map((e) => e.text), ['10%', '20%', '30%']);
 });
 
 test('the exit-code stderr detail also survives chunk-split multi-byte characters', POSIX_SHIM, async () => {

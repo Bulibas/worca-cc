@@ -14,6 +14,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { loadAgentRegistry, pluginAgentLayers } from '../src/core/agent-registry.mjs';
 import { readPluginsLock, writePluginsLock, pluginDir } from '../src/core/plugins-lock.mjs';
 import { ASK_NEEDS_API_4 } from '../src/core/plugin-manifest.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -89,61 +90,66 @@ test('pluginAgentLayers carries the NEGOTIATED api beside builtFor', () => {
   assert.equal(layer.builtFor, 3, 'builtFor stays the LOWEST — the two are different questions');
 });
 
-test('API 4: the plugin agent keeps its ask block', () => {
-  const builtin = tmp('worca-cc-ask-builtin-');
-  writeAgent(builtin, 'alphaA', { order: 1 });
-  installFakePlugin('forms-ok', [['formsOkAgent', { ask: { forms: { 'pick-one': FORM } } }]], { range: '>=4 <5' });
-  const { reg, drops } = loadWith(builtin, 'forms-ok');
-  assert.ok(reg.formsOkAgent, 'the agent loads');
-  assert.deepEqual(Object.keys(reg.formsOkAgent.ask.forms), ['pick-one']);
-  assert.deepEqual(drops, [], 'nothing is reported as ignored');
+test('ask block kept when the plugin negotiates API 4+ (explicit >=4 <5 range or no engines constraint)', async () => {
+  await checkRows([
+    { name: 'API 4: the plugin agent keeps its ask block', run: () => {
+      const builtin = tmp('worca-cc-ask-builtin-');
+      writeAgent(builtin, 'alphaA', { order: 1 });
+      installFakePlugin('forms-ok', [['formsOkAgent', { ask: { forms: { 'pick-one': FORM } } }]], { range: '>=4 <5' });
+      const { reg, drops } = loadWith(builtin, 'forms-ok');
+      assert.ok(reg.formsOkAgent, 'the agent loads');
+      assert.deepEqual(Object.keys(reg.formsOkAgent.ask.forms), ['pick-one']);
+      assert.deepEqual(drops, [], 'nothing is reported as ignored');
+    } },
+    { name: 'an UNCONSTRAINED manifest negotiates the newest API and keeps its forms', run: () => {
+      const builtin = tmp('worca-cc-ask-builtin-');
+      writeAgent(builtin, 'alphaE', { order: 1 });
+      const versionDir = installFakePlugin('forms-open', [['formsOpenAgent', { ask: { forms: { 'pick-one': FORM } } }]], { range: null });
+      writeFileSync(join(versionDir, 'worca-cc-plugin.json'), JSON.stringify({ name: 'forms-open' }));
+      const { reg, drops } = loadWith(builtin, 'forms-open');
+      assert.ok(reg.formsOpenAgent.ask, 'no engines constraint claims the current API, as it does for meta v2');
+      assert.deepEqual(drops, []);
+    } },
+  ]);
 });
 
-test('API 3: the ask block is STRIPPED, the agent still loads, and the drop is reported', () => {
-  const builtin = tmp('worca-cc-ask-builtin-');
-  writeAgent(builtin, 'alphaB', { order: 1 });
-  installFakePlugin('forms-old', [['formsOldAgent', { ask: { forms: { 'pick-one': FORM } } }]], { range: '>=3 <4' });
-  const { reg, warned, drops } = loadWith(builtin, 'forms-old');
-  assert.ok(reg.formsOldAgent, 'the agent is NOT dropped — it keeps its ports and generic questions');
-  assert.equal(reg.formsOldAgent.inputs.length, 1, 'ports are untouched');
-  assert.equal(reg.formsOldAgent.inputs[0].id, 'task');
-  assert.equal(reg.formsOldAgent.outputs[0].id, 'plan');
-  assert.equal(reg.formsOldAgent.ask, undefined, 'P2’s prompt block can never mention a form that is not there');
-  assert.deepEqual(drops, [{ origin: 'plugin:forms-old', file: 'formsOldAgent.meta.json', reason: ASK_NEEDS_API_4 }]);
-  assert.ok(warned.some((w) => w.includes('plugin:forms-old/formsOldAgent.meta.json') && w.includes(ASK_NEEDS_API_4)),
-    warned.join('\n'));
-});
-
-test('an API-3 plugin with NO ask block loads byte-identically and reports nothing', () => {
-  const builtin = tmp('worca-cc-ask-builtin-');
-  writeAgent(builtin, 'alphaC', { order: 1 });
-  installFakePlugin('forms-none', [['formsNoneAgent', {}]], { range: '>=3 <4' });
-  const { reg, drops } = loadWith(builtin, 'forms-none');
-  assert.ok(reg.formsNoneAgent);
-  assert.equal(reg.formsNoneAgent.ask, undefined);
-  assert.deepEqual(drops, [], 'API-3 plugins must keep loading exactly as before');
-});
-
-test('an unreadable manifest fails CLOSED: the ask block is stripped', () => {
-  const builtin = tmp('worca-cc-ask-builtin-');
-  writeAgent(builtin, 'alphaD', { order: 1 });
-  const versionDir = installFakePlugin('forms-broken', [['formsBrokenAgent', { ask: { forms: { 'pick-one': FORM } } }]], { range: null });
-  writeFileSync(join(versionDir, 'worca-cc-plugin.json'), '{ not json');
-  const { reg, drops } = loadWith(builtin, 'forms-broken');
-  assert.ok(reg.formsBrokenAgent);
-  assert.equal(reg.formsBrokenAgent.ask, undefined, 'an unknowable API must never honour forms');
-  assert.equal(drops.length, 1);
-  assert.equal(drops[0].reason, ASK_NEEDS_API_4);
-});
-
-test('an UNCONSTRAINED manifest negotiates the newest API and keeps its forms', () => {
-  const builtin = tmp('worca-cc-ask-builtin-');
-  writeAgent(builtin, 'alphaE', { order: 1 });
-  const versionDir = installFakePlugin('forms-open', [['formsOpenAgent', { ask: { forms: { 'pick-one': FORM } } }]], { range: null });
-  writeFileSync(join(versionDir, 'worca-cc-plugin.json'), JSON.stringify({ name: 'forms-open' }));
-  const { reg, drops } = loadWith(builtin, 'forms-open');
-  assert.ok(reg.formsOpenAgent.ask, 'no engines constraint claims the current API, as it does for meta v2');
-  assert.deepEqual(drops, []);
+test('below API 4 the ask block is stripped and reported (API 3, unreadable manifest fails closed); no ask block reports nothing', async () => {
+  await checkRows([
+    { name: 'API 3: the ask block is STRIPPED, the agent still loads, and the drop is reported', run: () => {
+      const builtin = tmp('worca-cc-ask-builtin-');
+      writeAgent(builtin, 'alphaB', { order: 1 });
+      installFakePlugin('forms-old', [['formsOldAgent', { ask: { forms: { 'pick-one': FORM } } }]], { range: '>=3 <4' });
+      const { reg, warned, drops } = loadWith(builtin, 'forms-old');
+      assert.ok(reg.formsOldAgent, 'the agent is NOT dropped — it keeps its ports and generic questions');
+      assert.equal(reg.formsOldAgent.inputs.length, 1, 'ports are untouched');
+      assert.equal(reg.formsOldAgent.inputs[0].id, 'task');
+      assert.equal(reg.formsOldAgent.outputs[0].id, 'plan');
+      assert.equal(reg.formsOldAgent.ask, undefined, 'P2’s prompt block can never mention a form that is not there');
+      assert.deepEqual(drops, [{ origin: 'plugin:forms-old', file: 'formsOldAgent.meta.json', reason: ASK_NEEDS_API_4 }]);
+      assert.ok(warned.some((w) => w.includes('plugin:forms-old/formsOldAgent.meta.json') && w.includes(ASK_NEEDS_API_4)),
+        warned.join('\n'));
+    } },
+    { name: 'an API-3 plugin with NO ask block loads byte-identically and reports nothing', run: () => {
+      const builtin = tmp('worca-cc-ask-builtin-');
+      writeAgent(builtin, 'alphaC', { order: 1 });
+      installFakePlugin('forms-none', [['formsNoneAgent', {}]], { range: '>=3 <4' });
+      const { reg, drops } = loadWith(builtin, 'forms-none');
+      assert.ok(reg.formsNoneAgent);
+      assert.equal(reg.formsNoneAgent.ask, undefined);
+      assert.deepEqual(drops, [], 'API-3 plugins must keep loading exactly as before');
+    } },
+    { name: 'an unreadable manifest fails CLOSED: the ask block is stripped', run: () => {
+      const builtin = tmp('worca-cc-ask-builtin-');
+      writeAgent(builtin, 'alphaD', { order: 1 });
+      const versionDir = installFakePlugin('forms-broken', [['formsBrokenAgent', { ask: { forms: { 'pick-one': FORM } } }]], { range: null });
+      writeFileSync(join(versionDir, 'worca-cc-plugin.json'), '{ not json');
+      const { reg, drops } = loadWith(builtin, 'forms-broken');
+      assert.ok(reg.formsBrokenAgent);
+      assert.equal(reg.formsBrokenAgent.ask, undefined, 'an unknowable API must never honour forms');
+      assert.equal(drops.length, 1);
+      assert.equal(drops[0].reason, ASK_NEEDS_API_4);
+    } },
+  ]);
 });
 
 test('the gate is PLUGIN-only: builtin and user agents keep their forms whatever the plugin layer says', () => {

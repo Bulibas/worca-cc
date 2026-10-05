@@ -15,6 +15,7 @@ import { WebSocket } from 'ws';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { git, makeOrigin, cloneAs, useGitSandbox } from './helpers/metrics-git.mjs';
 import { _resetForTests as closeDbForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const skip = process.platform === 'win32' ? 'pre-receive hooks / sh not portable to win32' : false;
 useGitSandbox(before, after);   // FIRST: pins HOME / GIT_CONFIG_GLOBAL for the server and the git calls
@@ -125,38 +126,41 @@ test('the mock proposes an edit: the parent re-validates it over the real policy
   assert.equal(s.messages.flatMap((m) => m.blocks || []).find((b) => b.id === card.id).state, 'proposed', 'persisted');
 });
 
-test('apply: one commit on the branch, the card applied with the result, the notice row and the event turn', { skip }, async () => {
-  const { card, thread } = await proposePolicy();
-  const n = commits(gwBare);
-  const before = (await snapshot(thread.id)).messages.filter((m) => m.role === 'assistant').length;
-  const r = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'applied' });
-  assert.equal(r.status, 200, await r.clone().text());
-  const j = await r.json();
-  assert.equal(j.block.state, 'applied');
-  assert.match(j.block.card.result.detail, /^published [0-9a-f]{7} to gateway$/);
-  assert.equal(j.block.card.summary, "Edit gateway's team policy — Per-pipeline cap (USD): $25.00 → $40.00", 'the sub-patch keeps the card');
-  assert.equal(commits(gwBare), n + 1);
-  assert.deepEqual(POLICY(gwBare).fields['cost.pipelineLimitUsd'], { kind: 'soft', value: 40, requireReason: true });
-  const reply = await eventReply(thread.id, before);
-  assert.match(reply.text, /Applied\./);
-  const notice = noticeOf(await snapshot(thread.id));
-  assert.match(notice.blocks[0].text, /^Applied — Edit gateway's team policy — Per-pipeline cap \(USD\): \$25\.00 → \$40\.00 · published [0-9a-f]{7} to gateway$/);
-  assert.match(notice.text, /^\[worca event\] policy card card_[0-9a-f]{8} applied; "Edit gateway's team policy — Per-pipeline cap \(USD\): \$25\.00 → \$40\.00"; published [0-9a-f]{7} to gateway$/);
-  assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'applied' })).status, 409);
-  assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'dismissed' })).status, 400);
-});
-
-test('decline: nothing is published; the event turn confirms', { skip }, async () => {
-  const { card, thread } = await proposePolicy('change the policy cap to $55');
-  const n = commits(gwBare);
-  const before = (await snapshot(thread.id)).messages.filter((m) => m.role === 'assistant').length;
-  const r = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'declined' });
-  assert.equal(r.status, 200);
-  assert.equal((await r.json()).block.state, 'declined');
-  assert.equal(commits(gwBare), n, 'no commit');
-  const reply = await eventReply(thread.id, before);
-  assert.match(reply.text, /Declined — nothing changed\./);
-  assert.equal(noticeOf(await snapshot(thread.id)).blocks[0].text, "Declined — Edit gateway's team policy — Per-pipeline cap (USD): $40.00 → $55.00");
+test('policy card apply publishes one commit (applied + notice + event turn); decline publishes nothing', { skip }, async () => {
+  await checkRows([
+    { name: 'apply: one commit on the branch, the card applied with the result, the notice row and the event turn', run: async () => {
+      const { card, thread } = await proposePolicy();
+      const n = commits(gwBare);
+      const before = (await snapshot(thread.id)).messages.filter((m) => m.role === 'assistant').length;
+      const r = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'applied' });
+      assert.equal(r.status, 200, await r.clone().text());
+      const j = await r.json();
+      assert.equal(j.block.state, 'applied');
+      assert.match(j.block.card.result.detail, /^published [0-9a-f]{7} to gateway$/);
+      assert.equal(j.block.card.summary, "Edit gateway's team policy — Per-pipeline cap (USD): $25.00 → $40.00", 'the sub-patch keeps the card');
+      assert.equal(commits(gwBare), n + 1);
+      assert.deepEqual(POLICY(gwBare).fields['cost.pipelineLimitUsd'], { kind: 'soft', value: 40, requireReason: true });
+      const reply = await eventReply(thread.id, before);
+      assert.match(reply.text, /Applied\./);
+      const notice = noticeOf(await snapshot(thread.id));
+      assert.match(notice.blocks[0].text, /^Applied — Edit gateway's team policy — Per-pipeline cap \(USD\): \$25\.00 → \$40\.00 · published [0-9a-f]{7} to gateway$/);
+      assert.match(notice.text, /^\[worca event\] policy card card_[0-9a-f]{8} applied; "Edit gateway's team policy — Per-pipeline cap \(USD\): \$25\.00 → \$40\.00"; published [0-9a-f]{7} to gateway$/);
+      assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'applied' })).status, 409);
+      assert.equal((await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'dismissed' })).status, 400);
+    } },
+    { name: 'decline: nothing is published; the event turn confirms', run: async () => {
+      const { card, thread } = await proposePolicy('change the policy cap to $55');
+      const n = commits(gwBare);
+      const before = (await snapshot(thread.id)).messages.filter((m) => m.role === 'assistant').length;
+      const r = await post(`/api/ask/threads/${thread.id}/cards/${card.id}`, { state: 'declined' });
+      assert.equal(r.status, 200);
+      assert.equal((await r.json()).block.state, 'declined');
+      assert.equal(commits(gwBare), n, 'no commit');
+      const reply = await eventReply(thread.id, before);
+      assert.match(reply.text, /Declined — nothing changed\./);
+      assert.equal(noticeOf(await snapshot(thread.id)).blocks[0].text, "Declined — Edit gateway's team policy — Per-pipeline cap (USD): $40.00 → $55.00");
+    } },
+  ]);
 });
 
 test('a proposal the real validator refuses leaves a notice, never a card', { skip }, async () => {

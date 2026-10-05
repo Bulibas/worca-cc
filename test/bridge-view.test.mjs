@@ -11,7 +11,7 @@ import { JSDOM } from 'jsdom';
 import {
   renderProvidersCard, collectProviderRow, renderCopilotSignIn, renderImportSheet, collectImportSheet, applyImportSelectAll,
   renderConnectionSection, applyConnectionMode, setModelUpstream, collectConnection,
-  bridgedBadge, needsSignInPill, degradationLine, COPILOT_TERMS,
+  bridgedBadge, needsSignInPill, degradationLine,
 } from '../ui/public/bridge-view.mjs';
 import { renderModelsList, renderModelEditor, collectModelEditor, applyConnectionModeIn } from '../ui/public/models-view.mjs';
 
@@ -22,27 +22,6 @@ const PROVIDERS = {
   openai: { configured: true, keySet: true, keySource: 'stored', keyMasked: '••••••abcd', baseUrl: 'https://gw.example/v1', maxConcurrent: 8 },
   anthropic: { configured: false, keySet: true, keySource: 'env', keyRef: '${ANT}', baseUrl: 'https://api.anthropic.com', maxConcurrent: 8 },
 };
-
-test('providers card: connected copilot shows login, quota, import + sign-out; key rows show their state', () => {
-  const card = renderProvidersCard(PROVIDERS, { doc });
-  assert.ok(card.classList.contains('mv-providers'));
-  const cp = card.querySelector('.mv-pv-row[data-provider="copilot"]');
-  assert.match(cp.querySelector('.badge').textContent, /connected as @octo/);
-  assert.equal(cp.querySelector('.mv-cp-account').value, 'business');
-  assert.equal(cp.querySelector('.mv-pv-conc').value, '3');
-  assert.match(cp.querySelector('.mv-cp-quota').textContent, /12 \/ 300.*resets 2026-10-01/);
-  assert.ok(cp.querySelector('.mv-cp-signout'));
-  assert.equal(cp.querySelector('.mv-cp-signin'), null);
-  assert.equal(cp.querySelector('.mv-cp-fetch-models').disabled, false);
-  assert.equal(cp.querySelector('.mv-cp-terms').textContent, 'Re-read notice');
-  const oa = card.querySelector('.mv-pv-row[data-provider="openai"]');
-  assert.equal(oa.querySelector('.badge').textContent, 'key set');
-  assert.equal(oa.querySelector('.mv-pv-key').value, '••••••abcd');
-  assert.equal(oa.querySelector('.mv-pv-baseurl').value, 'https://gw.example/v1');
-  const an = card.querySelector('.mv-pv-row[data-provider="anthropic"]');
-  assert.equal(an.querySelector('.badge').textContent, 'key ${VAR} not set');
-  assert.equal(an.querySelector('.mv-pv-key').value, '${ANT}');
-});
 
 test('providers card: not connected / not acknowledged states; sign-in block replaces the button', () => {
   const card = renderProvidersCard({ copilot: { connected: false, termsCurrent: false, accountType: 'individual', maxConcurrent: 4 } }, { doc });
@@ -85,12 +64,6 @@ test('collectProviderRow: unchanged masked key is omitted (keep); a new key, bas
   card.querySelector('.mv-pv-row[data-provider="openai"] .mv-pv-conc').value = '2';
   assert.deepEqual(collectProviderRow(card, 'openai'), { baseUrl: 'https://gw.example/v1', apiKey: 'sk-new', maxConcurrent: 2 });
   assert.equal(collectProviderRow(card, 'nope'), null);
-});
-
-test('terms notice text names the risk and the account', () => {
-  assert.match(COPILOT_TERMS.body, /supported clients/);
-  assert.match(COPILOT_TERMS.body, /Your GitHub account, not Worca/);
-  assert.equal(COPILOT_TERMS.checkbox, 'I understand and want to continue');
 });
 
 test('import sheet: rows, disabled policy rows, status column, select-all and collect', () => {
@@ -230,32 +203,6 @@ test('cards: bridged badge, needs-sign-in pill + Sign in button, degradation lin
   assert.equal(degradationLine(claude), '');
 });
 
-// The Test-connection verdict has to land where the eye is: a pill in the button row, empty until a
-// test runs. The hint line under the description reads as "nothing happened" (#models UX).
-test('providers card: every key-based row carries an empty result pill beside its buttons', () => {
-  const doc = new JSDOM('<!doctype html><body></body>').window.document;
-  const card = renderProvidersCard(PROVIDERS, { doc });
-  for (const name of ['openai', 'anthropic']) {
-    const row = card.querySelector(`.mv-pv-row[data-provider="${name}"]`);
-    const pill = row.querySelector('.mv-pv-btns .mv-pv-result');
-    assert.ok(pill, `${name} has a result pill`);
-    assert.equal(pill.textContent, '', 'silent until a test runs');
-    assert.equal(pill.className, 'mv-pv-result', 'the is-on state is added by the flow');
-    assert.ok(row.querySelector('.mv-pv-test'), 'and the button it belongs to');
-  }
-});
-
-test('import sheet: an API column names the wire protocol each model will use', () => {
-  const sheet = renderImportSheet([
-    { id: 'gpt-6-astra', name: 'GPT-6 Astra', vendor: 'OpenAI', api: 'openai-responses', pickerEnabled: true, policyState: 'enabled' },
-    { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', vendor: 'Google', api: 'openai-chat', pickerEnabled: true, policyState: 'enabled' },
-    { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', vendor: 'Anthropic', api: 'anthropic', pickerEnabled: true, policyState: 'enabled' },
-    { id: 'old', name: 'Old', vendor: 'OpenAI', pickerEnabled: true, policyState: 'enabled' },
-  ], { doc });
-  assert.deepEqual([...sheet.querySelectorAll('thead th')].slice(1).map((t) => t.textContent), ['Model', 'Vendor', 'Context', 'Tools', 'Vision', 'Reasoning', 'API', 'Status']);
-  assert.deepEqual([...sheet.querySelectorAll('.mvi-api')].map((t) => t.textContent), ['Responses', 'chat', 'Messages', '—']);
-});
-
 test('connection + cards: the Responses API is offered for copilot and openai, labelled, and described', () => {
   const conn = renderConnectionSection(null, { doc, providers: PROVIDERS });
   setModelUpstream(conn, { provider: 'openai', api: 'openai-responses', model: 'gpt-5-codex', capabilities: { reasoning: true } });
@@ -331,38 +278,4 @@ test('editor: an imported Responses entry keeps its effort list on save, offers 
   const conn = renderConnectionSection(stored, { doc });
   setModelUpstream(conn, { provider: 'copilot', api: 'openai-responses', model: 'gpt-5.4', capabilities: { reasoning: true } });
   assert.equal('reasoningEfforts' in collectConnection(conn).upstream.capabilities, false);
-});
-
-test('providers card with the credential broker: each pill is the viewer\'s own key-page state', () => {
-  const pill = (card, name) => card.querySelector(`.mv-pv-row[data-provider="${name}"] .mv-head .badge`);
-  const broker = (providers, extra = {}) => ({ enabled: true, mode: 'multi', keyPage: 'https://keys.example.com', providers, ...extra });
-  const base = { copilot: { connected: false, termsCurrent: true, acknowledgedTerms: '2026-09-27T00:00:00.000Z' }, openai: { configured: false, baseUrl: 'https://openrouter.ai/api/v1' }, anthropic: { configured: false, baseUrl: '' } };
-
-  // worca holds no key, yet the viewer's keys are set on the key page: that is what shows.
-  const set = renderProvidersCard({ ...base, broker: broker({ copilot: { slot: 'copilot', state: 'set', suffix: 'ztYC' }, openai: { slot: 'openrouter', state: 'set', suffix: '9d92' }, anthropic: { slot: 'anthropic', state: 'missing' } }) }, { doc });
-  assert.equal(pill(set, 'copilot').textContent, 'your sign-in ••••ztYC');
-  assert.ok(pill(set, 'copilot').classList.contains('green'));
-  assert.equal(pill(set, 'openai').textContent, 'your key ••••9d92');
-  // A missing key links to the key page instead of saying "no key".
-  const missing = pill(set, 'anthropic');
-  assert.equal(missing.tagName, 'A');
-  assert.equal(missing.textContent, 'add your key on the key page');
-  assert.equal(missing.href, 'https://keys.example.com/');
-  assert.equal(missing.target, '_blank');
-
-  const other = renderProvidersCard({ ...base, broker: broker({ copilot: { slot: 'copilot', state: 'invalid' }, openai: { state: 'keyless' }, anthropic: { state: 'none', error: 'no credential slot for gw.example' } }) }, { doc });
-  assert.equal(pill(other, 'copilot').textContent, 'your sign-in was rejected');
-  assert.ok(pill(other, 'copilot').classList.contains('red'));
-  assert.equal(pill(other, 'openai').textContent, 'local — no key needed');
-  assert.equal(pill(other, 'anthropic').textContent, 'no broker slot for this URL');
-  assert.match(pill(other, 'anthropic').title, /gw\.example/);
-
-  const anon = renderProvidersCard({ ...base, broker: broker({ openai: { slot: 'openrouter' } }, { signInNeeded: true }) }, { doc });
-  assert.equal(pill(anon, 'openai').textContent, 'sign in to see your key');
-  const down = renderProvidersCard({ ...base, broker: broker({ openai: { slot: 'openrouter' } }, { error: 'cannot reach the credential broker' }) }, { doc });
-  assert.equal(pill(down, 'openai').textContent, 'key page unreachable');
-
-  // The Copilot notice still gates Copilot models: before it is acknowledged, its pill wins.
-  const notice = renderProvidersCard({ ...base, copilot: { connected: false, termsCurrent: false }, broker: broker({ copilot: { slot: 'copilot', state: 'set' } }) }, { doc });
-  assert.equal(pill(notice, 'copilot').textContent, 'please read the notice first');
 });

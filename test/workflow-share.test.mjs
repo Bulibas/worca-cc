@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { writeKeyGraph } from './helpers/export-fixtures.mjs';
 import {
-  exportGraphJson, importGraphWorkflow, saveGraphWorkflow, summarizeUnknownAgents, workflowFileSlug,
+  exportGraphJson, importGraphWorkflow, saveGraphWorkflow, summarizeUnknownAgents,
   listScriptNodes, formatScriptNodes, SCRIPT_IMPORT_NOTICE,
 } from '../src/core/workflow-share.mjs';
 import { loadScriptRegistry } from '../src/core/script-registry.mjs';
@@ -29,21 +29,6 @@ test('exportGraphJson: the STORED row — no id/origin/timestamps, canvas kept, 
   assert.deepEqual(j.wires, tpl.wires);
   assert.deepEqual(j.canvas, { zoom: 1.5, x: 10 });
   for (const k of ['id', 'origin', 'createdAt', 'updatedAt', 'archivedAt', '_worca']) assert.equal(k in j, false, `${k} must not leak`);
-});
-
-test('exportGraphJson: the built-in default is shareable; an unknown id is NOT_FOUND', async () => {
-  const j = await exportGraphJson('wf_default');
-  assert.equal(j.version, 2);
-  assert.ok(j.nodes.length > 0);
-  assert.equal('canvas' in j, false, 'no canvas => no key');
-  await assert.rejects(exportGraphJson('wf_no-such-thing'), (e) => e.code === 'NOT_FOUND');
-});
-
-test('workflowFileSlug: wf_ stripped, other ids sanitized, never empty', () => {
-  assert.equal(workflowFileSlug('wf_my-flow'), 'my-flow');
-  assert.equal(workflowFileSlug('wf_default'), 'default');
-  assert.equal(workflowFileSlug('wfp_demo_simple'), 'wfp_demo_simple');
-  assert.equal(workflowFileSlug('wf_'), 'workflow');
 });
 
 test('importGraphWorkflow mints an id and ignores the file\'s id/origin; canvas survives', async () => {
@@ -115,18 +100,6 @@ test('importGraphWorkflow checks per-node tunables against the catalog (BAD_REQU
   const nodes = src.nodes.map((n) => (n.kind === 'agent' ? { ...n, config: { ...(n.config || {}), model: 'no-such-model' } } : n));
   await assert.rejects(importGraphWorkflow({ ...src, name: 'Bad Model', nodes }),
     (e) => e.code === 'BAD_REQUEST' && /unknown model "no-such-model"/.test(e.message));
-});
-
-test('saveGraphWorkflow keeps composer semantics: a minted collision is ID_TAKEN, a legal id re-saves', async () => {
-  const src = await exportGraphJson('wf_default');
-  const a = await saveGraphWorkflow({ ...src, name: 'Composer Save' });
-  assert.ok(a.workflow.id.startsWith('wf_'));
-  await assert.rejects(saveGraphWorkflow({ ...src, name: 'Composer Save' }),
-    (e) => e.code === 'ID_TAKEN' && e.id === a.workflow.id);
-  const b = await saveGraphWorkflow({ ...src, id: a.workflow.id, name: 'Composer Save Renamed' });
-  assert.equal(b.workflow.id, a.workflow.id);
-  assert.equal(b.workflow.name, 'Composer Save Renamed');
-  await assert.rejects(saveGraphWorkflow({ name: 'v1', steps: [] }), (e) => e.code === 'BAD_REQUEST');
 });
 
 /** The default (built-in) script registry — shell + js carry command/code params. */

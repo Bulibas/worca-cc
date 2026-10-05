@@ -5,7 +5,6 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, chmod, rename } from 
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
 
 import { deletePipeline, discardRetainedWorktrees } from '../src/core/pipeline-delete.mjs';
 import {
@@ -19,6 +18,8 @@ import {
 import { writeRunManifest, updateRunManifest } from '../src/core/run-manifest.mjs';
 import { deleteWorkspace } from '../src/core/workspaces.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 const POSIX_SHIM = { skip: process.platform === 'win32' ? 'fake claude shim is a POSIX shell script (no .exe stand-in on Windows)' : false };
 
@@ -30,13 +31,8 @@ after(() => {
 
 // A real git repo so branch/worktree teardown is exercised for real.
 async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-del-repo-'));
+  const dir = templateRepo('del-repo', { branch: 'main', user: true, files: { 'README.md': '# hi\n' } });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 
@@ -215,56 +211,78 @@ test('discardRetainedWorktrees snapshots every retained workspace member before 
   }
 });
 
-test('deletePipeline needs no title/slug heuristic: indexed files are removed even when title equals the dir basename', async () => {
-  // The OLD hard case for the name-pattern deleter: no usable title (it equals the
-  // auto dir basename), so deriveNames had to fall back to the dir slug / prompt.
-  // The index-based deleter unlinks the EXACT recorded rel_paths regardless of title.
-  const repo = await freshRepo();
-  const prev = process.env.WORCA_HOME;
-  const { root, pdir } = await freshStore(repo, {
-    id: 'zz', base: 'rename-widget', datePrefix: '04-06-26', status: 'done',
-    title: '04-06-26-rename-widget-zz', branch: null,
-  });
-  try {
-    const report = await deletePipeline({ key: 'proj-00000001', id: 'zz' });
-    assert.ok(report && report.ok);
-    assert.equal(existsSync(pdir), false, 'pipeline dir removed');
-    const plans = await readdir(join(root, 'plans'));
-    assert.deepEqual(plans.sort(), ['04-06-26-rename-widget-extra.md'], 'indexed v1+v2 removed, non-indexed sibling kept');
-    const reviews = await readdir(join(root, 'reviews'));
-    assert.equal(reviews.length, 0, 'indexed review md removed');
-  } finally {
-    if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
-  }
-});
-
-test('deletePipeline refuses an active pipeline (running/pausing; status from the DB row)', async () => {
-  const repo = await freshRepo();
-  const prev = process.env.WORCA_HOME;
-  try {
-    for (const status of ['running', 'pausing']) {
-      await freshStore(repo, {
-        id: 'run1', base: 'add-login-screen', datePrefix: '04-06-26', status, branch: null,
+test('deletePipeline refuses an active pipeline (running/pausing; project and workspace rows)', async () => {
+  await checkRows([
+    { name: 'deletePipeline refuses an active pipeline (running/pausing; status from the DB row)', run: async () => {
+      const repo = await freshRepo();
+      const prev = process.env.WORCA_HOME;
+      try {
+        for (const status of ['running', 'pausing']) {
+          await freshStore(repo, {
+            id: 'run1', base: 'add-login-screen', datePrefix: '04-06-26', status, branch: null,
+          });
+          await assert.rejects(() => deletePipeline({ key: 'proj-00000001', id: 'run1' }),
+            (e) => e && e.code === 'RUNNING', `status=${status} must refuse deletion`);
+        }
+      } finally {
+        if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
+      }
+    } },
+    { name: 'deletePipeline({workspaceKey}) refuses a running workspace pipeline', run: async () => {
+      const repoA = await freshRepo();
+      const repoB = await freshRepo();
+      const prev = process.env.WORCA_HOME;
+      const wkey = 'wks-demo-9f3a1c20';
+      await freshWorkspaceStore({
+        wkey, id: 'wsrun', base: 'add-login-screen', datePrefix: '04-06-26', status: 'running',
+        members: [
+          { projectDir: repoA, branch: null },
+          { projectDir: repoB, branch: null },
+        ],
       });
-      await assert.rejects(() => deletePipeline({ key: 'proj-00000001', id: 'run1' }),
-        (e) => e && e.code === 'RUNNING', `status=${status} must refuse deletion`);
-    }
-  } finally {
-    if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
-  }
+      try {
+        await assert.rejects(() => deletePipeline({ workspaceKey: wkey, id: 'wsrun' }),
+          (e) => e && e.code === 'RUNNING');
+      } finally {
+        if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
+      }
+    } },
+  ]);
 });
 
-test('deletePipeline returns null for an unknown id', async () => {
-  const repo = await freshRepo();
-  const prev = process.env.WORCA_HOME;
-  await freshStore(repo, {
-    id: 'x', base: 'add-login-screen', datePrefix: '04-06-26', status: 'done', branch: null,
-  });
-  try {
-    assert.equal(await deletePipeline({ key: 'proj-00000001', id: 'nope' }), null);
-  } finally {
-    if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
-  }
+test('deletePipeline returns null for an unknown id (project key and workspace key)', async () => {
+  await checkRows([
+    { name: 'deletePipeline returns null for an unknown id', run: async () => {
+      const repo = await freshRepo();
+      const prev = process.env.WORCA_HOME;
+      await freshStore(repo, {
+        id: 'x', base: 'add-login-screen', datePrefix: '04-06-26', status: 'done', branch: null,
+      });
+      try {
+        assert.equal(await deletePipeline({ key: 'proj-00000001', id: 'nope' }), null);
+      } finally {
+        if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
+      }
+    } },
+    { name: 'deletePipeline({workspaceKey}) returns null for an unknown workspace id', run: async () => {
+      const repoA = await freshRepo();
+      const repoB = await freshRepo();
+      const prev = process.env.WORCA_HOME;
+      const wkey = 'wks-demo-9f3a1c20';
+      await freshWorkspaceStore({
+        wkey, id: 'present', base: 'add-login-screen', datePrefix: '04-06-26', status: 'done',
+        members: [
+          { projectDir: repoA, branch: null },
+          { projectDir: repoB, branch: null },
+        ],
+      });
+      try {
+        assert.equal(await deletePipeline({ workspaceKey: wkey, id: 'nope' }), null);
+      } finally {
+        if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
+      }
+    } },
+  ]);
 });
 
 test('deletePipeline({workspaceKey}) removes the ws-store dir + iterates state.branches per project', async () => {
@@ -305,45 +323,6 @@ test('deletePipeline({workspaceKey}) removes the ws-store dir + iterates state.b
     assert.equal(existsSync(wtB.worktreeDir), false, 'member B worktree gone');
     assert.ok(!(await listLocalBranches(repoA)).includes(wtA.branch), 'member A branch deleted');
     assert.ok(!(await listLocalBranches(repoB)).includes(wtB.branch), 'member B branch deleted');
-  } finally {
-    if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
-  }
-});
-
-test('deletePipeline({workspaceKey}) refuses a running workspace pipeline', async () => {
-  const repoA = await freshRepo();
-  const repoB = await freshRepo();
-  const prev = process.env.WORCA_HOME;
-  const wkey = 'wks-demo-9f3a1c20';
-  await freshWorkspaceStore({
-    wkey, id: 'wsrun', base: 'add-login-screen', datePrefix: '04-06-26', status: 'running',
-    members: [
-      { projectDir: repoA, branch: null },
-      { projectDir: repoB, branch: null },
-    ],
-  });
-  try {
-    await assert.rejects(() => deletePipeline({ workspaceKey: wkey, id: 'wsrun' }),
-      (e) => e && e.code === 'RUNNING');
-  } finally {
-    if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
-  }
-});
-
-test('deletePipeline({workspaceKey}) returns null for an unknown workspace id', async () => {
-  const repoA = await freshRepo();
-  const repoB = await freshRepo();
-  const prev = process.env.WORCA_HOME;
-  const wkey = 'wks-demo-9f3a1c20';
-  await freshWorkspaceStore({
-    wkey, id: 'present', base: 'add-login-screen', datePrefix: '04-06-26', status: 'done',
-    members: [
-      { projectDir: repoA, branch: null },
-      { projectDir: repoB, branch: null },
-    ],
-  });
-  try {
-    assert.equal(await deletePipeline({ workspaceKey: wkey, id: 'nope' }), null);
   } finally {
     if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
   }

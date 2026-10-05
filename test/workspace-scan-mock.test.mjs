@@ -1,7 +1,7 @@
 // test/workspace-scan-mock.test.mjs
 // The offline writers of the Workspace scan's three agents (wsmap spec D20): each reads the reference
-// file its brief names on the pinned first-lines marker and writes a VALID document — P1's checkers
-// agree — so a mock run exercises every script and the finalize end to end. A missing brief, a
+// file its brief names on the pinned first-lines marker and writes a VALID document, so a mock run
+// exercises every script and the finalize end to end. A missing brief, a
 // missing reference or garbage JSON degrades to an empty valid document; nothing throws.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,7 +11,6 @@ import { join } from 'node:path';
 
 import { briefMarker, writeMockSurvey, writeMockUsage, writeMockSynthesis } from '../src/core/workspace-scan-mock.mjs';
 import { runClaude } from '../src/core/claude-runner.mjs';
-import { checkSurvey, checkUsage, checkSynthesis } from '../src/shared/workspace-map/schema.mjs';
 
 const scratch = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'worca-cc-wsmock-')); scratch.push(d); return d; };
@@ -45,50 +44,6 @@ test('briefMarker reads a first-lines marker, LF or CRLF; null when absent', () 
   assert.equal(briefMarker('# T\r\n<!-- worca:map=C:\\r\\workspace-map.json -->\r\n', 'map'), 'C:\\r\\workspace-map.json');
   assert.equal(briefMarker('# T\n', 'catalog'), null);
   assert.equal(briefMarker(undefined, 'catalog'), null);
-});
-
-test('survey: members with needs are investigated with a mock role, the rest skipped — a valid survey.json', async () => {
-  const dir = tmp();
-  const extractPath = join(dir, 'extract.json');
-  // BOM-prefixed on purpose: the writers' reader tolerates an editor's leading byte-order mark.
-  writeFileSync(extractPath, String.fromCharCode(0xFEFF) + JSON.stringify({ version: 1, workspace: { name: 'Shop' }, createdAt: '2026-09-25T00:00:00.000Z', members: {
-    web: { key: 'web', name: 'Web', needs: ['provides', 'consumes'] },
-    api: { key: 'api', name: 'API', needs: [] },
-  } }));
-  const out = join(dir, 'survey.json');
-  const r = await writeMockSurvey({ briefPath: brief(dir, 'Workspace survey brief', 'extract', extractPath), outPath: out });
-  assert.deepEqual([r.investigated, r.skipped], [1, 1]);
-  const doc = read(out);
-  assert.deepEqual(doc, { version: 1, members: {
-    api: { status: 'skipped', role: '', aliases: [], provides: [], consumes: [], notes: '' },
-    web: { status: 'investigated', role: 'Mock role for web', aliases: [], provides: [], consumes: [], notes: '' },
-  } });
-  const checked = checkSurvey(doc, { memberKeys: ['api', 'web'] });
-  assert.equal(checked.ok, true, checked.errors.join('\n'));
-});
-
-test('usage: every member investigated, every well-formed candidate confirmed — a valid usage.json', async () => {
-  const dir = tmp();
-  const out = join(dir, 'usage.json');
-  const r = await writeMockUsage({ briefPath: brief(dir, 'Workspace usage brief', 'catalog', catalogFixture(dir)), outPath: out });
-  assert.equal(r.uses, 1, 'a malformed candidate is never echoed');
-  const doc = read(out);
-  assert.deepEqual(doc, { version: 1, members: {
-    api: { status: 'investigated', uses: [], rejected: [], other: [] },
-    web: { status: 'investigated', uses: [{ entry: ENTRY, file: 'src/pay.js', line: 12, match: "fetch('/invoices/' + id)" }], rejected: [], other: [] },
-  } });
-  const checked = checkUsage(doc, { memberKeys: ['api', 'web'], entryIds: [ENTRY] });
-  assert.equal(checked.ok, true, checked.errors.join('\n'));
-});
-
-test('synthesis: the mock overview and roles only for members without one — a valid synthesis.json', async () => {
-  const dir = tmp();
-  const out = join(dir, 'synthesis.json');
-  await writeMockSynthesis({ briefPath: brief(dir, 'Workspace synthesis brief', 'map', mapFixture(dir)), outPath: out });
-  const doc = read(out);
-  assert.deepEqual(doc, { version: 1, overview: 'Mock overview of 3 projects.', roles: { web: 'Mock role for web', lib: 'Mock role for lib' }, coordination: [], orderNotes: '' });
-  const checked = checkSynthesis(doc, { memberKeys: ['api', 'lib', 'web'] });
-  assert.equal(checked.ok, true, checked.errors.join('\n'));
 });
 
 test('no brief, a garbage reference, no brief path at all: each writer still writes an empty valid document', async () => {

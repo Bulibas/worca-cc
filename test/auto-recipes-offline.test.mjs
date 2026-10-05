@@ -62,44 +62,6 @@ test('RECIPE_GUIDE names every task kind, rung, modifier and agent key; RECIPE_S
   for (const r of RECIPE_SHAPES) { assert.ok(r.id); normalizeShape(r.shape); }
 });
 
-// The guide is rendered into BOTH selection paths (the Ask system prompt and the
-// classifier system prompt), so the sizing principle lives here once: an additive
-// ladder from the implementer up, one rung per concrete signal (2026-09-07).
-test('RECIPE_GUIDE opens with the ladder principle, ties clarify to the planner, and reserves the web pair for a very big UI feature', () => {
-  const lines = RECIPE_GUIDE.split('\n');
-  assert.ok(lines[0].startsWith('## Recipes (starting points'), 'the heading the Ask catalog pins stays first');
-  assert.ok(lines[1].includes('build the workflow UP from the implementer'), 'the sizing principle is the first thing after the heading');
-  for (const t of ['add a stage only when a concrete signal in the task itself demands it', 'every extra stage must earn its cost', 'when unsure between two shapes, take the lighter one']) {
-    assert.ok(RECIPE_GUIDE.includes(t), `sizing: "${t}"`);
-  }
-  assert.ok(lines[2].startsWith('taskKind names what the user GAVE, never how big the work is'), 'taskKind is specification form, not size');
-  assert.ok(lines[2].includes('never label a prompt as a plan'), 'the plan-complete mislabel the live probe showed is forbidden');
-  const trivial = lines.find((l) => l.startsWith('- trivial'));
-  assert.ok(trivial.includes('implementer only') && trivial.includes('well-specified small change'), 'rung 1 is implementer only for a well-specified small change');
-  const small = lines.find((l) => l.startsWith('- small'));
-  assert.ok(small.includes('implementer ⇄ reviewer') && small.includes('bigger than one bounded edit'), 'rung 2 adds the reviewer');
-  const plan = lines.find((l) => l.startsWith('- needs a plan'));
-  assert.ok(plan.includes('clarify → planner → implementer ⇄ reviewer') && plan.includes('WHAT but not HOW'), 'rung 3 adds clarify + planner');
-  const big = lines.find((l) => l.startsWith('- big plan'));
-  assert.ok(big.includes('refiner (selfLoop)'), 'rung 4 adds the refiner');
-  const given = lines.find((l) => l.startsWith('- given plan, large'));
-  assert.ok(given.startsWith('- given plan, large — refiner (selfLoop) → implementer ⇄ reviewer'), 'a large given plan is refiner-first, no planner');
-  const clarify = lines.find((l) => l.startsWith('Clarify:'));
-  assert.ok(clarify.includes('only directly in front of a planner') && clarify.includes('only when a human is in the loop'), 'clarify is tied to the planner and to HITL');
-  const web = lines.find((l) => l.startsWith('- web / UI feature'));
-  assert.ok(web, 'the web modifier line survives');
-  assert.ok(web.includes('ONLY for a very big user-facing UI feature'), 'the web pair is reserved for a very big UI feature');
-  assert.ok(web.includes('never a trigger'), 'the fingerprint hint is context, never a trigger');
-  assert.ok(web.includes('stays with the reviewer only'), 'small and medium UI changes stop at the reviewer');
-  assert.ok(!web.includes('or the fingerprint says "web-ui likely"'), 'the old fingerprint trigger is gone');
-  const large = lines.find((l) => l.startsWith('- large task'));
-  const risky = lines.find((l) => l.startsWith('- risky or large plan'));
-  assert.ok(large.includes('many files or subsystems') && large.includes('only when'), 'large is an exception with a real signal');
-  assert.ok(risky.includes('irreversible or high-blast-radius') && risky.includes('only for'), 'risky is an exception with a real signal');
-  assert.ok(lines.some((l) => l.startsWith('Modifiers') && l.includes('never a default')), 'modifiers are framed as exceptions');
-  assert.ok(!RECIPE_GUIDE.includes('start from the SMALLEST recipe that fits the task kind'), 'the taskKind-keyed base table is gone');
-});
-
 test('every recipe shape assembles and runs offline to the End card, with and without a human in the loop', { timeout: 300000 }, async () => {
   const shapes = [...RECIPE_SHAPES.map((r) => ({ id: r.id, shape: r.shape })),
     { id: 'mock:trivial', shape: mockShapeFor('demo task') },

@@ -100,7 +100,7 @@ import { createVoiceController } from './ask-voice.mjs';
 import { renderGettingStarted, renderGettingStartedPill, bindWelcome, doneCount, allStepsDone, GETTING_STARTED_STEPS } from './getting-started.mjs';
 import { createGuideSpot } from './guide-spot.mjs';
 import {
-  splitPatchSections, parseFileSection, patchIndex, sectionKey,
+  splitPatchSections, parseFileSection, patchIndex, sectionKey, MAX_FILE_SECTION_CODE_UNITS,
 } from './diff-view.mjs';
 import {
   langForPath, canHighlightParsed, highlightParsed,
@@ -206,6 +206,13 @@ import { renderNightForm, readNightForm, updateAwaySummary } from './night-mode-
 import { visibleFields as visibleAnswerFields } from '../../src/shared/forms/layout.mjs';
 
 const diffHljsLoader = window.__worcaTestHooks?.hljsLoader ?? createHljsLoader();
+
+// A test-only size knob, read once per app.js instance (tests set window.__worcaTestHooks before
+// their cache-busted import). Anything but a positive integer keeps the production value.
+function testHookInt(name, fallback) {
+  const v = window.__worcaTestHooks?.[name];
+  return Number.isInteger(v) && v > 0 ? v : fallback;
+}
 
 // One markdown pipeline for the whole page — Ask answers AND diff-comment bodies
 // (D15): marked + DOMPurify from the vendor routes, the test hook first. This is
@@ -667,8 +674,8 @@ function applySidebarCollapsed() {
   }
   // The rail has no visible labels, so mirror each button's label into a native
   // tooltip while collapsed (the mock does this on all twelve). Written by JS,
-  // never as markup: a static title= on the CTA or on Settings reds
-  // ui-nav-sections:48 / :57, whose regexes pin those open-tags verbatim.
+  // never as markup: keep the CTA and Settings open-tags free of a static title=
+  // (the ui-nav-sections regexes that pinned them verbatim are no longer tested).
   // `data-rail-title` marks the ones WE wrote, so expanding removes only those.
   // Runs is excluded — updateNavCounts owns its title (the needs-you/live
   // counts). It has not run yet at the boot call below; showView does.
@@ -4188,7 +4195,7 @@ function effectiveDefaultsOf(row) {
 // ---------------------------------------------------------------------------
 // Log window
 // ---------------------------------------------------------------------------
-const MAX_LOG_LINES = 4000;
+const MAX_LOG_LINES = testHookInt('maxLogLines', 4000);
 
 // Build one .log-line node from a normalized log record. (Same DOM shape the
 // old global appendLog produced: ts/src/msg spans + lvl class.)
@@ -10053,9 +10060,9 @@ function agentFormRender(host, meta, opts = {}) {
   const ws = document.createElement('div');
   ws.className = 'field agent-workspace';
   // NB: the heading local is `wsHeadLabel` ON PURPOSE. Do NOT shorten it to the
-  // ws + Label form: test/ui-install-removed.test.mjs guards the removed
-  // WS-status indicator with a naive substring check over app.js as PLAIN TEXT,
-  // so even a comment mentioning that token reds it. Do not weaken the guard.
+  // ws + Label form: that token named the removed WS-status indicator. The
+  // plain-text guard that kept it out of app.js is no longer tested, so keep
+  // the token out by hand.
   const wsHeadLabel = document.createElement('label');
   wsHeadLabel.textContent = 'Workspace runs';
   const variant = fmInput('agent-f-ws-variantof', m.workspaceVariantOf || '', { placeholder: 'agent key' });
@@ -13390,7 +13397,8 @@ function syncThemeColorMeta() {
   let bg = '';
   try { bg = window.getComputedStyle(document.body).backgroundColor || ''; } catch { bg = ''; }
   // A fully transparent background is "no colour": read the alpha rather than comparing
-  // against a literal — test/ui-js-colors forbids `rgba(` followed by a digit in browser JS.
+  // against a literal — spec §4.2 bans `rgba(` followed by a digit in browser JS (no longer
+  // tested: the ui-js-colors guard is gone).
   const alpha = Number((/^rgba\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*([\d.]+)\s*\)$/.exec(bg) || [])[1] ?? '1');
   if (meta && bg && alpha > 0) meta.setAttribute('content', bg);
 }
@@ -22378,7 +22386,10 @@ function afterDiffPaint(win = window) {
 // 500,000-code-unit section cap (diff-view.mjs); this bounds what one paint
 // CONNECTS, so a 250k-row generated diff cannot mint a million gutter/source
 // nodes at once while every hidden row stays one click away.
-const HD_DIFF_WINDOW_LINES = 5_000;
+const HD_DIFF_WINDOW_LINES = testHookInt('diffWindowLines', 5_000);
+// Parse cap for the Diff tab (diff-view.mjs is a shared, once-per-process module, so the
+// test hook travels as an argument; the server's diff-anchor keeps the exported cap).
+const HD_MAX_SECTION_CODE_UNITS = testHookInt('maxSectionCodeUnits', MAX_FILE_SECTION_CODE_UNITS);
 
 // One selected file's render state, shared by the window appender and the
 // highlighter so rows connected by a later "Show more" still get enhanced.
@@ -23068,7 +23079,7 @@ function buildHdDiff(sec, record, data) {
       pane.appendChild(body);
       return;
     }
-    const parsed = parseFileSection(section.raw);
+    const parsed = parseFileSection(section.raw, { maxCodeUnits: HD_MAX_SECTION_CODE_UNITS });
     if (parsed.binary || !parsed.hunks.length) {
       body.classList.add('hint');
       const note = document.createElement('div');
@@ -23857,7 +23868,7 @@ function rdRenderFileBody(pane, index, entry) {
   const body = document.createElement('div');
   body.className = 'hd-diff-body mono';
   const section = index && index.get(sectionKey(entry.project, entry.f.path));
-  const parsed = section ? parseFileSection(section.raw) : null;
+  const parsed = section ? parseFileSection(section.raw, { maxCodeUnits: HD_MAX_SECTION_CODE_UNITS }) : null;
   if (!parsed || parsed.binary || !parsed.hunks.length) {
     body.classList.add('hint');
     const note = document.createElement('div');
@@ -29905,7 +29916,7 @@ function rdTickHosts(r) {
   return hosts;
 }
 
-const _timerTick = setInterval(() => {
+function timerTick() {
   try { paintSideAway(); } catch { /* the word moves with the clock (away hours start and end) */ }
   // The Away mode pill counts down while the run WAITS on a question, which the loop below skips.
   try { const open = rdOpenRun(); if (open && runDetailState.screen) paintRdAwayPill(runDetailState.screen, open); } catch { /* a closed test window must not throw from a timer */ }
@@ -29935,7 +29946,10 @@ const _timerTick = setInterval(() => {
       }
     }
   }
-}, 1000);
+}
+const _timerTick = setInterval(timerTick, 1000);
+// Test hook: a suite drives the 1 s tick itself instead of waiting a real second.
+if (typeof window !== 'undefined') window.__np = Object.assign(window.__np || {}, { timerTick });
 // In a real browser, setInterval returns a numeric id and this timer simply runs
 // for the page's lifetime. Under node:test the jsdom harness imports THIS module,
 // where bare `setInterval` resolves to Node's global and returns a Timeout that
@@ -30331,7 +30345,7 @@ loadWhoami();
 }
 
 // Ask Worca mount (§10.2 seam 1): a JS-built body-level overlay — index.html is
-// untouched so ui-shell's routed-view census stays at 11. No network happens here;
+// untouched, so the routed-view count in test/ui-boot.test.mjs stays as it is. No network happens here;
 // the panel fetches only on first open / hello.
 askPanel = createAskPanel({
   doc: document,

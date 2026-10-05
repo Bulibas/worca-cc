@@ -11,6 +11,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { normalizeManifest, validatePluginDir } from '../src/core/plugin-manifest.mjs';
 import { buildInstallInventory } from '../src/core/plugin-store.mjs';
 import { materializeCopy } from '../src/core/mcp/registry.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -56,30 +57,33 @@ test('every plugin the builtin marketplace lists validates strictly', () => {
   }
 });
 
-test('cloudflare-mcp: the whole Cloudflare API behind a bearer API token, and the docs with no credentials', () => {
-  assertShipped('cloudflare-mcp', ['cloudflare', 'cloudflare-docs']);
-  assert.deepEqual(consent('cloudflare-mcp'), [
-    { name: 'cloudflare', type: 'http', url: 'https://mcp.cloudflare.com/mcp' },
-    { name: 'cloudflare-docs', type: 'http', url: 'https://docs.mcp.cloudflare.com/mcp' },
+test('http MCP plugins (cloudflare, atlassian): no secret no copy; the token rides an env ref in the auth header', async () => {
+  await checkRows([
+    { name: 'cloudflare-mcp: the whole Cloudflare API behind a bearer API token, and the docs with no credentials', run: async () => {
+      assertShipped('cloudflare-mcp', ['cloudflare', 'cloudflare-docs']);
+      assert.deepEqual(consent('cloudflare-mcp'), [
+        { name: 'cloudflare', type: 'http', url: 'https://mcp.cloudflare.com/mcp' },
+        { name: 'cloudflare-docs', type: 'http', url: 'https://docs.mcp.cloudflare.com/mcp' },
+      ]);
+      assert.deepEqual(mat('cloudflare-mcp', 'cloudflare'), { reason: 'missing:token' }, 'no token, no copy');
+      const r = mat('cloudflare-mcp', 'cloudflare', { secrets: { token: sec('cf-api-token-0123456789') } });
+      const [ref] = Object.keys(r.env);
+      assert.deepEqual(r.server, { type: 'http', url: 'https://mcp.cloudflare.com/mcp', headers: { Authorization: `Bearer \${${ref}}` } });
+      assert.deepEqual(r.env, { [ref]: 'cf-api-token-0123456789' });
+      assert.deepEqual(mat('cloudflare-mcp', 'cloudflare-docs').server, { type: 'http', url: 'https://docs.mcp.cloudflare.com/mcp' });
+    } },
+    { name: 'atlassian-mcp: the Rovo MCP server with Basic API-token credentials (base64 padding survives)', run: async () => {
+      assertShipped('atlassian-mcp', ['atlassian']);
+      assert.deepEqual(consent('atlassian-mcp'), [{ name: 'atlassian', type: 'http', url: 'https://mcp.atlassian.com/v2/mcp' }]);
+      assert.deepEqual(mat('atlassian-mcp', 'atlassian'), { reason: 'missing:credentials' });
+      const basic = Buffer.from('dev@example.com:ATATT3xFfGF0-token').toString('base64');
+      assert.ok(basic.endsWith('='), 'the fixture exercises = padding');
+      const r = mat('atlassian-mcp', 'atlassian', { secrets: { credentials: sec(basic) } });
+      const [ref] = Object.keys(r.env);
+      assert.deepEqual(r.server, { type: 'http', url: 'https://mcp.atlassian.com/v2/mcp', headers: { Authorization: `Basic \${${ref}}` } });
+      assert.deepEqual(r.env, { [ref]: basic });
+    } },
   ]);
-  assert.deepEqual(mat('cloudflare-mcp', 'cloudflare'), { reason: 'missing:token' }, 'no token, no copy');
-  const r = mat('cloudflare-mcp', 'cloudflare', { secrets: { token: sec('cf-api-token-0123456789') } });
-  const [ref] = Object.keys(r.env);
-  assert.deepEqual(r.server, { type: 'http', url: 'https://mcp.cloudflare.com/mcp', headers: { Authorization: `Bearer \${${ref}}` } });
-  assert.deepEqual(r.env, { [ref]: 'cf-api-token-0123456789' });
-  assert.deepEqual(mat('cloudflare-mcp', 'cloudflare-docs').server, { type: 'http', url: 'https://docs.mcp.cloudflare.com/mcp' });
-});
-
-test('atlassian-mcp: the Rovo MCP server with Basic API-token credentials (base64 padding survives)', () => {
-  assertShipped('atlassian-mcp', ['atlassian']);
-  assert.deepEqual(consent('atlassian-mcp'), [{ name: 'atlassian', type: 'http', url: 'https://mcp.atlassian.com/v2/mcp' }]);
-  assert.deepEqual(mat('atlassian-mcp', 'atlassian'), { reason: 'missing:credentials' });
-  const basic = Buffer.from('dev@example.com:ATATT3xFfGF0-token').toString('base64');
-  assert.ok(basic.endsWith('='), 'the fixture exercises = padding');
-  const r = mat('atlassian-mcp', 'atlassian', { secrets: { credentials: sec(basic) } });
-  const [ref] = Object.keys(r.env);
-  assert.deepEqual(r.server, { type: 'http', url: 'https://mcp.atlassian.com/v2/mcp', headers: { Authorization: `Basic \${${ref}}` } });
-  assert.deepEqual(r.env, { [ref]: basic });
 });
 
 test('firebase-mcp: firebase-tools over stdio; blank optional fields leave no flag behind', () => {
@@ -108,26 +112,29 @@ test('firebase-mcp on Windows: npx runs through its .cmd shim; no npx on PATH sk
   assert.deepEqual(mat('firebase-mcp', 'firebase', { ctx: { ...WIN, resolveCommand: () => null } }), { reason: 'command-not-found' });
 });
 
-test('railway-mcp: the Railway CLI local server; blank token = railway login, a token only through env', () => {
-  assertShipped('railway-mcp', ['railway']);
-  assert.deepEqual(consent('railway-mcp'), [{ name: 'railway', type: 'stdio', command: 'railway mcp local' }]);
-  const login = mat('railway-mcp', 'railway');
-  assert.deepEqual(childArgv(login.server), ['railway', 'mcp', 'local']);
-  assert.equal(login.server.env, undefined);
-  const tok = mat('railway-mcp', 'railway', { secrets: { token: sec('rw-account-token-0123') } });
-  const [ref] = Object.keys(tok.env);
-  assert.deepEqual(tok.server.env, { MCPCHILD_RAILWAY_API_TOKEN: `\${${ref}}` });
-  assert.ok(!tok.server.args.includes('rw-account-token-0123'));
-  assert.deepEqual(mat('railway-mcp', 'railway', { ctx: { ...WIN, resolveCommand: () => null } }), { reason: 'command-not-found' });
-});
-
-test('notion-mcp: the open-source Notion server over stdio with an integration secret', () => {
-  assertShipped('notion-mcp', ['notion']);
-  assert.deepEqual(consent('notion-mcp'), [{ name: 'notion', type: 'stdio', command: 'npx -y @notionhq/notion-mcp-server' }]);
-  assert.deepEqual(mat('notion-mcp', 'notion'), { reason: 'missing:token' });
-  const r = mat('notion-mcp', 'notion', { secrets: { token: sec('ntn_0123456789abcdefghij') } });
-  assert.deepEqual(childArgv(r.server), ['npx', '-y', '@notionhq/notion-mcp-server']);
-  const [ref] = Object.keys(r.env);
-  assert.deepEqual(r.server.env, { MCPCHILD_NOTION_TOKEN: `\${${ref}}` });
-  assert.deepEqual(r.env, { [ref]: 'ntn_0123456789abcdefghij' });
+test('stdio token MCP plugins (railway, notion): the token reaches the child only through env, never argv', async () => {
+  await checkRows([
+    { name: 'railway-mcp: the Railway CLI local server; blank token = railway login, a token only through env', run: async () => {
+      assertShipped('railway-mcp', ['railway']);
+      assert.deepEqual(consent('railway-mcp'), [{ name: 'railway', type: 'stdio', command: 'railway mcp local' }]);
+      const login = mat('railway-mcp', 'railway');
+      assert.deepEqual(childArgv(login.server), ['railway', 'mcp', 'local']);
+      assert.equal(login.server.env, undefined);
+      const tok = mat('railway-mcp', 'railway', { secrets: { token: sec('rw-account-token-0123') } });
+      const [ref] = Object.keys(tok.env);
+      assert.deepEqual(tok.server.env, { MCPCHILD_RAILWAY_API_TOKEN: `\${${ref}}` });
+      assert.ok(!tok.server.args.includes('rw-account-token-0123'));
+      assert.deepEqual(mat('railway-mcp', 'railway', { ctx: { ...WIN, resolveCommand: () => null } }), { reason: 'command-not-found' });
+    } },
+    { name: 'notion-mcp: the open-source Notion server over stdio with an integration secret', run: async () => {
+      assertShipped('notion-mcp', ['notion']);
+      assert.deepEqual(consent('notion-mcp'), [{ name: 'notion', type: 'stdio', command: 'npx -y @notionhq/notion-mcp-server' }]);
+      assert.deepEqual(mat('notion-mcp', 'notion'), { reason: 'missing:token' });
+      const r = mat('notion-mcp', 'notion', { secrets: { token: sec('ntn_0123456789abcdefghij') } });
+      assert.deepEqual(childArgv(r.server), ['npx', '-y', '@notionhq/notion-mcp-server']);
+      const [ref] = Object.keys(r.env);
+      assert.deepEqual(r.server.env, { MCPCHILD_NOTION_TOKEN: `\${${ref}}` });
+      assert.deepEqual(r.env, { [ref]: 'ntn_0123456789abcdefghij' });
+    } },
+  ]);
 });

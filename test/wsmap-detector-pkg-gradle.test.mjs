@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeWorkspace, runDetector, keysOf, assertEvidence } from './helpers/wsmap-fixtures.mjs';
 import detector from '../src/core/workspace-map/detectors/pkg-gradle.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const GROOVY_SETTINGS = `rootProject.name = 'billing'
 include ':billing-client', ':billing-server'
@@ -69,32 +70,30 @@ before(async () => {
 after(() => ws.cleanup());
 const member = (k) => ws.members.find((m) => m.key === k);
 
-test('pkg-gradle (Groovy): provides group:rootProject.name and every include; alias = rootProject.name', async () => {
+test('pkg-gradle (member billing, Groovy): provides, consumes, project remaps, interpolated coordinate unresolved', async () => {
   const r = await runDetector(detector, member('billing'), ws.members);
-  assert.deepEqual(keysOf(r, 'pkg', 'provides'), ['maven:com.acme:billing', 'maven:com.acme:billing-client', 'maven:com.acme:billing-server', 'maven:com.acme:shared']);
-  assert.deepEqual(r.aliases.map((a) => a.value), ['billing']);
-  assert.deepEqual(r.stack, ['java']);
-  assertEvidence(member('billing'), r);
-});
-
-test('pkg-gradle (Groovy): consumes string, map and platform coordinates; skips comments', async () => {
-  const r = await runDetector(detector, member('billing'), ws.members);
-  const consumes = keysOf(r, 'pkg', 'consumes');
-  for (const k of ['maven:com.acme:money', 'maven:com.acme:ledger', 'maven:com.acme:acme-bom', 'maven:org.junit.jupiter:junit-jupiter']) assert.ok(consumes.includes(k), k);
-  assert.ok(!consumes.some((k) => k.includes('commented')));
-  assert.equal(r.facts.find((f) => f.key === 'maven:com.acme:money').line, 6);
-});
-
-test('pkg-gradle: project(":x") remapped into another member consumes it (target = member); intra-build project deps do not', async () => {
-  const r = await runDetector(detector, member('billing'), ws.members);
-  const proj = r.facts.filter((f) => f.detail?.startsWith('project dependency'));
-  assert.deepEqual(proj.map((f) => [f.key, f.target, f.line]), [['maven:com.acme:shared', 'shared-lib', 11]]);
-});
-
-test('pkg-gradle: an interpolated coordinate is unresolved', async () => {
-  const r = await runDetector(detector, member('billing'), ws.members);
-  assert.deepEqual(r.unresolved.map((u) => [u.raw, u.reason, u.line]), [['${acmeGroup}:dynamic:1.0', 'interpolated gradle coordinate', 13]]);
-  assert.equal(r.facts.find((f) => f.key === 'maven:com.acme:multi-line').line, 15, 'a call spanning lines cites its coordinate\'s line');
+  await checkRows([
+    { name: 'pkg-gradle (Groovy): provides group:rootProject.name and every include; alias = rootProject.name', run: () => {
+      assert.deepEqual(keysOf(r, 'pkg', 'provides'), ['maven:com.acme:billing', 'maven:com.acme:billing-client', 'maven:com.acme:billing-server', 'maven:com.acme:shared']);
+      assert.deepEqual(r.aliases.map((a) => a.value), ['billing']);
+      assert.deepEqual(r.stack, ['java']);
+      assertEvidence(member('billing'), r);
+    } },
+    { name: 'pkg-gradle (Groovy): consumes string, map and platform coordinates; skips comments', run: () => {
+      const consumes = keysOf(r, 'pkg', 'consumes');
+      for (const k of ['maven:com.acme:money', 'maven:com.acme:ledger', 'maven:com.acme:acme-bom', 'maven:org.junit.jupiter:junit-jupiter']) assert.ok(consumes.includes(k), k);
+      assert.ok(!consumes.some((k) => k.includes('commented')));
+      assert.equal(r.facts.find((f) => f.key === 'maven:com.acme:money').line, 6);
+    } },
+    { name: 'pkg-gradle: project(":x") remapped into another member consumes it (target = member); intra-build project deps do not', run: () => {
+      const proj = r.facts.filter((f) => f.detail?.startsWith('project dependency'));
+      assert.deepEqual(proj.map((f) => [f.key, f.target, f.line]), [['maven:com.acme:shared', 'shared-lib', 11]]);
+    } },
+    { name: 'pkg-gradle: an interpolated coordinate is unresolved', run: () => {
+      assert.deepEqual(r.unresolved.map((u) => [u.raw, u.reason, u.line]), [['${acmeGroup}:dynamic:1.0', 'interpolated gradle coordinate', 13]]);
+      assert.equal(r.facts.find((f) => f.key === 'maven:com.acme:multi-line').line, 15, 'a call spanning lines cites its coordinate\'s line');
+    } },
+  ]);
 });
 
 test('pkg-gradle (Kotlin DSL, CRLF): provides, consumes, version catalog, kotlin stack', async () => {

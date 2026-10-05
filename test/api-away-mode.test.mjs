@@ -8,6 +8,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 let homeDir, userHome, srv, base, mod;
@@ -37,17 +38,33 @@ const api = async (method, path, body) => {
 };
 const projectDir = async () => { const d = await mkdtemp(join(tmpdir(), 'worca-cc-awayapi-proj-')); projects.push(d); return d; };
 
-test('GET /api/away-mode: effective config, sources, live status and the raw layers', async () => {
-  await api('POST', '/api/settings', { nightMode: { window: '22:00-07:00', enabled: true }, nightModeToggle: 'on' });
-  const r = await api('GET', '/api/away-mode');
-  assert.equal(r.status, 200);
-  assert.equal(r.body.toggle, 'on');
-  assert.equal(r.body.config.window, '22:00-07:00');
-  assert.equal(r.body.sources.window, 'user');
-  assert.deepEqual(r.body.user, { window: '22:00-07:00', enabled: true });
-  assert.equal(r.body.project, null);
-  assert.equal(r.body.inherited.config.window, null, 'user level inherits the default');
-  assert.equal(r.body.inherited.sources.window, 'default');
+test('GET /api/away-mode: effective config, sources, live status, raw layers, and the project layer with ?projectDir=', async () => {
+  await checkRows([
+    { name: 'GET /api/away-mode: effective config, sources, live status and the raw layers', run: async () => {
+      await api('POST', '/api/settings', { nightMode: { window: '22:00-07:00', enabled: true }, nightModeToggle: 'on' });
+      const r = await api('GET', '/api/away-mode');
+      assert.equal(r.status, 200);
+      assert.equal(r.body.toggle, 'on');
+      assert.equal(r.body.config.window, '22:00-07:00');
+      assert.equal(r.body.sources.window, 'user');
+      assert.deepEqual(r.body.user, { window: '22:00-07:00', enabled: true });
+      assert.equal(r.body.project, null);
+      assert.equal(r.body.inherited.config.window, null, 'user level inherits the default');
+      assert.equal(r.body.inherited.sources.window, 'default');
+    } },
+    { name: 'GET /api/away-mode?projectDir= adds the project layer and says what the user layer gives', run: async () => {
+      await api('POST', '/api/settings', { nightMode: { window: '22:00-07:00', enabled: true } });   // self-contained: runs alone too
+      const dir = await projectDir();
+      await api('PATCH', '/api/config', { projectDir: dir, nightMode: { graceMinutes: 45, enabled: false } });
+      const r = await api('GET', `/api/away-mode?projectDir=${encodeURIComponent(dir)}`);
+      assert.equal(r.body.config.graceMinutes, 45);
+      assert.equal(r.body.sources.graceMinutes, 'project');
+      assert.deepEqual(r.body.project, { graceMinutes: 45, enabled: false });
+      assert.equal(r.body.config.enabled, false);
+      assert.equal(r.body.inherited.config.enabled, true, 'what "Same as my settings" means here');
+      assert.equal(r.body.inherited.sources.enabled, 'user');
+    } },
+  ]);
 });
 
 test('POST nightModeToggle "here": stored as auto plus when it was said; GET /api/away-mode reports both', async () => {
@@ -60,17 +77,4 @@ test('POST nightModeToggle "here": stored as auto plus when it was said; GET /ap
   assert.equal((await api('GET', '/api/away-mode')).body.hereSince, null);
   assert.equal((await api('POST', '/api/settings', { nightModeToggle: 'later' })).status, 400);
   await api('POST', '/api/settings', { nightModeToggle: 'auto' });
-});
-
-test('GET /api/away-mode?projectDir= adds the project layer and says what the user layer gives', async () => {
-  await api('POST', '/api/settings', { nightMode: { window: '22:00-07:00', enabled: true } });   // self-contained: runs alone too
-  const dir = await projectDir();
-  await api('PATCH', '/api/config', { projectDir: dir, nightMode: { graceMinutes: 45, enabled: false } });
-  const r = await api('GET', `/api/away-mode?projectDir=${encodeURIComponent(dir)}`);
-  assert.equal(r.body.config.graceMinutes, 45);
-  assert.equal(r.body.sources.graceMinutes, 'project');
-  assert.deepEqual(r.body.project, { graceMinutes: 45, enabled: false });
-  assert.equal(r.body.config.enabled, false);
-  assert.equal(r.body.inherited.config.enabled, true, 'what "Same as my settings" means here');
-  assert.equal(r.body.inherited.sources.enabled, 'user');
 });

@@ -8,37 +8,41 @@ import { join, dirname } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
 import { recordArtifact, listRunArtifacts, resolveIndexedArtifactForRow, findPipelineRowById, forgetMissingArtifacts } from '../src/core/artifacts.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
-test('listRunArtifacts returns attributed, byte-sized, ordered rows', async () => {
-  const { id, dir } = await seedPipeline(process.cwd(), { title: 'A', status: 'done' });
-  writeFileSync(join(dir, 'note.md'), 'hello');                  // 5 bytes
-  mkdirSync(join(dir, 'extras'), { recursive: true });
-  writeFileSync(join(dir, 'extras', 'a.md'), 'world!!');         // 7 bytes
-  recordArtifact(id, 'note', 'note.md');                        // legacy: NULL attribution
-  recordArtifact(id, 'extra', 'extras/a.md', { stepKey: 'exec-9', nodeId: 'planner', cycle: 2 });
+test('listRunArtifacts returns attributed, byte-sized, ordered rows; [] for an unknown run', async () => {
+  await checkRows([
+    { name: 'listRunArtifacts returns attributed, byte-sized, ordered rows', run: async () => {
+      const { id, dir } = await seedPipeline(process.cwd(), { title: 'A', status: 'done' });
+      writeFileSync(join(dir, 'note.md'), 'hello');                  // 5 bytes
+      mkdirSync(join(dir, 'extras'), { recursive: true });
+      writeFileSync(join(dir, 'extras', 'a.md'), 'world!!');         // 7 bytes
+      recordArtifact(id, 'note', 'note.md');                        // legacy: NULL attribution
+      recordArtifact(id, 'extra', 'extras/a.md', { stepKey: 'exec-9', nodeId: 'planner', cycle: 2 });
 
-  const rows = await listRunArtifacts(id);
-  // seedPipeline records prompt.md too (NULL attribution) — filter to the ones we added.
-  const note = rows.find((r) => r.kind === 'note');
-  const extra = rows.find((r) => r.kind === 'extra');
-  assert.equal(note.stepKey, null);            // legacy row: NULL attribution
-  assert.deepEqual(
-    { kind: extra.kind, stepKey: extra.stepKey, nodeId: extra.nodeId, cycle: extra.cycle, relPath: extra.relPath, bytes: extra.bytes },
-    { kind: 'extra', stepKey: 'exec-9', nodeId: 'planner', cycle: 2, relPath: 'extras/a.md', bytes: 7 },
-  );
-  assert.equal(note.bytes, 5);
-  // Legacy (NULL created_at) rows bucket ahead of attributed rows.
-  const firstAttributedIdx = rows.findIndex((r) => r.createdAt != null);
-  const lastLegacyIdx = rows.map((r) => r.createdAt).lastIndexOf(null);
-  assert.ok(lastLegacyIdx < firstAttributedIdx, 'legacy NULL-attribution rows sort first');
-  assert.equal((await listRunArtifacts(id, { stepKey: 'exec-9' })).length, 1);
-  assert.equal((await listRunArtifacts(id, { kind: 'extra' })).length, 1);
-});
-
-test('listRunArtifacts returns [] for an unknown run', async () => {
-  assert.deepEqual(await listRunArtifacts('deadbeef'), []);
+      const rows = await listRunArtifacts(id);
+      // seedPipeline records prompt.md too (NULL attribution) — filter to the ones we added.
+      const note = rows.find((r) => r.kind === 'note');
+      const extra = rows.find((r) => r.kind === 'extra');
+      assert.equal(note.stepKey, null);            // legacy row: NULL attribution
+      assert.deepEqual(
+        { kind: extra.kind, stepKey: extra.stepKey, nodeId: extra.nodeId, cycle: extra.cycle, relPath: extra.relPath, bytes: extra.bytes },
+        { kind: 'extra', stepKey: 'exec-9', nodeId: 'planner', cycle: 2, relPath: 'extras/a.md', bytes: 7 },
+      );
+      assert.equal(note.bytes, 5);
+      // Legacy (NULL created_at) rows bucket ahead of attributed rows.
+      const firstAttributedIdx = rows.findIndex((r) => r.createdAt != null);
+      const lastLegacyIdx = rows.map((r) => r.createdAt).lastIndexOf(null);
+      assert.ok(lastLegacyIdx < firstAttributedIdx, 'legacy NULL-attribution rows sort first');
+      assert.equal((await listRunArtifacts(id, { stepKey: 'exec-9' })).length, 1);
+      assert.equal((await listRunArtifacts(id, { kind: 'extra' })).length, 1);
+    } },
+    { name: 'listRunArtifacts returns [] for an unknown run', run: async () => {
+      assert.deepEqual(await listRunArtifacts('deadbeef'), []);
+    } },
+  ]);
 });
 
 // Splitting resolveIndexedArtifactForRow into "access() picks the base" +
@@ -114,32 +118,35 @@ test('forgetMissingArtifacts is one level deep and refuses nonsense', async () =
   assert.ok(rels.includes('deck/deck.html'), rels.join(','));
 });
 
-// `_` is a single-character WILDCARD in SQLite LIKE, and EXTRA_GLOB_RE admits it
-// in a directory name — so sweeping `my_dir/` also selected rows under `myXdir/`,
-// whose basenames are absent from my_dir's listing and were therefore DELETEd.
-// An index row for a file still on disk, which then 404s from the raw route and
-// from read_run_artifact.
-test('forgetMissingArtifacts does not treat _ in a directory name as a wildcard', async () => {
-  const { id } = await seedPipeline(await mkdtemp(join(tmpdir(), 'worca-like-')), { title: 'L', status: 'done' });
-  recordArtifact(id, 'shot', 'my_dir/a.png');
-  recordArtifact(id, 'shot', 'myXdir/b.png');          // a DIFFERENT directory
-  recordArtifact(id, 'shot', 'my_dir/gone.png');
+test('forgetMissingArtifacts escapes LIKE wildcards (_ and %) in a directory name', async () => {
+  await checkRows([
+    // `_` is a single-character WILDCARD in SQLite LIKE, and EXTRA_GLOB_RE admits it
+    // in a directory name — so sweeping `my_dir/` also selected rows under `myXdir/`,
+    // whose basenames are absent from my_dir's listing and were therefore DELETEd.
+    // An index row for a file still on disk, which then 404s from the raw route and
+    // from read_run_artifact.
+    { name: 'forgetMissingArtifacts does not treat _ in a directory name as a wildcard', run: async () => {
+      const { id } = await seedPipeline(await mkdtemp(join(tmpdir(), 'worca-like-')), { title: 'L', status: 'done' });
+      recordArtifact(id, 'shot', 'my_dir/a.png');
+      recordArtifact(id, 'shot', 'myXdir/b.png');          // a DIFFERENT directory
+      recordArtifact(id, 'shot', 'my_dir/gone.png');
 
-  const removed = forgetMissingArtifacts(id, 'my_dir', new Set(['a.png']));
+      const removed = forgetMissingArtifacts(id, 'my_dir', new Set(['a.png']));
 
-  assert.deepEqual(removed, ['my_dir/gone.png'], 'only my_dir/gone.png');
-  const rels = (await listRunArtifacts(id)).map((a) => a.relPath);
-  assert.ok(rels.includes('myXdir/b.png'), `a neighbouring directory was pruned: ${rels.join(',')}`);
-  assert.ok(rels.includes('my_dir/a.png'), rels.join(','));
-  assert.ok(!rels.includes('my_dir/gone.png'), rels.join(','));
-});
-
-test('forgetMissingArtifacts does not treat % in a directory name as a wildcard', async () => {
-  const { id } = await seedPipeline(await mkdtemp(join(tmpdir(), 'worca-like2-')), { title: 'L2', status: 'done' });
-  recordArtifact(id, 'shot', 'a%b/one.png');
-  recordArtifact(id, 'shot', 'axxb/two.png');
-  assert.deepEqual(forgetMissingArtifacts(id, 'a%b', new Set()), ['a%b/one.png']);
-  assert.ok((await listRunArtifacts(id)).map((a) => a.relPath).includes('axxb/two.png'));
+      assert.deepEqual(removed, ['my_dir/gone.png'], 'only my_dir/gone.png');
+      const rels = (await listRunArtifacts(id)).map((a) => a.relPath);
+      assert.ok(rels.includes('myXdir/b.png'), `a neighbouring directory was pruned: ${rels.join(',')}`);
+      assert.ok(rels.includes('my_dir/a.png'), rels.join(','));
+      assert.ok(!rels.includes('my_dir/gone.png'), rels.join(','));
+    } },
+    { name: 'forgetMissingArtifacts does not treat % in a directory name as a wildcard', run: async () => {
+      const { id } = await seedPipeline(await mkdtemp(join(tmpdir(), 'worca-like2-')), { title: 'L2', status: 'done' });
+      recordArtifact(id, 'shot', 'a%b/one.png');
+      recordArtifact(id, 'shot', 'axxb/two.png');
+      assert.deepEqual(forgetMissingArtifacts(id, 'a%b', new Set()), ['a%b/one.png']);
+      assert.ok((await listRunArtifacts(id)).map((a) => a.relPath).includes('axxb/two.png'));
+    } },
+  ]);
 });
 
 // Plan/review markdown is STORE-ROOT relative, not run-dir relative:
@@ -170,65 +177,71 @@ test('forgetMissingArtifacts keeps a row whose file lives at the store root', as
   assert.ok(kept.includes('reviews/impl-review-1.md'), kept.join(','));
 });
 
-// SQLite accepts OFFSET only alongside LIMIT, so `hasOffset = hasLimit && …`
-// silently returned page 1 to a caller that passed an offset and no limit — the
-// shape a future caller reaches for after reading `nextOffset` in a response.
-// `LIMIT -1` is SQLite's "no limit", which lets the offset stand on its own.
-test('listRunArtifacts honours an offset given without a limit', async () => {
-  const { id } = await seedPipeline(await mkdtemp(join(tmpdir(), 'worca-offset-')), { title: 'O', status: 'done' });
-  for (const n of ['a.md', 'b.md', 'c.md']) recordArtifact(id, 'plan', `plans/${n}`);
-  const all = (await listRunArtifacts(id, {})).map((a) => a.relPath);
-  const skipped = (await listRunArtifacts(id, { offset: 2 })).map((a) => a.relPath);
-  assert.equal(skipped.length, all.length - 2, 'two rows were skipped');
-  assert.deepEqual(skipped, all.slice(2), 'and they are the right two');
+test('listRunArtifacts paging: offset without limit, and an unsafe limit is no limit', async () => {
+  await checkRows([
+    // SQLite accepts OFFSET only alongside LIMIT, so `hasOffset = hasLimit && …`
+    // silently returned page 1 to a caller that passed an offset and no limit — the
+    // shape a future caller reaches for after reading `nextOffset` in a response.
+    // `LIMIT -1` is SQLite's "no limit", which lets the offset stand on its own.
+    { name: 'listRunArtifacts honours an offset given without a limit', run: async () => {
+      const { id } = await seedPipeline(await mkdtemp(join(tmpdir(), 'worca-offset-')), { title: 'O', status: 'done' });
+      for (const n of ['a.md', 'b.md', 'c.md']) recordArtifact(id, 'plan', `plans/${n}`);
+      const all = (await listRunArtifacts(id, {})).map((a) => a.relPath);
+      const skipped = (await listRunArtifacts(id, { offset: 2 })).map((a) => a.relPath);
+      assert.equal(skipped.length, all.length - 2, 'two rows were skipped');
+      assert.deepEqual(skipped, all.slice(2), 'and they are the right two');
+    } },
+    // The offset guard was moved to Number.isSafeInteger because node:sqlite refuses
+    // to bind a non-safe integer (`datatype mismatch`, surfacing as a 500) — and the
+    // comment says the guard belongs "where the value meets the statement, so no
+    // caller can reintroduce it". `limit` is the same statement, bound the same way,
+    // and was left on Number.isInteger. Both current callers happen to clamp; the
+    // next one to forward a query param would not.
+    { name: 'listRunArtifacts survives an unsafe limit the way it survives an unsafe offset', run: async () => {
+      const { id } = await seedPipeline(await mkdtemp(join(tmpdir(), 'worca-biglimit-')), { title: 'B', status: 'done' });
+      recordArtifact(id, 'plan', 'plans/a.md');
+      const rows = await listRunArtifacts(id, { limit: 1e20 });
+      assert.ok(Array.isArray(rows) && rows.length >= 1, 'an absurd limit is simply no limit, not a throw');
+    } },
+  ]);
 });
 
-// The offset guard was moved to Number.isSafeInteger because node:sqlite refuses
-// to bind a non-safe integer (`datatype mismatch`, surfacing as a 500) — and the
-// comment says the guard belongs "where the value meets the statement, so no
-// caller can reintroduce it". `limit` is the same statement, bound the same way,
-// and was left on Number.isInteger. Both current callers happen to clamp; the
-// next one to forward a query param would not.
-test('listRunArtifacts survives an unsafe limit the way it survives an unsafe offset', async () => {
-  const { id } = await seedPipeline(await mkdtemp(join(tmpdir(), 'worca-biglimit-')), { title: 'B', status: 'done' });
-  recordArtifact(id, 'plan', 'plans/a.md');
-  const rows = await listRunArtifacts(id, { limit: 1e20 });
-  assert.ok(Array.isArray(rows) && rows.length >= 1, 'an absurd limit is simply no limit, not a throw');
-});
+test('re-kinding a file: indexedNamesUnder exposes the kind and forgetOtherKinds retires the old row', async () => {
+  await checkRows([
+    // indexedNamesUnder returns BASENAMES, kind-blind — while recordArtifact's PK is
+    // (pipeline_id, kind, rel_path) and forgetMissingArtifacts only drops rows whose
+    // FILE is gone. So a file already indexed under kind A that a later sweep claims
+    // under kind B kept its A row: skipped entirely when its mtime predates the
+    // execution, and DOUBLE-listed when it did not. Reachable for any run spanning the
+    // V32 deck/deck-asset split, and for any sidecar edit that re-kinds a glob. A file
+    // has one kind at a time — that is exactly why the ports are first-match-wins.
+    { name: 're-kinding a file replaces its row instead of leaving two', run: async () => {
+      const { id } = await seedPipeline(await mkdtemp(join(tmpdir(), 'worca-rekind-')), { title: 'K', status: 'done' });
+      recordArtifact(id, 'deck', 'deck/deck-stage.js', { stepKey: 'x:n_build:1', nodeId: 'n_build', cycle: 1 });
+      const { indexedNamesUnder } = await import('../src/core/artifacts.mjs');
 
-// indexedNamesUnder returns BASENAMES, kind-blind — while recordArtifact's PK is
-// (pipeline_id, kind, rel_path) and forgetMissingArtifacts only drops rows whose
-// FILE is gone. So a file already indexed under kind A that a later sweep claims
-// under kind B kept its A row: skipped entirely when its mtime predates the
-// execution, and DOUBLE-listed when it did not. Reachable for any run spanning the
-// V32 deck/deck-asset split, and for any sidecar edit that re-kinds a glob. A file
-// has one kind at a time — that is exactly why the ports are first-match-wins.
-test('re-kinding a file replaces its row instead of leaving two', async () => {
-  const { id } = await seedPipeline(await mkdtemp(join(tmpdir(), 'worca-rekind-')), { title: 'K', status: 'done' });
-  recordArtifact(id, 'deck', 'deck/deck-stage.js', { stepKey: 'x:n_build:1', nodeId: 'n_build', cycle: 1 });
-  const { indexedNamesUnder } = await import('../src/core/artifacts.mjs');
+      const known = indexedNamesUnder(id, 'deck');
+      assert.ok(known.has('deck-stage.js'), 'the name is known');
+      assert.deepEqual([...(known.get('deck-stage.js') || [])], ['deck'],
+        'and the KIND it is known under is available, so a sweep can tell A from B');
+    } },
+    { name: 'forgetOtherKinds retires the superseded row so the file is listed once', run: async () => {
+      const { id } = await seedPipeline(await mkdtemp(join(tmpdir(), 'worca-rekind2-')), { title: 'K2', status: 'done' });
+      const { forgetOtherKinds } = await import('../src/core/artifacts.mjs');
+      recordArtifact(id, 'deck', 'deck/deck-stage.js', { stepKey: 'x:n_build:1', nodeId: 'n_build', cycle: 1 });
+      recordArtifact(id, 'deck-asset', 'deck/deck-stage.js', { stepKey: 'x:n_build:2', nodeId: 'n_build', cycle: 2 });
+      assert.equal((await listRunArtifacts(id)).filter((a) => a.relPath === 'deck/deck-stage.js').length, 2,
+        'both rows exist to begin with — that is the bug');
 
-  const known = indexedNamesUnder(id, 'deck');
-  assert.ok(known.has('deck-stage.js'), 'the name is known');
-  assert.deepEqual([...(known.get('deck-stage.js') || [])], ['deck'],
-    'and the KIND it is known under is available, so a sweep can tell A from B');
-});
+      const dropped = forgetOtherKinds(id, 'deck/deck-stage.js', 'deck-asset');
 
-test('forgetOtherKinds retires the superseded row so the file is listed once', async () => {
-  const { id } = await seedPipeline(await mkdtemp(join(tmpdir(), 'worca-rekind2-')), { title: 'K2', status: 'done' });
-  const { forgetOtherKinds } = await import('../src/core/artifacts.mjs');
-  recordArtifact(id, 'deck', 'deck/deck-stage.js', { stepKey: 'x:n_build:1', nodeId: 'n_build', cycle: 1 });
-  recordArtifact(id, 'deck-asset', 'deck/deck-stage.js', { stepKey: 'x:n_build:2', nodeId: 'n_build', cycle: 2 });
-  assert.equal((await listRunArtifacts(id)).filter((a) => a.relPath === 'deck/deck-stage.js').length, 2,
-    'both rows exist to begin with — that is the bug');
-
-  const dropped = forgetOtherKinds(id, 'deck/deck-stage.js', 'deck-asset');
-
-  assert.deepEqual(dropped, ['deck'], 'it says what it retired');
-  const rows = (await listRunArtifacts(id)).filter((a) => a.relPath === 'deck/deck-stage.js');
-  assert.equal(rows.length, 1, 'one kind per file');
-  assert.equal(rows[0].kind, 'deck-asset', 'the current one survives');
-  assert.deepEqual(forgetOtherKinds(id, 'deck/deck-stage.js', 'deck-asset'), [], 'idempotent');
+      assert.deepEqual(dropped, ['deck'], 'it says what it retired');
+      const rows = (await listRunArtifacts(id)).filter((a) => a.relPath === 'deck/deck-stage.js');
+      assert.equal(rows.length, 1, 'one kind per file');
+      assert.equal(rows[0].kind, 'deck-asset', 'the current one survives');
+      assert.deepEqual(forgetOtherKinds(id, 'deck/deck-stage.js', 'deck-asset'), [], 'idempotent');
+    } },
+  ]);
 });
 
 // The prune decides from a readdir SNAPSHOT taken before the sweep's own awaits.

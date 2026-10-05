@@ -1,5 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -34,24 +35,27 @@ test('a node web app: manifests, deps, lockfile, test config, languages and the 
   assert.ok(!fp.includes('never counted') && !/JavaScript/.test(fp), 'node_modules is skipped');
 });
 
-test('a python library and an empty dir', async () => {
-  const py = await fixture({ 'pyproject.toml': '[project]\nname = "x"\ndependencies = ["fastapi>=0.1", "pydantic"]\n', 'pkg/__init__.py': '', 'pkg/core.py': '', 'tests/test_core.py': '', 'pytest.ini': '' });
-  const fp = await fingerprintProject(py);
-  assert.match(fp, /^pyproject\.toml \(python\): fastapi, pydantic$/m);
-  assert.match(fp, /^languages: Python \(3\)$/m);
-  assert.match(fp, /^hints: web-ui likely \(fastapi\); tests: pytest$/m);
-  const empty = await fixture({});
-  assert.equal(await fingerprintProject(empty), 'top-level: ');
-});
-
-test('requirements*.txt globs and .csproj manifests are recognised', async () => {
-  const dir = await fixture({
-    'requirements-dev.txt': 'pytest>=8\nruff\n# a comment\n-r requirements.txt\n',
-    'App.csproj': '<Project><ItemGroup><PackageReference Include="Serilog" Version="3" /><PackageReference Include="xunit" Version="2" /></ItemGroup></Project>',
-  });
-  const fp = await fingerprintProject(dir);
-  assert.match(fp, /^requirements-dev\.txt \(python\): pytest, ruff$/m);
-  assert.match(fp, /^App\.csproj \(dotnet\): Serilog, xunit$/m);
+test('python, requirements*.txt and .csproj manifests are recognised; an empty dir lists nothing', async () => {
+  await checkRows([
+    { name: 'a python library and an empty dir', run: async () => {
+      const py = await fixture({ 'pyproject.toml': '[project]\nname = "x"\ndependencies = ["fastapi>=0.1", "pydantic"]\n', 'pkg/__init__.py': '', 'pkg/core.py': '', 'tests/test_core.py': '', 'pytest.ini': '' });
+      const fp = await fingerprintProject(py);
+      assert.match(fp, /^pyproject\.toml \(python\): fastapi, pydantic$/m);
+      assert.match(fp, /^languages: Python \(3\)$/m);
+      assert.match(fp, /^hints: web-ui likely \(fastapi\); tests: pytest$/m);
+      const empty = await fixture({});
+      assert.equal(await fingerprintProject(empty), 'top-level: ');
+    } },
+    { name: 'requirements*.txt globs and .csproj manifests are recognised', run: async () => {
+      const dir = await fixture({
+        'requirements-dev.txt': 'pytest>=8\nruff\n# a comment\n-r requirements.txt\n',
+        'App.csproj': '<Project><ItemGroup><PackageReference Include="Serilog" Version="3" /><PackageReference Include="xunit" Version="2" /></ItemGroup></Project>',
+      });
+      const fp = await fingerprintProject(dir);
+      assert.match(fp, /^requirements-dev\.txt \(python\): pytest, ruff$/m);
+      assert.match(fp, /^App\.csproj \(dotnet\): Serilog, xunit$/m);
+    } },
+  ]);
 });
 
 test('the output is capped and an unreadable dir degrades, never throws', async () => {

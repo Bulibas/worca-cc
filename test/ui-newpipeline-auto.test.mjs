@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -93,27 +94,29 @@ async function settle(window, n = 4) {
   for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
 }
 
-test('Auto is first, selected from activeWorkflowId, and never fetched as a workflow row', async () => {
-  const { window, calls } = await boot();
-  const sel = window.document.getElementById('workflowSelect');
-  assert.deepEqual([...sel.options].map((o) => o.value), ['wf_auto', 'wf_default', 'wf_a']);
-  assert.equal(sel.options[0].textContent, 'Auto');
-  assert.equal(sel.value, 'wf_auto');
-  assert.ok(!calls.some((c) => c.url.includes('/api/workflows/wf_auto')), 'the stub is never requested');
-  assert.equal(window.document.getElementById('agents-config').hidden, true, 'agents accordion hidden under Auto');
-  assert.equal(window.document.getElementById('agents-rows').innerHTML, '', 'no "Could not load this workflow." painted');
-  assert.equal(window.document.getElementById('hitl-row').hidden, false);
-  assert.equal(window.document.getElementById('humanInLoop').checked, true, 'default on (config omits the key)');
-});
-
-test('picking a saved workflow restores the accordion and hides the switch; picking Auto persists wf_auto', async () => {
-  const { window, patches } = await boot();
-  const sel = window.document.getElementById('workflowSelect');
-  sel.value = 'wf_a'; sel.dispatchEvent(new window.Event('change')); await settle(window);
-  assert.equal(window.document.getElementById('agents-config').hidden, false);
-  assert.equal(window.document.getElementById('hitl-row').hidden, true);
-  sel.value = 'wf_auto'; sel.dispatchEvent(new window.Event('change')); await settle(window);
-  assert.deepEqual(patches.at(-1), { projectDir: '/repos/proj', activeWorkflowId: 'wf_auto' });
+test('Auto is first and selected from activeWorkflowId, never fetched; picking a saved workflow restores the accordion, picking Auto persists wf_auto', async () => {
+  const { window, calls, patches } = await boot();
+  await checkRows([
+    { name: 'Auto is first, selected from activeWorkflowId, and never fetched as a workflow row', run: async () => {
+      const sel = window.document.getElementById('workflowSelect');
+      assert.deepEqual([...sel.options].map((o) => o.value), ['wf_auto', 'wf_default', 'wf_a']);
+      assert.equal(sel.options[0].textContent, 'Auto');
+      assert.equal(sel.value, 'wf_auto');
+      assert.ok(!calls.some((c) => c.url.includes('/api/workflows/wf_auto')), 'the stub is never requested');
+      assert.equal(window.document.getElementById('agents-config').hidden, true, 'agents accordion hidden under Auto');
+      assert.equal(window.document.getElementById('agents-rows').innerHTML, '', 'no "Could not load this workflow." painted');
+      assert.equal(window.document.getElementById('hitl-row').hidden, false);
+      assert.equal(window.document.getElementById('humanInLoop').checked, true, 'default on (config omits the key)');
+    } },
+    { name: 'picking a saved workflow restores the accordion and hides the switch; picking Auto persists wf_auto', run: async () => {
+      const sel = window.document.getElementById('workflowSelect');
+      sel.value = 'wf_a'; sel.dispatchEvent(new window.Event('change')); await settle(window);
+      assert.equal(window.document.getElementById('agents-config').hidden, false);
+      assert.equal(window.document.getElementById('hitl-row').hidden, true);
+      sel.value = 'wf_auto'; sel.dispatchEvent(new window.Event('change')); await settle(window);
+      assert.deepEqual(patches.at(-1), { projectDir: '/repos/proj', activeWorkflowId: 'wf_auto' });
+    } },
+  ]);
 });
 
 test('the switch persists humanInLoop and the run body carries it under Auto only', async () => {
@@ -142,22 +145,25 @@ test('a workspace target disables Auto with the hint and shows Default WITHOUT p
   assert.equal(sel.value, 'wf_auto', 'back on a project the stored choice returns');
 });
 
-test('a project whose config turned the switch off boots with it off', async () => {
-  const { window } = await bootWith({ humanInLoop: false });
-  assert.equal(window.document.getElementById('humanInLoop').checked, false);
-});
-
 // humanInLoop is stored PER PROJECT, and saveHumanInLoop drops the write when none is
 // selected — the same reason the agents accordion disables its rows there. An enabled
 // switch would accept a flip, discard it, and read as "the control doesn't work".
-test('with no project selected the switch is disabled and nothing is written', async () => {
-  const { window, patches } = await boot();
-  const cb = window.document.getElementById('humanInLoop');
-  assert.equal(cb.disabled, false, 'a project is selected at boot');
-  const projects = window.document.getElementById('projectSelect');
-  projects.value = ''; projects.dispatchEvent(new window.Event('change')); await settle(window, 6);
-  assert.equal(cb.disabled, true, 'no project ⇒ nowhere to write it');
-  const before = patches.length;
-  cb.checked = false; cb.dispatchEvent(new window.Event('change')); await settle(window);
-  assert.equal(patches.length, before, 'no PATCH for a project-less flip');
+test('the Human-in-the-loop switch follows the project: off from config, disabled with no project and nothing written', async () => {
+  await checkRows([
+    { name: 'a project whose config turned the switch off boots with it off', run: async () => {
+      const { window } = await bootWith({ humanInLoop: false });
+      assert.equal(window.document.getElementById('humanInLoop').checked, false);
+    } },
+    { name: 'with no project selected the switch is disabled and nothing is written', run: async () => {
+      const { window, patches } = await boot();
+      const cb = window.document.getElementById('humanInLoop');
+      assert.equal(cb.disabled, false, 'a project is selected at boot');
+      const projects = window.document.getElementById('projectSelect');
+      projects.value = ''; projects.dispatchEvent(new window.Event('change')); await settle(window, 6);
+      assert.equal(cb.disabled, true, 'no project ⇒ nowhere to write it');
+      const before = patches.length;
+      cb.checked = false; cb.dispatchEvent(new window.Event('change')); await settle(window);
+      assert.equal(patches.length, before, 'no PATCH for a project-less flip');
+    } },
+  ]);
 });

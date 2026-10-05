@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JSDOM } from 'jsdom';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { JIRA, SENTRY, writeMcpPlugin } from './helpers/mcp-plugin-fixture.mjs';
 import { buildInstallInventory, ignoredContributions, linkPlugin, listInstalledPlugins } from '../src/core/plugin-store.mjs';
 import { MCP_NEEDS_API_5 } from '../src/core/plugin-manifest.mjs';
@@ -38,21 +39,25 @@ test('consent lists each honoured server with its command or URL; ./ shows as <p
   assert.deepEqual(buildInstallInventory(old).mcpServers, [], 'below API 5 consent promises no server');
 });
 
-test('an API-4 plugin names its ignored block; an API-5 one does not', () => {
-  const old = writeMcpPlugin(join(scratch, 'c'), { name: 'old-tools', range: '>=4 <5' });
-  assert.deepEqual(ignoredContributions('old-tools', old, { drops: [], scriptDrops: [], workflowSkips: [] }),
-    [{ file: 'worca-cc-plugin.json', reason: MCP_NEEDS_API_5 }]);
-  const cur = writeMcpPlugin(join(scratch, 'd'), { name: 'new-tools' });
-  assert.deepEqual(ignoredContributions('new-tools', cur, { drops: [], scriptDrops: [], workflowSkips: [] }), []);
-});
-
-test('listInstalledPlugins: contributions.mcpServers counts honoured servers', async () => {
-  await linkPlugin('acme-tools', writeMcpPlugin(join(scratch, 'e'), { name: 'acme-tools', mcpServers: { jira: JIRA, sentry: SENTRY } }));
-  await linkPlugin('old-tools', writeMcpPlugin(join(scratch, 'f'), { name: 'old-tools', range: '>=4 <5' }));
-  const rows = Object.fromEntries(listInstalledPlugins().map((r) => [r.name, r]));
-  assert.equal(rows['acme-tools'].contributions.mcpServers, 2);
-  assert.equal(rows['old-tools'].contributions.mcpServers, 0);
-  assert.deepEqual(rows['old-tools'].ignored.map((i) => i.reason), [MCP_NEEDS_API_5]);
+test('API-5 plugins count honoured MCP servers and report nothing ignored; API-4 plugins count 0 and name the ignored block', async () => {
+  await checkRows([
+    { name: 'an API-4 plugin names its ignored block; an API-5 one does not', run: () => {
+      const old = writeMcpPlugin(join(scratch, 'c'), { name: 'old-tools', range: '>=4 <5' });
+      assert.deepEqual(ignoredContributions('old-tools', old, { drops: [], scriptDrops: [], workflowSkips: [] }),
+        [{ file: 'worca-cc-plugin.json', reason: MCP_NEEDS_API_5 }]);
+      const cur = writeMcpPlugin(join(scratch, 'd'), { name: 'new-tools' });
+      assert.deepEqual(ignoredContributions('new-tools', cur, { drops: [], scriptDrops: [], workflowSkips: [] }), []);
+    } },
+    { name: 'listInstalledPlugins: contributions.mcpServers counts honoured servers', run: async () => {
+      await linkPlugin('acme-tools', writeMcpPlugin(join(scratch, 'e'), { name: 'acme-tools', mcpServers: { jira: JIRA, sentry: SENTRY } }));
+      await linkPlugin('old-tools', writeMcpPlugin(join(scratch, 'f'), { name: 'old-tools', range: '>=4 <5' }));
+      const rows = Object.fromEntries(listInstalledPlugins().map((r) => [r.name, r]));
+      assert.equal(rows['acme-tools'].contributions.mcpServers, 2);
+      assert.deepEqual(rows['acme-tools'].ignored, []);
+      assert.equal(rows['old-tools'].contributions.mcpServers, 0);
+      assert.deepEqual(rows['old-tools'].ignored.map((i) => i.reason), [MCP_NEEDS_API_5]);
+    } },
+  ]);
 });
 
 test('consent modal: listed servers, nothing when none, "unknown — refresh" for an old snapshot', () => {

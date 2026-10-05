@@ -86,6 +86,25 @@ async function pipShows(pkg) {
   return false;
 }
 
+const PROBE_TTL_MS = 60_000;
+const _cliProbes = new Map();
+/** Test seam: forget the memoized CLI probes. */
+export function _resetToolProbeCache() { _cliProbes.clear(); }
+function cliProbes(now = Date.now()) {
+  const key = process.env.PATH || '';
+  const hit = _cliProbes.get(key);
+  if (hit && now - hit.at < PROBE_TTL_MS) return hit.value;
+  const value = (async () => {
+    const [graphify, crg] = await Promise.all([
+      (async () => (await whichOk('graphify')) || (await pipxMentions('graphify')) || (await pipShows('graphify')))(),
+      (async () => (await Promise.all([whichOk('code-review-graph'), pipxMentions('code-review-graph'), pipShows('code-review-graph')])).some(Boolean))(),
+    ]);
+    return { graphify, crg };
+  })().catch(() => ({ graphify: false, crg: false }));
+  _cliProbes.set(key, { at: now, value });
+  return value;
+}
+
 /**
  * Detect graphify and HOW it is installed. Returns:
  *   { found: boolean, kind: 'cli'|'skill'|'output-cached'|null }
@@ -102,9 +121,7 @@ async function pipShows(pkg) {
  * means a graph exists but we don't know how it was built.
  */
 async function detectGraphify(projectDir) {
-  if (await whichOk('graphify')) return { found: true, kind: 'cli' };
-  if (await pipxMentions('graphify')) return { found: true, kind: 'cli' };
-  if (await pipShows('graphify')) return { found: true, kind: 'cli' };
+  if ((await cliProbes()).graphify) return { found: true, kind: 'cli' };
   if (await pathExists(join(homedir(), '.claude', 'skills', 'graphify', 'SKILL.md'))) {
     return { found: true, kind: 'skill' };
   }
@@ -122,9 +139,7 @@ async function detectGraphify(projectDir) {
  */
 async function detectCodeReviewGraph(projectDir) {
   const checks = await Promise.all([
-    whichOk('code-review-graph'),
-    pipxMentions('code-review-graph'),
-    pipShows('code-review-graph'),
+    cliProbes().then((p) => p.crg),
     pathExists(join(projectDir, 'code-review-graph')),
     pathExists(join(homedir(), 'code-review-graph')),
   ]);

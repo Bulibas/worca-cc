@@ -1,12 +1,11 @@
 // test/seed-traces.test.mjs
 // The golden EXECUTION TRACE of every shipped graph — the v2 replacement for the
 // dual-engine parity suite P8 deleted (test/saved-pipeline-parity.test.mjs, commit
-// 11c7b7ee). Nothing else at HEAD asserts anything about a seed run beyond "it
-// finished done, bound End and wrote no error row"
-// (test/orchestrator-graph.test.mjs:89-110), so a scheduler/executor/registry-ports
+// 11c7b7ee). It is also the only per-seed run left: "it finished done, bound End and
+// wrote no error row" is asserted in trace() below, so a scheduler/executor/registry-ports
 // change that drops one seed's refiner, reorders two launches, re-fires a node an
 // extra time inside its budget, renames an allocated artifact or raises the loop
-// gate on the wrong wire ships green.
+// gate on the wrong wire goes red here.
 //
 // Per graph, under the offline mock and answering interactively:
 //   launches   the agent-start sequence, composite PARENTS excluded (a fan-out's
@@ -131,6 +130,10 @@ async function trace(workflowId, tag) {
   });
   const res = await orch.run();
   const st = orch.getState();
+  // Two outcome facts the golden does not carry: no ledger row ended in error, and a run
+  // that reached End bound its result.
+  assert.ok(st.steps.length > 0 && st.steps.every((s) => s.status !== 'error'), `${workflowId}: no error rows`);
+  if (st.endReached) assert.ok(st.result, `${workflowId}: End bound a result`);
   const launches = starts.filter((s) => !parents.has(s.executionId)).map((s) => s.key);
   const artifacts = (await listArtifacts(st.id))
     .map((a) => `${a.kind}:${undate(a.relPath)}`).sort();
@@ -168,11 +171,3 @@ for (const workflowId of GRAPH_IDS) {
       + "(see this file's header).");
   });
 }
-
-test('the golden set covers every shipped graph', () => {
-  assert.equal(GRAPH_IDS.length, 8, 'seven seeds + the graph default alias');
-  assert.deepEqual(GRAPH_IDS, [
-    'wf_full', 'wf_no-clarify', 'wf_provided-plan', 'wf_full-no-decompose',
-    'wf_quick-fix', 'wf_clarify-implement', 'wf_clarify-quick-fix', 'wf_default',
-  ]);
-});

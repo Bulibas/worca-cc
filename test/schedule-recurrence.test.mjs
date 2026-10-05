@@ -7,6 +7,7 @@ import {
   zonedToUtc, zonedParts, normalizeRule, nextOccurrence, previewOccurrences, describeRule,
   formatInstant, formatCountdown, parseEvery, parseCron, parseAt, parseScheduledFor, localDate,
 } from '../src/shared/schedule/recurrence.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const BERLIN = 'Europe/Berlin';
 const NY = 'America/New_York';
@@ -17,19 +18,22 @@ const rule = (r, today = '2026-09-18') => {
   return n.rule;
 };
 
-test('zonedToUtc: plain, gap (spring forward) and fold (autumn) in Europe/Berlin', () => {
-  assert.equal(zonedToUtc({ y: 2026, m: 9, d: 19, hh: 2, mm: 0 }, BERLIN), Z('2026-09-19T00:00:00Z'));
-  // 2027-03-28 02:30 does not exist: it lands the same distance past the gap (03:30 CEST).
-  assert.equal(zonedToUtc({ y: 2027, m: 3, d: 28, hh: 2, mm: 30 }, BERLIN), Z('2027-03-28T01:30:00Z'));
-  // 2026-10-25 02:30 happens twice: the FIRST one (still CEST) wins.
-  assert.equal(zonedToUtc({ y: 2026, m: 10, d: 25, hh: 2, mm: 30 }, BERLIN), Z('2026-10-25T00:30:00Z'));
-});
-
-test('zonedParts and localDate read wall-clock time in the zone', () => {
-  const p = zonedParts(Z('2026-09-18T23:30:00Z'), BERLIN);
-  assert.deepEqual([p.y, p.m, p.d, p.hh, p.mm], [2026, 9, 19, 1, 30]);
-  assert.equal(localDate(Z('2026-09-18T23:30:00Z'), BERLIN), '2026-09-19');
-  assert.equal(localDate(Z('2026-09-18T23:30:00Z'), NY), '2026-09-18');
+test('zoned time: zonedToUtc (plain/gap/fold) and zonedParts/localDate read wall-clock time', async () => {
+  await checkRows([
+    { name: 'zonedToUtc: plain, gap (spring forward) and fold (autumn) in Europe/Berlin', run: () => {
+      assert.equal(zonedToUtc({ y: 2026, m: 9, d: 19, hh: 2, mm: 0 }, BERLIN), Z('2026-09-19T00:00:00Z'));
+      // 2027-03-28 02:30 does not exist: it lands the same distance past the gap (03:30 CEST).
+      assert.equal(zonedToUtc({ y: 2027, m: 3, d: 28, hh: 2, mm: 30 }, BERLIN), Z('2027-03-28T01:30:00Z'));
+      // 2026-10-25 02:30 happens twice: the FIRST one (still CEST) wins.
+      assert.equal(zonedToUtc({ y: 2026, m: 10, d: 25, hh: 2, mm: 30 }, BERLIN), Z('2026-10-25T00:30:00Z'));
+    } },
+    { name: 'zonedParts and localDate read wall-clock time in the zone', run: () => {
+      const p = zonedParts(Z('2026-09-18T23:30:00Z'), BERLIN);
+      assert.deepEqual([p.y, p.m, p.d, p.hh, p.mm], [2026, 9, 19, 1, 30]);
+      assert.equal(localDate(Z('2026-09-18T23:30:00Z'), BERLIN), '2026-09-19');
+      assert.equal(localDate(Z('2026-09-18T23:30:00Z'), NY), '2026-09-18');
+    } },
+  ]);
 });
 
 test('a nightly rule keeps its wall-clock time across a DST change', () => {
@@ -43,43 +47,44 @@ test('a nightly rule keeps its wall-clock time across a DST change', () => {
   ]);
 });
 
-test('weekday rule: sentence and the next three dates', () => {
-  const r = rule({ freq: 'weekly', weekdays: ['fr', 'mo', 'tu', 'we', 'th'], time: '2:00' });
-  assert.equal(r.time, '02:00');
-  assert.deepEqual(r.weekdays, ['mo', 'tu', 'we', 'th', 'fr']);
-  assert.equal(describeRule(r), 'Every weekday at 02:00');
-  const now = Z('2026-09-18T16:48:00Z'); // Friday evening
-  assert.deepEqual(previewOccurrences(r, now, 3).map((t) => formatInstant(t, BERLIN)),
-    ['Mon Sep 21, 02:00', 'Tue Sep 22, 02:00', 'Wed Sep 23, 02:00']);
-});
-
-test('interval rules count from the anchor', () => {
-  const every3 = rule({ freq: 'daily', interval: 3, time: '06:00' }, '2026-09-18');
-  assert.deepEqual(previewOccurrences(every3, Z('2026-09-18T12:00:00Z'), 3).map((t) => localDate(t, BERLIN)),
-    ['2026-09-21', '2026-09-24', '2026-09-27']);
-  const biweekly = rule({ freq: 'weekly', interval: 2, weekdays: ['mo'], time: '02:00' }, '2026-09-18');
-  assert.deepEqual(previewOccurrences(biweekly, Z('2026-09-18T12:00:00Z'), 3).map((t) => localDate(t, BERLIN)),
-    ['2026-09-28', '2026-10-12', '2026-10-26']);
-  assert.equal(describeRule(biweekly), 'Every 2 weeks on Monday at 02:00');
-});
-
-test('monthly rules clamp to the last day and support "last"', () => {
-  const r31 = rule({ freq: 'monthly', monthDay: 31, time: '03:00', tz: NY });
-  assert.deepEqual(previewOccurrences(r31, Z('2026-09-18T16:00:00Z'), 3).map((t) => formatInstant(t, NY)),
-    ['Wed Sep 30, 03:00', 'Sat Oct 31, 03:00', 'Mon Nov 30, 03:00']);
-  const last = rule({ freq: 'monthly', monthDay: 'last', time: '03:00' });
-  assert.equal(describeRule(last), 'Every month on the last day at 03:00');
-  assert.equal(describeRule(rule({ freq: 'monthly', monthDay: 1, time: '03:00' })), 'Every month on the 1st at 03:00');
-  assert.equal(describeRule(rule({ freq: 'monthly', monthDay: 22, time: '03:00' })), 'Every month on the 22nd at 03:00');
-});
-
-test('end conditions stop the series', () => {
-  const until = rule({ freq: 'daily', time: '02:00', end: { type: 'until', until: '2026-09-20' } });
-  assert.equal(previewOccurrences(until, Z('2026-09-18T12:00:00Z'), 10).length, 2);
-  const count = rule({ freq: 'daily', time: '02:00', end: { type: 'count', count: 3 } });
-  assert.equal(nextOccurrence(count, Z('2026-09-18T12:00:00Z'), { firedCount: 3 }), null);
-  assert.equal(previewOccurrences(count, Z('2026-09-18T12:00:00Z'), 10, { firedCount: 1 }).length, 2);
-  assert.equal(describeRule(count), 'Every day at 02:00, 3 times');
+test('rule kinds: weekday, interval, monthly clamp/last and end conditions produce the right sentence and dates', async () => {
+  await checkRows([
+    { name: 'weekday rule: sentence and the next three dates', run: () => {
+      const r = rule({ freq: 'weekly', weekdays: ['fr', 'mo', 'tu', 'we', 'th'], time: '2:00' });
+      assert.equal(r.time, '02:00');
+      assert.deepEqual(r.weekdays, ['mo', 'tu', 'we', 'th', 'fr']);
+      assert.equal(describeRule(r), 'Every weekday at 02:00');
+      const now = Z('2026-09-18T16:48:00Z'); // Friday evening
+      assert.deepEqual(previewOccurrences(r, now, 3).map((t) => formatInstant(t, BERLIN)),
+        ['Mon Sep 21, 02:00', 'Tue Sep 22, 02:00', 'Wed Sep 23, 02:00']);
+    } },
+    { name: 'interval rules count from the anchor', run: () => {
+      const every3 = rule({ freq: 'daily', interval: 3, time: '06:00' }, '2026-09-18');
+      assert.deepEqual(previewOccurrences(every3, Z('2026-09-18T12:00:00Z'), 3).map((t) => localDate(t, BERLIN)),
+        ['2026-09-21', '2026-09-24', '2026-09-27']);
+      const biweekly = rule({ freq: 'weekly', interval: 2, weekdays: ['mo'], time: '02:00' }, '2026-09-18');
+      assert.deepEqual(previewOccurrences(biweekly, Z('2026-09-18T12:00:00Z'), 3).map((t) => localDate(t, BERLIN)),
+        ['2026-09-28', '2026-10-12', '2026-10-26']);
+      assert.equal(describeRule(biweekly), 'Every 2 weeks on Monday at 02:00');
+    } },
+    { name: 'monthly rules clamp to the last day and support "last"', run: () => {
+      const r31 = rule({ freq: 'monthly', monthDay: 31, time: '03:00', tz: NY });
+      assert.deepEqual(previewOccurrences(r31, Z('2026-09-18T16:00:00Z'), 3).map((t) => formatInstant(t, NY)),
+        ['Wed Sep 30, 03:00', 'Sat Oct 31, 03:00', 'Mon Nov 30, 03:00']);
+      const last = rule({ freq: 'monthly', monthDay: 'last', time: '03:00' });
+      assert.equal(describeRule(last), 'Every month on the last day at 03:00');
+      assert.equal(describeRule(rule({ freq: 'monthly', monthDay: 1, time: '03:00' })), 'Every month on the 1st at 03:00');
+      assert.equal(describeRule(rule({ freq: 'monthly', monthDay: 22, time: '03:00' })), 'Every month on the 22nd at 03:00');
+    } },
+    { name: 'end conditions stop the series', run: () => {
+      const until = rule({ freq: 'daily', time: '02:00', end: { type: 'until', until: '2026-09-20' } });
+      assert.equal(previewOccurrences(until, Z('2026-09-18T12:00:00Z'), 10).length, 2);
+      const count = rule({ freq: 'daily', time: '02:00', end: { type: 'count', count: 3 } });
+      assert.equal(nextOccurrence(count, Z('2026-09-18T12:00:00Z'), { firedCount: 3 }), null);
+      assert.equal(previewOccurrences(count, Z('2026-09-18T12:00:00Z'), 10, { firedCount: 1 }).length, 2);
+      assert.equal(describeRule(count), 'Every day at 02:00, 3 times');
+    } },
+  ]);
 });
 
 test('normalizeRule rejects bad input with a readable reason', () => {
@@ -118,27 +123,30 @@ test('parseCron translates what a rule can express and refuses the rest', () => 
   assert.equal(parseCron('0 2 *').ok, false);
 });
 
-test('parseAt reads local forms in the given zone and absolute ISO as-is', () => {
-  const nowMs = Z('2026-09-18T16:48:00Z'); // 18:48 in Berlin
-  const at = (s) => { const r = parseAt(s, { nowMs, tz: BERLIN }); assert.equal(r.ok, true, r.error); return new Date(r.ms).toISOString(); };
-  assert.equal(at('02:00'), '2026-09-19T00:00:00.000Z');       // next 02:00
-  assert.equal(at('22:00'), '2026-09-18T20:00:00.000Z');       // later today
-  assert.equal(at('tomorrow 02:00'), '2026-09-19T00:00:00.000Z');
-  assert.equal(at('+90m'), '2026-09-18T18:18:00.000Z');
-  assert.equal(at('+2h'), '2026-09-18T18:48:00.000Z');
-  assert.equal(at('2026-09-19 02:00'), '2026-09-19T00:00:00.000Z');
-  assert.equal(at('2026-09-19T02:00:00+02:00'), '2026-09-19T00:00:00.000Z');
-  assert.equal(at('2026-09-19T02:00:00Z'), '2026-09-19T02:00:00.000Z');
-  assert.equal(parseAt('next week', { nowMs, tz: BERLIN }).ok, false);
-  assert.equal(parseAt('26:00', { nowMs, tz: BERLIN }).ok, false);
-});
-
-test('parseScheduledFor demands an offset', () => {
-  assert.equal(parseScheduledFor('2026-09-19T02:00:00+02:00').ms, Z('2026-09-19T00:00:00Z'));
-  assert.equal(parseScheduledFor('2026-09-19T02:00:00Z').ok, true);
-  assert.match(parseScheduledFor('2026-09-19T02:00:00').error, /offset/);
-  assert.equal(parseScheduledFor('tomorrow').ok, false);
-  assert.equal(parseScheduledFor(42).ok, false);
+test('parseAt reads local/relative/ISO forms; parseScheduledFor demands an offset', async () => {
+  await checkRows([
+    { name: 'parseAt reads local forms in the given zone and absolute ISO as-is', run: () => {
+      const nowMs = Z('2026-09-18T16:48:00Z'); // 18:48 in Berlin
+      const at = (s) => { const r = parseAt(s, { nowMs, tz: BERLIN }); assert.equal(r.ok, true, r.error); return new Date(r.ms).toISOString(); };
+      assert.equal(at('02:00'), '2026-09-19T00:00:00.000Z');       // next 02:00
+      assert.equal(at('22:00'), '2026-09-18T20:00:00.000Z');       // later today
+      assert.equal(at('tomorrow 02:00'), '2026-09-19T00:00:00.000Z');
+      assert.equal(at('+90m'), '2026-09-18T18:18:00.000Z');
+      assert.equal(at('+2h'), '2026-09-18T18:48:00.000Z');
+      assert.equal(at('2026-09-19 02:00'), '2026-09-19T00:00:00.000Z');
+      assert.equal(at('2026-09-19T02:00:00+02:00'), '2026-09-19T00:00:00.000Z');
+      assert.equal(at('2026-09-19T02:00:00Z'), '2026-09-19T02:00:00.000Z');
+      assert.equal(parseAt('next week', { nowMs, tz: BERLIN }).ok, false);
+      assert.equal(parseAt('26:00', { nowMs, tz: BERLIN }).ok, false);
+    } },
+    { name: 'parseScheduledFor demands an offset', run: () => {
+      assert.equal(parseScheduledFor('2026-09-19T02:00:00+02:00').ms, Z('2026-09-19T00:00:00Z'));
+      assert.equal(parseScheduledFor('2026-09-19T02:00:00Z').ok, true);
+      assert.match(parseScheduledFor('2026-09-19T02:00:00').error, /offset/);
+      assert.equal(parseScheduledFor('tomorrow').ok, false);
+      assert.equal(parseScheduledFor(42).ok, false);
+    } },
+  ]);
 });
 
 test('formatCountdown', () => {

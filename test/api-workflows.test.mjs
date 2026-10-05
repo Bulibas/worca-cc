@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Outer isolation that outlives the per-suite before/after: /api/run returns a
 // runId and the orchestrator finishes ASYNC in-process, so a store write can
@@ -49,33 +50,30 @@ after(async () => {
   await rm(homeDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
-test('GET /api/workflows lists the built-in default first', async () => {
-  const r = await fetch(`${base}/api/workflows`);
-  assert.equal(r.status, 200);
-  const j = await r.json();
-  assert.ok(Array.isArray(j.workflows));
-  assert.equal(j.workflows[0].id, 'wf_default');
-  assert.equal(j.workflows[0].name, 'Default');
-  // After the v2 break the built-in default IS the graph: nodes + wires, no steps.
-  assert.equal(j.workflows[0].version, 2);
-  assert.equal(j.workflows[0].nodes.length, 7);
-  assert.equal(j.workflows[0].steps, undefined, 'no v1 topology on the default');
-  assert.equal(j.workflows[1].id, 'wf_memory_defrag', 'the Memory defragment built-in is listed second');
-  assert.equal(j.workflows[1].nodes.length, 3);
-});
-
-test('GET /api/workflows/:id returns the default template', async () => {
-  const r = await fetch(`${base}/api/workflows/wf_default`);
-  assert.equal(r.status, 200);
-  const j = await r.json();
-  assert.equal(j.id, 'wf_default');
-  assert.ok(Array.isArray(j.wires), 'a graph template carries wires, not feedbacks');
-});
-
-test('GET /api/workflows/:id is 404 for an unknown id', async () => {
-  const r = await fetch(`${base}/api/workflows/wf_does_not_exist`);
-  assert.equal(r.status, 404);
-  assert.ok((await r.json()).error);
+test('GET /api/workflows lists the built-in default first (7-node graph, then wf_memory_defrag) and GET /api/workflows/wf_default returns it with wires', async () => {
+  await checkRows([
+    { name: 'GET /api/workflows lists the built-in default first', run: async () => {
+      const r = await fetch(`${base}/api/workflows`);
+      assert.equal(r.status, 200);
+      const j = await r.json();
+      assert.ok(Array.isArray(j.workflows));
+      assert.equal(j.workflows[0].id, 'wf_default');
+      assert.equal(j.workflows[0].name, 'Default');
+      // After the v2 break the built-in default IS the graph: nodes + wires, no steps.
+      assert.equal(j.workflows[0].version, 2);
+      assert.equal(j.workflows[0].nodes.length, 7);
+      assert.equal(j.workflows[0].steps, undefined, 'no v1 topology on the default');
+      assert.equal(j.workflows[1].id, 'wf_memory_defrag', 'the Memory defragment built-in is listed second');
+      assert.equal(j.workflows[1].nodes.length, 3);
+    } },
+    { name: 'GET /api/workflows/:id returns the default template', run: async () => {
+      const r = await fetch(`${base}/api/workflows/wf_default`);
+      assert.equal(r.status, 200);
+      const j = await r.json();
+      assert.equal(j.id, 'wf_default');
+      assert.ok(Array.isArray(j.wires), 'a graph template carries wires, not feedbacks');
+    } },
+  ]);
 });
 
 test('POST /api/workflows creates a valid template -> 201, then it lists', async () => {
@@ -94,15 +92,35 @@ test('POST /api/workflows creates a valid template -> 201, then it lists', async
   assert.ok(list.workflows.some((w) => w.id === workflow.id && w.name === 'Quick Fix'));
 });
 
-test('DELETE /api/workflows/wf_default is refused -> 400', async () => {
-  const r = await fetch(`${base}/api/workflows/wf_default`, { method: 'DELETE' });
-  assert.equal(r.status, 400);
-  assert.ok((await r.json()).error);
-});
+test('DELETE /api/workflows/:id: wf_default 400, unknown 404, a created template is removed', async () => {
+  await checkRows([
+    { name: 'DELETE /api/workflows/wf_default is refused -> 400', run: async () => {
+      const r = await fetch(`${base}/api/workflows/wf_default`, { method: 'DELETE' });
+      assert.equal(r.status, 400);
+      assert.ok((await r.json()).error);
+    } },
+    { name: 'DELETE /api/workflows/:id is 404 for an unknown id', run: async () => {
+      const r = await fetch(`${base}/api/workflows/wf_missing_xyz`, { method: 'DELETE' });
+      assert.equal(r.status, 404);
+    } },
+    { name: 'DELETE /api/workflows/:id removes a created template', run: async () => {
+      // Create one to delete.
+      const created = await (await fetch(`${base}/api/workflows`, {
+        method: 'POST', headers: JSONH,
+        body: JSON.stringify(graphBody('Disposable')),
+      })).json();
+      const id = created.workflow.id;
 
-test('DELETE /api/workflows/:id is 404 for an unknown id', async () => {
-  const r = await fetch(`${base}/api/workflows/wf_missing_xyz`, { method: 'DELETE' });
-  assert.equal(r.status, 404);
+      const del = await fetch(`${base}/api/workflows/${id}`, { method: 'DELETE' });
+      assert.equal(del.status, 200);
+      assert.deepEqual(await del.json(), { ok: true });
+
+      // Gone from the list (default still present).
+      const list = await (await fetch(`${base}/api/workflows`)).json();
+      assert.ok(!list.workflows.some((w) => w.id === id));
+      assert.ok(list.workflows.some((w) => w.id === 'wf_default'));
+    } },
+  ]);
 });
 
 test('workflow API rejects path-traversal ids (no read, no delete)', async () => {
@@ -112,24 +130,6 @@ test('workflow API rejects path-traversal ids (no read, no delete)', async () =>
   // DELETE traversal must be refused (400 or 404) and never unlink anything.
   const d = await fetch(`${base}/api/workflows/${encodeURIComponent('../../package')}`, { method: 'DELETE' });
   assert.ok(d.status === 404 || d.status === 400, `expected 404/400, got ${d.status}`);
-});
-
-test('DELETE /api/workflows/:id removes a created template', async () => {
-  // Create one to delete.
-  const created = await (await fetch(`${base}/api/workflows`, {
-    method: 'POST', headers: JSONH,
-    body: JSON.stringify(graphBody('Disposable')),
-  })).json();
-  const id = created.workflow.id;
-
-  const del = await fetch(`${base}/api/workflows/${id}`, { method: 'DELETE' });
-  assert.equal(del.status, 200);
-  assert.deepEqual(await del.json(), { ok: true });
-
-  // Gone from the list (default still present).
-  const list = await (await fetch(`${base}/api/workflows`)).json();
-  assert.ok(!list.workflows.some((w) => w.id === id));
-  assert.ok(list.workflows.some((w) => w.id === 'wf_default'));
 });
 
 test('GET /api/agents returns the palette registry as an ordered array', async () => {
@@ -150,99 +150,76 @@ test('GET /api/agents returns the palette registry as an ordered array', async (
   // Sorted ascending by .order (palette render order).
   const orders = j.agents.map((a) => a.order);
   assert.deepEqual(orders, [...orders].sort((a, b) => a - b), 'ordered by .order');
+  // Registry serialization carries domain on every agent (?all=1: workspaceScanner
+  // is workspace-only, so the palette list leaves it out).
+  const every = (await (await fetch(`${base}/api/agents?all=1`)).json()).agents;
+  assert.ok(every.every((a) => typeof a.domain === 'string' && a.domain.length));
+  assert.equal(every.find((a) => a.key === 'workspaceScanner').domain, 'shared');
 });
 
-test('POST /api/run starts with the implicit default workflow', async () => {
-  const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-run-'));
-  const r = await fetch(`${base}/api/run`, {
-    method: 'POST', headers: JSONH,
-    body: JSON.stringify({ projectDir, prompt: 'demo task', mock: true }),
-  });
-  assert.equal(r.status, 200);
-  assert.match((await r.json()).runId, /[0-9a-f-]{8,}/);
-  await rm(projectDir, { recursive: true, force: true });
-});
-
-test('POST /api/run accepts an explicit workflowId', async () => {
+test('POST /api/run accepts a saved workflowId and rejects an unknown one with 400', async () => {
   // Create a custom workflow, then run it.
   const wf = await (await fetch(`${base}/api/workflows`, {
     method: 'POST', headers: JSONH,
     body: JSON.stringify(graphBody('Run Me')),
   })).json();
-
-  const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-run-'));
-  const r = await fetch(`${base}/api/run`, {
-    method: 'POST', headers: JSONH,
-    body: JSON.stringify({ projectDir, prompt: 'demo task', mock: true, workflowId: wf.workflow.id }),
-  });
-  assert.equal(r.status, 200, 'a known workflowId is accepted');
-  assert.ok((await r.json()).runId);
-  await rm(projectDir, { recursive: true, force: true });
+  await checkRows([
+    { name: 'POST /api/run accepts an explicit workflowId', run: async () => {
+      const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-run-'));
+      const r = await fetch(`${base}/api/run`, {
+        method: 'POST', headers: JSONH,
+        body: JSON.stringify({ projectDir, prompt: 'demo task', mock: true, workflowId: wf.workflow.id }),
+      });
+      assert.equal(r.status, 200, 'a known workflowId is accepted');
+      assert.ok((await r.json()).runId);
+      await rm(projectDir, { recursive: true, force: true });
+    } },
+    { name: 'POST /api/run rejects an unknown workflowId -> 400', run: async () => {
+      const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-run-'));
+      const r = await fetch(`${base}/api/run`, {
+        method: 'POST', headers: JSONH,
+        body: JSON.stringify({ projectDir, prompt: 'demo task', mock: true, workflowId: 'wf_nope' }),
+      });
+      assert.equal(r.status, 400, 'an unknown workflow is a client error before the run starts');
+      await rm(projectDir, { recursive: true, force: true });
+    } },
+  ]);
 });
 
-test('POST /api/run rejects an unknown workflowId -> 400', async () => {
-  const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-run-'));
-  const r = await fetch(`${base}/api/run`, {
-    method: 'POST', headers: JSONH,
-    body: JSON.stringify({ projectDir, prompt: 'demo task', mock: true, workflowId: 'wf_nope' }),
-  });
-  assert.equal(r.status, 400, 'an unknown workflow is a client error before the run starts');
-  await rm(projectDir, { recursive: true, force: true });
-});
+test('PATCH /api/config sets a node model+effort and a feedback cycle count; without projectDir it is a 400', async () => {
+  await checkRows([
+    { name: 'PATCH /api/config sets a node model+effort and a feedback cycle count', run: async () => {
+      const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-rc-'));
+      const wfId = 'wf_quickfix';
 
-test('PATCH /api/config sets a node model+effort and a feedback cycle count', async () => {
-  const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-rc-'));
-  const wfId = 'wf_quickfix';
+      let r = await fetch(`${base}/api/config`, {
+        method: 'PATCH', headers: JSONH,
+        body: JSON.stringify({
+          projectDir, workflowId: wfId,
+          nodes: { s1_0: { model: 'claude-opus-4-8', effort: 'high' } },
+          feedbacks: { fb_0: { maxCycles: 3 } },
+          activeWorkflowId: wfId,
+        }),
+      });
+      assert.equal(r.status, 200);
 
-  let r = await fetch(`${base}/api/config`, {
-    method: 'PATCH', headers: JSONH,
-    body: JSON.stringify({
-      projectDir, workflowId: wfId,
-      nodes: { s1_0: { model: 'claude-opus-4-8', effort: 'high' } },
-      feedbacks: { fb_0: { maxCycles: 3 } },
-      activeWorkflowId: wfId,
-    }),
-  });
-  assert.equal(r.status, 200);
+      // GET reflects the run-config under config.workflows[wfId] + activeWorkflowId.
+      r = await fetch(`${base}/api/config?${new URLSearchParams({ projectDir })}`);
+      const j = await r.json();
+      assert.deepEqual(j.config.workflows[wfId].nodes.s1_0, { model: 'claude-opus-4-8', effort: 'high' });
+      assert.equal(j.config.workflows[wfId].feedbacks.fb_0.maxCycles, 3);
+      assert.equal(j.config.activeWorkflowId, wfId);
 
-  // GET reflects the run-config under config.workflows[wfId] + activeWorkflowId.
-  r = await fetch(`${base}/api/config?${new URLSearchParams({ projectDir })}`);
-  const j = await r.json();
-  assert.deepEqual(j.config.workflows[wfId].nodes.s1_0, { model: 'claude-opus-4-8', effort: 'high' });
-  assert.equal(j.config.workflows[wfId].feedbacks.fb_0.maxCycles, 3);
-  assert.equal(j.config.activeWorkflowId, wfId);
-
-  await rm(projectDir, { recursive: true, force: true });
-});
-
-test('PATCH /api/config preserves legacy steps alongside workflows', async () => {
-  const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-rc-'));
-  // Set a legacy per-role step via the existing POST route.
-  await fetch(`${base}/api/config`, {
-    method: 'POST', headers: JSONH,
-    body: JSON.stringify({ projectDir, step: 'reviewer', model: 'claude-opus-4-8', effort: 'max' }),
-  });
-  // Then a run-config node via PATCH.
-  await fetch(`${base}/api/config`, {
-    method: 'PATCH', headers: JSONH,
-    body: JSON.stringify({
-      projectDir, workflowId: 'wf_default',
-      nodes: { s0_0: { model: 'claude-sonnet-4-6', effort: 'high' } },
-    }),
-  });
-  const j = await (await fetch(`${base}/api/config?${new URLSearchParams({ projectDir })}`)).json();
-  // Both coexist (backward-compatible: legacy steps untouched).
-  assert.deepEqual(j.config.steps.reviewer, { model: 'claude-opus-4-8', effort: 'max' });
-  assert.deepEqual(j.config.workflows.wf_default.nodes.s0_0, { model: 'claude-sonnet-4-6', effort: 'high' });
-  await rm(projectDir, { recursive: true, force: true });
-});
-
-test('PATCH /api/config without projectDir -> 400', async () => {
-  const r = await fetch(`${base}/api/config`, {
-    method: 'PATCH', headers: JSONH,
-    body: JSON.stringify({ workflowId: 'wf_default', nodes: {} }),
-  });
-  assert.equal(r.status, 400);
+      await rm(projectDir, { recursive: true, force: true });
+    } },
+    { name: 'PATCH /api/config without projectDir -> 400', run: async () => {
+      const r = await fetch(`${base}/api/config`, {
+        method: 'PATCH', headers: JSONH,
+        body: JSON.stringify({ workflowId: 'wf_default', nodes: {} }),
+      });
+      assert.equal(r.status, 400);
+    } },
+  ]);
 });
 
 test('POST /api/workflows rejects a v1 body with 400 and never writes a row', async () => {

@@ -10,6 +10,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import {
   cmdContainer, detectRuntime, commonParent, seedEnv, composeFileArgs, initDir, OVERLAYS, COMPOSE_SRC_DIR,
 } from '../src/cli/container.mjs';
@@ -36,21 +37,29 @@ const io = () => {
 };
 const tmp = () => mkdtempSync(join(tmpdir(), 'worca-container-'));
 
-test('detectRuntime: flag, env, autodetect, none', () => {
-  assert.deepEqual(detectRuntime(fakeExec(['docker']).exec), { bin: 'docker' });
-  assert.deepEqual(detectRuntime(fakeExec(['podman']).exec), { bin: 'podman' });
-  assert.deepEqual(detectRuntime(fakeExec(['docker', 'podman']).exec, 'podman'), { bin: 'podman' });
-  assert.match(detectRuntime(fakeExec([]).exec).error, /no container runtime found/);
-  assert.match(detectRuntime(fakeExec(['docker']).exec, 'podman').error, /podman compose is not available/);
-  assert.match(detectRuntime(fakeExec(['docker']).exec, 'lima').error, /docker or podman/);
-});
-
-test('commonParent: the parent shared by every project, never a root', () => {
-  assert.equal(commonParent(['/Users/me/dev/a', '/Users/me/dev/b']), '/Users/me/dev');
-  assert.equal(commonParent(['/Users/me/dev/a']), '/Users/me/dev');
-  assert.equal(commonParent(['/Users/me/dev/a', '/Users/me/work/b']), '/Users/me');
-  assert.equal(commonParent(['/a/x', '/b/y']), null, 'only "/" in common is too wide');
-  assert.equal(commonParent([]), null);
+test('container helpers: detectRuntime, commonParent and composeFileArgs', async () => {
+  await checkRows([
+    { name: 'detectRuntime: flag, env, autodetect, none', run: async () => {
+      assert.deepEqual(detectRuntime(fakeExec(['docker']).exec), { bin: 'docker' });
+      assert.deepEqual(detectRuntime(fakeExec(['podman']).exec), { bin: 'podman' });
+      assert.deepEqual(detectRuntime(fakeExec(['docker', 'podman']).exec, 'podman'), { bin: 'podman' });
+      assert.match(detectRuntime(fakeExec([]).exec).error, /no container runtime found/);
+      assert.match(detectRuntime(fakeExec(['docker']).exec, 'podman').error, /podman compose is not available/);
+      assert.match(detectRuntime(fakeExec(['docker']).exec, 'lima').error, /docker or podman/);
+    } },
+    { name: 'commonParent: the parent shared by every project, never a root', run: async () => {
+      assert.equal(commonParent(['/Users/me/dev/a', '/Users/me/dev/b']), '/Users/me/dev');
+      assert.equal(commonParent(['/Users/me/dev/a']), '/Users/me/dev');
+      assert.equal(commonParent(['/Users/me/dev/a', '/Users/me/work/b']), '/Users/me');
+      assert.equal(commonParent(['/a/x', '/b/y']), null, 'only "/" in common is too wide');
+      assert.equal(commonParent([]), null);
+    } },
+    { name: 'composeFileArgs: base first, then one -f per overlay', run: async () => {
+      assert.deepEqual(composeFileArgs([]), ['-f', 'compose.yml']);
+      assert.deepEqual(composeFileArgs(['egress', 'ssh']), ['-f', 'compose.yml', '-f', 'compose.egress.yml', '-f', 'compose.ssh.yml']);
+      assert.deepEqual(OVERLAYS, ['egress', 'ssh', 'teams', 'clonein']);
+    } },
+  ]);
 });
 
 test('seedEnv fills the known keys in the example and leaves the rest commented', () => {
@@ -64,12 +73,6 @@ test('seedEnv fills the known keys in the example and leaves the rest commented'
   assert.match(body, /^#WORCA_TAG=/m);
   const untouched = seedEnv(example, { projects: '', tz: '', gitName: '', gitEmail: '' });
   assert.match(untouched, /^WORCA_PROJECTS=\/Users\/me\/dev$/m, 'the example value stays when nothing is known');
-});
-
-test('composeFileArgs: base first, then one -f per overlay', () => {
-  assert.deepEqual(composeFileArgs([]), ['-f', 'compose.yml']);
-  assert.deepEqual(composeFileArgs(['egress', 'ssh']), ['-f', 'compose.yml', '-f', 'compose.egress.yml', '-f', 'compose.ssh.yml']);
-  assert.deepEqual(OVERLAYS, ['egress', 'ssh', 'teams', 'clonein']);
 });
 
 test('initDir copies every compose file, seeds .env once (0600) and never overwrites it', async () => {

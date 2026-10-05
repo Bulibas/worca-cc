@@ -21,6 +21,7 @@ import { addGlobalModel, listGlobalModels, memoryDefragModel, setMemoryDefragMod
 import { EFFORTS, TIER_MODEL_ENV_KEYS, PROVIDER_MODE_ENV_KEYS } from '../src/core/model-env.mjs';
 import { getDb, _resetForTests } from '../src/core/db.mjs';
 import { projectKey } from '../src/core/store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const dirs = [];
 const prevEnv = {
@@ -208,28 +209,30 @@ test('removing a global model keeps the row/step\'s OTHER tunables (only model+e
     'the node row is UPDATED, not deleted — the effort goes with its model, the rest stays');
 });
 
-test('the built-in catalog offers Fable 5.1 and no longer Fable 5', () => {
-  const fable = PREDEFINED_MODELS.find((m) => m.id === 'claude-fable-5-1');
-  assert.deepEqual(fable, { id: 'claude-fable-5-1', label: 'Fable 5.1 (1M)', efforts: ['medium', 'high', 'xhigh', 'max'] });
-  assert.equal(PREDEFINED_MODELS.some((m) => m.id === 'claude-fable-5'), false,
-    'the retired id is gone from the catalog (db.mjs V26 moves the stored pins)');
-});
-
-test('the built-in catalog offers Opus 5.5 and Opus 5 side by side, Opus 5.5 first', () => {
-  const opus55 = PREDEFINED_MODELS.find((m) => m.id === 'claude-opus-5-5');
-  assert.deepEqual(opus55, { id: 'claude-opus-5-5', label: 'Opus 5.5', efforts: ['medium', 'high', 'xhigh', 'max'] });
-  const opus5 = PREDEFINED_MODELS.find((m) => m.id === 'claude-opus-5');
-  assert.deepEqual(opus5, { id: 'claude-opus-5', label: 'Opus 5', efforts: ['medium', 'high', 'xhigh', 'max'] });
-  assert.deepEqual(PREDEFINED_MODELS.slice(0, 2).map((m) => m.id), ['claude-opus-5-5', 'claude-opus-5'],
-    'Opus 5.5 stays the first (default) entry; Opus 5 sits right after it');
-});
-
-test('the built-in catalog offers Sonnet 5.5 right before Sonnet 5', () => {
-  const sonnet55 = PREDEFINED_MODELS.find((m) => m.id === 'claude-sonnet-5-5');
-  assert.deepEqual(sonnet55, { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', efforts: ['medium', 'high', 'xhigh', 'max'] });
-  const i = PREDEFINED_MODELS.findIndex((m) => m.id === 'claude-sonnet-5-5');
-  assert.equal(PREDEFINED_MODELS[i + 1]?.id, 'claude-sonnet-5', 'Sonnet 5 stays, right after it');
-  assert.equal(PREDEFINED_MODELS.some((m) => m.id === 'claude-sonnet-5-5[1m]'), false, '1M-only: no [1m] twin');
+test('the built-in catalog: Fable 5.1 (not 5), Opus 5.5 first then Opus 5, Sonnet 5.5 right before Sonnet 5, no [1m] twins', async () => {
+  await checkRows([
+    { name: 'the built-in catalog offers Fable 5.1 and no longer Fable 5', run: async () => {
+      const fable = PREDEFINED_MODELS.find((m) => m.id === 'claude-fable-5-1');
+      assert.deepEqual(fable, { id: 'claude-fable-5-1', label: 'Fable 5.1 (1M)', efforts: ['medium', 'high', 'xhigh', 'max'] });
+      assert.equal(PREDEFINED_MODELS.some((m) => m.id === 'claude-fable-5'), false,
+        'the retired id is gone from the catalog (db.mjs V26 moves the stored pins)');
+    } },
+    { name: 'the built-in catalog offers Opus 5.5 and Opus 5 side by side, Opus 5.5 first', run: async () => {
+      const opus55 = PREDEFINED_MODELS.find((m) => m.id === 'claude-opus-5-5');
+      assert.deepEqual(opus55, { id: 'claude-opus-5-5', label: 'Opus 5.5', efforts: ['medium', 'high', 'xhigh', 'max'] });
+      const opus5 = PREDEFINED_MODELS.find((m) => m.id === 'claude-opus-5');
+      assert.deepEqual(opus5, { id: 'claude-opus-5', label: 'Opus 5', efforts: ['medium', 'high', 'xhigh', 'max'] });
+      assert.deepEqual(PREDEFINED_MODELS.slice(0, 2).map((m) => m.id), ['claude-opus-5-5', 'claude-opus-5'],
+        'Opus 5.5 stays the first (default) entry; Opus 5 sits right after it');
+    } },
+    { name: 'the built-in catalog offers Sonnet 5.5 right before Sonnet 5', run: async () => {
+      const sonnet55 = PREDEFINED_MODELS.find((m) => m.id === 'claude-sonnet-5-5');
+      assert.deepEqual(sonnet55, { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', efforts: ['medium', 'high', 'xhigh', 'max'] });
+      const i = PREDEFINED_MODELS.findIndex((m) => m.id === 'claude-sonnet-5-5');
+      assert.equal(PREDEFINED_MODELS[i + 1]?.id, 'claude-sonnet-5', 'Sonnet 5 stays, right after it');
+      assert.equal(PREDEFINED_MODELS.some((m) => m.id === 'claude-sonnet-5-5[1m]'), false, '1M-only: no [1m] twin');
+    } },
+  ]);
 });
 
 // Settings › Memory: the defragment model is a GLOBAL ref — listed by the refs preview and cleared

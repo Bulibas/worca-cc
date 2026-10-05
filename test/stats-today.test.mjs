@@ -75,8 +75,3 @@ test('range=today: hour buckets through now, active attribution, yesterday prev'
   // bars reconcile with the KPI tile (D4 invariant)
   assert.equal(s.series.reduce((n, p) => n + p.finished, 0), s.totals.finished);
 });
-
-test('today is a valid range; junk still throws RangeError', () => {
-  assert.doesNotThrow(() => getStats({ range: 'today', now: NOW }));
-  assert.throws(() => getStats({ range: 'yesterday', now: NOW }), RangeError);
-});

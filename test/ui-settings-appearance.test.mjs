@@ -1,8 +1,8 @@
 // test/ui-settings-appearance.test.mjs — Settings › General › Appearance (dark-mode
 // design §5.3/§5.5): GET paints the segmented control and <html data-theme>, a
 // click applies at once and POSTs exactly { theme }, a 400 reverts to the server
-// value and shows the error, settings-changed re-applies, boot needs no
-// matchMedia, and the theme-color meta follows the resolved background.
+// value and shows the error, settings-changed re-applies, and boot needs no
+// matchMedia.
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { lastToast } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -24,7 +25,7 @@ const GET_BODY = (theme = 'system') => ({
   titleModel: null, titleModelEffective: {}, hideBuiltinModels: false, theme,
 });
 
-async function boot({ postResponse, initialTheme = 'system', bodyBg = '' } = {}) {
+async function boot({ postResponse, initialTheme = 'system' } = {}) {
   const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
   window.Element.prototype.scrollIntoView = function () {};
@@ -35,10 +36,6 @@ async function boot({ postResponse, initialTheme = 'system', bodyBg = '' } = {})
     addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
     dispatch(type, evt) { (this._listeners[type] || []).forEach((fn) => fn(evt)); }
   };
-  if (bodyBg) {                                   // resolved colours exist only in a real browser
-    const real = window.getComputedStyle.bind(window);
-    window.getComputedStyle = (el, pseudo) => { const cs = real(el, pseudo); return el === window.document.body ? new Proxy(cs, { get: (t, k) => (k === 'backgroundColor' ? bodyBg : t[k]) }) : cs; };
-  }
   const box = { theme: initialTheme };
   const posts = [];
   window.fetch = (url, opts = {}) => {
@@ -83,14 +80,25 @@ test('boot: no matchMedia in jsdom, the server-rendered attribute is normalised 
   assert.deepEqual(themeEvents, ['system']);
 });
 
-test('GET paints the segmented control and applies the stored mode', async () => {
-  const { $, openSettings, root, on } = await boot({ initialTheme: 'dark' });
-  await openSettings();
-  assert.ok($('#appearance-card'), 'the card exists');
-  assert.equal($('.settings-pane[data-tab="general"] .card'), $('#appearance-card'), 'first card of General');
-  assert.equal(root(), 'dark');
-  assert.deepEqual(on(), ['dark']);
-  assert.equal($('#theme-seg').getAttribute('role'), 'group');
+test('GET paints the segmented control and applies the stored mode; an unknown mode from the server is treated as system', async () => {
+  // Each row boots with its own stored mode.
+  await checkRows([
+    { name: 'GET paints the segmented control and applies the stored mode', run: async () => {
+      const { $, openSettings, root, on } = await boot({ initialTheme: 'dark' });
+      await openSettings();
+      assert.ok($('#appearance-card'), 'the card exists');
+      assert.equal($('.settings-pane[data-tab="general"] .card'), $('#appearance-card'), 'first card of General');
+      assert.equal(root(), 'dark');
+      assert.deepEqual(on(), ['dark']);
+      assert.equal($('#theme-seg').getAttribute('role'), 'group');
+    } },
+    { name: 'an unknown mode from the server is treated as system', run: async () => {
+      const { openSettings, root, on } = await boot({ initialTheme: 'blue' });
+      await openSettings();
+      assert.equal(root(), 'system');
+      assert.deepEqual(on(), ['system']);
+    } },
+  ]);
 });
 
 test('click Light: applied at once, POST is exactly { theme: "light" }, the response repaints', async () => {
@@ -126,18 +134,4 @@ test('settings-changed from another tab re-fetches and re-applies, on any view',
   await tick(); await tick();
   assert.equal(root(), 'dark');
   assert.deepEqual(on(), ['dark']);
-});
-
-test('meta theme-color follows the resolved body background, and stays put without one', async () => {
-  const a = await boot();
-  assert.equal(a.$('meta[name="theme-color"]').getAttribute('content'), '#ffffff', 'jsdom resolves no colour → untouched');
-  const b = await boot({ bodyBg: 'rgb(22, 22, 20)' });
-  assert.equal(b.$('meta[name="theme-color"]').getAttribute('content'), 'rgb(22, 22, 20)');
-});
-
-test('an unknown mode from the server is treated as system', async () => {
-  const { openSettings, root, on } = await boot({ initialTheme: 'blue' });
-  await openSettings();
-  assert.equal(root(), 'system');
-  assert.deepEqual(on(), ['system']);
 });

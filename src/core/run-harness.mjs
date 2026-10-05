@@ -31,7 +31,7 @@ import {
 } from './artifacts.mjs';
 import { diffNameStatus, diffNumstat, diffPatch, untrackedFiles, untrackedPatch } from './git-info.mjs';
 import { clearStaleIndexLock, staleIndexLockNote } from './git-lock.mjs';
-import { claimPipelineCommand, discardPendingPipelineCommands, CONTROL_CHECK_INTERVAL_MS } from './pipeline-commands.mjs';
+import { claimPipelineCommand, discardPendingPipelineCommands, controlCheckIntervalMs } from './pipeline-commands.mjs';
 import {
   assembleResults, persistResults, persistDiffPatch, buildPerProject, rollupSummary,
   retainedWorkPatchName,
@@ -6502,7 +6502,7 @@ export class RunHarness extends EventEmitter {
       } catch { /* best-effort */ }
       this._controlTimer = setInterval(() => {
         try { this._checkControlSlot(); } catch { /* best-effort: the next tick retries */ }
-      }, CONTROL_CHECK_INTERVAL_MS);
+      }, controlCheckIntervalMs());
       this._controlTimer.unref?.();
     }
   }

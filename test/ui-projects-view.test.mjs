@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { lastToast } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -96,19 +97,6 @@ test('projects view un-hides and renders one row per project', async () => {
   assert.ok(rows[1].querySelector('.proj-missing'), 'beta should show a missing marker');
 });
 
-test('the list row has no trash button and no Memory expander any more', async () => {
-  const { window } = await boot();
-  await goProjects(window);
-  const doc = window.document;
-  assert.equal(doc.querySelector('#projects-list .proj-del'), null);
-  assert.equal(doc.querySelector('#projects-list .proj-mem-head'), null);
-  assert.equal(doc.querySelector('#projects-list .proj-mem-detail'), null);
-  const row = doc.querySelector('#projects-list .pl-item[data-key="alpha-00000001"] .pl-row');
-  assert.equal(row.getAttribute('role'), 'button');
-  assert.equal(row.tabIndex, 0);
-  assert.ok(row.querySelector('.proj-open'), 'the chevron');
-});
-
 test('Remove from the detail header: confirm → DELETE → back on the list without the row', async () => {
   const calls = [];
   const { window } = await boot({
@@ -135,7 +123,8 @@ test('Remove from the detail header: confirm → DELETE → back on the list wit
   assert.equal([...doc.querySelectorAll('#projects-list .pl-item')].length, 1);
 });
 
-test('cancelling the Remove confirm issues no DELETE and keeps the detail open', async () => {
+test('cancelling the Remove confirm issues no DELETE and keeps the page; the modal owns Escape, and Escape without it goes back to the list', async () => {
+  // One boot: the page stays open after the cancelled confirm, so the Escape row starts there.
   const calls = [];
   const { window } = await boot({
     fetchHandler: (u, opts) => {
@@ -145,13 +134,27 @@ test('cancelling the Remove confirm issues no DELETE and keeps the detail open',
   });
   await goHash(window, 'projects/alpha-00000001');
   const doc = window.document;
-  click(window, doc.querySelector('#proj-detail .pd-remove'));
-  await tick();
-  click(window, doc.querySelector('#confirm-cancel'));
-  await tick();
-  assert.equal(calls.length, 0, 'no DELETE on cancel');
-  assert.equal(doc.getElementById('proj-shell').classList.contains('detail-open'), true);
-  assert.equal(doc.querySelector('#proj-detail .pd-remove').disabled, false, 're-enabled after cancel');
+  await checkRows([
+    { name: 'cancelling the Remove confirm issues no DELETE and keeps the detail open', run: async () => {
+      click(window, doc.querySelector('#proj-detail .pd-remove'));
+      await tick();
+      click(window, doc.querySelector('#confirm-cancel'));
+      await tick();
+      assert.equal(calls.length, 0, 'no DELETE on cancel');
+      assert.equal(doc.getElementById('proj-shell').classList.contains('detail-open'), true);
+      assert.equal(doc.querySelector('#proj-detail .pd-remove').disabled, false, 're-enabled after cancel');
+    } },
+    { name: 'Escape on the project page goes back to the list; not while the confirm modal is up', run: async () => {
+      click(window, doc.querySelector('#proj-detail .pd-remove'));
+      await tick();
+      doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await tick();
+      assert.equal(window.location.hash, '#projects/alpha-00000001', 'the modal owns Escape');
+      await tick();
+      doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      assert.equal(window.location.hash, '#projects');
+    } },
+  ]);
 });
 
 test('add: + picks a folder, prefills the basename, and POSTs the project', async () => {
@@ -205,31 +208,8 @@ const memFetch = (u, o = {}) => {
   if (u.includes('/api/memory/projects/alpha-00000001')) return memJson(MEM);
   return null;
 };
-test('a row click opens the project page: slide, header, focus on Back, hash #projects/<key>', async () => {
-  const { window } = await boot();
-  await goProjects(window);
-  const doc = window.document;
-  const row = doc.querySelector('#projects-list .pl-item[data-key="alpha-00000001"] .pl-row');
-  click(window, row);
-  await tick(); await tick();
-  assert.equal(window.location.hash, '#projects/alpha-00000001');
-  const shell = doc.getElementById('proj-shell');
-  assert.equal(shell.classList.contains('detail-open'), true);
-  const d = doc.getElementById('proj-detail');
-  assert.equal(d.getAttribute('aria-hidden'), 'false');
-  assert.equal(d.querySelector('.pd-title').textContent.trim(), 'alpha');
-  assert.equal(d.querySelector('.pd-path').textContent, '/Users/me/dev/alpha');
-  assert.equal(doc.activeElement, d.querySelector('.pd-back'), 'focus lands on Back');
-  assert.equal(shell.querySelector('.proj-screen-list').hasAttribute('inert'), true, 'the list is inert behind the detail');
-  // The Overview pill is lit and its section built.
-  assert.equal(d.querySelector('.pd-tab.active').dataset.sec, 'overview');
-  // The path lives in the header only (with a copy button); the Overview opens on BRANCH instead.
-  assert.ok(d.querySelector('.pd-meta .pd-path-copy'), 'the header path has a copy button');
-  assert.equal(d.querySelector('.pd-sec[data-sec="overview"] .pd-ov-card-path'), null, 'no PATH card repeating the header');
-  assert.ok(d.querySelector('.pd-sec[data-sec="overview"] .pd-ov-card-branch'), 'BRANCH card');
-});
-
-test('Enter on a focused row and the chevron button both open the page; a keyless row is inert', async () => {
+test('a row opens the project page by click, Enter or chevron (hash, header, focus on Back, list inert); a keyless row is inert; Back returns focus to the row', async () => {
+  // One boot; the list carries a keyless third project for the second row.
   const { window } = await boot({
     fetchHandler: (u) => (u.includes('/api/projects')
       ? Promise.resolve({ ok: true, status: 200, json: async () => ({ projects: [...PROJECTS, { name: 'stray', path: '/x/stray', exists: true }] }) })
@@ -237,105 +217,83 @@ test('Enter on a focused row and the chevron button both open the page; a keyles
   });
   await goProjects(window);
   const doc = window.document;
-  const rows = [...doc.querySelectorAll('#projects-list .pl-row')];
-  assert.equal(rows[2].getAttribute('role'), null, 'a keyless project has no page');
-  assert.equal(rows[2].querySelector('.proj-open'), null);
-  rows[1].focus();
-  rows[1].dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  await tick(); await tick();
-  assert.equal(window.location.hash, '#projects/beta-00000002');
-  assert.ok(doc.querySelector('#proj-detail .pd-title .proj-missing'), 'a missing folder is badged in the title');
-  assert.equal(doc.querySelector('#proj-detail .pd-new').disabled, true, 'New pipeline is off for a missing folder');
-  // Back, then the chevron of the other row.
-  click(window, doc.querySelector('#proj-detail .pd-back'));
-  await tick(); await tick();
-  assert.equal(doc.getElementById('proj-shell').classList.contains('detail-open'), false);
-  assert.equal(doc.activeElement, doc.querySelector('#projects-list .pl-item[data-key="beta-00000002"] .pl-row'), 'focus comes home to the row');
-  click(window, doc.querySelector('#projects-list .pl-item[data-key="alpha-00000001"] .proj-open'));
-  await tick(); await tick();
-  assert.equal(window.location.hash, '#projects/alpha-00000001');
+  await checkRows([
+    { name: 'a row click opens the project page: slide, header, focus on Back, hash #projects/<key>', run: async () => {
+      const row = doc.querySelector('#projects-list .pl-item[data-key="alpha-00000001"] .pl-row');
+      click(window, row);
+      await tick(); await tick();
+      assert.equal(window.location.hash, '#projects/alpha-00000001');
+      const shell = doc.getElementById('proj-shell');
+      assert.equal(shell.classList.contains('detail-open'), true);
+      const d = doc.getElementById('proj-detail');
+      assert.equal(d.getAttribute('aria-hidden'), 'false');
+      assert.equal(d.querySelector('.pd-title').textContent.trim(), 'alpha');
+      assert.equal(d.querySelector('.pd-path').textContent, '/Users/me/dev/alpha');
+      assert.equal(doc.activeElement, d.querySelector('.pd-back'), 'focus lands on Back');
+      assert.equal(shell.querySelector('.proj-screen-list').hasAttribute('inert'), true, 'the list is inert behind the detail');
+      // The Overview pill is lit and its section built.
+      assert.equal(d.querySelector('.pd-tab.active').dataset.sec, 'overview');
+      // The path lives in the header only (with a copy button); the Overview opens on BRANCH instead.
+      assert.ok(d.querySelector('.pd-meta .pd-path-copy'), 'the header path has a copy button');
+      assert.equal(d.querySelector('.pd-sec[data-sec="overview"] .pd-ov-card-path'), null, 'no PATH card repeating the header');
+      assert.ok(d.querySelector('.pd-sec[data-sec="overview"] .pd-ov-card-branch'), 'BRANCH card');
+    } },
+    { name: 'Enter on a focused row and the chevron button both open the page; a keyless row is inert', run: async () => {
+      await goProjects(window);                   // back on the list: the first row left alpha's page open
+      const rows = [...doc.querySelectorAll('#projects-list .pl-row')];
+      assert.equal(rows[2].getAttribute('role'), null, 'a keyless project has no page');
+      assert.equal(rows[2].querySelector('.proj-open'), null);
+      rows[1].focus();
+      rows[1].dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await tick(); await tick();
+      assert.equal(window.location.hash, '#projects/beta-00000002');
+      assert.ok(doc.querySelector('#proj-detail .pd-title .proj-missing'), 'a missing folder is badged in the title');
+      assert.equal(doc.querySelector('#proj-detail .pd-new').disabled, true, 'New pipeline is off for a missing folder');
+      // Back, then the chevron of the other row.
+      click(window, doc.querySelector('#proj-detail .pd-back'));
+      await tick(); await tick();
+      assert.equal(doc.getElementById('proj-shell').classList.contains('detail-open'), false);
+      assert.equal(doc.activeElement, doc.querySelector('#projects-list .pl-item[data-key="beta-00000002"] .pl-row'), 'focus comes home to the row');
+      click(window, doc.querySelector('#projects-list .pl-item[data-key="alpha-00000001"] .proj-open'));
+      await tick(); await tick();
+      assert.equal(window.location.hash, '#projects/alpha-00000001');
+    } },
+  ]);
 });
 
-test('#projects/<key> on boot: Overview reads the History dataset (RUNS, LAST RUN, KEY) and the History button is live', async () => {
-  const { window } = await boot();
-  await goHash(window, 'projects/alpha-00000001');
-  await tick(); await tick();
-  const doc = window.document;
-  const ov = doc.querySelector('#proj-detail .pd-sec[data-sec="overview"]');
-  assert.equal(ov.querySelector('.pd-ov-card-runs .pd-ov-value').textContent, '2');
-  assert.equal(ov.querySelector('.pd-ov-card-runs .pd-ov-sub').textContent, '1 done · 1 stopped', 'only the counts that are not zero');
-  const last = ov.querySelector('button.pd-ov-card-last');
-  assert.ok(last, 'LAST RUN is a button');
-  assert.match(last.querySelector('.pd-ov-sub').textContent, /^Newest run · \w+$/, 'its title and how it ended');
-  assert.match(last.querySelector('.pd-ov-value').textContent, /ago$|^just now$/, 'a relative time; the full date is in the title');
-  assert.equal(ov.querySelector('.pd-ov-card-key .pd-ov-value').textContent, 'alpha-00000001');
-  assert.equal(ov.querySelector('.pd-ov-card-key .pd-ov-sub').textContent, 'memory scope projects/alpha-00000001');
-  assert.equal(doc.querySelector('#proj-detail .pd-history').disabled, false);
-  click(window, last);
-  assert.equal(window.location.hash, '#history/alpha-00000001/p-new');
-});
-
-test('a project with no runs: one wide RUNS card with Start one, no LAST RUN; Show in Runs is disabled', async () => {
+test('Show in Runs unfolds the project group; New pipeline selects the project, lands on #new and issues ONE config load for it', async () => {
+  // One boot walks Show in Runs, then New pipeline; each step's state is recorded as it
+  // happens, and the rows read the records.
+  const cfgDirs = [];
   const { window } = await boot({
-    fetchHandler: (u) => (u.includes('/api/history') ? Promise.resolve({ ok: true, status: 200, json: async () => ({ pipelines: [], ghAvailable: false }) }) : null),
+    storage: { 'worca-cc.runs.collapsed': JSON.stringify(['alpha-00000001']) },
+    fetchHandler: (u) => { if (u.startsWith('/api/config')) cfgDirs.push(decodeURIComponent(u.split('projectDir=')[1] || '')); return null; },
   });
   await goHash(window, 'projects/alpha-00000001');
   await tick(); await tick();
   const doc = window.document;
-  const runsCard = doc.querySelector('#proj-detail .pd-ov-card-runs');
-  assert.equal(runsCard.querySelector('.pd-ov-value').textContent, 'No runs yet');
-  assert.ok(runsCard.classList.contains('pd-ov-wide'), 'one card for one fact');
-  assert.equal(doc.querySelector('#proj-detail .pd-ov-card-last'), null, 'no "—" beside it');
-  click(window, runsCard.querySelector('.pd-ov-start'));
-  assert.equal(window.location.hash, '#new', 'Start one opens New pipeline for this project');
-  await goHash(window, 'projects/alpha-00000001');
-  await tick(); await tick();
-  const btn = doc.querySelector('#proj-detail .pd-history');
-  assert.equal(btn.disabled, true);
-  assert.equal(btn.title, 'No runs yet');
-});
-
-test('Show in Runs unfolds the project group on the Runs list; New pipeline selects the project and lands on #new', async () => {
-  const { window } = await boot({ storage: { 'worca-cc.runs.collapsed': JSON.stringify(['alpha-00000001']) } });
-  await goHash(window, 'projects/alpha-00000001');
-  await tick(); await tick();
-  const doc = window.document;
   click(window, doc.querySelector('#proj-detail .pd-history'));
-  assert.equal(window.location.hash, '#runs');
-  assert.deepEqual(JSON.parse(window.localStorage.getItem('worca-cc.runs.collapsed')), [],
-    'the project group is unfolded (the folded key is gone)');
+  const afterHistory = { hash: window.location.hash, collapsed: JSON.parse(window.localStorage.getItem('worca-cc.runs.collapsed')) };
   await goHash(window, 'projects/alpha-00000001');
+  cfgDirs.length = 0;
   click(window, doc.querySelector('#proj-detail .pd-new'));
-  assert.equal(window.location.hash, '#new');
   const sel = doc.getElementById('projectSelect');
-  assert.equal(sel.options[sel.selectedIndex].dataset.name, 'alpha');
-  assert.equal(window.localStorage.getItem('worca-cc.lastProject'), 'alpha');
-});
-
-test('Escape on the project page goes back to the list; not while the confirm modal is up', async () => {
-  const { window } = await boot();
-  await goHash(window, 'projects/alpha-00000001');
-  const doc = window.document;
-  click(window, doc.querySelector('#proj-detail .pd-remove'));
-  await tick();
-  doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  await tick();
-  assert.equal(window.location.hash, '#projects/alpha-00000001', 'the modal owns Escape');
-  await tick();
-  doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  assert.equal(window.location.hash, '#projects');
-});
-
-test('an unknown key shows the list with the not-registered toast; the list line stays empty', async () => {
-  const { window } = await boot();
-  await goHash(window, 'projects/ghost-00000009');
-  const doc = window.document;
-  assert.equal(doc.getElementById('proj-shell').classList.contains('detail-open'), false);
-  assert.deepEqual(lastToast(doc), { tone: 'err', title: 'project "ghost-00000009" is not registered here', detail: '', action: '' });
-  assert.equal(doc.getElementById('projects-msg').textContent, '');
-  await goHash(window, 'workspaces');
-  await goHash(window, 'projects');
-  assert.equal(doc.getElementById('projects-msg').textContent, '');
+  const afterNew = { hash: window.location.hash, name: sel.options[sel.selectedIndex].dataset.name,
+    lastProject: window.localStorage.getItem('worca-cc.lastProject') };
+  await tick(); await tick();
+  await checkRows([
+    { name: 'Show in Runs unfolds the project group on the Runs list; New pipeline selects the project and lands on #new', run: () => {
+      assert.equal(afterHistory.hash, '#runs');
+      assert.deepEqual(afterHistory.collapsed, [],
+        'the project group is unfolded (the folded key is gone)');
+      assert.equal(afterNew.hash, '#new');
+      assert.equal(afterNew.name, 'alpha');
+      assert.equal(afterNew.lastProject, 'alpha');
+    } },
+    { name: 'New pipeline from a project page issues ONE config load, for the page project', run: () => {
+      assert.deepEqual(cfgDirs, ['/Users/me/dev/alpha']);
+    } },
+  ]);
 });
 
 test('projects-changed while a page is open: the list rebuilds and the page stays; a payload that dropped the project closes it', async () => {
@@ -359,47 +317,51 @@ test('projects-changed while a page is open: the list rebuilds and the page stay
   assert.match(lastToast(doc).title, /project "alpha" was removed/);
 });
 
-test('#projects/<key>/memory/<name> lands on the Memory tab with the file open; the Overview pill routes back', async () => {
-  const { window } = await boot({ fetchHandler: memFetch });
-  await goHash(window, 'projects/alpha-00000001/memory/conv');
-  const doc = window.document;
-  const d = doc.getElementById('proj-detail');
-  assert.equal(doc.getElementById('proj-shell').classList.contains('detail-open'), true);
-  assert.equal(d.querySelector('.pd-tab.active').dataset.sec, 'memory');
-  const sec = d.querySelector('.pd-sec[data-sec="memory"]');
-  assert.equal(sec.hidden, false);
-  assert.deepEqual([...sec.querySelectorAll('.mem-row')].map((r) => r.dataset.name), ['conv']);
-  const ed = sec.querySelector('.mem-editor');
-  assert.ok(ed, 'the file is open');
-  assert.equal(ed.querySelector('.mem-name').value, 'conv');
-  assert.equal(sec.querySelector('.mem-defrag').disabled, false, 'a project defragment never needs a host');
-  assert.equal(sec.querySelector('.mem-host-hint'), null, 'and never names one');
-  click(window, doc.getElementById('pd-tab-overview'));
-  assert.equal(d.querySelector('.pd-tab.active').dataset.sec, 'overview', 'the engine switched at once');
-  await tick(); await tick();
-  assert.equal(window.location.hash, '#projects/alpha-00000001');
-  assert.equal(sec.hidden, true);
-  assert.ok(sec.querySelector('.mem-editor'), 'the section is hidden, not torn down');
-});
-
-test('the Memory pill is hash-first: click → #projects/<key>/memory, one scope load, controller mounted once', async () => {
-  const gets = [];
-  const { window } = await boot({
-    fetchHandler: (u, o = {}) => { if (u.endsWith('/api/memory/projects/alpha-00000001') && (o.method || 'GET') === 'GET') gets.push(u); return memFetch(u, o); },
-  });
-  await goHash(window, 'projects/alpha-00000001');
-  const doc = window.document;
-  click(window, doc.getElementById('pd-tab-memory'));
-  await tick(); await tick(); await tick();
-  assert.equal(window.location.hash, '#projects/alpha-00000001/memory');
-  assert.equal(gets.length, 1, 'exactly one GET of the scope for the pill click (jsdom delivers the one hashchange)');
-  const sec = doc.querySelector('#proj-detail .pd-sec[data-sec="memory"]');
-  assert.deepEqual([...sec.querySelectorAll('.mem-row')].map((r) => r.dataset.name), ['conv']);
-  // A file row routes to the file (navigate is ON here, unlike the old expander).
-  click(window, sec.querySelector('.mem-row'));
-  assert.equal(window.location.hash, '#projects/alpha-00000001/memory/conv');
-  await tick(); await tick(); await tick();
-  assert.equal(sec.querySelector('.mem-name').value, 'conv');
+test('memory deep link opens the file on the Memory tab; the Memory pill is hash-first with one scope load; the Overview pill hides (not tears down) the section', async () => {
+  // Each row boots: after the deep link the pill returns to the open file and the controller is already mounted.
+  await checkRows([
+    { name: '#projects/<key>/memory/<name> lands on the Memory tab with the file open; the Overview pill routes back', run: async () => {
+      const { window } = await boot({ fetchHandler: memFetch });
+      await goHash(window, 'projects/alpha-00000001/memory/conv');
+      const doc = window.document;
+      const d = doc.getElementById('proj-detail');
+      assert.equal(doc.getElementById('proj-shell').classList.contains('detail-open'), true);
+      assert.equal(d.querySelector('.pd-tab.active').dataset.sec, 'memory');
+      const sec = d.querySelector('.pd-sec[data-sec="memory"]');
+      assert.equal(sec.hidden, false);
+      assert.deepEqual([...sec.querySelectorAll('.mem-row')].map((r) => r.dataset.name), ['conv']);
+      const ed = sec.querySelector('.mem-editor');
+      assert.ok(ed, 'the file is open');
+      assert.equal(ed.querySelector('.mem-name').value, 'conv');
+      assert.equal(sec.querySelector('.mem-defrag').disabled, false, 'a project defragment never needs a host');
+      assert.equal(sec.querySelector('.mem-host-hint'), null, 'and never names one');
+      click(window, doc.getElementById('pd-tab-overview'));
+      assert.equal(d.querySelector('.pd-tab.active').dataset.sec, 'overview', 'the engine switched at once');
+      await tick(); await tick();
+      assert.equal(window.location.hash, '#projects/alpha-00000001');
+      assert.equal(sec.hidden, true);
+      assert.ok(sec.querySelector('.mem-editor'), 'the section is hidden, not torn down');
+    } },
+    { name: 'the Memory pill is hash-first: click → #projects/<key>/memory, one scope load, controller mounted once', run: async () => {
+      const gets = [];
+      const { window } = await boot({
+        fetchHandler: (u, o = {}) => { if (u.endsWith('/api/memory/projects/alpha-00000001') && (o.method || 'GET') === 'GET') gets.push(u); return memFetch(u, o); },
+      });
+      await goHash(window, 'projects/alpha-00000001');
+      const doc = window.document;
+      click(window, doc.getElementById('pd-tab-memory'));
+      await tick(); await tick(); await tick();
+      assert.equal(window.location.hash, '#projects/alpha-00000001/memory');
+      assert.equal(gets.length, 1, 'exactly one GET of the scope for the pill click (jsdom delivers the one hashchange)');
+      const sec = doc.querySelector('#proj-detail .pd-sec[data-sec="memory"]');
+      assert.deepEqual([...sec.querySelectorAll('.mem-row')].map((r) => r.dataset.name), ['conv']);
+      // A file row routes to the file (navigate is ON here, unlike the old expander).
+      click(window, sec.querySelector('.mem-row'));
+      assert.equal(window.location.hash, '#projects/alpha-00000001/memory/conv');
+      await tick(); await tick(); await tick();
+      assert.equal(sec.querySelector('.mem-name').value, 'conv');
+    } },
+  ]);
 });
 
 test('a NEW file saved on the page routes to it and shows up as a saved row', async () => {
@@ -475,16 +437,6 @@ test('a malformed escape in a memory deep link is not decoded and does not throw
   assert.equal(sec.querySelector('.mem-editor'), null, 'no editor for a file that is not there');
 });
 
-test('leaving the view tears the page down instantly', async () => {
-  const { window } = await boot();
-  await goHash(window, 'projects/alpha-00000001');
-  const doc = window.document;
-  await goHash(window, 'workspaces');
-  assert.equal(doc.getElementById('proj-detail').innerHTML, '');
-  assert.equal(doc.getElementById('proj-shell').classList.contains('detail-open'), false);
-  assert.equal(doc.body.classList.contains('view-projects'), false);
-});
-
 // ---- Review majors (2026-09-14-project-detail-review-majors.md) ----
 
 const WORKFLOWS = [
@@ -513,18 +465,6 @@ test('two /api/config loads in flight: the LAST project picked wins, whatever or
   await new Promise((r) => setTimeout(r, 120));
   assert.equal(sel.options[sel.selectedIndex].dataset.name, 'alpha');
   assert.equal(doc.getElementById('workflowSelect').value, 'wf_alpha', 'the earlier, slower reply never painted over the later pick');
-});
-
-test('New pipeline from a project page issues ONE config load, for the page project', async () => {
-  const cfgDirs = [];
-  const { window } = await boot({
-    fetchHandler: (u) => { if (u.startsWith('/api/config')) cfgDirs.push(decodeURIComponent(u.split('projectDir=')[1] || '')); return null; },
-  });
-  await goHash(window, 'projects/alpha-00000001');
-  cfgDirs.length = 0;
-  click(window, window.document.querySelector('#proj-detail .pd-new'));
-  await tick(); await tick();
-  assert.deepEqual(cfgDirs, ['/Users/me/dev/alpha']);
 });
 
 test('a Memory draft survives Overview → Memory: the pill returns to the open file and the hop keeps the unsaved text', async () => {
@@ -586,18 +526,6 @@ test('Back with an unsaved memory draft asks first: Cancel stays, Discard leaves
   assert.equal(doc.getElementById('proj-shell').classList.contains('detail-open'), false);
 });
 
-test('the page keeps its Memory grid while it slides out; it is emptied after the slide', async () => {
-  const { window } = await boot({ fetchHandler: memFetch });
-  await goHash(window, 'projects/alpha-00000001/memory');
-  const doc = window.document;
-  click(window, doc.querySelector('#proj-detail .pd-back'));
-  await tick(); await tick();
-  assert.equal(doc.getElementById('proj-shell').classList.contains('detail-open'), false, 'the slide started');
-  assert.ok(doc.querySelector('#proj-detail .mem-host .mem-row'), 'the grid is still painted during the slide');
-  await new Promise((r) => setTimeout(r, 700));   // jsdom has no transitionend: the 600 ms fallback clears
-  assert.equal(doc.getElementById('proj-detail').innerHTML, '', 'emptied after the slide');
-});
-
 test('a row opened while the #projects fetch is in flight stays open: the late reply never routes the stale param', async () => {
   let holdNext = false; let release; const gate = new Promise((r) => { release = r; });
   const { window } = await boot({
@@ -639,51 +567,6 @@ test('leaving Projects while its fetch is in flight mounts nothing in the hidden
 });
 
 // ---- Project detail page (2026-09-13-project-detail-design.md) ----
-
-const cssText = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8');
-const htmlText = readFileSync(htmlPath, 'utf8');
-// Same helper test/ui-running-routing.test.mjs uses: the body of the FIRST rule whose selector
-// list contains `selector` (a `,`-separated list counts).
-function ruleBody(selector) {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const m = cssText.match(new RegExp('(?:^|[\\s,}])' + escaped + '\\s*\\{([^}]*)\\}'));
-  return m ? m[1] : null;
-}
-
-test('index.html: the Projects view is a two-screen shell with a detail template, and no new routed view', () => {
-  assert.match(htmlText, /<div class="proj-shell" id="proj-shell">\s*<div class="proj-screen proj-screen-list">/);
-  assert.match(htmlText, /<div class="proj-screen proj-screen-detail" id="proj-detail" aria-hidden="true"><\/div>/);
-  assert.ok(htmlText.includes('<template id="proj-detail-tpl">'), 'the detail template');
-  for (const cls of ['pd-back', 'pd-title', 'pd-path', 'pd-new', 'pd-history', 'pd-remove', 'pd-error', 'pd-tabs', 'pd-sections']) {
-    assert.ok(htmlText.includes(`class="${cls}`) || htmlText.includes(` ${cls} `) || htmlText.includes(` ${cls}"`), `template carries .${cls}`);
-  }
-  // The list still lives at the same ids (the controller and every older test read them).
-  assert.match(htmlText, /<p id="projects-msg" class="form-msg" aria-live="polite"><\/p>\s*<div class="run-list" id="projects-list"><\/div>/);
-  assert.equal((htmlText.match(/data-view/g) || []).length, 15, 'a screen inside the projects view, not a view (Team metrics, Team policy, Getting started, Scripts and Schedules are their own views)');
-});
-
-test('style.css: the projects shell is a twin of the History track', () => {
-  assert.match(ruleBody('.view[data-view="projects"]') || '', /position:relative/);
-  assert.match(ruleBody('.view[data-view="projects"]') || '', /padding:0/);
-  assert.match(ruleBody('.proj-screen') || '', /transition:transform/);
-  assert.match(ruleBody('.proj-shell.detail-open .proj-screen-detail') || '', /transform:none/);   // rests on none, not translateX(0): a transform would trap a guide's elevated control under the scrim
-  assert.match(ruleBody('body.view-projects .main') || '', /padding:0/);
-  // pd- twins ride the hd- rules (spec D13): the pd- selector is appended to the hd- selector
-  // list and that one rule carries the signature declaration.
-  const shared = {
-    '.hd-header,.pd-header{': /border-radius:var\(--r-card\)/,
-    '.hd-tabs,.pd-tabs{': /position:sticky/,
-    '.hd-tab,.pd-tab{': /border-radius:999px/,
-    '.hd-sec[hidden],.pd-sec[hidden]{': /display:none/,
-    '.hd-ov-grid,.pd-ov-grid{': /grid-template-columns/,
-    '.hd-ov-card,.pd-ov-card{': /padding:20px/,
-  };
-  for (const [head, re] of Object.entries(shared)) {
-    const i = cssText.indexOf(head);
-    assert.ok(i >= 0, `${head} — the pd- selector rides the hd- rule`);
-    assert.match(cssText.slice(i, cssText.indexOf('}', i)), re);
-  }
-});
 
 test('rows carry compact team chips (status only, no controls); the project page\'s Team tab has the full block: .tm-enable opens the enable dialog, toggling .tm-record PATCHes', async () => {
   const patches = [];

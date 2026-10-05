@@ -15,6 +15,7 @@ import { listGlobalModels } from '../src/core/settings.mjs';
 import { setNodeModel } from '../src/core/config.mjs';
 import { EFFORTS } from '../src/core/model-env.mjs';
 import { WebSocket } from 'ws';
+import { checkRows } from './helpers/rows.mjs';
 
 let proj, srv, base, homeDir, worcaHomeDir;
 const prevEnv = {
@@ -55,28 +56,31 @@ after(async () => {
   await Promise.all([proj, homeDir, worcaHomeDir].map((d) => rm(d, { recursive: true, force: true })));
 });
 
-test('GET /api/models: empty catalog + predefined + efforts', async () => {
-  const { status, body } = await jfetch('/api/models');
-  assert.equal(status, 200);
-  assert.deepEqual(body.models, []);
-  assert.ok(body.predefined.some((m) => m.id === 'claude-opus-5-5'));
-  assert.deepEqual(body.efforts, EFFORTS);
-});
-
-test('POST /api/models adds a global entry; env values come back MASKED, ${VAR} refs readable', async () => {
-  const { status, body } = await post('/api/models', {
-    id: 'glm-4.7', label: 'GLM (proxy)', efforts: ['high', 'medium'],
-    env: { ANTHROPIC_BASE_URL: 'https://proxy.example/v1', ANTHROPIC_AUTH_TOKEN: 'sk-live-abcdef1234', X_REF: '${MY_VAR}' },
-  });
-  assert.equal(status, 200);
-  assert.equal(body.model.id, 'glm-4.7');
-  assert.deepEqual(body.model.efforts, ['medium', 'high']);
-  assert.equal(body.model.env.ANTHROPIC_BASE_URL, '••••••e/v1', 'literal masked to a suffix');
-  assert.equal(body.model.env.ANTHROPIC_AUTH_TOKEN, '••••••1234');
-  assert.equal(body.model.env.X_REF, '${MY_VAR}', 'a whole-value ref is config, not a secret');
-  // The store holds the RAW values (same process — read the core directly).
-  const raw = listGlobalModels().find((m) => m.id === 'glm-4.7');
-  assert.equal(raw.env.ANTHROPIC_AUTH_TOKEN, 'sk-live-abcdef1234');
+test('GET /api/models starts empty (predefined + efforts); POST adds a global entry whose env values come back MASKED, ${VAR} refs readable', async () => {
+  await checkRows([
+    { name: 'GET /api/models: empty catalog + predefined + efforts', run: async () => {
+      const { status, body } = await jfetch('/api/models');
+      assert.equal(status, 200);
+      assert.deepEqual(body.models, []);
+      assert.ok(body.predefined.some((m) => m.id === 'claude-opus-5-5'));
+      assert.deepEqual(body.efforts, EFFORTS);
+    } },
+    { name: 'POST /api/models adds a global entry; env values come back MASKED, ${VAR} refs readable', run: async () => {
+      const { status, body } = await post('/api/models', {
+        id: 'glm-4.7', label: 'GLM (proxy)', efforts: ['high', 'medium'],
+        env: { ANTHROPIC_BASE_URL: 'https://proxy.example/v1', ANTHROPIC_AUTH_TOKEN: 'sk-live-abcdef1234', X_REF: '${MY_VAR}' },
+      });
+      assert.equal(status, 200);
+      assert.equal(body.model.id, 'glm-4.7');
+      assert.deepEqual(body.model.efforts, ['medium', 'high']);
+      assert.equal(body.model.env.ANTHROPIC_BASE_URL, '••••••e/v1', 'literal masked to a suffix');
+      assert.equal(body.model.env.ANTHROPIC_AUTH_TOKEN, '••••••1234');
+      assert.equal(body.model.env.X_REF, '${MY_VAR}', 'a whole-value ref is config, not a secret');
+      // The store holds the RAW values (same process — read the core directly).
+      const raw = listGlobalModels().find((m) => m.id === 'glm-4.7');
+      assert.equal(raw.env.ANTHROPIC_AUTH_TOKEN, 'sk-live-abcdef1234');
+    } },
+  ]);
 });
 
 test('the global entry reaches /api/config for projects AND project-less', async () => {
@@ -90,11 +94,19 @@ test('the global entry reaches /api/config for projects AND project-less', async
   }
 });
 
-test('POST /api/models rejections -> 400 (reserved env key, dup id, unknown effort)', async () => {
-  assert.equal((await post('/api/models', { id: 'x1', env: { PATH: '/evil' } })).status, 400);
-  assert.equal((await post('/api/models', { id: 'GLM-4.7' })).status, 400);
-  assert.equal((await post('/api/models', { id: 'x1', efforts: ['low'] })).status, 400);
-  assert.equal((await post('/api/models', {})).status, 400);
+test('POST/PATCH /api/models rejections -> 400 (reserved env key, dup id, unknown effort, unknown id)', async () => {
+  await checkRows([
+    { name: 'POST /api/models rejections -> 400 (reserved env key, dup id, unknown effort)', run: async () => {
+      assert.equal((await post('/api/models', { id: 'x1', env: { PATH: '/evil' } })).status, 400);
+      assert.equal((await post('/api/models', { id: 'GLM-4.7' })).status, 400);
+      assert.equal((await post('/api/models', { id: 'x1', efforts: ['low'] })).status, 400);
+      assert.equal((await post('/api/models', {})).status, 400);
+    } },
+    { name: 'PATCH /api/models/:id: unknown id and reserved key -> 400', run: async () => {
+      assert.equal((await patch('/api/models/nope', { label: 'x' })).status, 400);
+      assert.equal((await patch('/api/models/glm-4.7', { env: { WORCA_MOCK: '1' } })).status, 400);
+    } },
+  ]);
 });
 
 test('PATCH /api/models/:id: write-only env — masked echoes mean KEEP, null deletes, strings set', async () => {
@@ -130,11 +142,6 @@ test('GET /api/models/:id/env-value reveals raw values (per key and whole map); 
   // The reveal endpoint does not weaken the default surface.
   const masked = (await jfetch('/api/models')).body.models.find((m) => m.id === 'glm-4.7');
   assert.match(masked.env.ANTHROPIC_AUTH_TOKEN, /^••/);
-});
-
-test('PATCH /api/models/:id: unknown id and reserved key -> 400', async () => {
-  assert.equal((await patch('/api/models/nope', { label: 'x' })).status, 400);
-  assert.equal((await patch('/api/models/glm-4.7', { env: { WORCA_MOCK: '1' } })).status, 400);
 });
 
 test('PATCH /api/config with an unknown node model -> 400 (validation parity over HTTP)', async () => {
@@ -270,51 +277,88 @@ test('PUT /api/plugins/:name/config { target: modelSecrets } round-trips set-nes
   assert.equal(bad.status, 400);
 });
 
-test('POST /api/models/export-plugin: scaffold with value stripping; rejections', async () => {
-  const { readFileSync, existsSync, writeFileSync, mkdirSync } = await import('node:fs');
-  await post('/api/models', {
-    id: 'exp-m', label: 'Exportable', efforts: ['medium'],
-    env: { ANTHROPIC_BASE_URL: 'https://x.example', ANTHROPIC_AUTH_TOKEN: 'sk-live-strip-me', X_REF: '${VV}' },
-  });
-  const dest = join(proj, 'export', 'team-models');
-  const r = await post('/api/models/export-plugin', {
-    name: 'team-models', description: 'Team routing', dest,
-    models: [{ id: 'EXP-M', env: { ANTHROPIC_BASE_URL: 'include', ANTHROPIC_AUTH_TOKEN: 'secret', X_REF: 'include' } }],
-  });
-  assert.equal(r.status, 200);
-  assert.equal(r.body.dir, dest);
-  assert.deepEqual(r.body.modelSecrets, [{ key: 'anthropic-auth-token', label: 'ANTHROPIC_AUTH_TOKEN' }]);
+test('POST /api/models/export-plugin: scaffold with value stripping and `cost`; rejections', async () => {
+  await checkRows([
+    { name: 'POST /api/models/export-plugin: scaffold with value stripping; rejections', run: async () => {
+      const { readFileSync, existsSync, writeFileSync, mkdirSync } = await import('node:fs');
+      await post('/api/models', {
+        id: 'exp-m', label: 'Exportable', efforts: ['medium'],
+        env: { ANTHROPIC_BASE_URL: 'https://x.example', ANTHROPIC_AUTH_TOKEN: 'sk-live-strip-me', X_REF: '${VV}' },
+      });
+      const dest = join(proj, 'export', 'team-models');
+      const r = await post('/api/models/export-plugin', {
+        name: 'team-models', description: 'Team routing', dest,
+        models: [{ id: 'EXP-M', env: { ANTHROPIC_BASE_URL: 'include', ANTHROPIC_AUTH_TOKEN: 'secret', X_REF: 'include' } }],
+      });
+      assert.equal(r.status, 200);
+      assert.equal(r.body.dir, dest);
+      assert.deepEqual(r.body.modelSecrets, [{ key: 'anthropic-auth-token', label: 'ANTHROPIC_AUTH_TOKEN' }]);
 
-  const manifest = JSON.parse(readFileSync(join(dest, 'worca-cc-plugin.json'), 'utf8'));
-  assert.equal(manifest.name, 'team-models');
-  assert.equal(manifest.version, '0.1.0');
-  const [m] = manifest.models;
-  assert.equal(m.id, 'exp-m', 'stored id casing, not the request casing');
-  assert.equal(m.label, 'Exportable');
-  assert.deepEqual(m.efforts, ['medium']);
-  assert.equal(m.env.ANTHROPIC_BASE_URL, 'https://x.example', 'include -> verbatim');
-  assert.equal(m.env.X_REF, '${VV}', 'ref text travels as-is');
-  assert.deepEqual(m.env.ANTHROPIC_AUTH_TOKEN, { secret: 'anthropic-auth-token' });
-  assert.deepEqual(manifest.modelSecrets, [{ key: 'anthropic-auth-token', label: 'ANTHROPIC_AUTH_TOKEN' }]);
-  const blob = readFileSync(join(dest, 'worca-cc-plugin.json'), 'utf8') + readFileSync(join(dest, 'README.md'), 'utf8');
-  assert.doesNotMatch(blob, /sk-live-strip-me/, 'secret value stripped from every scaffold file');
-  assert.ok(existsSync(join(dest, 'README.md')));
+      const manifest = JSON.parse(readFileSync(join(dest, 'worca-cc-plugin.json'), 'utf8'));
+      assert.equal(manifest.name, 'team-models');
+      assert.equal(manifest.version, '0.1.0');
+      const [m] = manifest.models;
+      assert.equal(m.id, 'exp-m', 'stored id casing, not the request casing');
+      assert.equal(m.label, 'Exportable');
+      assert.deepEqual(m.efforts, ['medium']);
+      assert.equal(m.env.ANTHROPIC_BASE_URL, 'https://x.example', 'include -> verbatim');
+      assert.equal(m.env.X_REF, '${VV}', 'ref text travels as-is');
+      assert.deepEqual(m.env.ANTHROPIC_AUTH_TOKEN, { secret: 'anthropic-auth-token' });
+      assert.deepEqual(manifest.modelSecrets, [{ key: 'anthropic-auth-token', label: 'ANTHROPIC_AUTH_TOKEN' }]);
+      const blob = readFileSync(join(dest, 'worca-cc-plugin.json'), 'utf8') + readFileSync(join(dest, 'README.md'), 'utf8');
+      assert.doesNotMatch(blob, /sk-live-strip-me/, 'secret value stripped from every scaffold file');
+      assert.ok(existsSync(join(dest, 'README.md')));
 
-  // Rejections.
-  const cases = [
-    [{ name: 'Bad Name', dest: join(proj, 'x1'), models: [{ id: 'exp-m' }] }, /kebab-case/],
-    [{ name: 'ok-name', dest: join(proj, 'x2'), models: [] }, /non-empty array/],
-    [{ name: 'ok-name', dest: join(proj, 'x3'), models: [{ id: 'nope' }] }, /unknown global model id/],
-    [{ name: 'ok-name', dest: join(proj, 'x4'), models: [{ id: 'exp-m', env: { NOT_THERE: 'include' } }] }, /has no env key/],
-    [{ name: 'ok-name', dest: join(proj, 'x5'), models: [{ id: 'exp-m', env: { X_REF: 'wat' } }] }, /include \| secret \| omit/],
-    [{ name: 'ok-name', dest: '', models: [{ id: 'exp-m' }] }, /dest is required/],
-    [{ name: 'ok-name', dest, models: [{ id: 'exp-m' }] }, /not empty/],
-  ];
-  for (const [bodyIn, re] of cases) {
-    const bad = await post('/api/models/export-plugin', bodyIn);
-    assert.equal(bad.status, 400, JSON.stringify(bodyIn));
-    assert.match(bad.body.error, re);
-  }
+      // Rejections.
+      const cases = [
+        [{ name: 'Bad Name', dest: join(proj, 'x1'), models: [{ id: 'exp-m' }] }, /kebab-case/],
+        [{ name: 'ok-name', dest: join(proj, 'x2'), models: [] }, /non-empty array/],
+        [{ name: 'ok-name', dest: join(proj, 'x3'), models: [{ id: 'nope' }] }, /unknown global model id/],
+        [{ name: 'ok-name', dest: join(proj, 'x4'), models: [{ id: 'exp-m', env: { NOT_THERE: 'include' } }] }, /has no env key/],
+        [{ name: 'ok-name', dest: join(proj, 'x5'), models: [{ id: 'exp-m', env: { X_REF: 'wat' } }] }, /include \| secret \| omit/],
+        [{ name: 'ok-name', dest: '', models: [{ id: 'exp-m' }] }, /dest is required/],
+        [{ name: 'ok-name', dest, models: [{ id: 'exp-m' }] }, /not empty/],
+      ];
+      for (const [bodyIn, re] of cases) {
+        const bad = await post('/api/models/export-plugin', bodyIn);
+        assert.equal(bad.status, 400, JSON.stringify(bodyIn));
+        assert.match(bad.body.error, re);
+      }
+    } },
+    { name: 'export-plugin carries `cost` into the generated manifest (pricing is config, not a credential)', run: async () => {
+      const { readFileSync } = await import('node:fs');
+      const { normalizeManifest } = await import('../src/core/plugin-manifest.mjs');
+      await post('/api/models', {
+        id: 'exp-priced', label: 'Priced export',
+        env: { ANTHROPIC_BASE_URL: 'https://p.example', ANTHROPIC_AUTH_TOKEN: 'sk-live-never-export' },
+        cost: { perMtok: { input: 0.5, output: 1.5, cacheWrite1h: 1.2 } },
+      });
+      await post('/api/models', { id: 'exp-free', cost: { free: true } });
+      await post('/api/models', { id: 'exp-unpriced' });
+
+      const dest = join(proj, 'export', 'priced-models');
+      const r = await post('/api/models/export-plugin', {
+        name: 'priced-models', dest,
+        models: [
+          { id: 'exp-priced', env: { ANTHROPIC_BASE_URL: 'include', ANTHROPIC_AUTH_TOKEN: 'secret' } },
+          { id: 'exp-free' },
+          { id: 'exp-unpriced' },
+        ],
+      });
+      assert.equal(r.status, 200);
+
+      const manifest = JSON.parse(readFileSync(join(dest, 'worca-cc-plugin.json'), 'utf8'));
+      const byId = Object.fromEntries(manifest.models.map((m) => [m.id, m]));
+      assert.deepEqual(byId['exp-priced'].cost, { perMtok: { input: 0.5, output: 1.5, cacheWrite1h: 1.2 } },
+        'a shared on-prem model would otherwise be re-priced by NAME on every machine that installs this');
+      assert.deepEqual(byId['exp-free'].cost, { free: true });
+      assert.equal(byId['exp-unpriced'].cost, undefined, 'no override -> no key');
+
+      // The scaffold must install anywhere this host would, and the secret still never travels.
+      assert.equal(normalizeManifest(manifest).ok, true);
+      assert.doesNotMatch(readFileSync(join(dest, 'worca-cc-plugin.json'), 'utf8'), /sk-live-never-export/);
+    } },
+  ]);
 });
 
 test('GET /api/plugins/:name/model-env: raw literals/refs for Edit-a-copy; secrets listed, never resolved', async () => {
@@ -333,110 +377,96 @@ test('GET /api/plugins/:name/model-env: raw literals/refs for Edit-a-copy; secre
 
 // ── model connectivity test (Models-view Test button) ────────────────────────
 
-test('POST /api/models/:id/test: 404 unknown id; 400 for a plugin model with an unset secret', async () => {
-  const r404 = await post('/api/models/no-such-model/test', {});
-  assert.equal(r404.status, 404);
-  assert.match(r404.body.error, /unknown model id/);
+test('POST /api/models/:id/test: 404 unknown id, 400 for a plugin model with an unset secret, 200 for a built-in id (mock)', async () => {
+  await checkRows([
+    { name: 'POST /api/models/:id/test: 404 unknown id; 400 for a plugin model with an unset secret', run: async () => {
+      const r404 = await post('/api/models/no-such-model/test', {});
+      assert.equal(r404.status, 404);
+      assert.match(r404.body.error, /unknown model id/);
 
-  // A fresh plugin whose model references a secret nobody has set yet — the
-  // route must refuse before spawning anything.
-  const { writePluginsLock, readPluginsLock, pluginCurrentDir } = await import('../src/core/plugins-lock.mjs');
-  const { mkdirSync, writeFileSync } = await import('node:fs');
-  const cur = pluginCurrentDir('unset-plug');
-  mkdirSync(cur, { recursive: true });
-  writeFileSync(join(cur, 'worca-cc-plugin.json'), JSON.stringify({
-    name: 'unset-plug',
-    modelSecrets: [{ key: 'up-token', label: 'UP token' }],
-    models: [{ id: 'up-model', label: 'UP', env: { ANTHROPIC_AUTH_TOKEN: { secret: 'up-token' } } }],
-  }));
-  writePluginsLock({
-    ...readPluginsLock(),
-    'unset-plug': { repo: 'https://example.com/r', subdir: '', pinnedSha: 'x'.repeat(40), version: '1', enabled: true },
-  });
+      // A fresh plugin whose model references a secret nobody has set yet — the
+      // route must refuse before spawning anything.
+      const { writePluginsLock, readPluginsLock, pluginCurrentDir } = await import('../src/core/plugins-lock.mjs');
+      const { mkdirSync, writeFileSync } = await import('node:fs');
+      const cur = pluginCurrentDir('unset-plug');
+      mkdirSync(cur, { recursive: true });
+      writeFileSync(join(cur, 'worca-cc-plugin.json'), JSON.stringify({
+        name: 'unset-plug',
+        modelSecrets: [{ key: 'up-token', label: 'UP token' }],
+        models: [{ id: 'up-model', label: 'UP', env: { ANTHROPIC_AUTH_TOKEN: { secret: 'up-token' } } }],
+      }));
+      writePluginsLock({
+        ...readPluginsLock(),
+        'unset-plug': { repo: 'https://example.com/r', subdir: '', pinnedSha: 'x'.repeat(40), version: '1', enabled: true },
+      });
 
-  const r400 = await post('/api/models/up-model/test', {});
-  assert.equal(r400.status, 400);
-  assert.match(r400.body.error, /up-token.*not set/);
+      const r400 = await post('/api/models/up-model/test', {});
+      assert.equal(r400.status, 400);
+      assert.match(r400.body.error, /up-token.*not set/);
+    } },
+    { name: '#422: POST /api/models/:id/test accepts a BUILT-IN id (the Title-generation card offers them)', run: async () => {
+      const { PREDEFINED_MODELS } = await import('../src/core/config.mjs');
+      const prev = process.env.WORCA_MOCK;
+      process.env.WORCA_MOCK = '1';           // never a real spawn under the test PATH guard
+      try {
+        const r = await post(`/api/models/${PREDEFINED_MODELS[0].id}/test`, {});
+        assert.notEqual(r.status, 404, JSON.stringify(r.body));
+        assert.equal(r.status, 200);
+        assert.equal(typeof r.body.ok, 'boolean');
+      } finally {
+        if (prev === undefined) delete process.env.WORCA_MOCK; else process.env.WORCA_MOCK = prev;
+      }
+    } },
+  ]);
 });
 
 // ── the pricing override over HTTP (what the editor form actually sends) ──────
 
-test('POST/PATCH /api/models carry `cost` end-to-end, and GET surfaces it unmasked', async () => {
-  const add = await post('/api/models', {
-    id: 'priced-api', label: 'Priced', efforts: [],
-    env: { ANTHROPIC_BASE_URL: 'https://p' },
-    cost: { perMtok: { input: 0.5, output: 1.5 } },
-  });
-  assert.equal(add.status, 200);
-  assert.deepEqual(add.body.model.cost, { perMtok: { input: 0.5, output: 1.5 } });
-  // Pricing is configuration, never a credential — it must NOT come back masked.
-  const got = (await jfetch('/api/models')).body.models.find((m) => m.id === 'priced-api');
-  assert.deepEqual(got.cost, { perMtok: { input: 0.5, output: 1.5 } });
-  assert.match(got.env.ANTHROPIC_BASE_URL, /^••/, 'env still masked alongside it');
+test('POST/PATCH /api/models carry `cost` end-to-end (GET unmasked) and reject a malformed `cost` with the form message', async () => {
+  await checkRows([
+    { name: 'POST/PATCH /api/models carry `cost` end-to-end, and GET surfaces it unmasked', run: async () => {
+      const add = await post('/api/models', {
+        id: 'priced-api', label: 'Priced', efforts: [],
+        env: { ANTHROPIC_BASE_URL: 'https://p' },
+        cost: { perMtok: { input: 0.5, output: 1.5 } },
+      });
+      assert.equal(add.status, 200);
+      assert.deepEqual(add.body.model.cost, { perMtok: { input: 0.5, output: 1.5 } });
+      // Pricing is configuration, never a credential — it must NOT come back masked.
+      const got = (await jfetch('/api/models')).body.models.find((m) => m.id === 'priced-api');
+      assert.deepEqual(got.cost, { perMtok: { input: 0.5, output: 1.5 } });
+      assert.match(got.env.ANTHROPIC_BASE_URL, /^••/, 'env still masked alongside it');
 
-  // The editor replaces the table wholesale (it is small) rather than merging.
-  const toFree = await patch('/api/models/priced-api', { cost: { free: true } });
-  assert.deepEqual(toFree.body.model.cost, { free: true });
+      // The editor replaces the table wholesale (it is small) rather than merging.
+      const toFree = await patch('/api/models/priced-api', { cost: { free: true } });
+      assert.deepEqual(toFree.body.model.cost, { free: true });
 
-  // 'Trust the CLI' sends null — an explicit clear, since the form shows the state.
-  const cleared = await patch('/api/models/priced-api', { cost: null });
-  assert.equal(cleared.body.model.cost, undefined);
-  assert.equal(listGlobalModels().find((m) => m.id === 'priced-api').cost, undefined);
+      // 'Trust the CLI' sends null — an explicit clear, since the form shows the state.
+      const cleared = await patch('/api/models/priced-api', { cost: null });
+      assert.equal(cleared.body.model.cost, undefined);
+      assert.equal(listGlobalModels().find((m) => m.id === 'priced-api').cost, undefined);
 
-  // An unrelated edit omits `cost` entirely -> the stored override is kept.
-  await patch('/api/models/priced-api', { cost: { perMtok: { input: 2 } } });
-  const relabel = await patch('/api/models/priced-api', { label: 'Renamed' });
-  assert.equal(relabel.body.model.label, 'Renamed');
-  assert.deepEqual(relabel.body.model.cost, { perMtok: { input: 2 } }, 'omitted means keep');
-});
+      // An unrelated edit omits `cost` entirely -> the stored override is kept.
+      await patch('/api/models/priced-api', { cost: { perMtok: { input: 2 } } });
+      const relabel = await patch('/api/models/priced-api', { label: 'Renamed' });
+      assert.equal(relabel.body.model.label, 'Renamed');
+      assert.deepEqual(relabel.body.model.cost, { perMtok: { input: 2 } }, 'omitted means keep');
+    } },
+    { name: 'POST/PATCH /api/models reject a malformed `cost` with the message the form shows', run: async () => {
+      const bad = await post('/api/models', { id: 'bad-cost', cost: { perMtok: {} } });
+      assert.equal(bad.status, 400);
+      assert.match(bad.body.error, /must define at least one rate/);
+      assert.equal(listGlobalModels().some((m) => m.id === 'bad-cost'), false, 'a rejected add leaves nothing behind');
 
-test('POST/PATCH /api/models reject a malformed `cost` with the message the form shows', async () => {
-  const bad = await post('/api/models', { id: 'bad-cost', cost: { perMtok: {} } });
-  assert.equal(bad.status, 400);
-  assert.match(bad.body.error, /must define at least one rate/);
-  assert.equal(listGlobalModels().some((m) => m.id === 'bad-cost'), false, 'a rejected add leaves nothing behind');
+      const neg = await post('/api/models', { id: 'bad-cost', cost: { perMtok: { input: -1 } } });
+      assert.equal(neg.status, 400);
+      assert.match(neg.body.error, /finite number >= 0/);
 
-  const neg = await post('/api/models', { id: 'bad-cost', cost: { perMtok: { input: -1 } } });
-  assert.equal(neg.status, 400);
-  assert.match(neg.body.error, /finite number >= 0/);
-
-  const unknown = await patch('/api/models/priced-api', { cost: { perMtok: { bogus: 1 } } });
-  assert.equal(unknown.status, 400);
-  assert.match(unknown.body.error, /unknown cost\.perMtok rate "bogus"/);
-});
-
-test('export-plugin carries `cost` into the generated manifest (pricing is config, not a credential)', async () => {
-  const { readFileSync } = await import('node:fs');
-  const { normalizeManifest } = await import('../src/core/plugin-manifest.mjs');
-  await post('/api/models', {
-    id: 'exp-priced', label: 'Priced export',
-    env: { ANTHROPIC_BASE_URL: 'https://p.example', ANTHROPIC_AUTH_TOKEN: 'sk-live-never-export' },
-    cost: { perMtok: { input: 0.5, output: 1.5, cacheWrite1h: 1.2 } },
-  });
-  await post('/api/models', { id: 'exp-free', cost: { free: true } });
-  await post('/api/models', { id: 'exp-unpriced' });
-
-  const dest = join(proj, 'export', 'priced-models');
-  const r = await post('/api/models/export-plugin', {
-    name: 'priced-models', dest,
-    models: [
-      { id: 'exp-priced', env: { ANTHROPIC_BASE_URL: 'include', ANTHROPIC_AUTH_TOKEN: 'secret' } },
-      { id: 'exp-free' },
-      { id: 'exp-unpriced' },
-    ],
-  });
-  assert.equal(r.status, 200);
-
-  const manifest = JSON.parse(readFileSync(join(dest, 'worca-cc-plugin.json'), 'utf8'));
-  const byId = Object.fromEntries(manifest.models.map((m) => [m.id, m]));
-  assert.deepEqual(byId['exp-priced'].cost, { perMtok: { input: 0.5, output: 1.5, cacheWrite1h: 1.2 } },
-    'a shared on-prem model would otherwise be re-priced by NAME on every machine that installs this');
-  assert.deepEqual(byId['exp-free'].cost, { free: true });
-  assert.equal(byId['exp-unpriced'].cost, undefined, 'no override -> no key');
-
-  // The scaffold must install anywhere this host would, and the secret still never travels.
-  assert.equal(normalizeManifest(manifest).ok, true);
-  assert.doesNotMatch(readFileSync(join(dest, 'worca-cc-plugin.json'), 'utf8'), /sk-live-never-export/);
+      const unknown = await patch('/api/models/priced-api', { cost: { perMtok: { bogus: 1 } } });
+      assert.equal(unknown.status, 400);
+      assert.match(unknown.body.error, /unknown cost\.perMtok rate "bogus"/);
+    } },
+  ]);
 });
 
 test('a plugin model\'s manifest price reaches GET /api/models and Edit-a-copy', async () => {
@@ -523,18 +553,4 @@ test('#422: POST /api/settings titleModel — catalog member stored, unknown id 
   assert.equal(clear.status, 200);
   assert.equal(clear.body.titleModel, null);
   assert.deepEqual(clear.body.titleModelEffective, { model: null, source: 'run', stale: null });
-});
-
-test('#422: POST /api/models/:id/test accepts a BUILT-IN id (the Title-generation card offers them)', async () => {
-  const { PREDEFINED_MODELS } = await import('../src/core/config.mjs');
-  const prev = process.env.WORCA_MOCK;
-  process.env.WORCA_MOCK = '1';           // never a real spawn under the test PATH guard
-  try {
-    const r = await post(`/api/models/${PREDEFINED_MODELS[0].id}/test`, {});
-    assert.notEqual(r.status, 404, JSON.stringify(r.body));
-    assert.equal(r.status, 200);
-    assert.equal(typeof r.body.ok, 'boolean');
-  } finally {
-    if (prev === undefined) delete process.env.WORCA_MOCK; else process.env.WORCA_MOCK = prev;
-  }
 });

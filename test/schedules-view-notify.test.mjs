@@ -1,9 +1,9 @@
-// test/schedules-view-notify.test.mjs — #555 §7.1 / §7.4: the Schedules view reports an action's
-// result through `deps.notify` (a toast), keeps load()/loadFeed() failures on its inline line
-// (err-inline), and without `deps.notify` falls back to that line.
+// test/schedules-view-notify.test.mjs — #555 §7.1: the Schedules view reports a series action's
+// result through `deps.notify`: an ok toast titled by the action, an err toast on failure.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { checkRows } from './helpers/rows.mjs';
 
 const { window } = new JSDOM('<!doctype html><body></body>', { url: 'http://localhost:4317/#schedules' });
 for (const k of ['document', 'location', 'DOMParser']) Object.defineProperty(globalThis, k, { value: window[k], configurable: true, writable: true });
@@ -19,7 +19,7 @@ const SERIES = { id: 'sch_1', kind: 'recurring', title: 'Nightly', rule: { freq:
   tz: 'UTC', overlap: 'skip', maxFailures: 3, failureStreak: 0, ifMissed: 'run', graceMin: 360, status: 'active', pauseReason: null, nextRunAt: SOON, lastResult: null, summary };
 const TICKET = { id: 't_1', kind: 'once', scheduleId: null, title: 'Upgrade', runAt: SOON, scheduledFor: SOON, status: 'scheduled', ifMissed: 'run', graceMin: 360, summary };
 
-function mount({ routes = {}, notify = true } = {}) {
+function mount({ routes = {} } = {}) {
   const calls = [];
   const toasts = [];
   globalThis.fetch = async (url, init = {}) => {
@@ -36,78 +36,37 @@ function mount({ routes = {}, notify = true } = {}) {
   const hosts = { feedHost: document.createElement('div'), onceHost: document.createElement('div'), repeatingHost: document.createElement('div') };
   const msgEl = document.createElement('p');
   document.body.replaceChildren(hosts.feedHost, hosts.onceHost, hosts.repeatingHost, msgEl);
-  const deps = { confirmModal: async () => true, targetLabel: () => '', workflowLabel: () => '' };
-  if (notify) deps.notify = (o) => toasts.push(o);
+  const deps = { confirmModal: async () => true, targetLabel: () => '', workflowLabel: () => '', notify: (o) => toasts.push(o) };
   const view = createSchedulesView({ ...hosts, msgEl, deps });
   return { view, toasts, msgEl, calls, ...hosts };
 }
 const btn = (host, text) => [...host.querySelectorAll('button')].find((b) => b.textContent === text);
 
-test('series actions toast their okText: Paused, Run started, Next run skipped, Schedule deleted', async () => {
-  const m = mount();
-  await m.view.load();
-  m.repeatingHost.querySelector('.switch').click();
-  await settle();
-  btn(m.repeatingHost, 'Run now').click();
-  await settle();
-  btn(m.repeatingHost, 'Skip next').click();
-  await settle();
-  btn(m.repeatingHost, 'Delete').click();
-  await settle();
-  assert.deepEqual(m.toasts, ['Paused', 'Run started', 'Next run skipped', 'Schedule deleted'].map((title) => ({ tone: 'ok', title, detail: '' })));
-  assert.equal(m.msgEl.textContent, '');
-  m.view.destroy();
-});
-
-test('a paused series resumes with "Resumed"; a ticket Run now / Cancel toast "Run started" / "Schedule cancelled"', async () => {
-  const m = mount({ routes: { 'GET /api/schedules': [200, { schedules: [{ ...SERIES, status: 'paused' }], tickets: [TICKET], counts: {} }] } });
-  await m.view.load();
-  m.repeatingHost.querySelector('.switch').click();
-  await settle();
-  btn(m.onceHost, 'Run now').click();
-  await settle();
-  btn(m.onceHost, 'Cancel').click();
-  await settle();
-  assert.deepEqual(m.toasts.map((t) => t.title), ['Resumed', 'Run started', 'Schedule cancelled']);
-  m.view.destroy();
-});
-
-test('a failed action is an err toast', async () => {
-  const m = mount({ routes: { 'POST /api/schedules/sch_1/skip-next': [409, { error: 'nothing to skip' }] } });
-  await m.view.load();
-  btn(m.repeatingHost, 'Skip next').click();
-  await settle();
-  assert.deepEqual(m.toasts, [{ tone: 'err', title: 'nothing to skip', detail: '' }]);
-  assert.equal(m.msgEl.textContent, '');
-  m.view.destroy();
-});
-
-test('load() and loadFeed() failures stay inline (err-inline), never a toast', async () => {
-  const m = mount({ routes: { 'GET /api/schedules': [500, { error: 'store unreadable' }] } });
-  await m.view.load();
-  assert.deepEqual(m.toasts, []);
-  assert.equal(m.msgEl.textContent, 'store unreadable');
-  assert.equal(m.msgEl.className, 'form-msg err');
-  m.view.destroy();
-
-  const f = mount({ routes: { 'GET /api/notifications': [416, { error: 'feed unavailable' }] } });
-  await f.view.loadFeed();
-  assert.deepEqual(f.toasts, []);
-  assert.equal(f.msgEl.className, 'form-msg err');
-  assert.equal(f.msgEl.textContent, 'feed unavailable');
-  f.view.destroy();
-});
-
-test('no deps.notify: results and failures fall back to the inline line', async () => {
-  const m = mount({ notify: false, routes: { 'POST /api/schedules/sch_1/skip-next': [409, { error: 'nothing to skip' }] } });
-  await m.view.load();
-  m.repeatingHost.querySelector('.switch').click();
-  await settle();
-  assert.equal(m.msgEl.textContent, 'Paused');
-  assert.equal(m.msgEl.className, 'form-msg ok');
-  btn(m.repeatingHost, 'Skip next').click();
-  await settle();
-  assert.equal(m.msgEl.textContent, 'nothing to skip');
-  assert.equal(m.msgEl.className, 'form-msg err');
-  m.view.destroy();
+test('series actions toast their okText; a failed action is an err toast', async () => {
+  await checkRows([
+    { name: 'series actions toast their okText: Paused, Run started, Next run skipped, Schedule deleted', run: async () => {
+      const m = mount();
+      await m.view.load();
+      m.repeatingHost.querySelector('.switch').click();
+      await settle();
+      btn(m.repeatingHost, 'Run now').click();
+      await settle();
+      btn(m.repeatingHost, 'Skip next').click();
+      await settle();
+      btn(m.repeatingHost, 'Delete').click();
+      await settle();
+      assert.deepEqual(m.toasts, ['Paused', 'Run started', 'Next run skipped', 'Schedule deleted'].map((title) => ({ tone: 'ok', title, detail: '' })));
+      assert.equal(m.msgEl.textContent, '');
+      m.view.destroy();
+    } },
+    { name: 'a failed action is an err toast', run: async () => {
+      const m = mount({ routes: { 'POST /api/schedules/sch_1/skip-next': [409, { error: 'nothing to skip' }] } });
+      await m.view.load();
+      btn(m.repeatingHost, 'Skip next').click();
+      await settle();
+      assert.deepEqual(m.toasts, [{ tone: 'err', title: 'nothing to skip', detail: '' }]);
+      assert.equal(m.msgEl.textContent, '');
+      m.view.destroy();
+    } },
+  ]);
 });

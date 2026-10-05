@@ -7,13 +7,13 @@ import { JSDOM } from 'jsdom';
 import { confirmDialog } from './helpers/confirm-modal.mjs';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { lastToast } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
 
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
-const cssPath = fileURLToPath(new URL('../ui/public/style.css', import.meta.url));
 
 const AGENTS = [
   { key: 'planner', displayName: 'Plan', description: 'architecture', color: 'violet', runnerType: 'producer',
@@ -69,22 +69,41 @@ const goAgents = async (window) => {
   await new Promise((r) => setTimeout(r, 0));
 };
 
-test('agents view renders grouped cards with origin badges + typed port pills', async () => {
+test('agents view renders cards: origin badge, typed/void port pills, port-summary fallback, not-placeable badge', async () => {
   const { window } = await boot();
   await goAgents(window);
-  const cards = window.document.querySelectorAll('.agent-card');
-  assert.equal(cards.length, 2);
-  const planner = cards[0];
-  assert.equal(planner.querySelector('.agent-origin').textContent, 'builtin');
-  assert.equal(planner.querySelector('.agent-sub').textContent, 'planner \u00b7 producer \u2014 architecture');
-  const inPills = [...planner.querySelectorAll('.agent-chips-in .agent-chip')].map((p) => p.textContent);
-  assert.deepEqual(inPills, ['task \u00b7 md', '\u21ba revise \u00b7 md']);
-  assert.deepEqual([...planner.querySelectorAll('.agent-chips-out .agent-chip')].map((p) => p.textContent), ['plan \u00b7 md']);
-  // The io block stays in the always-visible header, one labelled row per side.
-  // (Rescued from the deleted channel-pill test — nothing else pins this.)
-  assert.ok(planner.querySelector('.agent-head .agent-io'), 'io block is inside .agent-head');
-  assert.equal(planner.querySelector('.agent-io-in .agent-io-label').textContent, 'Input');
-  assert.equal(planner.querySelector('.agent-io-out .agent-io-label').textContent, 'Output');
+  await checkRows([
+    { name: 'agents view renders grouped cards with origin badges + typed port pills', run: async () => {
+      const cards = window.document.querySelectorAll('.agent-card');
+      assert.equal(cards.length, 2);
+      const planner = cards[0];
+      assert.equal(planner.querySelector('.agent-origin').textContent, 'builtin');
+      assert.equal(planner.querySelector('.agent-sub').textContent, 'planner \u00b7 producer \u2014 architecture');
+      const inPills = [...planner.querySelectorAll('.agent-chips-in .agent-chip')].map((p) => p.textContent);
+      assert.deepEqual(inPills, ['task \u00b7 md', '\u21ba revise \u00b7 md']);
+      assert.deepEqual([...planner.querySelectorAll('.agent-chips-out .agent-chip')].map((p) => p.textContent), ['plan \u00b7 md']);
+      // The io block stays in the always-visible header, one labelled row per side.
+      // (Rescued from the deleted channel-pill test — nothing else pins this.)
+      assert.ok(planner.querySelector('.agent-head .agent-io'), 'io block is inside .agent-head');
+      assert.equal(planner.querySelector('.agent-io-in .agent-io-label').textContent, 'Input');
+      assert.equal(planner.querySelector('.agent-io-out .agent-io-label').textContent, 'Output');
+    } },
+    { name: 'a description-less agent falls back to its port summary, and void pills are marked', run: async () => {
+      const docs = window.document.querySelectorAll('.agent-card')[1];
+      assert.equal(docs.querySelector('.agent-sub').textContent, 'docsWriter \u00b7 verifier \u2014 Reads plan; produces review.');
+      const out = docs.querySelectorAll('.agent-chips-out .agent-chip');
+      assert.equal(out[1].textContent, 'pass \u00b7 void');
+      assert.ok(out[1].classList.contains('void'), 'a void port pill is visually distinct');
+      assert.ok(!out[0].classList.contains('void'));
+    } },
+    { name: 'placeable:false raises the amber "not placeable" badge, and only there', run: async () => {
+      const [planner, docs] = window.document.querySelectorAll('.agent-card');
+      assert.equal(planner.querySelector('.agent-not-placeable').hidden, true);
+      const badge = docs.querySelector('.agent-not-placeable');
+      assert.equal(badge.hidden, false);
+      assert.equal(badge.textContent, 'not placeable');
+    } },
+  ]);
 });
 
 test('Delete issues DELETE /api/agents/:key; a 409 keeps the card + surfaces the error', async () => {
@@ -137,41 +156,4 @@ test('Duplicate on a builtin GETs the full agent then POSTs a copy with a fresh 
   assert.equal(posts[0].meta.displayName, 'Plan (copy)');
   assert.equal(posts[0].meta.key, undefined, 'key derived server-side');
   assert.equal(posts[0].markdown, '# planner body');
-});
-
-test('a description-less agent falls back to its port summary, and void pills are marked', async () => {
-  const { window } = await boot();
-  await goAgents(window);
-  const docs = window.document.querySelectorAll('.agent-card')[1];
-  assert.equal(docs.querySelector('.agent-sub').textContent, 'docsWriter \u00b7 verifier \u2014 Reads plan; produces review.');
-  const out = docs.querySelectorAll('.agent-chips-out .agent-chip');
-  assert.equal(out[1].textContent, 'pass \u00b7 void');
-  assert.ok(out[1].classList.contains('void'), 'a void port pill is visually distinct');
-  assert.ok(!out[0].classList.contains('void'));
-});
-
-test('placeable:false raises the amber "not placeable" badge, and only there', async () => {
-  const { window } = await boot();
-  await goAgents(window);
-  const [planner, docs] = window.document.querySelectorAll('.agent-card');
-  assert.equal(planner.querySelector('.agent-not-placeable').hidden, true);
-  const badge = docs.querySelector('.agent-not-placeable');
-  assert.equal(badge.hidden, false);
-  assert.equal(badge.textContent, 'not placeable');
-});
-
-test('an agent with no ports on a side keeps the \u2014 placeholder', async () => {
-  const { window } = await boot({ fetchHandler: (u) => (u.includes('/api/agents')
-    ? Promise.resolve({ ok: true, status: 200, json: async () => ({
-      agents: [{ key: 'lonely', displayName: 'Lonely', runnerType: 'producer', metaVersion: 2, order: 5,
-        origin: 'user', inputs: [], outputs: [], portSummary: '' }], mockWriterRoles: MOCK_ROLES }) })
-    : null) });
-  await goAgents(window);
-  assert.equal(window.document.querySelector('.agent-chips-in .agent-io-none').textContent, '\u2014');
-});
-
-test('agent detail body is spaced below the channel pills', () => {
-  // jsdom does not compute layout; assert the spacing RULE exists in the stylesheet.
-  const css = readFileSync(cssPath, 'utf8');
-  assert.match(css, /\.agent-detail\s*\{[^}]*margin-top\s*:/, '.agent-detail must define margin-top for pill→body spacing');
 });

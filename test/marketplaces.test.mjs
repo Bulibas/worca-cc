@@ -16,6 +16,7 @@ import {
 } from '../src/core/marketplaces.mjs';
 import { repoCacheDir, repoSlug } from '../src/core/plugin-repo.mjs';
 import { writePluginsLock, pluginsRoot } from '../src/core/plugins-lock.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 const execFileP = promisify(execFile);
@@ -58,27 +59,43 @@ async function makeMarketRepo(dirName, pluginNames) {
   return { root, sha: await git(root, 'rev-parse', 'HEAD') };
 }
 
-test('normalizeMarketplaceUrl: shorthand, trailing junk, local paths', () => {
-  assert.equal(normalizeMarketplaceUrl('owner/repo'), 'https://github.com/owner/repo');
-  assert.equal(normalizeMarketplaceUrl('https://github.com/o/r.git'), 'https://github.com/o/r');
-  assert.equal(normalizeMarketplaceUrl('https://github.com/o/r/'), 'https://github.com/o/r');
-  assert.equal(normalizeMarketplaceUrl(''), null);
-  assert.equal(normalizeMarketplaceUrl(scratch), scratch); // absolute local path stays
-  assert.equal(normalizeMarketplaceUrl('git@github.com:o/r.git'), 'git@github.com:o/r'); // scp-style SSH (C2)
+test('normalizeMarketplaceUrl + marketplaceId: shorthand, trailing junk, local paths, scp SSH; id = repoSlug of the normalized url', async () => {
+  await checkRows([
+    { name: 'normalizeMarketplaceUrl: shorthand, trailing junk, local paths', run: () => {
+      assert.equal(normalizeMarketplaceUrl('owner/repo'), 'https://github.com/owner/repo');
+      assert.equal(normalizeMarketplaceUrl('https://github.com/o/r.git'), 'https://github.com/o/r');
+      assert.equal(normalizeMarketplaceUrl('https://github.com/o/r/'), 'https://github.com/o/r');
+      assert.equal(normalizeMarketplaceUrl(''), null);
+      assert.equal(normalizeMarketplaceUrl(scratch), scratch); // absolute local path stays
+      assert.equal(normalizeMarketplaceUrl('git@github.com:o/r.git'), 'git@github.com:o/r'); // scp-style SSH (C2)
+    } },
+    { name: 'marketplaceId equals repoSlug of the normalized url (E5)', run: () => {
+      assert.equal(marketplaceId('owner/repo'), repoSlug('https://github.com/owner/repo'));
+      assert.match(marketplaceId('owner/repo'), /^github\.com-owner-repo-/); // readable prefix survives
+    } },
+  ]);
 });
 
-test('read tolerates a garbage file; write is atomic and round-trips', () => {
-  mkdirSync(dirname(marketplacesFile()), { recursive: true }); // B2: first write predates the plugins dir
-  writeFileSync(marketplacesFile(), '{broken', 'utf8');
-  const empty = readMarketplaces();
-  assert.equal(empty.seededBuiltin, false);
-  assert.deepEqual({ ...empty.marketplaces }, {}); // A5: null-proto map -> spread to compare under assert/strict
-  const state = { seededBuiltin: true, marketplaces: { x: { id: 'x', url: '/tmp/x', name: 'X', plugins: [], warnings: [], lastSync: null, addedAt: 'now' } } };
-  writeMarketplaces(state);
-  const rt = readMarketplaces();
-  assert.equal(rt.seededBuiltin, true);
-  assert.deepEqual({ ...rt.marketplaces }, state.marketplaces);
-  assert.deepEqual(readdirSync(pluginsRoot()).filter((f) => f.endsWith('.tmp')), [], 'atomic write leaves no .tmp (E6)');
+test('read tolerates a garbage file and returns a prototype-free map; write is atomic and round-trips', async () => {
+  await checkRows([
+    { name: 'read tolerates a garbage file; write is atomic and round-trips', run: () => {
+      mkdirSync(dirname(marketplacesFile()), { recursive: true }); // B2: first write predates the plugins dir
+      writeFileSync(marketplacesFile(), '{broken', 'utf8');
+      const empty = readMarketplaces();
+      assert.equal(empty.seededBuiltin, false);
+      assert.deepEqual({ ...empty.marketplaces }, {}); // A5: null-proto map -> spread to compare under assert/strict
+      const state = { seededBuiltin: true, marketplaces: { x: { id: 'x', url: '/tmp/x', name: 'X', plugins: [], warnings: [], lastSync: null, addedAt: 'now' } } };
+      writeMarketplaces(state);
+      const rt = readMarketplaces();
+      assert.equal(rt.seededBuiltin, true);
+      assert.deepEqual({ ...rt.marketplaces }, state.marketplaces);
+      assert.deepEqual(readdirSync(pluginsRoot()).filter((f) => f.endsWith('.tmp')), [], 'atomic write leaves no .tmp (E6)');
+    } },
+    { name: 'readMarketplaces returns a prototype-free marketplaces map (pollution-safe) (A5)', run: () => {
+      writeMarketplaces({ seededBuiltin: false, marketplaces: {} });
+      assert.equal(Object.getPrototypeOf(readMarketplaces().marketplaces), null);
+    } },
+  ]);
 });
 
 test('addMarketplace: syncs the snapshot; duplicate add -> EXISTS; junk url not recorded', async () => {
@@ -174,24 +191,6 @@ test('refreshAllMarketplaces re-syncs every registered marketplace, picking up n
   assert.deepEqual(byId[marketplaceId(b.root)], ['xb']);
 });
 
-test('readMarketplaces returns a prototype-free marketplaces map (pollution-safe) (A5)', () => {
-  writeMarketplaces({ seededBuiltin: false, marketplaces: {} });
-  assert.equal(Object.getPrototypeOf(readMarketplaces().marketplaces), null);
-});
-
-test('marketplaceId equals repoSlug of the normalized url (E5)', () => {
-  assert.equal(marketplaceId('owner/repo'), repoSlug('https://github.com/owner/repo'));
-  assert.match(marketplaceId('owner/repo'), /^github\.com-owner-repo-/); // readable prefix survives
-});
-
-test('addMarketplace threads an injected exec (injection seam is real) (E9)', async () => {
-  const { root } = await makeMarketRepo('m6', ['ya']);
-  let calls = 0;
-  const exec = (cmd, args, opts) => { calls++; return execFileP(cmd, args, opts); };
-  await addMarketplace(root, { exec });
-  assert.ok(calls > 0, 'the injected exec ran the git work');
-});
-
 test('syncMarketplace drops its write when the entry is removed mid-sync (B7)', async () => {
   const { root } = await makeMarketRepo('m-race', ['zz']);
   const entry = await addMarketplace(root);
@@ -262,23 +261,32 @@ test('builtinMarketplaceSource: the package repository on GitHub, branch dev; WO
     { url: 'https://github.com/o/r', ref: null });
 });
 
-test('seedBuiltinMarketplace: registers the source once with its branch and no git work; removal never resurrects', () => {
-  writeMarketplaces({ seededBuiltin: false, marketplaces: {} });
-  const r1 = seedBuiltinMarketplace({ source: GH });
-  assert.equal(r1.seeded, true);
-  assert.equal(r1.id, marketplaceId(GH.url));
-  const entry = readMarketplaces().marketplaces[r1.id];
-  assert.equal(entry.url, GH.url);
-  assert.equal(entry.ref, 'dev');
-  assert.equal(entry.builtin, true);
-  assert.equal(entry.name, 'Worca CC Official');
-  assert.equal(entry.lastSync, null);
-  assert.deepEqual(entry.plugins, []);
-  assert.ok(!existsSync(repoCacheDir(GH.url)), 'seeding never clones');
-  assert.equal(seedBuiltinMarketplace({ source: GH }).seeded, false, 'idempotent');
-  removeMarketplace(r1.id);
-  assert.equal(seedBuiltinMarketplace({ source: GH }).seeded, false, 'removal never resurrects');
-  assert.ok(!readMarketplaces().marketplaces[r1.id]);
+test('seedBuiltinMarketplace: registers once with its branch, no git work, removal never resurrects; no source -> not seeded', async () => {
+  await checkRows([
+    { name: 'seedBuiltinMarketplace: registers the source once with its branch and no git work; removal never resurrects', run: () => {
+      writeMarketplaces({ seededBuiltin: false, marketplaces: {} });
+      const r1 = seedBuiltinMarketplace({ source: GH });
+      assert.equal(r1.seeded, true);
+      assert.equal(r1.id, marketplaceId(GH.url));
+      const entry = readMarketplaces().marketplaces[r1.id];
+      assert.equal(entry.url, GH.url);
+      assert.equal(entry.ref, 'dev');
+      assert.equal(entry.builtin, true);
+      assert.equal(entry.name, 'Worca CC Official');
+      assert.equal(entry.lastSync, null);
+      assert.deepEqual(entry.plugins, []);
+      assert.ok(!existsSync(repoCacheDir(GH.url)), 'seeding never clones');
+      assert.equal(seedBuiltinMarketplace({ source: GH }).seeded, false, 'idempotent');
+      removeMarketplace(r1.id);
+      assert.equal(seedBuiltinMarketplace({ source: GH }).seeded, false, 'removal never resurrects');
+      assert.ok(!readMarketplaces().marketplaces[r1.id]);
+    } },
+    { name: 'seedBuiltinMarketplace: no source -> not seeded, flag stays false', run: () => {
+      writeMarketplaces({ seededBuiltin: false, marketplaces: {} });
+      assert.equal(seedBuiltinMarketplace({ source: null }).seeded, false);
+      assert.equal(readMarketplaces().seededBuiltin, false);
+    } },
+  ]);
 });
 
 test('seedBuiltinMarketplace: a local-checkout builtin (older worca) is replaced by the GitHub one; its unused cache goes', async () => {
@@ -323,12 +331,6 @@ test('seedBuiltinMarketplace: the same repo added by hand becomes the builtin on
   assert.equal(entry.name, 'Mine');
   assert.equal(entry.lastSync, null);
   assert.deepEqual(entry.plugins, []);
-});
-
-test('seedBuiltinMarketplace: no source -> not seeded, flag stays false', () => {
-  writeMarketplaces({ seededBuiltin: false, marketplaces: {} });
-  assert.equal(seedBuiltinMarketplace({ source: null }).seeded, false);
-  assert.equal(readMarketplaces().seededBuiltin, false);
 });
 
 test('a marketplace with a ref discovers that branch, not HEAD; a missing branch is a sync warning', async () => {

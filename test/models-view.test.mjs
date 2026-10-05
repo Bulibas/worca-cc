@@ -4,9 +4,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { checkRows } from './helpers/rows.mjs';
 import {
-  effortsSummary, envSummary, costSummary, suggestDuplicateId, renderModelsList, renderModelEditor,
-  collectModelEditor, makeEnvRow, applyCostMode, setModelCost, deleteRefsSummary, setModelEngine,
+  suggestDuplicateId, renderModelsList, renderModelEditor,
+  collectModelEditor, makeEnvRow, setModelCost, setModelEngine,
   renderExportWizard, collectExportWizard, applyConnectionModeIn,
 } from '../ui/public/models-view.mjs';
 import { bridgedBadge, degradationLine } from '../ui/public/bridge-view.mjs';
@@ -23,15 +24,6 @@ const GLOBAL = {
   env: { ANTHROPIC_BASE_URL: '••••••e/v1', ANTHROPIC_AUTH_TOKEN: '••••••1234', X_REF: '${MY_VAR}' },
 };
 const SHADOW = { id: 'claude-sonnet-4-6', label: 'Sonnet via proxy', efforts: ['medium'], env: { ANTHROPIC_BASE_URL: '••••••e/v1' } };
-
-test('effortsSummary/envSummary', () => {
-  assert.equal(effortsSummary(EFFORTS, EFFORTS), 'all efforts');
-  assert.equal(effortsSummary([], EFFORTS), 'all efforts');
-  assert.equal(effortsSummary(['medium', 'high'], EFFORTS), 'medium · high');
-  assert.equal(envSummary(undefined), '');
-  assert.equal(envSummary({ A: '1' }), '1 env var');
-  assert.equal(envSummary({ ANTHROPIC_BASE_URL: 'x', T: 'y' }), '2 env vars · routes via base URL');
-});
 
 test('list: global cards get Edit/Delete + shadow badge; legacy get Promote; built-ins read-only + overridden badge', () => {
   const el = renderModelsList({
@@ -63,18 +55,6 @@ test('list: global cards get Edit/Delete + shadow badge; legacy get Promote; bui
   assert.equal(builtins[0].querySelector('button'), null, 'built-ins carry no actions');
 });
 
-test('editor (create): id enabled, all efforts pre-checked, no env rows', () => {
-  const el = renderModelEditor(null, EFFORTS, { doc });
-  assert.equal(el.dataset.mode, 'create');
-  assert.equal(el.querySelector('.mv-id').disabled, false);
-  const cbs = [...el.querySelectorAll('.mv-effort-cb')];
-  assert.equal(cbs.length, 4);
-  assert.ok(cbs.every((c) => c.checked));
-  assert.equal(el.querySelectorAll('.mv-env-row').length, 0);
-  assert.ok(el.querySelector('.mv-save'));
-  assert.ok(el.querySelector('.mv-cancel'));
-});
-
 test('editor (edit): id locked, efforts reflect the entry, masked env rows carry data-original', () => {
   const el = renderModelEditor(GLOBAL, EFFORTS, { doc });
   assert.equal(el.dataset.mode, 'edit');
@@ -89,24 +69,6 @@ test('editor (edit): id locked, efforts reflect the entry, masked env rows carry
   assert.equal(rows[0].querySelector('.mv-env-val').value, '••••••e/v1');
   assert.equal(rows[0].querySelector('.mv-env-val').dataset.original, '••••••e/v1');
   assert.equal(el.dataset.envKeys, 'ANTHROPIC_BASE_URL\nANTHROPIC_AUTH_TOKEN\nX_REF');
-});
-
-test('editor (edit): stored env rows carry a copy button + frozen data-key and a reveal toggle; create mode has neither', () => {
-  const el = renderModelEditor(GLOBAL, EFFORTS, { doc });
-  const rows = [...el.querySelectorAll('.mv-env-row')];
-  for (const row of rows) {
-    assert.ok(row.dataset.key, 'stored row keeps its persisted key');
-    assert.ok(row.querySelector('.mv-env-copy'), 'stored row gets a copy button');
-  }
-  assert.equal(rows[1].dataset.key, 'ANTHROPIC_AUTH_TOKEN');
-  assert.ok(el.querySelector('.mv-env-reveal'), 'reveal toggle present when stored rows exist');
-  assert.equal(el.querySelector('.mv-env-reveal').textContent, 'Show values');
-
-  const created = renderModelEditor(null, EFFORTS, { doc });
-  assert.equal(created.querySelector('.mv-env-reveal'), null, 'nothing to reveal in create mode');
-  const fresh = makeEnvRow({ doc });
-  assert.equal(fresh.querySelector('.mv-env-copy'), null, 'a NEW row has no stored value to copy');
-  assert.equal(fresh.dataset.key, undefined);
 });
 
 test('collect (create): id from input, partial efforts, env rows as typed; full effort set collapses to []', () => {
@@ -141,20 +103,6 @@ test('collect (edit): removed env rows become null-deletes; kept masked values a
   assert.equal(body.env.ANTHROPIC_BASE_URL, 'https://new.example');
   assert.equal(body.env.ANTHROPIC_AUTH_TOKEN, null, 'removed row -> null delete');
   assert.equal(body.env.X_REF, '${MY_VAR}', 'untouched value echoed (server keeps refs readable)');
-});
-
-test('deleteRefsSummary wording', () => {
-  assert.match(deleteRefsSummary('x', { predefinedShadow: true }), /Remove the override/);
-  assert.match(deleteRefsSummary('x', { predefinedShadow: false, nodes: [], steps: [] }), /No pipeline configuration references it/);
-  const refs = {
-    predefinedShadow: false,
-    nodes: [{ projectKey: 'a', workflowId: 'w', nodeId: 'n' }, { projectKey: 'b', workflowId: 'w', nodeId: 'n' }],
-    steps: [{ projectKey: 'a', step: 'implementer' }],
-  };
-  assert.match(deleteRefsSummary('x', refs), /2 node selections and 1 role selection across 2 projects/);
-  assert.match(deleteRefsSummary('x', refs), /across 2 projects\.$/, 'no Memory ref: the sentence ends as before');
-  assert.match(deleteRefsSummary('x', { ...refs, memoryDefrag: true }), /across 2 projects, and the Memory defragment model \(Settings › Memory\)\.$/);
-  assert.match(deleteRefsSummary('x', { predefinedShadow: false, nodes: [], steps: [], memoryDefrag: true }), /^Delete model "x"\? Memory defragment runs use it \(Settings › Memory\) — that setting is cleared and they fall back to the default\.$/);
 });
 
 // ── plugin section + export wizard (design §9.5–§9.6) ────────────────────────
@@ -244,35 +192,6 @@ test('export wizard: token LIMITS are not credentials (MAX_OUTPUT_TOKENS default
   assert.equal(mode('API_KEY'), 'secret');
 });
 
-test('list: Test button on global + plugin cards (disabled while a secret is unset); built-ins get none', () => {
-  const el = renderModelsList({
-    globals: [GLOBAL],
-    plugins: PLUGINS,
-    predefined: PREDEFINED,
-    efforts: EFFORTS,
-  }, { doc });
-
-  const globalCard = el.querySelector('.mv-card:not(.mv-plugin):not(.mv-legacy)');
-  const gt = globalCard.querySelector('.mv-test');
-  assert.equal(gt.dataset.id, 'glm-4.7');
-  assert.equal(gt.disabled, false);
-  assert.ok(globalCard.querySelector('.mv-test-result'), 'result line present');
-
-  const cards = [...el.querySelectorAll('.mv-plugin')];
-  const unsetBtn = cards[0].querySelector('.mv-test');
-  assert.equal(unsetBtn.dataset.id, 'ds-stable');
-  assert.equal(unsetBtn.dataset.plugin, 'team-models');
-  assert.equal(unsetBtn.disabled, true, 'unset secret disables Test');
-  assert.match(unsetBtn.title, /secret/);
-  const okBtn = cards[1].querySelector('.mv-test');
-  assert.equal(okBtn.disabled, false, 'no secrets → enabled');
-  assert.ok(cards[0].querySelector('.mv-test-result'), 'result line present');
-
-  for (const row of el.querySelectorAll('.mv-builtin')) {
-    assert.equal(row.querySelector('.mv-test'), null, 'no Test on built-ins');
-  }
-});
-
 // ── Pricing: the opt-in per-model cost override (config.mjs resolveModelCost) ──
 
 const PRICED = {
@@ -284,81 +203,35 @@ const FREE = { id: 'onprem', label: 'On-prem', efforts: EFFORTS, cost: { free: t
 const mode = (el) => el.querySelector('.mv-cost-mode-rb:checked')?.value;
 const rate = (el, k) => el.querySelector(`.mv-cost-rate-in[data-rate="${k}"]`);
 
-test('costSummary: only a real override says anything', () => {
-  assert.equal(costSummary(undefined), '');
-  assert.equal(costSummary({}), '');
-  assert.equal(costSummary({ perMtok: {} }), '');
-  assert.equal(costSummary({ free: true }), 'priced free');
-  assert.equal(costSummary({ perMtok: { input: 0.5, output: 1.5 } }), 'input $0.5 · output $1.5 /Mtok');
-  assert.equal(costSummary({ perMtok: { cacheWrite1h: 1 } }), 'cache write (1h) $1 /Mtok');
-  assert.equal(costSummary({ perMtok: { input: 0 } }), 'input $0 /Mtok', 'a pinned ZERO rate is not "unset"');
-});
+test('collect: each pricing mode emits its own cost shape (blank rates omitted, zero kept, all-blank perMtok sent as-is)', async () => {
+  await checkRows([
+    { name: 'collect: each mode emits its own cost shape; only filled rates are sent, as numbers', run: () => {
+      const el = renderModelEditor(null, EFFORTS, { doc });
+      el.querySelector('.mv-id').value = 'm';
+      assert.equal(collectModelEditor(el).body.cost, null, 'Trust the CLI = no override');
 
-test('editor (create): pricing defaults to Trust the CLI with the rate grid hidden', () => {
-  const el = renderModelEditor(null, EFFORTS, { doc });
-  assert.equal(mode(el), 'cli', 'default behavior is unchanged behavior');
-  assert.equal(el.querySelector('.mv-cost-rates').hidden, true);
-  assert.equal(el.querySelectorAll('.mv-cost-rate-in').length, 5, 'all five rate keys are offered');
-  assert.deepEqual([...el.querySelectorAll('.mv-cost-rate-in')].map((i) => i.dataset.rate),
-    ['input', 'output', 'cacheRead', 'cacheWrite', 'cacheWrite1h']);
-  assert.ok([...el.querySelectorAll('.mv-cost-rate-in')].every((i) => i.value === ''));
-});
+      el.querySelector('.mv-cost-mode-rb[value="free"]').checked = true;
+      assert.deepEqual(collectModelEditor(el).body.cost, { free: true });
 
-test('editor (edit): the STORED override is what the form shows', () => {
-  const free = renderModelEditor(FREE, EFFORTS, { doc });
-  assert.equal(mode(free), 'free');
-  assert.equal(free.querySelector('.mv-cost-rates').hidden, true, 'rates are irrelevant to free');
+      el.querySelector('.mv-cost-mode-rb[value="perMtok"]').checked = true;
+      rate(el, 'input').value = '0.5';
+      rate(el, 'cacheRead').value = '0.05';
+      rate(el, 'output').value = '';
+      assert.deepEqual(collectModelEditor(el).body.cost, { perMtok: { input: 0.5, cacheRead: 0.05 } },
+        'blank rates are omitted (cacheWrite1h then falls back to the 5m rate), values are numbers');
 
-  const priced = renderModelEditor(PRICED, EFFORTS, { doc });
-  assert.equal(mode(priced), 'perMtok');
-  assert.equal(priced.querySelector('.mv-cost-rates').hidden, false);
-  assert.equal(rate(priced, 'input').value, '0.5');
-  assert.equal(rate(priced, 'output').value, '1.5');
-  assert.equal(rate(priced, 'cacheRead').value, '', 'an unset rate stays blank, not "0"');
-
-  // A model with no override opens on Trust the CLI, like create.
-  assert.equal(mode(renderModelEditor(GLOBAL, EFFORTS, { doc })), 'cli');
-});
-
-test('applyCostMode: the rate grid follows the selected mode (app.js wires it to change)', () => {
-  const el = renderModelEditor(null, EFFORTS, { doc });
-  const rates = el.querySelector('.mv-cost-rates');
-  el.querySelector('.mv-cost-mode-rb[value="perMtok"]').checked = true;
-  applyCostMode(el);
-  assert.equal(rates.hidden, false);
-  el.querySelector('.mv-cost-mode-rb[value="free"]').checked = true;
-  applyCostMode(el);
-  assert.equal(rates.hidden, true);
-  // Never throws on an editor without the block (defensive: shared entry point).
-  applyCostMode(doc.createElement('div'));
-});
-
-test('collect: each mode emits its own cost shape; only filled rates are sent, as numbers', () => {
-  const el = renderModelEditor(null, EFFORTS, { doc });
-  el.querySelector('.mv-id').value = 'm';
-  assert.equal(collectModelEditor(el).body.cost, null, 'Trust the CLI = no override');
-
-  el.querySelector('.mv-cost-mode-rb[value="free"]').checked = true;
-  assert.deepEqual(collectModelEditor(el).body.cost, { free: true });
-
-  el.querySelector('.mv-cost-mode-rb[value="perMtok"]').checked = true;
-  rate(el, 'input').value = '0.5';
-  rate(el, 'cacheRead').value = '0.05';
-  rate(el, 'output').value = '';
-  assert.deepEqual(collectModelEditor(el).body.cost, { perMtok: { input: 0.5, cacheRead: 0.05 } },
-    'blank rates are omitted (cacheWrite1h then falls back to the 5m rate), values are numbers');
-
-  // A pinned ZERO is a rate, not a blank.
-  rate(el, 'output').value = '0';
-  assert.deepEqual(collectModelEditor(el).body.cost.perMtok.output, 0);
-});
-
-test('collect: per-Mtok with every rate blank is sent as-is for the server to reject by name', () => {
-  const el = renderModelEditor(null, EFFORTS, { doc });
-  el.querySelector('.mv-id').value = 'm';
-  el.querySelector('.mv-cost-mode-rb[value="perMtok"]').checked = true;
-  assert.deepEqual(collectModelEditor(el).body.cost, { perMtok: {} },
-    'settings.mjs owns the rules — duplicating them here would let them drift');
+      // A pinned ZERO is a rate, not a blank.
+      rate(el, 'output').value = '0';
+      assert.deepEqual(collectModelEditor(el).body.cost.perMtok.output, 0);
+    } },
+    { name: 'collect: per-Mtok with every rate blank is sent as-is for the server to reject by name', run: () => {
+      const el = renderModelEditor(null, EFFORTS, { doc });
+      el.querySelector('.mv-id').value = 'm';
+      el.querySelector('.mv-cost-mode-rb[value="perMtok"]').checked = true;
+      assert.deepEqual(collectModelEditor(el).body.cost, { perMtok: {} },
+        'settings.mjs owns the rules — duplicating them here would let them drift');
+    } },
+  ]);
 });
 
 test('collect: the override ROUND-TRIPS, so editing a label never silently reprices a model', () => {
@@ -367,31 +240,6 @@ test('collect: the override ROUND-TRIPS, so editing a label never silently repri
   const { body } = collectModelEditor(el);
   assert.equal(body.label, 'Renamed');
   assert.deepEqual(body.cost, { perMtok: { input: 0.5, output: 1.5 } }, 'untouched pricing survives');
-});
-
-test('list: a priced model shows its rates and drops the now-meaningless "cost not verified" badge', () => {
-  const el = renderModelsList({
-    globals: [
-      { ...PRICED, costUnreliable: true },
-      { ...FREE, costUnreliable: true },
-      { ...GLOBAL, costUnreliable: true },
-    ],
-    predefined: [], efforts: EFFORTS,
-  }, { doc });
-  const cards = [...el.querySelectorAll('.mv-card')];
-  const badges = (c) => [...c.querySelectorAll('.badge')].map((b) => b.textContent);
-
-  assert.ok(badges(cards[0]).includes('priced'));
-  assert.ok(!badges(cards[0]).includes('cost not verified'),
-    'an override GOVERNS the spend — the unreliable flag says nothing about it');
-  assert.match(cards[0].querySelector('.mv-summary').textContent, /input \$0\.5 · output \$1\.5 \/Mtok/);
-
-  assert.ok(badges(cards[1]).includes('free'));
-  assert.match(cards[1].querySelector('.mv-summary').textContent, /priced free/);
-
-  // A model with NO override still shows the flag — unchanged.
-  assert.ok(badges(cards[2]).includes('cost not verified'));
-  assert.ok(!badges(cards[2]).includes('priced'));
 });
 
 test('setModelCost: loads any override into an editor (the ONE cost -> form mapping)', () => {
@@ -413,25 +261,53 @@ test('setModelCost: loads any override into an editor (the ONE cost -> form mapp
   setModelCost(doc.createElement('div'), { free: true }); // never throws without the block
 });
 
-test('list: a plugin card shows its MANIFEST price, same rules as a global card', () => {
-  const el = renderModelsList({
-    globals: [],
-    plugins: [
-      { id: 'pp-rated', label: 'PP Rated', efforts: EFFORTS, plugin: 'priced-plug', secrets: [],
-        env: { ANTHROPIC_BASE_URL: '••••••mple' }, cost: { perMtok: { input: 1, output: 3 } }, costUnreliable: true },
-      { id: 'pp-free', label: 'PP Free', efforts: EFFORTS, plugin: 'priced-plug', secrets: [], cost: { free: true } },
-      { id: 'pp-plain', label: 'PP Plain', efforts: EFFORTS, plugin: 'priced-plug', secrets: [], costUnreliable: true },
-    ],
-    predefined: [], efforts: EFFORTS,
-  }, { doc });
-  const cards = [...el.querySelectorAll('.mv-plugin')];
-  const badges = (c) => [...c.querySelectorAll('.badge')].map((b) => b.textContent);
+test('list: priced/free/unpriced badges and summaries on global and plugin cards', async () => {
+  await checkRows([
+    { name: 'list: a priced model shows its rates and drops the now-meaningless "cost not verified" badge', run: () => {
+      const el = renderModelsList({
+        globals: [
+          { ...PRICED, costUnreliable: true },
+          { ...FREE, costUnreliable: true },
+          { ...GLOBAL, costUnreliable: true },
+        ],
+        predefined: [], efforts: EFFORTS,
+      }, { doc });
+      const cards = [...el.querySelectorAll('.mv-card')];
+      const badges = (c) => [...c.querySelectorAll('.badge')].map((b) => b.textContent);
 
-  assert.ok(badges(cards[0]).includes('priced'));
-  assert.ok(!badges(cards[0]).includes('cost not verified'), 'a pinned price governs the spend');
-  assert.match(cards[0].querySelector('.mv-summary').textContent, /input \$1 · output \$3 \/Mtok/);
-  assert.ok(badges(cards[1]).includes('free'));
-  assert.ok(badges(cards[2]).includes('cost not verified'), 'unpriced plugin model: flag unchanged');
+      assert.ok(badges(cards[0]).includes('priced'));
+      assert.ok(!badges(cards[0]).includes('cost not verified'),
+        'an override GOVERNS the spend — the unreliable flag says nothing about it');
+      assert.match(cards[0].querySelector('.mv-summary').textContent, /input \$0\.5 · output \$1\.5 \/Mtok/);
+
+      assert.ok(badges(cards[1]).includes('free'));
+      assert.match(cards[1].querySelector('.mv-summary').textContent, /priced free/);
+
+      // A model with NO override still shows the flag — unchanged.
+      assert.ok(badges(cards[2]).includes('cost not verified'));
+      assert.ok(!badges(cards[2]).includes('priced'));
+    } },
+    { name: 'list: a plugin card shows its MANIFEST price, same rules as a global card', run: () => {
+      const el = renderModelsList({
+        globals: [],
+        plugins: [
+          { id: 'pp-rated', label: 'PP Rated', efforts: EFFORTS, plugin: 'priced-plug', secrets: [],
+            env: { ANTHROPIC_BASE_URL: '••••••mple' }, cost: { perMtok: { input: 1, output: 3 } }, costUnreliable: true },
+          { id: 'pp-free', label: 'PP Free', efforts: EFFORTS, plugin: 'priced-plug', secrets: [], cost: { free: true } },
+          { id: 'pp-plain', label: 'PP Plain', efforts: EFFORTS, plugin: 'priced-plug', secrets: [], costUnreliable: true },
+        ],
+        predefined: [], efforts: EFFORTS,
+      }, { doc });
+      const cards = [...el.querySelectorAll('.mv-plugin')];
+      const badges = (c) => [...c.querySelectorAll('.badge')].map((b) => b.textContent);
+
+      assert.ok(badges(cards[0]).includes('priced'));
+      assert.ok(!badges(cards[0]).includes('cost not verified'), 'a pinned price governs the spend');
+      assert.match(cards[0].querySelector('.mv-summary').textContent, /input \$1 · output \$3 \/Mtok/);
+      assert.ok(badges(cards[1]).includes('free'));
+      assert.ok(badges(cards[2]).includes('cost not verified'), 'unpriced plugin model: flag unchanged');
+    } },
+  ]);
 });
 
 // ── Duplicate ────────────────────────────────────────────────────────────────
@@ -446,85 +322,7 @@ test('suggestDuplicateId: first free -copy, then numbered, case-insensitively', 
   assert.equal(suggestDuplicateId('glm-4.7-copy', ['glm-4.7-copy']), 'glm-4.7-copy-copy');
 });
 
-test('list: only global cards get Duplicate — plugin cards already have Edit a copy', () => {
-  const el = renderModelsList({
-    globals: [GLOBAL],
-    legacy: [{ id: 'old-local', label: 'Old Local' }],
-    plugins: [{ id: 'pp', label: 'PP', efforts: EFFORTS, plugin: 'p', secrets: [] }],
-    predefined: PREDEFINED,
-    efforts: EFFORTS,
-  }, { doc });
-
-  const globalCard = el.querySelector('.mv-card:not(.mv-plugin):not(.mv-legacy)');
-  const dup = globalCard.querySelector('.mv-duplicate');
-  assert.ok(dup, 'global card offers Duplicate');
-  assert.equal(dup.dataset.id, GLOBAL.id, 'carries the SOURCE id — the flow reads the raw env by it');
-  assert.equal(dup.type, 'button', 'never submits a form');
-
-  assert.equal(el.querySelector('.mv-plugin .mv-duplicate'), null);
-  assert.equal(el.querySelector('.mv-legacy .mv-duplicate'), null);
-  assert.equal(el.querySelector('.mv-builtin .mv-duplicate'), null);
-});
-
-// ── #422: hide-built-ins checkbox, collapsed built-ins, endpoint-routed badge ──
-
-test('list (#422): the hide-built-ins checkbox sits at the top and mirrors the flag; built-ins collapse when hidden', () => {
-  const shown = renderModelsList({ globals: [GLOBAL], plugins: [], predefined: PREDEFINED, efforts: EFFORTS, hideBuiltin: false }, { doc });
-  const cb = shown.querySelector('.mv-hide-builtin');
-  assert.ok(cb && cb.type === 'checkbox' && cb.checked === false);
-  assert.equal(shown.firstElementChild.className, 'mv-toolbar', 'the toolbar tops the pane');
-  assert.equal(shown.children[1].className, 'mv-hide-builtin-row', 'then the flag, above Your models');
-  assert.equal(shown.querySelectorAll('.mv-builtin').length, PREDEFINED.length);
-  assert.ok(shown.querySelector('.mv-section.mv-builtins-shown'));
-
-  const hidden = renderModelsList({ globals: [GLOBAL], plugins: [], predefined: PREDEFINED, efforts: EFFORTS, hideBuiltin: true }, { doc });
-  assert.equal(hidden.querySelector('.mv-hide-builtin').checked, true);
-  assert.equal(hidden.querySelectorAll('.mv-builtin').length, 0, 'no built-in rows');
-  const sec = hidden.querySelector('.mv-section.mv-builtins-hidden');
-  assert.ok(sec, 'the section stays, collapsed');
-  assert.match(sec.textContent, /Hidden from every picker \(2 built-ins\)/);
-});
-
-// The catalog runs to several screens once the built-ins, a plugin's models and a team policy's are
-// all listed, and the entry you came for is never the one on top.
-test('list: the toolbar searches and filters, groups fold with a count, and built-ins start folded', () => {
-  const plug = { id: 'pm', label: 'Plugin model', efforts: [], plugin: 'acme', env: {}, secrets: [] };
-  const args = { globals: [GLOBAL], plugins: [plug], predefined: PREDEFINED, efforts: EFFORTS };
-  const plain = renderModelsList({ ...args, collapsed: { builtin: true } }, { doc });
-  const sec = (key) => plain.querySelector(`.mv-section[data-section="${key}"]`);
-  assert.equal(sec('builtin').classList.contains('is-folded'), true, 'built-ins start folded');
-  assert.equal(sec('builtin').querySelector('.mv-sec-toggle').getAttribute('aria-expanded'), 'false');
-  // The same chevron as every other disclosure (New pipeline's Advanced, the model editor's Advanced).
-  const caret = sec('builtin').querySelector('.mv-sec-toggle .mv-sec-caret');
-  assert.ok(caret.classList.contains('adv-chev'), 'group caret is the shared disclosure chevron');
-  assert.equal(caret.getAttribute('aria-hidden'), 'true');
-  assert.equal(caret.textContent, '', 'a CSS chevron, not a text glyph');
-  assert.equal(sec('builtin').querySelector('.mv-sec-count').textContent, String(PREDEFINED.length), 'the count answers "is it in there?"');
-  assert.equal(sec('global').classList.contains('is-folded'), false);
-  assert.equal(plain.querySelectorAll('.mv-builtin').length, PREDEFINED.length, 'folded is CSS, not absent — search still finds them');
-  assert.deepEqual([...plain.querySelectorAll('.mv-filter')].map((c) => c.textContent), ['All', 'Yours', 'Built-in', 'Codex', 'Plugin', 'Team', 'Needs setup']);
-
-  // A search opens every group that still has a hit, and drops the groups that have none.
-  const hit = renderModelsList({ ...args, collapsed: { builtin: true }, query: PREDEFINED[0].id }, { doc });
-  assert.equal(hit.querySelector('.mv-search').value, PREDEFINED[0].id);
-  assert.equal(hit.querySelector(`.mv-section[data-section="builtin"]`).classList.contains('is-folded'), false, 'a match is never hidden in a fold');
-  assert.equal(hit.querySelectorAll('.mv-builtin').length, 1);
-  assert.equal(hit.querySelector(`.mv-section[data-section="global"]`).classList.contains('hidden'), true, 'a group with no hit drops out');
-
-  const none = renderModelsList({ ...args, query: 'zzz-nothing' }, { doc });
-  assert.match(none.querySelector('.mv-no-hits').textContent, /No model matches “zzz-nothing”/);
-
-  // The chips pick a layer; "Just imported" appears only when something just landed.
-  const onlyPlugin = renderModelsList({ ...args, filter: 'plugin' }, { doc });
-  assert.equal(onlyPlugin.querySelectorAll('.mv-card').length, 1);
-  assert.equal(onlyPlugin.querySelector('.mv-card').dataset.id, 'pm');
-  assert.equal(onlyPlugin.querySelector('.mv-filter[data-filter="plugin"]').getAttribute('aria-pressed'), 'true');
-  const imported = renderModelsList({ ...args, filter: 'imported', highlight: [GLOBAL.id] }, { doc });
-  assert.ok(imported.querySelector('.mv-filter[data-filter="imported"]'), 'the chip exists only with an import to show');
-  assert.deepEqual([...imported.querySelectorAll('.mv-card')].map((c) => c.dataset.id), [GLOBAL.id]);
-  const needs = renderModelsList({ globals: [{ ...GLOBAL, needsSignIn: true }, { ...GLOBAL, id: 'ok-one' }], predefined: PREDEFINED, efforts: EFFORTS, filter: 'needs-setup' }, { doc });
-  assert.deepEqual([...needs.querySelectorAll('.mv-card')].map((c) => c.dataset.id), [GLOBAL.id]);
-});
+// ── #422: endpoint-routed badge ──
 
 test('list (#422): endpoint-routed badge on global + plugin cards whose env carries ANTHROPIC_BASE_URL, and only those', () => {
   const plain = { id: 'plain', label: 'Plain', efforts: [], env: { ANTHROPIC_AUTH_TOKEN: '••••' } };

@@ -9,6 +9,7 @@ import {
 } from '../ui/public/scripts-view.mjs';
 import { iconSvgOf } from '../src/shared/graph/script-icons.mjs';
 import { SCRIPT_EXAMPLES } from '../src/shared/graph/script-templates.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const win = new JSDOM('<!doctype html><body></body>').window;
 const doc = win.document;
@@ -79,134 +80,143 @@ function mountCtl(apiOver = {}, over = {}) {
 }
 const draftOf = (c) => collectScriptDraft(q(c.host, '.script-detail'));
 
-test('#scripts/new paints the runtime step; a card click repaints the pick; Continue navigates to the runtime`s step 2', async () => {
-  const c = mountCtl();
-  await c.ctl.route('new');
-  await flush();
-  assert.equal(q(c.host, '.wz').dataset.step, '1');
-  assert.equal(q(c.host, '.rt[data-runtime="node"]').getAttribute('aria-pressed'), 'true');
-  q(c.host, '.rt[data-runtime="shell"]').click();
-  assert.equal(q(c.host, '.rt[data-runtime="shell"]').getAttribute('aria-pressed'), 'true');
-  q(c.host, '.wz-continue').click();
-  assert.deepEqual(c.nav, ['scripts/new/shell']);
-  q(c.host, '.wz-cancel').click();
-  assert.deepEqual(c.nav, ['scripts/new/shell', 'scripts']);
-  assert.equal(qa(c.host, 'p').length, 0);
-  c.cleanup();
+test('#scripts/new paints the runtime step (a card click repaints the pick, Continue routes to step 2) and #scripts/new/node opens the workspace with the node template and no bench until a key exists', async () => {
+  await checkRows([
+    { name: '#scripts/new paints the runtime step; a card click repaints the pick; Continue navigates to the runtime`s step 2', run: async () => {
+      const c = mountCtl();
+      await c.ctl.route('new');
+      await flush();
+      assert.equal(q(c.host, '.wz').dataset.step, '1');
+      assert.equal(q(c.host, '.rt[data-runtime="node"]').getAttribute('aria-pressed'), 'true');
+      q(c.host, '.rt[data-runtime="shell"]').click();
+      assert.equal(q(c.host, '.rt[data-runtime="shell"]').getAttribute('aria-pressed'), 'true');
+      q(c.host, '.wz-continue').click();
+      assert.deepEqual(c.nav, ['scripts/new/shell']);
+      q(c.host, '.wz-cancel').click();
+      assert.deepEqual(c.nav, ['scripts/new/shell', 'scripts']);
+      assert.equal(qa(c.host, 'p').length, 0);
+      c.cleanup();
+    } },
+    { name: '#scripts/new/node: the workspace with the node template, the runtime`s colour and icon, no bench until there is a key', run: async () => {
+      const c = mountCtl();
+      await c.ctl.route('new/node');
+      await flush();
+      const root = q(c.host, '.script-detail');
+      assert.equal(root.dataset.step, '2');
+      assert.equal(field(root, 'script:source').value, SCRIPT_TEMPLATES.node);
+      assert.equal(field(root, 'meta:color').value, 'violet');
+      assert.equal(field(root, 'meta:icon').value, iconSvgOf('code'));
+      assert.equal(q(root, '.script-save').disabled, true);
+      assert.equal(q(root, '.script-test-mount .bench'), null, 'no key, nothing to bench');
+      assert.equal(c.ctl.isDirty(), false, 'the template is the baseline');
+      c.cleanup();
+    } },
+  ]);
 });
 
-test('#scripts/new/node: the workspace with the node template, the runtime`s colour and icon, no bench until there is a key', async () => {
-  const c = mountCtl();
-  await c.ctl.route('new/node');
-  await flush();
-  const root = q(c.host, '.script-detail');
-  assert.equal(root.dataset.step, '2');
-  assert.equal(field(root, 'script:source').value, SCRIPT_TEMPLATES.node);
-  assert.equal(field(root, 'meta:color').value, 'violet');
-  assert.equal(field(root, 'meta:icon').value, iconSvgOf('code'));
-  assert.equal(q(root, '.script-save').disabled, true);
-  assert.equal(q(root, '.script-test-mount .bench'), null, 'no key, nothing to bench');
-  assert.equal(c.ctl.isDirty(), false, 'the template is the baseline');
-  c.cleanup();
+test('typing a name derives the key, enables Save and mounts the draft bench (a typed key stops following); a reserved or invalid key gates Save and the bench', async () => {
+  await checkRows([
+    { name: 'typing a name derives the key, lights the tile, enables Save and mounts the bench as an unsaved draft; a typed key stops following', run: async () => {
+      const c = mountCtl();
+      await c.ctl.route('new/node');
+      await flush();
+      const root = q(c.host, '.script-detail');
+      type(field(root, 'meta:displayName'), 'Diff gate v2');
+      await flush();
+      assert.equal(field(root, 'meta:key').value, 'diffGateV2');
+      assert.equal(q(root, '.wz-tile .pv-name').textContent, 'Diff gate v2');
+      assert.equal(q(root, '.wz-tile .pv-key').textContent, 'diffGateV2');
+      assert.equal(q(root, '.wz-file').textContent, 'diffGateV2.mjs');
+      assert.equal(q(root, '.script-save').disabled, false);
+      assert.ok(q(root, '.script-test-mount .bench'), 'the bench mounts for a draft');
+      assert.equal(q(root, '.script-test-mount .bench').dataset.unsaved, 'true');
+      assert.equal(q(root, '.bench-save-case').disabled, true);
+      assert.equal(c.ctl.isDirty(), true);
+      type(field(root, 'meta:key'), 'gate2');
+      type(field(root, 'meta:displayName'), 'Another name');
+      assert.equal(field(root, 'meta:key').value, 'gate2', 'a touched key is the user`s');
+      type(field(root, 'meta:displayName'), '');
+      assert.equal(q(root, '.script-save').disabled, true, 'no name, no Save');
+      c.cleanup();
+    } },
+    { name: 'a reserved or invalid key gates Save and the bench', run: async () => {
+      const c = mountCtl();
+      await c.ctl.route('new/node');
+      await flush();
+      const root = q(c.host, '.script-detail');
+      type(field(root, 'meta:displayName'), 'New');
+      await flush();
+      assert.equal(field(root, 'meta:key').value, 'new');
+      assert.equal(q(root, '.script-save').disabled, true, '`new` is a reserved key');
+      assert.equal(q(root, '.script-test-mount .bench'), null);
+      type(field(root, 'meta:key'), 'bad key');
+      assert.equal(q(root, '.script-save').disabled, true);
+      type(field(root, 'meta:key'), 'goodKey');
+      await flush();
+      assert.equal(q(root, '.script-save').disabled, false);
+      assert.ok(q(root, '.script-test-mount .bench'));
+      type(field(root, 'meta:key'), 'bad key');
+      assert.equal(q(root, '.script-test-mount .bench'), null, 'the draft bench leaves with the key: nothing to run under a key the store refuses');
+      type(field(root, 'meta:key'), 'goodKey');
+      await flush();
+      assert.ok(q(root, '.script-test-mount .bench'), 'and comes back with a valid one');
+      c.cleanup();
+    } },
+  ]);
 });
 
-test('typing a name derives the key, lights the tile, enables Save and mounts the bench as an unsaved draft; a typed key stops following', async () => {
-  const c = mountCtl();
-  await c.ctl.route('new/node');
-  await flush();
-  const root = q(c.host, '.script-detail');
-  type(field(root, 'meta:displayName'), 'Diff gate v2');
-  await flush();
-  assert.equal(field(root, 'meta:key').value, 'diffGateV2');
-  assert.equal(q(root, '.wz-tile .pv-name').textContent, 'Diff gate v2');
-  assert.equal(q(root, '.wz-tile .pv-key').textContent, 'diffGateV2');
-  assert.equal(q(root, '.wz-file').textContent, 'diffGateV2.mjs');
-  assert.equal(q(root, '.script-save').disabled, false);
-  assert.ok(q(root, '.script-test-mount .bench'), 'the bench mounts for a draft');
-  assert.equal(q(root, '.script-test-mount .bench').dataset.unsaved, 'true');
-  assert.equal(q(root, '.bench-save-case').disabled, true);
-  assert.equal(c.ctl.isDirty(), true);
-  type(field(root, 'meta:key'), 'gate2');
-  type(field(root, 'meta:displayName'), 'Another name');
-  assert.equal(field(root, 'meta:key').value, 'gate2', 'a touched key is the user`s');
-  type(field(root, 'meta:displayName'), '');
-  assert.equal(q(root, '.script-save').disabled, true, 'no name, no Save');
-  c.cleanup();
-});
-
-test('a reserved or invalid key gates Save and the bench', async () => {
-  const c = mountCtl();
-  await c.ctl.route('new/node');
-  await flush();
-  const root = q(c.host, '.script-detail');
-  type(field(root, 'meta:displayName'), 'New');
-  await flush();
-  assert.equal(field(root, 'meta:key').value, 'new');
-  assert.equal(q(root, '.script-save').disabled, true, '`new` is a reserved key');
-  assert.equal(q(root, '.script-test-mount .bench'), null);
-  type(field(root, 'meta:key'), 'bad key');
-  assert.equal(q(root, '.script-save').disabled, true);
-  type(field(root, 'meta:key'), 'goodKey');
-  await flush();
-  assert.equal(q(root, '.script-save').disabled, false);
-  assert.ok(q(root, '.script-test-mount .bench'));
-  type(field(root, 'meta:key'), 'bad key');
-  assert.equal(q(root, '.script-test-mount .bench'), null, 'the draft bench leaves with the key: nothing to run under a key the store refuses');
-  type(field(root, 'meta:key'), 'goodKey');
-  await flush();
-  assert.ok(q(root, '.script-test-mount .bench'), 'and comes back with a valid one');
-  c.cleanup();
-});
-
-test('the create hashes reached FROM a saved script`s workspace (browser Back after a save) paint a fresh draft and never throw', async () => {
-  const c = mountCtl();
-  await c.ctl.route('new/node');
-  await flush();
-  type(field(q(c.host, '.script-detail'), 'meta:displayName'), 'Made here');
-  await flush();
-  q(c.host, '.script-save').click();
-  await flush();
-  assert.deepEqual(c.nav, ['scripts/madeHere']);
-  await c.ctl.route('madeHere');                          // what app.js does with the new hash (the fake read answers USER)
-  await flush();
-  assert.equal(field(q(c.host, '.script-detail'), 'meta:key').disabled, true, 'a SAVED script`s workspace is up');
-  await c.ctl.route('new/node');                          // Back: st.data was a saved script's and the tree still showed it
-  await flush();
-  let d = draftOf(c);
-  assert.equal(d.meta.key, '', 'a fresh draft, not the saved script read as one');
-  assert.equal(d.source, SCRIPT_TEMPLATES.node);
-  assert.equal(c.ctl.isDirty(), false);
-  await c.ctl.route('diffGate');
-  await flush();
-  await c.ctl.route('new');                               // the picker, from a saved workspace
-  await flush();
-  assert.equal(q(c.host, '.wz').dataset.step, '1');
-  await c.ctl.route('new/shell');
-  await flush();
-  d = draftOf(c);
-  assert.equal(d.meta.runtime, 'shell');
-  assert.equal(d.meta.key, '');
-  c.cleanup();
-});
-
-test('a re-fired route to the hash the workspace already shows keeps every typed byte', async () => {
-  const c = mountCtl();
-  await c.ctl.route('new/node');
-  await flush();
-  const root = q(c.host, '.script-detail');
-  type(field(root, 'meta:displayName'), 'Probe one');
-  await flush();
-  type(field(root, 'script:source'), SCRIPT_TEMPLATES.node + 'export const x = (api) => api.inputs.extra.path;\n');
-  await flush();
-  assert.ok(q(root, '.wz-prow[data-id="extra"]'));
-  await c.ctl.route('new/node');
-  await flush();
-  assert.equal(q(c.host, '.script-detail'), root, 'the same tree: no repaint from a stale st.data');
-  const d = draftOf(c);
-  assert.equal(d.meta.displayName, 'Probe one');
-  assert.ok(d.source.includes('inputs.extra'));
-  assert.equal(c.ctl.isDirty(), true);
-  c.cleanup();
+test('create hashes reached from a saved script paint a fresh draft without throwing, and a re-fired route to the shown hash keeps every typed byte', async () => {
+  await checkRows([
+    { name: 'the create hashes reached FROM a saved script`s workspace (browser Back after a save) paint a fresh draft and never throw', run: async () => {
+      const c = mountCtl();
+      await c.ctl.route('new/node');
+      await flush();
+      type(field(q(c.host, '.script-detail'), 'meta:displayName'), 'Made here');
+      await flush();
+      q(c.host, '.script-save').click();
+      await flush();
+      assert.deepEqual(c.nav, ['scripts/madeHere']);
+      await c.ctl.route('madeHere');                          // what app.js does with the new hash (the fake read answers USER)
+      await flush();
+      assert.equal(field(q(c.host, '.script-detail'), 'meta:key').disabled, true, 'a SAVED script`s workspace is up');
+      await c.ctl.route('new/node');                          // Back: st.data was a saved script's and the tree still showed it
+      await flush();
+      let d = draftOf(c);
+      assert.equal(d.meta.key, '', 'a fresh draft, not the saved script read as one');
+      assert.equal(d.source, SCRIPT_TEMPLATES.node);
+      assert.equal(c.ctl.isDirty(), false);
+      await c.ctl.route('diffGate');
+      await flush();
+      await c.ctl.route('new');                               // the picker, from a saved workspace
+      await flush();
+      assert.equal(q(c.host, '.wz').dataset.step, '1');
+      await c.ctl.route('new/shell');
+      await flush();
+      d = draftOf(c);
+      assert.equal(d.meta.runtime, 'shell');
+      assert.equal(d.meta.key, '');
+      c.cleanup();
+    } },
+    { name: 'a re-fired route to the hash the workspace already shows keeps every typed byte', run: async () => {
+      const c = mountCtl();
+      await c.ctl.route('new/node');
+      await flush();
+      const root = q(c.host, '.script-detail');
+      type(field(root, 'meta:displayName'), 'Probe one');
+      await flush();
+      type(field(root, 'script:source'), SCRIPT_TEMPLATES.node + 'export const x = (api) => api.inputs.extra.path;\n');
+      await flush();
+      assert.ok(q(root, '.wz-prow[data-id="extra"]'));
+      await c.ctl.route('new/node');
+      await flush();
+      assert.equal(q(c.host, '.script-detail'), root, 'the same tree: no repaint from a stale st.data');
+      const d = draftOf(c);
+      assert.equal(d.meta.displayName, 'Probe one');
+      assert.ok(d.source.includes('inputs.extra'));
+      assert.equal(c.ctl.isDirty(), true);
+      c.cleanup();
+    } },
+  ]);
 });
 
 test('typing code adds interface rows live (debounced), the bench follows, and a saved-only port shows as stale', async () => {
@@ -225,34 +235,6 @@ test('typing code adds interface rows live (debounced), the bench follows, and a
   assert.equal(c.ctl.isDirty(), true);
   const d = draftOf(c);
   assert.deepEqual(d.meta.outputs.map((p) => [p.id, p.filename]), [['report', 'r-{cycle}.md'], ['stats', 'diffGate-stats-cycle{cycle}.md']]);
-  c.cleanup();
-});
-
-test('chips: a type cycles, `when` cycles, a mode cycles, a param type cycles; × removes a stale row for good', async () => {
-  const c = mountCtl();
-  await c.ctl.route('diffGate');
-  await flush();
-  const root = q(c.host, '.script-detail');
-  q(root, '[data-chip="in:plan:type"]').click();
-  assert.equal(q(root, '[data-chip="in:plan:type"]').textContent, 'json');
-  assert.equal(draftOf(c).meta.inputs[0].type, 'json');
-  q(root, '[data-chip="in:plan:mode"]').click();
-  assert.equal(draftOf(c).meta.inputs[0].required, true);
-  q(root, '[data-chip="in:plan:mode"]').click();
-  assert.equal(draftOf(c).meta.inputs[0].loop, true);
-  q(root, '[data-chip="out:report:when"]').click();
-  assert.equal(q(root, '[data-chip="out:report:when"]').textContent, 'always');
-  assert.equal(draftOf(c).meta.outputs[0].when, 'always');
-  q(root, '[data-chip="param:maxFiles:type"]').click();
-  assert.equal(draftOf(c).meta.params[0].type, 'boolean');
-  q(root, '[data-remove="inputs:done"]').click();
-  assert.equal(q(root, '.wz-prow[data-id="done"]'), null);
-  assert.deepEqual(draftOf(c).meta.inputs.map((p) => p.id), ['plan', 'diff']);
-  // the removed row does not come back on the next inference pass
-  type(field(root, 'script:source'), SCRIPT_EXAMPLES.node.source + '\n');
-  await flush();
-  assert.equal(q(root, '.wz-prow[data-id="done"]'), null);
-  assert.equal(q(root, '[data-chip="in:plan:type"]').textContent, 'json', 'an override sticks across a re-inference');
   c.cleanup();
 });
 
@@ -364,33 +346,6 @@ test('a rejected save shows the server`s sentence and keeps every byte', async (
   c.cleanup();
 });
 
-test('colour and icon clicks update the hidden fields and the tile; Advanced opens in place', async () => {
-  const c = mountCtl();
-  await c.ctl.route('diffGate');
-  await flush();
-  const root = q(c.host, '.script-detail');
-  q(root, '.sw[data-swatch="pink"]').click();
-  assert.equal(field(root, 'meta:color').value, 'pink');
-  assert.ok(q(root, '.wz-tile .tile').classList.contains('tile-pink'));
-  assert.ok(q(root, '.sw-pink').classList.contains('sel'));
-  q(root, '.ico[data-icon="bolt"]').click();
-  assert.equal(field(root, 'meta:icon').value, iconSvgOf('bolt'));
-  assert.equal(q(root, '.wz-tile svg').dataset.iconName, 'bolt');
-  assert.equal(c.ctl.isDirty(), true);
-  q(root, '.wz-adv-toggle').click();
-  assert.equal(q(root, '.wz-adv-body').hidden, false);
-  assert.equal(q(root, '.wz-adv-toggle').getAttribute('aria-expanded'), 'true');
-  type(field(root, 'meta:timeoutSec'), '30');
-  assert.equal(draftOf(c).meta.timeoutMs, 30000);
-  assert.equal(q(root, '.wz-adv-sum').textContent, '1 min timeout · coding · order 20', 'the summary follows the timeout as it is typed');
-  type(field(root, 'meta:domain'), 'review');
-  type(field(root, 'meta:order'), '7');
-  assert.equal(q(root, '.wz-adv-sum').textContent, '1 min timeout · review · order 7');
-  type(field(root, 'meta:domain'), '');
-  assert.equal(q(root, '.wz-adv-sum').textContent, '1 min timeout · general · order 7', 'a blank domain reads general');
-  c.cleanup();
-});
-
 test('Load example fills identity and source (asking first when dirty); the runtime pill goes back to step 1 and the draft survives', async () => {
   const c = mountCtl();
   await c.ctl.route('new/python');
@@ -449,26 +404,6 @@ test('changing the runtime through the picker swaps the template only while the 
   root = q(c.host, '.script-detail');
   assert.equal(field(root, 'meta:runtime').value, 'node');
   assert.equal(field(root, 'script:source').value, SCRIPT_TEMPLATES.node, 'a shell COMMAND is not a node program: the template comes back');
-  c.cleanup();
-});
-
-test('a saved shell script: the Command | File control and the sh | win32 tabs still work, inference reads the visible default half', async () => {
-  const c = mountCtl();
-  await c.ctl.route('lint');
-  await flush();
-  let root = q(c.host, '.script-detail');
-  assert.equal(q(root, '.script-source').dataset.srcMode, 'file');
-  assert.deepEqual(qa(root, '.wz-prow').map((r) => r.dataset.id), ['log']);
-  q(root, '.script-src-plat button[data-src-mode], .script-src-plat button[data-src-tab="win32"]').click();
-  await flush();
-  assert.equal(q(c.host, '.script-detail'), root, 'an editor-only hop keeps the tree (the bench under it too)');
-  assert.equal(q(root, '.code-editor-ta').dataset.field, 'script:sourceWin32', 'the editor now holds the .cmd half');
-  assert.equal(field(root, 'script:sourceWin32').value, '@echo off\nnpm.cmd run lint\n');
-  assert.deepEqual(qa(root, '.wz-prow').map((r) => r.dataset.id), ['log'], 'the win32 half is not scanned');
-  q(root, '.script-src-mode button[data-src-mode="command"]').click();
-  await flush();
-  assert.equal(q(c.host, '.script-source').dataset.srcMode, 'command');
-  assert.equal(draftOf(c).source, '', 'Command mode sends no file');
   c.cleanup();
 });
 

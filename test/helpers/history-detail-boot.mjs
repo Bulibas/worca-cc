@@ -29,7 +29,7 @@ export const PROJECT = '/tmp/proj';
 // helpers/jsdom-release.mjs); the suites are also split in three files, so no one process holds them all.
 const trackDom = useDomRelease(afterEach);
 
-export async function boot({ fetchHandler, url = 'http://localhost:4317/', hljsLoader = null } = {}) {
+export async function boot({ fetchHandler, url = 'http://localhost:4317/', hljsLoader = null, hooks = null } = {}) {
   const dom = new JSDOM(readFileSync(htmlPath, 'utf8'), { url });
   trackDom(dom);
   const { window } = dom;
@@ -84,7 +84,7 @@ export async function boot({ fetchHandler, url = 'http://localhost:4317/', hljsL
   }
   globalThis.window = window;
   globalThis.document = window.document;
-  if (hljsLoader) window.__worcaTestHooks = { hljsLoader };
+  if (hljsLoader || hooks) window.__worcaTestHooks = { ...(hljsLoader ? { hljsLoader } : {}), ...hooks };
 
   await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
   await new Promise((r) => setTimeout(r, 0)); // let loadProjects/loadConfig settle
@@ -190,7 +190,7 @@ export function historyArms(box) {
 // case) and deliver it later through a `pipelines-changed` broadcast.
 export async function bootDetail({
   rows = [ROW], detail = DETAIL, budget = okBudget(), arms = null,
-  deepLink = false, hljsLoader = null,
+  deepLink = false, hljsLoader = null, hooks = null,
 } = {}) {
   const box = { rows, detail, budget };
   const base = historyArms(box);
@@ -198,6 +198,7 @@ export async function bootDetail({
     fetchHandler: (url, opts) => (arms && arms(url, opts, box)) || base(url, opts),
     url: deepLink ? `http://localhost:4317/#${detailHash}` : 'http://localhost:4317/',
     hljsLoader,
+    hooks,
   });
   ctx.box = box;
   return ctx;

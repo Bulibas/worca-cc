@@ -15,6 +15,7 @@ import { writePluginConfig } from '../src/core/plugin-config.mjs';
 import { createChatContext } from '../src/core/chat/chat-context.mjs';
 import { createNotifier } from '../src/core/chat/notifier.mjs';
 import { chatPrefs, setChatPrefs } from '../src/core/settings.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -41,66 +42,72 @@ function fixture({ prefs } = {}) {
   return { orch, sent, settle, chatContext, state, notifier, entry };
 }
 
-test('done event fans out to every notifyChatIds of outbound channels only', async () => {
-  const { orch, sent, settle } = fixture();
-  orch.emit('done', { status: 'done' });
-  await settle();
-  assert.equal(sent.length, 2, 'two chat ids, one outbound channel (inbound-only skipped)');
-  assert.deepEqual(sent.map((s) => s.chatId).sort(), ['100', '200']);
-  assert.ok(sent.every((s) => s.plugin === 'tg-chat'));
-  assert.match(sent[0].message.body[0].value, /\*9999[\s\S]*completed/);
-  assert.match(sent[0].message.body[0].value, /Notify me/, 'title read from the entry at send time');
+test('done, question and error events fan out to outbound notifyChatIds with their own messages', async () => {
+  await checkRows([
+    { name: 'done event fans out to every notifyChatIds of outbound channels only', run: async () => {
+      const { orch, sent, settle } = fixture();
+      orch.emit('done', { status: 'done' });
+      await settle();
+      assert.equal(sent.length, 2, 'two chat ids, one outbound channel (inbound-only skipped)');
+      assert.deepEqual(sent.map((s) => s.chatId).sort(), ['100', '200']);
+      assert.ok(sent.every((s) => s.plugin === 'tg-chat'));
+      assert.match(sent[0].message.body[0].value, /\*9999[\s\S]*completed/);
+      assert.match(sent[0].message.body[0].value, /Notify me/, 'title read from the entry at send time');
+    } },
+    { name: 'question and error events render their specific messages', run: async () => {
+      const { orch, sent, settle } = fixture();
+      orch.emit('question', { id: 'gate-1', kind: 'gate', issues: [{ severity: 'major', summary: 'X' }] });
+      await settle();
+      assert.match(sent[0].message.body[0].value, /\/approve \*9999/);
+      sent.length = 0;
+      orch.emit('error', { message: 'boom' });
+      orch.emit('done', { status: 'error' });
+      await settle();
+      assert.equal(sent.length, 2, "error renders once per chat id; done{status:'error'} is suppressed");
+      assert.match(sent[0].message.body[0].value, /\*\*Error:\*\* boom/);
+    } },
+  ]);
 });
 
-test('question and error events render their specific messages', async () => {
-  const { orch, sent, settle } = fixture();
-  orch.emit('question', { id: 'gate-1', kind: 'gate', issues: [{ severity: 'major', summary: 'X' }] });
-  await settle();
-  assert.match(sent[0].message.body[0].value, /\/approve \*9999/);
-  sent.length = 0;
-  orch.emit('error', { message: 'boom' });
-  orch.emit('done', { status: 'error' });
-  await settle();
-  assert.equal(sent.length, 2, "error renders once per chat id; done{status:'error'} is suppressed");
-  assert.match(sent[0].message.body[0].value, /\*\*Error:\*\* boom/);
-});
+test('prefs, per-channel toggles and muting gate delivery', async () => {
+  await checkRows([
+    { name: 'prefs gate events; per-channel toggle disables a channel', run: async () => {
+      const { orch, sent, settle, state } = fixture();
+      state.prefs = { notify: { done: false, error: true, question: true, paused: true }, channels: {} };
+      orch.emit('done', { status: 'done' });
+      await settle();
+      assert.equal(sent.length, 0, 'notify.done=false suppresses');
 
-test('prefs gate events; per-channel toggle disables a channel', async () => {
-  const { orch, sent, settle, state } = fixture();
-  state.prefs = { notify: { done: false, error: true, question: true, paused: true }, channels: {} };
-  orch.emit('done', { status: 'done' });
-  await settle();
-  assert.equal(sent.length, 0, 'notify.done=false suppresses');
+      state.prefs = { notify: { done: true, paused: false }, channels: {} };
+      orch.emit('done', { status: 'paused', reason: 'cost_total' });
+      await settle();
+      assert.equal(sent.length, 0, 'paused gated separately from done');
 
-  state.prefs = { notify: { done: true, paused: false }, channels: {} };
-  orch.emit('done', { status: 'paused', reason: 'cost_total' });
-  await settle();
-  assert.equal(sent.length, 0, 'paused gated separately from done');
+      state.prefs = { notify: { done: true }, channels: { 'tg-chat/main': { enabled: false } } };
+      orch.emit('done', { status: 'done' });
+      await settle();
+      assert.equal(sent.length, 0, 'channel toggle wins');
 
-  state.prefs = { notify: { done: true }, channels: { 'tg-chat/main': { enabled: false } } };
-  orch.emit('done', { status: 'done' });
-  await settle();
-  assert.equal(sent.length, 0, 'channel toggle wins');
-
-  state.prefs = { notify: { done: true, paused: false, error: true }, channels: {} };
-  orch.emit('done', { status: 'paused', reason: 'error', detail: 'boom' });
-  await settle();
-  assert.equal(sent.length, 2, 'an error-pause follows notify.error, not notify.paused');
-  assert.match(sent[0].message.body[0].value, /\*\*Error:\*\* boom/);
-  sent.length = 0;
-  state.prefs = { notify: { done: true, paused: true, error: false }, channels: {} };
-  orch.emit('done', { status: 'paused', reason: 'error', detail: 'boom' });
-  await settle();
-  assert.equal(sent.length, 0, 'notify.error=false suppresses the error-pause');
-});
-
-test('muted chats are skipped and counted; unmuted keep receiving', async () => {
-  const { orch, sent, settle, chatContext } = fixture();
-  chatContext.set('telegram:100', { mute_until: new Date(Date.now() + 60000).toISOString() });
-  orch.emit('done', { status: 'done' });
-  await settle();
-  assert.deepEqual(sent.map((s) => s.chatId), ['200'], 'muted chat 100 skipped');
-  assert.equal(chatContext.get('telegram:100').muted_messages, 1, 'suppression counted');
+      state.prefs = { notify: { done: true, paused: false, error: true }, channels: {} };
+      orch.emit('done', { status: 'paused', reason: 'error', detail: 'boom' });
+      await settle();
+      assert.equal(sent.length, 2, 'an error-pause follows notify.error, not notify.paused');
+      assert.match(sent[0].message.body[0].value, /\*\*Error:\*\* boom/);
+      sent.length = 0;
+      state.prefs = { notify: { done: true, paused: true, error: false }, channels: {} };
+      orch.emit('done', { status: 'paused', reason: 'error', detail: 'boom' });
+      await settle();
+      assert.equal(sent.length, 0, 'notify.error=false suppresses the error-pause');
+    } },
+    { name: 'muted chats are skipped and counted; unmuted keep receiving', run: async () => {
+      const { orch, sent, settle, chatContext } = fixture();
+      chatContext.set('telegram:100', { mute_until: new Date(Date.now() + 60000).toISOString() });
+      orch.emit('done', { status: 'done' });
+      await settle();
+      assert.deepEqual(sent.map((s) => s.chatId), ['200'], 'muted chat 100 skipped');
+      assert.equal(chatContext.get('telegram:100').muted_messages, 1, 'suppression counted');
+    } },
+  ]);
 });
 
 test('delivery failures are contained (logged, never thrown into the run)', async () => {
@@ -158,6 +165,10 @@ test('chatPrefs/setChatPrefs: defaults ON, merge-patch, unknown keys rejected', 
     assert.equal(chatPrefs().scriptTools, true);
     await assert.rejects(setChatPrefs({ scriptTools: 'yes' }), /chat scriptTools must be true or false/);
     await assert.rejects(setChatPrefs('nope'), /must be an object/);
+    // chat prefs: "away" is a notify event, on by default
+    assert.equal(chatPrefs().notify.away, true);
+    await setChatPrefs({ notify: { away: false } });
+    assert.equal(chatPrefs().notify.away, false);
   } finally {
     process.env.HOME = prevHome;
     rmSync(home, { recursive: true, force: true });
@@ -167,21 +178,24 @@ test('chatPrefs/setChatPrefs: defaults ON, merge-patch, unknown keys rejected', 
 // meta() omitted `directions`, so renderDone's "Directions pending" warning was
 // unreachable from chat — the one surface /direct is posted from, i.e. the user
 // who posted the direction was the only one who could not be told it went unread.
-test('the done notification warns about directions the run never applied', async () => {
-  const { orch, sent, settle } = fixture();
-  orch.state.directions = { posted: 2, applied: 1, pending: [{ id: 'd2', text: 'cut the roadmap' }] };
-  orch.emit('done', { status: 'done' });
-  await settle();
-  assert.ok(sent.length > 0);
-  assert.match(JSON.stringify(sent[0]), /Directions pending:\*\* 1/);
-});
-
-test('a run that applied every direction carries no such warning', async () => {
-  const { orch, sent, settle } = fixture();
-  orch.state.directions = { posted: 2, applied: 2, pending: [] };
-  orch.emit('done', { status: 'done' });
-  await settle();
-  assert.doesNotMatch(JSON.stringify(sent[0]), /Directions pending/);
+test('the done notification warns about unapplied directions, and only then', async () => {
+  await checkRows([
+    { name: 'the done notification warns about directions the run never applied', run: async () => {
+      const { orch, sent, settle } = fixture();
+      orch.state.directions = { posted: 2, applied: 1, pending: [{ id: 'd2', text: 'cut the roadmap' }] };
+      orch.emit('done', { status: 'done' });
+      await settle();
+      assert.ok(sent.length > 0);
+      assert.match(JSON.stringify(sent[0]), /Directions pending:\*\* 1/);
+    } },
+    { name: 'a run that applied every direction carries no such warning', run: async () => {
+      const { orch, sent, settle } = fixture();
+      orch.state.directions = { posted: 2, applied: 2, pending: [] };
+      orch.emit('done', { status: 'done' });
+      await settle();
+      assert.doesNotMatch(JSON.stringify(sent[0]), /Directions pending/);
+    } },
+  ]);
 });
 
 test('away hours: notifyAway sends one info message; notify.away=false keeps it out of chat', async () => {
@@ -196,18 +210,4 @@ test('away hours: notifyAway sends one info message; notify.away=false keeps it 
   notifier.notifyAway('Away hours ended. worca answered 3 questions while you were away; 1 to check.');
   await settle();
   assert.equal(sent.length, 0);
-});
-
-test('chat prefs: "away" is a notify event, on by default', async () => {
-  const prevHome = process.env.HOME;
-  const home = mkdtempSync(join(tmpdir(), 'worca-cc-chatprefs-away-'));
-  process.env.HOME = home;                     // settings.json lives under HOME: never the real one
-  try {
-    assert.equal(chatPrefs().notify.away, true);
-    await setChatPrefs({ notify: { away: false } });
-    assert.equal(chatPrefs().notify.away, false);
-  } finally {
-    process.env.HOME = prevHome;
-    rmSync(home, { recursive: true, force: true });
-  }
 });

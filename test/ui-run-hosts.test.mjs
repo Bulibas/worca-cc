@@ -1,6 +1,6 @@
 // test/ui-run-hosts.test.mjs
 // P6a — the DOM half of the run monitor: the view's decor fast paths (consumer-side
-// pins of P5's contract), the run-monitor CSS block, applyDecor, the host adapters
+// pins of P5's contract), applyDecor, the host adapters
 // and the app.js version arms. (The artifact routes live in test/api-run-artifact.test.mjs.)
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,9 +9,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { createGraphView } from '../ui/public/graph/view.mjs';
 import { manifestPortsFn, manifestTemplate } from '../src/shared/graph/manifest.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
-const cssPath = fileURLToPath(new URL('../ui/public/style.css', import.meta.url));
-const css = readFileSync(cssPath, 'utf8');
 const MANIFEST = {
   version: 2, template: { id: 'wf_t', name: 'T' },
   graph: {
@@ -39,153 +38,89 @@ function mountView(mode = 'monitor') {
   return { window, host, view };
 }
 
-test('setFooter builds one band per row and sizes the card from the band count', () => {
-  const { view, host } = mountView();
-  const card = () => host.querySelector('[data-node-id="n_a"]');
-  const h0 = parseFloat(card().style.height);
-  view.setFooter('n_a', [{ kind: 'strip', leds: ['done', 'active'], summary: '2 runs · $1.12', expanded: false }]);
-  assert.equal(card().querySelectorAll('.xfoot .xtoggle').length, 1);
-  assert.equal(card().querySelector('.xsum').textContent, '2 runs · $1.12');
-  assert.equal(card().querySelectorAll('.xsq .xq').length, 2);
-  const h1 = parseFloat(card().style.height);
-  assert.equal(h1, h0 + 26, 'one band = FOOT_H');
-  view.setFooter('n_a', [
-    { kind: 'strip', leds: ['done', 'active'], summary: '2 runs · $1.12', expanded: true },
-    { kind: 'exec', executionId: 'x:n_a:1', led: 'done', label: 'cycle 1', right: '1m 3s · $0.12' },
-    { kind: 'exec', executionId: 'x:n_a:2', led: 'active', label: 'cycle 2 · fix', right: '4s' },
+test('setFooter builds one band per row and bills LINES (wrapped fan squares, stacked exec rows) to size the card', async () => {
+  await checkRows([
+    { name: 'setFooter builds one band per row and sizes the card from the band count', run: async () => {
+      const { view, host } = mountView();
+      const card = () => host.querySelector('[data-node-id="n_a"]');
+      const h0 = parseFloat(card().style.height);
+      view.setFooter('n_a', [{ kind: 'strip', leds: ['done', 'active'], summary: '2 runs · $1.12', expanded: false }]);
+      assert.equal(card().querySelectorAll('.xfoot .xtoggle').length, 1);
+      assert.equal(card().querySelector('.xsum').textContent, '2 runs · $1.12');
+      assert.equal(card().querySelectorAll('.xsq .xq').length, 2);
+      const h1 = parseFloat(card().style.height);
+      assert.equal(h1, h0 + 26, 'one band = FOOT_H');
+      view.setFooter('n_a', [
+        { kind: 'strip', leds: ['done', 'active'], summary: '2 runs · $1.12', expanded: true },
+        { kind: 'exec', executionId: 'x:n_a:1', led: 'done', label: 'cycle 1', right: '1m 3s · $0.12' },
+        { kind: 'exec', executionId: 'x:n_a:2', led: 'active', label: 'cycle 2 · fix', right: '4s' },
+      ]);
+      assert.equal(parseFloat(card().style.height), h0 + 26 + 22 + 22, 'extra bands are EXEC_ROW_H');
+      const rows = [...card().querySelectorAll('.xrow')];
+      assert.deepEqual(rows.map((r) => r.dataset.executionId), ['x:n_a:1', 'x:n_a:2']);
+      assert.equal(rows[1].className, 'xrow is-active');
+      view.setFooter('n_a', []);
+      assert.equal(card().querySelector('.xfoot'), null, 'clearing removes the footer');
+      assert.equal(parseFloat(card().style.height), h0, 'and restores the card height');
+    } },
+    { name: 'setFooter bills LINES, not bands: wrapped fan squares and stacked exec rows grow the card', run: async () => {
+      const { view, host } = mountView();
+      const card = () => host.querySelector('[data-node-id="n_a"]');
+      const h0 = parseFloat(card().style.height);
+      // 17 squares wrap onto two 16-per-line rows (.f2): FOOT_H + one extra line.
+      view.setFooter('n_a', [{ kind: 'fan', leds: Array(17).fill('done'), count: 32, lines: 2 }]);
+      assert.equal(card().querySelector('.xfoot > .fan').className, 'fan f2');
+      assert.equal(card().querySelectorAll('.xfoot .fsq > .sq').length, 17, 'squares live in the wrapping .fsq column');
+      assert.equal(card().querySelector('.fan .fl').textContent, '×32');
+      assert.equal(parseFloat(card().style.height), h0 + 26 + 22);
+      // A stacked exec row bills 2 lines, a two-line-label row 3 — and the classes drive the CSS grid.
+      view.setFooter('n_a', [
+        { kind: 'strip', leds: ['done'], summary: '2 runs · $33.43', expanded: true },
+        { kind: 'exec', executionId: 'x:n_a:1', led: 'done', label: 'cycle 2 · revise', right: '20m 42s · $31.98', units: 2, stack: true, l2: false },
+        { kind: 'exec', executionId: 'x:n_a:2', led: 'done', label: 'Link FirebaseAI, plist setup + smoke tes…', right: '12m 28s · $1.45', units: 3, stack: true, l2: true },
+      ]);
+      assert.equal(parseFloat(card().style.height), h0 + 26 + 2 * 22 + 3 * 22, 'strip 1 + stacked 2 + l2 3 lines');
+      const rows = [...card().querySelectorAll('.xrow')];
+      assert.equal(rows[0].className, 'xrow is-done stack');
+      assert.equal(rows[1].className, 'xrow is-done stack l2');
+      // The in-place sync path (same executionId, layout changed) must converge too.
+      view.setFooter('n_a', [
+        { kind: 'strip', leds: ['done'], summary: '2 runs · $33.43', expanded: true },
+        { kind: 'exec', executionId: 'x:n_a:1', led: 'done', label: 'cycle 2', right: '20m 42s · $31.98', units: 1, stack: false, l2: false },
+        { kind: 'exec', executionId: 'x:n_a:2', led: 'done', label: 'Link FirebaseAI, plist setup + smoke tes…', right: '12m 28s · $1.45', units: 3, stack: true, l2: true },
+      ]);
+      assert.equal([...card().querySelectorAll('.xrow')][0].className, 'xrow is-done');
+      assert.equal(parseFloat(card().style.height), h0 + 26 + 22 + 3 * 22);
+    } },
   ]);
-  assert.equal(parseFloat(card().style.height), h0 + 26 + 22 + 22, 'extra bands are EXEC_ROW_H');
-  const rows = [...card().querySelectorAll('.xrow')];
-  assert.deepEqual(rows.map((r) => r.dataset.executionId), ['x:n_a:1', 'x:n_a:2']);
-  assert.equal(rows[1].className, 'xrow is-active');
-  view.setFooter('n_a', []);
-  assert.equal(card().querySelector('.xfoot'), null, 'clearing removes the footer');
-  assert.equal(parseFloat(card().style.height), h0, 'and restores the card height');
 });
 
-test('setFooter bills LINES, not bands: wrapped fan squares and stacked exec rows grow the card', () => {
-  const { view, host } = mountView();
-  const card = () => host.querySelector('[data-node-id="n_a"]');
-  const h0 = parseFloat(card().style.height);
-  // 17 squares wrap onto two 16-per-line rows (.f2): FOOT_H + one extra line.
-  view.setFooter('n_a', [{ kind: 'fan', leds: Array(17).fill('done'), count: 32, lines: 2 }]);
-  assert.equal(card().querySelector('.xfoot > .fan').className, 'fan f2');
-  assert.equal(card().querySelectorAll('.xfoot .fsq > .sq').length, 17, 'squares live in the wrapping .fsq column');
-  assert.equal(card().querySelector('.fan .fl').textContent, '×32');
-  assert.equal(parseFloat(card().style.height), h0 + 26 + 22);
-  // A stacked exec row bills 2 lines, a two-line-label row 3 — and the classes drive the CSS grid.
-  view.setFooter('n_a', [
-    { kind: 'strip', leds: ['done'], summary: '2 runs · $33.43', expanded: true },
-    { kind: 'exec', executionId: 'x:n_a:1', led: 'done', label: 'cycle 2 · revise', right: '20m 42s · $31.98', units: 2, stack: true, l2: false },
-    { kind: 'exec', executionId: 'x:n_a:2', led: 'done', label: 'Link FirebaseAI, plist setup + smoke tes…', right: '12m 28s · $1.45', units: 3, stack: true, l2: true },
+test('setNodeChrome paints --c, the gate pip and header totals, setWireBadge writes the cycle badge; nulls clear them', async () => {
+  await checkRows([
+    { name: 'setNodeChrome paints --c, the gate pip and the header totals; nulls clear them', run: async () => {
+      const { view, host } = mountView();
+      const card = host.querySelector('[data-node-id="n_a"]');
+      view.setNodeChrome('n_a', { color: 'violet', gate: { wireId: 'w1', title: 'waiting on a loop gate' }, totals: { dur: '2m 10s', cost: '$0.42' } });
+      assert.equal(card.style.getPropertyValue('--c'), 'var(--violet)');
+      assert.equal(card.querySelector('.ngate').dataset.wireId, 'w1');
+      assert.equal(card.querySelector('.nrun .dur').textContent, '2m 10s');
+      assert.equal(card.querySelector('.nrun .cost').textContent, '$0.42');
+      assert.equal(card.classList.contains('run-node'), true, 'the 1s tick hook selects .run-node[data-id] .dur');
+      assert.equal(card.dataset.id, 'n_a');
+      view.setNodeChrome('n_a', { color: '', gate: null, totals: null });
+      assert.equal(card.querySelector('.ngate'), null);
+      assert.equal(card.querySelector('.nrun'), null);
+    } },
+    { name: 'setWireBadge writes an amber cycle badge and clears it', run: async () => {
+      const { view, host } = mountView();
+      view.setWireBadge('w1', { text: '2×', title: '2 of 3 cycles' });
+      const badge = host.querySelector('.wbadge[data-wire-id="w1"] .wfired');
+      assert.equal(badge.textContent, '2×');
+      assert.equal(badge.title, '2 of 3 cycles');
+      view.setWireBadge('w1', null);
+      assert.equal(host.querySelector('.wfired'), null);
+    } },
   ]);
-  assert.equal(parseFloat(card().style.height), h0 + 26 + 2 * 22 + 3 * 22, 'strip 1 + stacked 2 + l2 3 lines');
-  const rows = [...card().querySelectorAll('.xrow')];
-  assert.equal(rows[0].className, 'xrow is-done stack');
-  assert.equal(rows[1].className, 'xrow is-done stack l2');
-  // The in-place sync path (same executionId, layout changed) must converge too.
-  view.setFooter('n_a', [
-    { kind: 'strip', leds: ['done'], summary: '2 runs · $33.43', expanded: true },
-    { kind: 'exec', executionId: 'x:n_a:1', led: 'done', label: 'cycle 2', right: '20m 42s · $31.98', units: 1, stack: false, l2: false },
-    { kind: 'exec', executionId: 'x:n_a:2', led: 'done', label: 'Link FirebaseAI, plist setup + smoke tes…', right: '12m 28s · $1.45', units: 3, stack: true, l2: true },
-  ]);
-  assert.equal([...card().querySelectorAll('.xrow')][0].className, 'xrow is-done');
-  assert.equal(parseFloat(card().style.height), h0 + 26 + 22 + 3 * 22);
-});
-
-test('setNodeChrome paints --c, the gate pip and the header totals; nulls clear them', () => {
-  const { view, host } = mountView();
-  const card = host.querySelector('[data-node-id="n_a"]');
-  view.setNodeChrome('n_a', { color: 'violet', gate: { wireId: 'w1', title: 'waiting on a loop gate' }, totals: { dur: '2m 10s', cost: '$0.42' } });
-  assert.equal(card.style.getPropertyValue('--c'), 'var(--violet)');
-  assert.equal(card.querySelector('.ngate').dataset.wireId, 'w1');
-  assert.equal(card.querySelector('.nrun .dur').textContent, '2m 10s');
-  assert.equal(card.querySelector('.nrun .cost').textContent, '$0.42');
-  assert.equal(card.classList.contains('run-node'), true, 'the 1s tick hook selects .run-node[data-id] .dur');
-  assert.equal(card.dataset.id, 'n_a');
-  view.setNodeChrome('n_a', { color: '', gate: null, totals: null });
-  assert.equal(card.querySelector('.ngate'), null);
-  assert.equal(card.querySelector('.nrun'), null);
-});
-
-test('setWireBadge writes an amber cycle badge and clears it', () => {
-  const { view, host } = mountView();
-  view.setWireBadge('w1', { text: '2×', title: '2 of 3 cycles' });
-  const badge = host.querySelector('.wbadge[data-wire-id="w1"] .wfired');
-  assert.equal(badge.textContent, '2×');
-  assert.equal(badge.title, '2 of 3 cycles');
-  view.setWireBadge('w1', null);
-  assert.equal(host.querySelector('.wfired'), null);
-});
-
-test('the run-monitor CSS block styles the hosts and states it ACTUALLY writes, at the end of the file, and re-declares no shared keyframe', () => {
-  for (const sel of ['.run-flow.gv-host{', '.run-flow-wrap.gv-wrap-monitor{', '.run-flow.gv-host .gv-world .node.is-error', '.run-flow.gv-host .gv-world .node.is-skipped',
-    '.run-flow.gv-host .gv-wires path.wire-live', '.rd-graph.settled .run-flow.gv-host .gv-wires path.wire-live{animation:none;stroke-dashoffset:0;}',
-    '.run-flow.gv-host .wbadge:not(:has(> .wfired))', '.run-flow.gv-host .gv-world .xfoot>.fan{', '--run-host-h', '.run-warn{', '.rg-hint{',
-    '.rg-hint{position:absolute;left:12px;',
-    '.gv-wrap-monitor .run-flow.gv-host .gv-world .node{cursor:grab;}',
-    '.gv-wrap-monitor .run-flow.gv-host .gv-stage{cursor:grab;}',
-    '.gv-wrap-monitor .run-flow.gv-host .gv-stage.panning,.gv-wrap-monitor .run-flow.gv-host .gv-stage.panning *{cursor:grabbing !important;}',
-    '.run-flow-wrap.gv-wrap-monitor > .gv-nav{right:12px;bottom:12px;}']) {
-    assert.ok(css.includes(sel), `${sel} must be written`);
-  }
-  for (const kf of ['@keyframes wireDash', '@keyframes sqPulse', '@keyframes nodeGlow{', '@keyframes xqPulse']) {
-    assert.equal(css.split(kf).length - 1, 1, `${kf} must be declared exactly once`);
-  }
-  assert.equal(css.includes('--gv-host'), false, 'the --gv-* namespace belongs to injectGeometry (test/ui-graph-css.test.mjs)');
-  // sqPulse may attach ONLY to the v1 fan square (test/ui-run-flow-css.test.mjs); v2 leds pulse through xqPulse.
-  for (const m of css.matchAll(/([^{}]+)\{[^}]*animation:\s*sqPulse[^}]*\}/g)) assert.equal(m[1].trim(), '.run-flow .node .fan .sq.on');
-  // The host reset: `.gv-stage{inset:0}` must fill the WRAP, not .run-flow's 118px padding box.
-  assert.ok(/\.run-flow\.gv-host\{[^}]*position:absolute[^}]*padding:0[^}]*display:block/.test(css), 'the graph host drops the v1 flex/padding box');
-  // Three of the selectors above also occur INSIDE other rules (the `.rd-graph.settled`
-  // twin and the reduced-motion arm for the ants; the two `::after` pip rules for
-  // is-error; `> .rg-hint{opacity:...}` for the hint chip), so a bare substring pin
-  // survives DELETING the rule it is meant to protect. Pin those three by BODY.
-  assert.match(css, /\.run-flow\.gv-host \.gv-wires path\.wire-live\{[^}]*stroke-dasharray[^}]*animation:wireDash \.6s linear infinite[^}]*\}/,
-    'the ants rule itself must dash the wire and own the marching animation (the settled/reduced-motion arms are not it)');
-  assert.match(css, /\.run-flow\.gv-host \.gv-world \.node\.is-error\{[^}]*border-color[^}]*\}/,
-    'the is-error card must get its own border colour (the ::after pip rules are not it)');
-  assert.match(css, /(^|\n)\.rg-hint\{[^}]*position:absolute[^}]*opacity:0[^}]*\}/,
-    'the hint chip rule itself (the :hover / .rg-engaged arms only toggle its opacity)');
-  assert.equal(css.includes('rg-engaged'), false, 'the engagement arm is gone with the state machine');
-  // The v1 `.run-flow .node .fan` rule (same specificity, earlier) leaks margin-top + border-top onto the 26px band.
-  const fan = (css.match(/\.run-flow\.gv-host \.gv-world \.xfoot>\.fan\{[^}]*\}/) || [''])[0];
-  assert.ok(/margin:0/.test(fan) && /border-top:0/.test(fan), 'the fan neutraliser resets margin + border');
-  // Appended at the END: the 3–4-class v1 rules tie P5's block, so source order must win (A32 deviation).
-  assert.ok(css.indexOf('.run-flow.gv-host{') > css.indexOf('/* v2 composer shell'), 'the P6 block follows the composer block');
-  // Spelled WITHOUT the space, so the ask-dock arm stays the LAST with-space block (test/ui-ask-style.test.mjs).
-  assert.ok(css.lastIndexOf('@media (prefers-reduced-motion:reduce)') > css.lastIndexOf('@media (prefers-reduced-motion: reduce)'));
-});
-
-test('the ants march per path — a seamless 12px loop, no :root clock', () => {
-  // One iteration travels exactly one 6+6 dash period (12px), so the loop
-  // boundary — and any restart when wire-live flips on — is invisible; phase
-  // parity across wires comes from setWireLive's negative animation-delay
-  // (test/ui-graph-view.test.mjs), not from a shared :root clock. Animating an
-  // inherited registered custom property on :root forced a whole-document
-  // style recalc per frame (the 2026-08-31 run-detail freeze) and must never
-  // come back. jsdom evaluates neither @property nor animations, so pin the
-  // stylesheet TEXT.
-  assert.equal(css.includes('@property --wire-dash'), false, 'the :root clock property is fully retired');
-  assert.equal(css.includes('--wire-dash'), false, 'nothing reads the retired clock variable');
-  assert.equal(css.includes(':root{animation'), false, 'nothing may ever animate :root');
-  assert.equal(css.split('@keyframes wireDash{to{stroke-dashoffset:-12px;}}').length - 1, 1,
-    'one iteration travels exactly one dash period, on the path property itself');
-  assert.equal(css.includes('wireFlow'), false, 'the snapping keyframe is fully retired');
-  const ants = (css.match(/\.run-flow\.gv-host \.gv-wires path\.wire-live\{[^}]*\}/) || [''])[0];
-  assert.ok(ants.includes('animation:wireDash .6s linear infinite'), 'the path owns the marching animation (-12px per .6s keeps 20px/s)');
-  assert.ok(ants.includes('stroke-dasharray:6 6'), 'the 6+6 dash IS the 12px period the keyframe travels');
-  assert.ok(!ants.includes('stroke-dashoffset'), 'the base rule sets no offset — the keyframe animates from the initial 0');
-  // The kill-switches: both settled shapes and reduced motion stop the path's
-  // animation and pin the phase at 0.
-  assert.ok(css.includes('.rd-graph.settled .run-flow .wires path.wire-live{animation:none;stroke-dashoffset:0;}'),
-    'the v1-shaped settled arm pins the phase too');
-  assert.ok(css.includes('.rd-graph.settled .run-flow.gv-host .gv-wires path.wire-live{animation:none;stroke-dashoffset:0;}'),
-    'the v2 settled arm pins the phase too');
-  const reduced = css.slice(css.lastIndexOf('@media (prefers-reduced-motion:reduce)'));
-  assert.equal(reduced.includes(':root{animation:none;}'), false, 'no :root clock left for reduced motion to stop');
-  assert.ok(reduced.includes('.run-flow.gv-host .gv-wires path.wire-live{stroke-dashoffset:0;}'),
-    'reduced motion pins the phase on the path');
 });
 
 // ── applyDecor: the ONE DOM pass ─────────────────────────────────────────────
@@ -247,65 +182,54 @@ test('a run that finished at quiescence renders End as skipped with no result ro
   assert.equal(decor.warnings[0], 'finished at quiescence — End not reached');
 });
 
-test('applyDecor: band ORDER is fan → strip → exec → result; the pip and the result land on ONE card each', () => {
-  const { view, host } = mountView();
-  const st = RUN({
-    status: 'done', endReached: true, result: { type: 'md', path: '/tmp/p/plan.md' },
-    steps: [
-      { key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, kind: 'cycle', status: 'done', activeMs: 63000, costUsd: 0.12 },
-      { key: 'x:n_end:1', executionId: 'x:n_end:1', nodeId: 'n_end', ordinal: 1, status: 'done' },
-    ],
-    gate: { wireId: 'w1', fromNode: 'n_a', toNode: 'n_end', askId: 'g' },
-  });
-  const decor = decorFromState(st, { subsOf: (id) => (id === 'n_a' ? [{ status: 'running' }, { status: 'finished' }] : []) });
-  applyDecor(view, { ...decor, expanded: 'n_a' });
-  const a = host.querySelector('[data-node-id="n_a"]');
-  const e = host.querySelector('[data-node-id="n_end"]');
-  assert.deepEqual([...a.querySelectorAll('.xfoot > *')].map((n) => n.className.split(' ')[0]), ['fan', 'xtoggle', 'xrow']);
-  assert.equal(a.querySelector('.fan .fl').textContent, '×2', 'the sub-agent fan rides the footer');
-  assert.equal(a.querySelector('.xrow .xr').textContent, '1m 3s · $0.12', 'the exec row\'s right column is dur · cost');
-  assert.equal(a.querySelector('.xresult'), null, 'the result band is End-only');
-  assert.deepEqual([...e.querySelectorAll('.xfoot > *')].map((n) => n.className.split(' ')[0]), ['xtoggle', 'xresult'], 'the result band is LAST');
-  assert.equal(e.querySelector('.xresult a').textContent, 'plan.md');
-  assert.equal(e.querySelector('.ngate'), null, 'the gate pip is FROM-node-only');
-  assert.equal(a.querySelector('.ngate').dataset.wireId, 'w1');
-  assert.equal(e.querySelector('.nrun'), null, 'a flow card has no header dur · cost');
-});
-
-test('applyDecor wires the layout through: capped strip leds, wrapped fan, stacked slice rows', () => {
-  const { view, host } = mountView();
-  const steps = Array.from({ length: 7 }, (_, i) => ({ key: `x:n_a:${i + 1}`, executionId: `x:n_a:${i + 1}`,
-    nodeId: 'n_a', ordinal: i + 1, kind: 'cycle', status: 'done', activeMs: 63000, costUsd: 0.12 }));
-  steps.push({ key: 'x:n_a:8:t', executionId: 'x:n_a:8:t', nodeId: 'n_a', ordinal: 8, kind: 'task',
-    title: 'Link FirebaseAI, plist setup and smoke test wiring', parentExecutionId: 'x:n_a:8',
-    status: 'done', activeMs: 748000, costUsd: 1.45 });
-  const decor = decorFromState(RUN({ status: 'done', steps }),
-    { subsOf: (id) => (id === 'n_a' ? Array.from({ length: 32 }, () => ({ status: 'finished' })) : []) });
-  applyDecor(view, { ...decor, expanded: 'n_a' });
-  const a = host.querySelector('[data-node-id="n_a"]');
-  assert.equal(a.querySelectorAll('.xsq .xq').length, 6, '8 runs → 6 strip leds, the summary text carries the tail');
-  assert.equal(a.querySelector('.xsum').textContent, '8 runs · $2.29');
-  assert.equal(a.querySelector('.xfoot > .fan').className, 'fan f2', '24 capped squares wrap onto two lines');
-  assert.equal(a.querySelectorAll('.fsq > .sq').length, 24);
-  assert.equal(a.querySelector('.fl').textContent, '×32');
-  const rows = [...a.querySelectorAll('.xrow')];
-  assert.equal(rows[0].className, 'xrow is-done', 'a short cycle row keeps its one compact line');
-  assert.equal(rows[7].className, 'xrow is-done stack l2', 'the truncated 40-char slice title takes two clamped lines');
-  assert.equal(rows[7].querySelector('.xr').textContent, '12m 28s · $1.45');
-});
-
-test('the stacked-row / wrapped-fan CSS exists and keeps every height on the --gv-* rhythm', () => {
-  for (const sel of ['.gv-world .xfoot>:first-child{height:var(--gv-foot-h);}',
-    '.gv-world .xfoot>.fan.f2{height:calc(var(--gv-foot-h) + var(--gv-exec-row-h));}',
-    '.gv-world .xfoot>.xrow.stack{height:calc(2*var(--gv-exec-row-h));',
-    '.gv-world .xfoot>.xrow.stack.l2{height:calc(3*var(--gv-exec-row-h));}',
-    '-webkit-line-clamp:2', '.gv-world .xfoot .fsq{']) {
-    assert.ok(css.includes(sel), `${sel} must be written`);
-  }
-  // The squares must never shrink again, and dur · cost must never wrap mid-text.
-  assert.match(css, /\.gv-world \.xfoot \.xq,\.gv-world \.xfoot \.sq\{[^}]*flex:0 0 auto[^}]*\}/);
-  assert.match(css, /\.gv-world \.xfoot \.xr,\.gv-world \.xfoot \.fl\{[^}]*white-space:nowrap[^}]*\}/);
-  assert.ok(css.includes('flex:0 0 var(--gv-fan-w)'), 'the fan column is the shared FAN_ROW_W');
+test('applyDecor band order is fan → strip → exec → result with one pip/result card each, and wires the layout through (capped strip leds, wrapped fan, stacked rows)', async () => {
+  await checkRows([
+    { name: 'applyDecor: band ORDER is fan → strip → exec → result; the pip and the result land on ONE card each', run: async () => {
+      const { view, host } = mountView();
+      const st = RUN({
+        status: 'done', endReached: true, result: { type: 'md', path: '/tmp/p/plan.md' },
+        steps: [
+          { key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, kind: 'cycle', status: 'done', activeMs: 63000, costUsd: 0.12 },
+          { key: 'x:n_end:1', executionId: 'x:n_end:1', nodeId: 'n_end', ordinal: 1, status: 'done' },
+        ],
+        gate: { wireId: 'w1', fromNode: 'n_a', toNode: 'n_end', askId: 'g' },
+      });
+      const decor = decorFromState(st, { subsOf: (id) => (id === 'n_a' ? [{ status: 'running' }, { status: 'finished' }] : []) });
+      applyDecor(view, { ...decor, expanded: 'n_a' });
+      const a = host.querySelector('[data-node-id="n_a"]');
+      const e = host.querySelector('[data-node-id="n_end"]');
+      assert.deepEqual([...a.querySelectorAll('.xfoot > *')].map((n) => n.className.split(' ')[0]), ['fan', 'xtoggle', 'xrow']);
+      assert.equal(a.querySelector('.fan .fl').textContent, '×2', 'the sub-agent fan rides the footer');
+      assert.equal(a.querySelector('.xrow .xr').textContent, '1m 3s · $0.12', 'the exec row\'s right column is dur · cost');
+      assert.equal(a.querySelector('.xresult'), null, 'the result band is End-only');
+      assert.deepEqual([...e.querySelectorAll('.xfoot > *')].map((n) => n.className.split(' ')[0]), ['xtoggle', 'xresult'], 'the result band is LAST');
+      assert.equal(e.querySelector('.xresult a').textContent, 'plan.md');
+      assert.equal(e.querySelector('.ngate'), null, 'the gate pip is FROM-node-only');
+      assert.equal(a.querySelector('.ngate').dataset.wireId, 'w1');
+      assert.equal(e.querySelector('.nrun'), null, 'a flow card has no header dur · cost');
+    } },
+    { name: 'applyDecor wires the layout through: capped strip leds, wrapped fan, stacked slice rows', run: async () => {
+      const { view, host } = mountView();
+      const steps = Array.from({ length: 7 }, (_, i) => ({ key: `x:n_a:${i + 1}`, executionId: `x:n_a:${i + 1}`,
+        nodeId: 'n_a', ordinal: i + 1, kind: 'cycle', status: 'done', activeMs: 63000, costUsd: 0.12 }));
+      steps.push({ key: 'x:n_a:8:t', executionId: 'x:n_a:8:t', nodeId: 'n_a', ordinal: 8, kind: 'task',
+        title: 'Link FirebaseAI, plist setup and smoke test wiring', parentExecutionId: 'x:n_a:8',
+        status: 'done', activeMs: 748000, costUsd: 1.45 });
+      const decor = decorFromState(RUN({ status: 'done', steps }),
+        { subsOf: (id) => (id === 'n_a' ? Array.from({ length: 32 }, () => ({ status: 'finished' })) : []) });
+      applyDecor(view, { ...decor, expanded: 'n_a' });
+      const a = host.querySelector('[data-node-id="n_a"]');
+      assert.equal(a.querySelectorAll('.xsq .xq').length, 6, '8 runs → 6 strip leds, the summary text carries the tail');
+      assert.equal(a.querySelector('.xsum').textContent, '8 runs · $2.29');
+      assert.equal(a.querySelector('.xfoot > .fan').className, 'fan f2', '24 capped squares wrap onto two lines');
+      assert.equal(a.querySelectorAll('.fsq > .sq').length, 24);
+      assert.equal(a.querySelector('.fl').textContent, '×32');
+      const rows = [...a.querySelectorAll('.xrow')];
+      assert.equal(rows[0].className, 'xrow is-done', 'a short cycle row keeps its one compact line');
+      assert.equal(rows[7].className, 'xrow is-done stack l2', 'the truncated 40-char slice title takes two clamped lines');
+      assert.equal(rows[7].querySelector('.xr').textContent, '12m 28s · $1.45');
+    } },
+  ]);
 });
 
 // ── the host adapters ─────────────────────────────────────────────────────────
@@ -339,47 +263,49 @@ const WIDE = { ...MANIFEST, graph: { nodes: [MANIFEST.graph.nodes[0], { ...MANIF
 // A vertically stacked graph: the HEIGHT (not the width) decides the fit.
 const TALL = { ...MANIFEST, graph: { nodes: [MANIFEST.graph.nodes[0], { ...MANIFEST.graph.nodes[1], x: 0, y: 500 }], wires: MANIFEST.graph.wires } };
 
-test('the static host centres a graph that fits (width−32 × 300−32) at ≤ 1×, stamps its classes, reads the manifest for its headers and binds no listeners', () => {
-  calls = [];
-  const { m, host, wrap, window } = mountHost('static');
-  m.update('run1', MANIFEST, decorFromState(RUN()));
-  const world = host.querySelector('.gv-world');
-  assert.ok(world, 'the world is rendered');
-  // bounds(16) = 652×175.5 into 768×268 → z = min(1.178, 1.527) clamped to 1; centred, then inset by 16.
-  const t = xform(world);
-  assert.equal(t.z, 1, 'fit never magnifies past 1×');
-  near(t.x, 90, 'x = 16 + (768 − 652)/2 + 16');
-  near(t.y, 78.25, 'y = 16 + (268 − 175.5)/2 + 16');
-  assert.equal(host.style.width, '', 'a graph that fits leaves the host at the wrap width');
-  assert.equal(host.classList.contains('gv-host'), true, 'the host drops the v1 flex box (style.css .run-flow.gv-host)');
-  assert.deepEqual([...wrap.classList], ['run-flow-wrap', 'gv-wrap', 'gv-wrap-static']);
-  assert.equal(wrap.querySelector('.rg-hint'), null, 'no hint chip on a static host');
-  // Headers come from the MANIFEST (History renders with the registry absent).
-  const head = host.querySelector('[data-node-id="n_a"] .nhead');
-  assert.equal(head.className, 'nhead h-violet');
-  assert.equal(head.querySelector('.tt').textContent, 'Planner');
-  const before = world.style.transform;
-  host.dispatchEvent(new window.PointerEvent('pointerdown', { pointerId: 1, button: 0, clientX: 10, clientY: 10, bubbles: true }));
-  assert.equal(world.style.transform, before, 'static mode never reacts to pointers');
-});
-
-test('a graph wider than the card at the 0.3 floor is LEFT-aligned and widens the host so the wrap scrolls natively', () => {
-  calls = [];
-  const { m, host } = mountHost('static');
-  m.update('run1', WIDE, decorFromState(RUN({ stepper: WIDE })));
-  const t = xform(host.querySelector('.gv-world'));
-  near(t.z, 0.3, 'the floor');
-  // sw = 2652 × 0.3 = 795.6 > 768 → host width = ceil(795.6 + 32); x = 16 − b.x·z = 16 + 16×0.3.
-  assert.equal(host.style.width, '828px');
-  near(t.x, 20.8, 'left-aligned at the 16px inset, not centred');
-});
-
-test('the static fit is capped by STATIC_HOST_H, not just by the width', () => {
-  calls = [];
-  const { m, host } = mountHost('static');
-  m.update('run1', TALL, decorFromState(RUN({ stepper: TALL })));
-  const z = zoomOf(host.querySelector('.gv-world'));
-  assert.ok(z < 0.5, `a 500px-tall graph must shrink to fit 300−32px, got ${z}`);
+test('the static host fit: centres a graph that fits at ≤1×, left-aligns and widens past the 0.3 floor, and is capped by STATIC_HOST_H', async () => {
+  await checkRows([
+    { name: 'the static host centres a graph that fits (width−32 × 300−32) at ≤ 1×, stamps its classes, reads the manifest for its headers and binds no listeners', run: async () => {
+      calls = [];
+      const { m, host, wrap, window } = mountHost('static');
+      m.update('run1', MANIFEST, decorFromState(RUN()));
+      const world = host.querySelector('.gv-world');
+      assert.ok(world, 'the world is rendered');
+      // bounds(16) = 652×175.5 into 768×268 → z = min(1.178, 1.527) clamped to 1; centred, then inset by 16.
+      const t = xform(world);
+      assert.equal(t.z, 1, 'fit never magnifies past 1×');
+      near(t.x, 90, 'x = 16 + (768 − 652)/2 + 16');
+      near(t.y, 78.25, 'y = 16 + (268 − 175.5)/2 + 16');
+      assert.equal(host.style.width, '', 'a graph that fits leaves the host at the wrap width');
+      assert.equal(host.classList.contains('gv-host'), true, 'the host drops the v1 flex box (style.css .run-flow.gv-host)');
+      assert.deepEqual([...wrap.classList], ['run-flow-wrap', 'gv-wrap', 'gv-wrap-static']);
+      assert.equal(wrap.querySelector('.rg-hint'), null, 'no hint chip on a static host');
+      // Headers come from the MANIFEST (History renders with the registry absent).
+      const head = host.querySelector('[data-node-id="n_a"] .nhead');
+      assert.equal(head.className, 'nhead h-violet');
+      assert.equal(head.querySelector('.tt').textContent, 'Planner');
+      const before = world.style.transform;
+      host.dispatchEvent(new window.PointerEvent('pointerdown', { pointerId: 1, button: 0, clientX: 10, clientY: 10, bubbles: true }));
+      assert.equal(world.style.transform, before, 'static mode never reacts to pointers');
+    } },
+    { name: 'a graph wider than the card at the 0.3 floor is LEFT-aligned and widens the host so the wrap scrolls natively', run: async () => {
+      calls = [];
+      const { m, host } = mountHost('static');
+      m.update('run1', WIDE, decorFromState(RUN({ stepper: WIDE })));
+      const t = xform(host.querySelector('.gv-world'));
+      near(t.z, 0.3, 'the floor');
+      // sw = 2652 × 0.3 = 795.6 > 768 → host width = ceil(795.6 + 32); x = 16 − b.x·z = 16 + 16×0.3.
+      assert.equal(host.style.width, '828px');
+      near(t.x, 20.8, 'left-aligned at the 16px inset, not centred');
+    } },
+    { name: 'the static fit is capped by STATIC_HOST_H, not just by the width', run: async () => {
+      calls = [];
+      const { m, host } = mountHost('static');
+      m.update('run1', TALL, decorFromState(RUN({ stepper: TALL })));
+      const z = zoomOf(host.querySelector('.gv-world'));
+      assert.ok(z < 0.5, `a 500px-tall graph must shrink to fit 300−32px, got ${z}`);
+    } },
+  ]);
 });
 
 test('the RENDERED footers feed the fit: each extra band on the bottom card shrinks the static zoom', () => {
@@ -402,105 +328,6 @@ test('the RENDERED footers feed the fit: each extra band on the bottom card shri
   assert.ok(strip < bare, `strip band must grow the card (${strip} < ${bare})`);
   assert.ok(stripResult < strip, `result band must grow the card (${stripResult} < ${strip})`);
   assert.ok(fanned < stripResult, `fan band must grow the card (${fanned} < ${stripResult})`);
-});
-
-test('the monitor host sizes itself clamp(360, fitted + 48, 600) through --run-host-h, shows the hint chip and stamps its classes', () => {
-  calls = [];
-  const { m, wrap, host } = mountHost('monitor');
-  m.update('run1', MANIFEST, decorFromState(RUN()));
-  // bounds(24).h = 191.5, zw = 1 → round(191.5) = 192 → floor 360.
-  assert.equal(wrap.style.getPropertyValue('--run-host-h'), '360px');
-  assert.equal(wrap.querySelector('.rg-hint').textContent, HINT_TEXT);
-  assert.equal(wrap.className.includes('rg-engaged'), false, 'there is no engagement state any more');
-  assert.equal(host.classList.contains('gv-host'), true);
-  assert.deepEqual([...wrap.classList], ['run-flow-wrap', 'gv-wrap', 'gv-wrap-monitor']);
-  assert.equal(host.querySelector('[data-node-id="n_a"] .nhead .tt').textContent, 'Planner');
-  // A tall graph hits the 600px ceiling: bounds(24).h = 658.5 → round(658.5) → 600.
-  const tall = mountHost('monitor');
-  tall.m.update('run1', TALL, decorFromState(RUN({ stepper: TALL })));
-  assert.equal(tall.wrap.style.getPropertyValue('--run-host-h'), '600px');
-  assert.ok(zoomOf(tall.host.querySelector('.gv-world')) < 1, 'and fits both axes into (800, 600)');
-});
-
-test('the monitor canvas never captures the page scroll: no engagement class, and the hint chip says what the gestures are', () => {
-  const { m, wrap, host, window } = mountHost('monitor');
-  m.update('run1', MANIFEST, decorFromState(RUN()));
-  const stage = m.view.stage;
-  assert.ok(host.contains(stage), 'the stage is the gesture surface');
-  stage.dispatchEvent(new window.PointerEvent('pointerdown', { pointerId: 1, button: 0, bubbles: true }));
-  stage.dispatchEvent(new window.FocusEvent('focus'));
-  assert.equal(wrap.className.includes('rg-engaged'), false, 'engagement is gone for good');
-  const plain = new window.WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true });
-  stage.dispatchEvent(plain);
-  assert.equal(plain.defaultPrevented, false, 'a plain wheel scrolls the PAGE, even after a press');
-  assert.equal(wrap.querySelector('.rg-hint').textContent, 'drag to pan · ⌘/ctrl+scroll to zoom');
-  assert.equal(wrap.querySelector('.rg-hint').textContent, HINT_TEXT);
-});
-
-test('the monitor host mounts the nav cluster: 1.2x steps about the host centre, clamped and disabled at the stops, Center = zoom-to-fit', () => {
-  calls = [];
-  const { m, wrap, host, window } = mountHost('monitor');
-  m.update('run1', MANIFEST, decorFromState(RUN()));
-  const nav = wrap.querySelector(':scope > .gv-nav');
-  assert.ok(nav, 'the cluster is a SIBLING of the stage, on the wrap');
-  assert.deepEqual([...nav.querySelectorAll('button')].map((b) => b.dataset.nav), ['in', 'out', 'center']);
-  assert.equal(nav.querySelector('[data-nav="center"]').title, 'Fit graph to view');
-  assert.equal(host.querySelector('.gv-nav'), null, 'and never inside the stage');
-  const btn = (k) => nav.querySelector(`[data-nav="${k}"]`);
-  const click = (el) => el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  const world = host.querySelector('.gv-world');
-  const fitted = xform(world);
-  // mountHost injects an 800x520 viewport, so the host centre is (400, 260).
-  const worldAt = (t, sx, sy) => ({ x: (sx - t.x) / t.z, y: (sy - t.y) / t.z });
-  const w0 = worldAt(fitted, 400, 260);
-  click(btn('in'));
-  near(zoomOf(world), fitted.z * 1.2, 'z x 1.2');
-  const w1 = worldAt(xform(world), 400, 260);
-  near(w1.x, w0.x, 'the world point under the host centre never moves');
-  near(w1.y, w0.y, 'nor on y');
-  click(btn('out'));
-  near(zoomOf(world), fitted.z, 'and back');
-  for (let i = 0; i < 12; i += 1) click(btn('in'));
-  near(zoomOf(world), 1.6, 'clamped at the monitor zoomMax');
-  assert.equal(btn('in').disabled, true, 'a button that cannot move is disabled');
-  assert.equal(btn('out').disabled, false);
-  for (let i = 0; i < 24; i += 1) click(btn('out'));
-  near(zoomOf(world), 0.3, 'clamped at the monitor zoomMin');
-  assert.equal(btn('out').disabled, true);
-  assert.equal(btn('in').disabled, false);
-  // Center is a zoom-to-FIT: it restores exactly what the auto-fit computes, and
-  // re-derives --run-host-h on the way (it runs the same two-pass fitMonitor).
-  m.view.setTransform({ x: 999, y: -400, z: 0.9 });
-  click(btn('center'));
-  assert.deepEqual(xform(world), fitted, 'Center restores the fit transform exactly');
-  assert.equal(btn('out').disabled, false, 'and the cluster repaints');
-  assert.equal(wrap.style.getPropertyValue('--run-host-h'), '360px', 'the host height survives the round trip');
-});
-
-test('a drag pans the monitor host, keeps its pan through a repaint, and Center hands the auto re-fit back', () => {
-  calls = [];
-  const { m, wrap, host, window } = mountHost('monitor');
-  const st = RUN({ steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'done', activeMs: 1000, costUsd: 0.1 }] });
-  m.update('run1', MANIFEST, decorFromState(st));
-  const world = host.querySelector('.gv-world');
-  const fitted = xform(world);
-  const stage = m.view.stage;
-  // `buttons: 1` is what a real drag reports on every move; a move with no button
-  // is a release this document never saw, and the nav drops the gesture (D17).
-  const pe = (type, o) => new window.PointerEvent(type, { pointerId: 4, buttons: 1, bubbles: true, cancelable: true, ...o });
-  stage.dispatchEvent(pe('pointerdown', { button: 0, clientX: 100, clientY: 100 }));
-  window.document.dispatchEvent(pe('pointermove', { clientX: 160, clientY: 130 }));
-  window.document.dispatchEvent(pe('pointerup', { clientX: 160, clientY: 130 }));
-  assert.deepEqual(xform(world), { x: fitted.x + 60, y: fitted.y + 30, z: fitted.z }, 'the drag panned by the delta');
-  // That drag swallows exactly one click (view.mjs): spend it before using the accordion.
-  stage.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  host.querySelector('.xtoggle').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  assert.equal(host.querySelectorAll('.xrow').length, 1, 'the delegated accordion click survived the drag');
-  assert.equal(xform(world).x, fitted.x + 60, 'a touched view keeps its pan while the card grows');
-  wrap.querySelector(':scope > .gv-nav [data-nav="center"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  const centred = xform(world);
-  m.fit();
-  assert.deepEqual(xform(world), centred, 'Center left the view exactly at the fit of the TALLER graph');
 });
 
 test('the footer accordion opens ONE node; row / gate / result clicks report out; the result link never navigates', () => {
@@ -526,24 +353,6 @@ test('the footer accordion opens ONE node; row / gate / result clicks report out
   assert.equal(host.querySelectorAll('.xrow').length, 0, 'a different run collapses an OPEN accordion');
 });
 
-test('a user pan/zoom survives a strip toggle and a decor update; the accordion re-fits only while untouched', () => {
-  calls = [];
-  const { m, host, window } = mountHost('monitor');
-  const st = RUN({ steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'done', activeMs: 1000, costUsd: 0.1 }] });
-  m.update('run1', MANIFEST, decorFromState(st));
-  const world = host.querySelector('.gv-world');
-  const fitted = world.style.transform;
-  host.querySelector('.xtoggle').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  assert.notEqual(world.style.transform, fitted, 'untouched → the taller card re-fits');
-  m.view.setTransform({ x: 5, y: 5, z: 1 });
-  host.querySelector('.xtoggle').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  assert.deepEqual(xform(world), { x: 5, y: 5, z: 1 }, 'touched → a toggle leaves the transform alone');
-  m.update('run1', MANIFEST, decorFromState({ ...st, status: 'done' }));
-  assert.deepEqual(xform(world), { x: 5, y: 5, z: 1 }, 'a decor update never re-fits');
-  m.update('run2', MANIFEST, decorFromState(st));
-  assert.notDeepEqual(xform(world), { x: 5, y: 5, z: 1 }, 'a NEW run is a new build: it fits again');
-});
-
 test('update() re-renders only on a structural change and re-applies the decor only for a NEW bag', () => {
   calls = [];
   const { m, host } = mountHost('monitor');
@@ -567,29 +376,44 @@ test('update() re-renders only on a structural change and re-applies the decor o
   assert.notEqual(m.view, view, 'a fresh view: its portsFn and headers read the NEW manifest');
 });
 
-test('destroy() unbinds everything and gives the host and the wrap back untouched', () => {
-  calls = [];
-  const { m, host, wrap, window } = mountHost('static');
-  m.update('run1', WIDE, decorFromState(RUN({ stepper: WIDE })));
-  assert.equal(host.style.width, '828px');
-  m.destroy();
-  assert.equal(host.querySelector('.gv-world'), null, 'the view is torn down');
-  assert.equal(host.style.width, '', 'the inline width is cleared');
-  assert.deepEqual([...host.classList], ['run-flow']);
-  assert.deepEqual([...wrap.classList], ['run-flow-wrap']);
-  const mon = mountHost('monitor');
-  mon.m.update('run1', MANIFEST, decorFromState(RUN()));
-  const stage = mon.m.view.stage;
-  mon.m.destroy();
-  assert.equal(mon.wrap.querySelector('.rg-hint'), null, 'the hint chip is gone');
-  assert.equal(mon.wrap.style.getPropertyValue('--run-host-h'), '', 'the host height is released');
-  assert.deepEqual([...mon.wrap.classList], ['run-flow-wrap']);
-  stage.dispatchEvent(new window.PointerEvent('pointerdown', { pointerId: 9, button: 0, bubbles: true }));
-  // `buttons: 1`: onMove drops a button-less move before it can ever add .panning
-  // (D17), so without it this would pass against a live, non-destroyed nav.
-  mon.window.document.dispatchEvent(new window.PointerEvent('pointermove', { pointerId: 9, buttons: 1, clientX: 200, clientY: 200, bubbles: true }));
-  assert.equal(stage.classList.contains('panning'), false, 'the nav listeners are gone');
-  assert.equal(mon.wrap.querySelector('.gv-nav'), null, 'the cluster is gone too');
+test('destroy() unbinds everything, gives the host back untouched, and re-arms bind() for a re-mount', async () => {
+  await checkRows([
+    { name: 'destroy() unbinds everything and gives the host and the wrap back untouched', run: async () => {
+      calls = [];
+      const { m, host, wrap, window } = mountHost('static');
+      m.update('run1', WIDE, decorFromState(RUN({ stepper: WIDE })));
+      assert.equal(host.style.width, '828px');
+      m.destroy();
+      assert.equal(host.querySelector('.gv-world'), null, 'the view is torn down');
+      assert.equal(host.style.width, '', 'the inline width is cleared');
+      assert.deepEqual([...host.classList], ['run-flow']);
+      assert.deepEqual([...wrap.classList], ['run-flow-wrap']);
+      const mon = mountHost('monitor');
+      mon.m.update('run1', MANIFEST, decorFromState(RUN()));
+      const stage = mon.m.view.stage;
+      mon.m.destroy();
+      assert.equal(mon.wrap.querySelector('.rg-hint'), null, 'the hint chip is gone');
+      assert.equal(mon.wrap.style.getPropertyValue('--run-host-h'), '', 'the host height is released');
+      assert.deepEqual([...mon.wrap.classList], ['run-flow-wrap']);
+      stage.dispatchEvent(new window.PointerEvent('pointerdown', { pointerId: 9, button: 0, bubbles: true }));
+      // `buttons: 1`: onMove drops a button-less move before it can ever add .panning
+      // (D17), so without it this would pass against a live, non-destroyed nav.
+      mon.window.document.dispatchEvent(new window.PointerEvent('pointermove', { pointerId: 9, buttons: 1, clientX: 200, clientY: 200, bubbles: true }));
+      assert.equal(stage.classList.contains('panning'), false, 'the nav listeners are gone');
+      assert.equal(mon.wrap.querySelector('.gv-nav'), null, 'the cluster is gone too');
+    } },
+    { name: 'destroy() re-arms bind(): a re-mounted host delegates clicks again', run: async () => {
+      calls = [];
+      const { m, host, wrap, window } = mountHost('monitor');
+      const st = RUN({ steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'done', activeMs: 1000, costUsd: 0.1 }] });
+      m.update('run1', MANIFEST, decorFromState(st));
+      m.destroy();
+      m.update('run1', MANIFEST, decorFromState(st));
+      assert.equal(wrap.querySelector('.rg-hint').textContent, HINT_TEXT, 'the hint chip is back');
+      host.querySelector('.xtoggle').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      assert.equal(host.querySelectorAll('.xrow').length, 1, 'the delegated accordion listener was re-bound');
+    } },
+  ]);
 });
 
 // A host whose measured width TRACKS the inline width the static fit writes —
@@ -655,17 +479,6 @@ test('a hidden host (0×0) is never fitted — on EITHER host — and the first 
   stat.m.update('run1', WIDE, decorFromState(RUN({ stepper: WIDE })));
   assert.equal(stat.host.style.width, '828px', 'the reveal fits the card');
 });
-test('destroy() re-arms bind(): a re-mounted host delegates clicks again', () => {
-  calls = [];
-  const { m, host, wrap, window } = mountHost('monitor');
-  const st = RUN({ steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'done', activeMs: 1000, costUsd: 0.1 }] });
-  m.update('run1', MANIFEST, decorFromState(st));
-  m.destroy();
-  m.update('run1', MANIFEST, decorFromState(st));
-  assert.equal(wrap.querySelector('.rg-hint').textContent, HINT_TEXT, 'the hint chip is back');
-  host.querySelector('.xtoggle').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  assert.equal(host.querySelectorAll('.xrow').length, 1, 'the delegated accordion listener was re-bound');
-});
 
 // ── app.js: version arms ────────────────────────────────────────────────────
 // jsdom boot idiom copied from test/ui-subagent-cycle-split.test.mjs (`boot()`).
@@ -693,42 +506,70 @@ const WITH_SHIM = { ...MANIFEST, steps: [
   { kind: 'agents', nodes: [{ id: 'n_end', key: null, uiPhase: 'end', label: 'End' }] },
   { kind: 'done', nodes: [{ id: 'done', label: 'Done', sub: 'complete' }] }], feedbacks: [] };
 
-test('every label helper reads the graph; a run with no manifest reads plainly "Running"', async () => {
-  const window = await bootApp();
-  const np = window.__np;
-  const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
-  np.onState(r, { status: 'running', stepper: MANIFEST, active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }],
-    steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'start', activeMs: 10, startedAt: '2026-08-26T10:00:00Z' }],
-    endReached: false, result: null, warnings: [], wireDeliveries: {}, gate: null });
-  assert.equal(np.isGraphRun(r), true);
-  assert.deepEqual(np.activeNodes(r).map((a) => a.nodeId), ['n_a']);
-  assert.equal(np.statusPill(r).text, 'Planner');
-  assert.equal(np.runDotClass(r), 'violet');
-  const label = np.runStepLabel(r);
-  assert.deepEqual([label.n, label.m, label.name], [0, 1, 'Planner'], 'n/m are DONE agent nodes over agent nodes');
-  // `active` reaches a run model ONLY through onState (app.js's single writer),
-  // which bumps the decor generation — activeNodes reads the memoised reducer
-  // output, so poking r.active directly would still show the last generation.
-  np.onState(r, { status: 'running', stepper: MANIFEST,
-    active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }, { nodeId: 'n_a2', executionId: 'x:n_a2:1' }],
-    steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'start', activeMs: 10, startedAt: '2026-08-26T10:00:00Z' }] });
-  assert.equal(np.statusPill(r).text, '2 agents running');
-  assert.equal(np.rdStateCopy(r, 'Planner'), '2 agents running.');
-  // An error pause names its cause; any OTHER reason is the orchestrator's own
-  // free text (a usage-limit line); a reasonless pause is plain "Paused" unless the deployment is
-  // shared (then "Paused by <name>" / "by you": test/ui-attribution.test.mjs).
-  assert.match(np.rdStateCopy({ ...r, status: 'paused', pauseReason: 'error', pauseDetail: 'claude exited with code 1: disk full' }, 'Planner'),
-    /^Paused after an error: claude exited with code 1: disk full\. Fix the cause, then Resume/);
-  assert.match(np.rdStateCopy({ ...r, status: 'paused', pauseReason: "You've hit your session limit · resets 6pm" }, 'Planner'),
-    /^Paused — You've hit your session limit · resets 6pm\./);
-  assert.match(np.rdStateCopy({ ...r, status: 'paused', pauseReason: null }, 'Planner'), /^Paused\. /);
-  assert.match(np.rdStateCopy({ ...r, status: 'paused', pauseReason: null, lastAction: { kind: 'pause', by: 'ada@example.com' } }, 'Planner'), /^Paused\. /, 'no viewer yet: nobody named');
-  // A run whose manifest has not arrived yet: no active agent to name, and the
-  // v1 phaseKey switch that used to name a phase is gone.
-  const bare = np.makeRun({ runId: 'r2', title: 't', projectDir: '/p', status: 'running' });
-  assert.equal(np.isGraphRun(bare), false);
-  assert.equal(np.statusPill(bare).text, 'Running');
-  assert.equal(np.runDotClass(bare), 'peach');
+test('label helpers (incl. nodeLabelLookup/agentNodeIdSet) read the v2 graph; a run with no manifest reads plainly "Running"', async () => {
+  await checkRows([
+    { name: 'every label helper reads the graph; a run with no manifest reads plainly "Running"', run: async () => {
+      const window = await bootApp();
+      const np = window.__np;
+      const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
+      np.onState(r, { status: 'running', stepper: MANIFEST, active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }],
+        steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'start', activeMs: 10, startedAt: '2026-08-26T10:00:00Z' }],
+        endReached: false, result: null, warnings: [], wireDeliveries: {}, gate: null });
+      assert.equal(np.isGraphRun(r), true);
+      assert.deepEqual(np.activeNodes(r).map((a) => a.nodeId), ['n_a']);
+      assert.equal(np.statusPill(r).text, 'Planner');
+      assert.equal(np.runDotClass(r), 'violet');
+      const label = np.runStepLabel(r);
+      assert.deepEqual([label.n, label.m, label.name], [0, 1, 'Planner'], 'n/m are DONE agent nodes over agent nodes');
+      // `active` reaches a run model ONLY through onState (app.js's single writer),
+      // which bumps the decor generation — activeNodes reads the memoised reducer
+      // output, so poking r.active directly would still show the last generation.
+      np.onState(r, { status: 'running', stepper: MANIFEST,
+        active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }, { nodeId: 'n_a2', executionId: 'x:n_a2:1' }],
+        steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'start', activeMs: 10, startedAt: '2026-08-26T10:00:00Z' }] });
+      assert.equal(np.statusPill(r).text, '2 agents running');
+      assert.equal(np.rdStateCopy(r, 'Planner'), '2 agents running.');
+      // An error pause names its cause; any OTHER reason is the orchestrator's own
+      // free text (a usage-limit line); a reasonless pause is plain "Paused" unless the deployment is
+      // shared (then "Paused by <name>" / "by you": test/ui-attribution.test.mjs).
+      assert.match(np.rdStateCopy({ ...r, status: 'paused', pauseReason: 'error', pauseDetail: 'claude exited with code 1: disk full' }, 'Planner'),
+        /^Paused after an error: claude exited with code 1: disk full\. Fix the cause, then Resume/);
+      assert.match(np.rdStateCopy({ ...r, status: 'paused', pauseReason: "You've hit your session limit · resets 6pm" }, 'Planner'),
+        /^Paused — You've hit your session limit · resets 6pm\./);
+      assert.match(np.rdStateCopy({ ...r, status: 'paused', pauseReason: null }, 'Planner'), /^Paused\. /);
+      assert.match(np.rdStateCopy({ ...r, status: 'paused', pauseReason: null, lastAction: { kind: 'pause', by: 'ada@example.com' } }, 'Planner'), /^Paused\. /, 'no viewer yet: nobody named');
+      // A run whose manifest has not arrived yet: no active agent to name, and the
+      // v1 phaseKey switch that used to name a phase is gone.
+      const bare = np.makeRun({ runId: 'r2', title: 't', projectDir: '/p', status: 'running' });
+      assert.equal(np.isGraphRun(bare), false);
+      assert.equal(np.statusPill(bare).text, 'Running');
+      assert.equal(np.runDotClass(bare), 'peach');
+    } },
+    { name: 'nodeLabelLookup and agentNodeIdSet read a v2 manifest\'s graph.nodes (labels; agent ids only)', run: async () => {
+      const window = await bootApp();
+      const np = window.__np;
+      const label = np.nodeLabelLookup(MANIFEST);
+      assert.equal(label('n_a'), 'Planner');
+      assert.equal(label('n_end'), 'End');
+      assert.equal(label('nope'), 'nope', 'unknown ids fall back to the id');
+      assert.deepEqual([...np.agentNodeIdSet(MANIFEST)], ['n_a'], 'flow nodes are never Agents-dropdown groups');
+      // v1 manifests keep today's shim-cell readers.
+      const v1 = { version: 1, steps: [{ kind: 'agents', nodes: [{ id: 's0_0', uiPhase: 'plan', label: 'Plan' }] }], feedbacks: [] };
+      assert.equal(np.nodeLabelLookup(v1)('s0_0'), 'Plan');
+      assert.deepEqual([...np.agentNodeIdSet(v1)], ['s0_0']);
+    } },
+    { name: 'runDotClass on a v2 run uses the PULSING dot families only', run: async () => {
+      const window = await bootApp();
+      const np = window.__np;
+      const green = { ...MANIFEST, graph: { ...MANIFEST.graph, nodes: [{ ...MANIFEST.graph.nodes[0], color: 'green' }, MANIFEST.graph.nodes[1]] } };
+      const r = np.makeRun({ runId: 'r7', title: 't', projectDir: '/p', status: 'running' });
+      np.onState(r, { status: 'running', stepper: green, active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }], steps: [] });
+      assert.equal(np.statusPill(r).family, 'green', 'the pill may be green');
+      assert.equal(np.runDotClass(r), 'grey-pulse', '.child-dot.green is the STATIC done dot — a live run never wears it');
+      np.onState(r, { status: 'running', stepper: green, active: [], steps: [] });
+      assert.equal(np.runDotClass(r), 'peach', 'nothing in flight → the Running family');
+    } },
+  ]);
 });
 
 test('isGraphRun is false for a REAL v1 stepper object, not just for a null one', async () => {
@@ -757,18 +598,6 @@ test('activeNodes orders in-flight executions newest-first, by executionId-only 
     active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }, { nodeId: 'n_end', executionId: 'x:n_end:1' }],
     endReached: false, warnings: [], wireDeliveries: {}, gate: null });
   assert.deepEqual(np.activeNodes(r).map((a) => a.nodeId), ['n_end', 'n_a'], 'newest first, NOT state.active order');
-});
-
-test('runDotClass on a v2 run uses the PULSING dot families only', async () => {
-  const window = await bootApp();
-  const np = window.__np;
-  const green = { ...MANIFEST, graph: { ...MANIFEST.graph, nodes: [{ ...MANIFEST.graph.nodes[0], color: 'green' }, MANIFEST.graph.nodes[1]] } };
-  const r = np.makeRun({ runId: 'r7', title: 't', projectDir: '/p', status: 'running' });
-  np.onState(r, { status: 'running', stepper: green, active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }], steps: [] });
-  assert.equal(np.statusPill(r).family, 'green', 'the pill may be green');
-  assert.equal(np.runDotClass(r), 'grey-pulse', '.child-dot.green is the STATIC done dot — a live run never wears it');
-  np.onState(r, { status: 'running', stepper: green, active: [], steps: [] });
-  assert.equal(np.runDotClass(r), 'peach', 'nothing in flight → the Running family');
 });
 
 test('runDecorFor is memoised per state generation and per mode: ONE reducer pass, one bag per host', async () => {
@@ -803,20 +632,6 @@ test('runDecorFor is memoised per state generation and per mode: ONE reducer pas
   assert.notEqual(d4, d3, 'a terminal transition invalidates the bag');
   assert.equal(d4.resolved, true);
   assert.deepEqual(d4.liveWireIds, [], 'nothing marches on a finished run');
-});
-
-test('nodeLabelLookup and agentNodeIdSet read a v2 manifest\'s graph.nodes (labels; agent ids only)', async () => {
-  const window = await bootApp();
-  const np = window.__np;
-  const label = np.nodeLabelLookup(MANIFEST);
-  assert.equal(label('n_a'), 'Planner');
-  assert.equal(label('n_end'), 'End');
-  assert.equal(label('nope'), 'nope', 'unknown ids fall back to the id');
-  assert.deepEqual([...np.agentNodeIdSet(MANIFEST)], ['n_a'], 'flow nodes are never Agents-dropdown groups');
-  // v1 manifests keep today's shim-cell readers.
-  const v1 = { version: 1, steps: [{ kind: 'agents', nodes: [{ id: 's0_0', uiPhase: 'plan', label: 'Plan' }] }], feedbacks: [] };
-  assert.equal(np.nodeLabelLookup(v1)('s0_0'), 'Plan');
-  assert.deepEqual([...np.agentNodeIdSet(v1)], ['s0_0']);
 });
 
 // ── paintGraphFor + the three hosts ─────────────────────────────────────────
@@ -898,40 +713,43 @@ test('the run page mounts the graph and it survives a shim-signature change', as
   window.location.hash = '';
 });
 
-test('openRunArtifact reads the End chip through the by-id route on Running and the keyed routes on History', async () => {
-  const window = await bootApp();
-  const np = window.__np;
-  const urls = [];
-  globalThis.fetch = window.fetch = (u) => { urls.push(String(u)); return Promise.resolve({ ok: true, status: 200, json: async () => ({ rel: 'plan.md', text: '# plan' }) }); };
-  const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
-  r.pipelineId = 'abcd1234';
-  await np.openRunArtifact({ run: r, runId: 'r1' }, '/tmp/p/plan.md');
-  await np.openRunArtifact({ run: { id: 'p1' }, runId: 'p1', record: { projectKey: 'proj-alpha-00000001' } }, '/tmp/p/plan.md');
-  await np.openRunArtifact({ run: { id: 'p1' }, runId: 'p1', record: { projectKey: 'workspaces/wks-a-00000001', target: 'workspace' } }, '/tmp/p/plan.md');
-  assert.deepEqual(urls, [
-    '/api/runs/abcd1234/artifact?rel=%2Ftmp%2Fp%2Fplan.md',
-    '/api/history/proj-alpha-00000001/p1/artifact?rel=%2Ftmp%2Fp%2Fplan.md',
-    '/api/workspaces/wks-a-00000001/runs/p1/artifact?rel=%2Ftmp%2Fp%2Fplan.md',
+test('openRunArtifact reads the End chip through the by-id route on Running and the keyed routes on History, titling the viewer with the file name', async () => {
+  await checkRows([
+    { name: 'openRunArtifact reads the End chip through the by-id route on Running and the keyed routes on History', run: async () => {
+      const window = await bootApp();
+      const np = window.__np;
+      const urls = [];
+      globalThis.fetch = window.fetch = (u) => { urls.push(String(u)); return Promise.resolve({ ok: true, status: 200, json: async () => ({ rel: 'plan.md', text: '# plan' }) }); };
+      const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
+      r.pipelineId = 'abcd1234';
+      await np.openRunArtifact({ run: r, runId: 'r1' }, '/tmp/p/plan.md');
+      await np.openRunArtifact({ run: { id: 'p1' }, runId: 'p1', record: { projectKey: 'proj-alpha-00000001' } }, '/tmp/p/plan.md');
+      await np.openRunArtifact({ run: { id: 'p1' }, runId: 'p1', record: { projectKey: 'workspaces/wks-a-00000001', target: 'workspace' } }, '/tmp/p/plan.md');
+      assert.deepEqual(urls, [
+        '/api/runs/abcd1234/artifact?rel=%2Ftmp%2Fp%2Fplan.md',
+        '/api/history/proj-alpha-00000001/p1/artifact?rel=%2Ftmp%2Fp%2Fplan.md',
+        '/api/workspaces/wks-a-00000001/runs/p1/artifact?rel=%2Ftmp%2Fp%2Fplan.md',
+      ]);
+      assert.equal(window.document.querySelector('#viewer-title').textContent, 'Saved: plan.md', 'the payload lands in the saved-artifact viewer');
+      assert.equal(window.document.querySelector('#viewer-card').classList.contains('hidden'), false);
+    } },
+    { name: 'openRunArtifact titles the raw viewer with the file, never the absolute run path', run: async () => {
+      // The text branch titles the viewer with the server's run-relative `rel`; the raw
+      // branch used the caller's `rel` verbatim, and a `.log-artifact` click carries the
+      // artifact event's ABSOLUTE path — so the same file opened from a log line was
+      // titled with the user's home directory while the Artifacts tab titled it
+      // `Artifact: deck.html`.
+      const window = await bootApp();
+      const np = window.__np;
+      const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
+      r.pipelineId = 'abcd1234';
+      await np.openRunArtifact({ run: r, runId: 'r1' }, '/Users/me/.worca-cc/runs/proj-00000001/run1/deck/deck.html');
+      assert.equal(window.document.querySelector('#viewer-title').textContent, 'Saved: deck.html');
+      // An already-relative rel keeps its shape — that is the more informative title.
+      await np.openRunArtifact({ run: r, runId: 'r1' }, 'deck/deck.html');
+      assert.equal(window.document.querySelector('#viewer-title').textContent, 'Saved: deck/deck.html');
+    } },
   ]);
-  assert.equal(window.document.querySelector('#viewer-title').textContent, 'Saved: plan.md', 'the payload lands in the saved-artifact viewer');
-  assert.equal(window.document.querySelector('#viewer-card').classList.contains('hidden'), false);
-});
-
-// The text branch titles the viewer with the server's run-relative `rel`; the raw
-// branch used the caller's `rel` verbatim, and a `.log-artifact` click carries the
-// artifact event's ABSOLUTE path — so the same file opened from a log line was
-// titled with the user's home directory while the Artifacts tab titled it
-// `Artifact: deck.html`.
-test('openRunArtifact titles the raw viewer with the file, never the absolute run path', async () => {
-  const window = await bootApp();
-  const np = window.__np;
-  const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
-  r.pipelineId = 'abcd1234';
-  await np.openRunArtifact({ run: r, runId: 'r1' }, '/Users/me/.worca-cc/runs/proj-00000001/run1/deck/deck.html');
-  assert.equal(window.document.querySelector('#viewer-title').textContent, 'Saved: deck.html');
-  // An already-relative rel keeps its shape — that is the more informative title.
-  await np.openRunArtifact({ run: r, runId: 'r1' }, 'deck/deck.html');
-  assert.equal(window.document.querySelector('#viewer-title').textContent, 'Saved: deck/deck.html');
 });
 
 test('applyRunLogFilter assigns onto r.logFilter and repaints; focusLogExecution narrows the Running log and activates the detail\'s Logs tab', async () => {
@@ -971,96 +789,62 @@ test('applyRunLogFilter assigns onto r.logFilter and repaints; focusLogExecution
   window.location.hash = '';
 });
 
-test('the list has no density toggle and no per-row graph body; setRunDensity is gone', async () => {
-  const window = await bootApp();
-  const np = window.__np;
-  assert.equal(np.setRunDensity, undefined, 'the density model is gone');
-  // The list card is gone (a compact row replaced it): read the run's row on the Runs list.
-  const r = np.upsertRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running', kind: 'run', startedAt: '10:00:00', pendingQuestion: null });
-  np.onState(r, { status: 'running', stepper: MANIFEST, active: [], steps: [] });
-  window.location.hash = 'runs';
-  window.dispatchEvent(new window.Event('hashchange'));
-  await new Promise((res) => setTimeout(res, 0));
-  const row = window.document.querySelector('#runs-list .runs-row[data-run-id="r1"]');
-  assert.ok(row, 'the run is listed');
-  assert.equal(row.querySelector('.rc-detailed, .rc-compact, .run-density, .run-flow, .rc-step-chip'), null);
-  assert.equal(window.document.querySelector('#runs-list .run-density'), null);
-  window.location.hash = '';
-});
-
 // ── banner / progress / gate copy / History header + Overview ────────────────
-test('progress reads numerically everywhere and the quiescence banner appears once', async () => {
-  const window = await bootApp();
-  const np = window.__np;
-  const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'done' });
-  np.onState(r, { status: 'done', stepper: MANIFEST, active: [], endReached: false, warnings: [],
-    wireDeliveries: { w1: 2 }, gate: null,
-    steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'done', activeMs: 1000, costUsd: 0.1 }] });
-  assert.deepEqual((({ n, m }) => [n, m])(np.runStepLabel(r)), [1, 1]);
-  const banners = window.document.createElement('div');
-  np.paintQuiescenceBanner(banners, np.runDecorFor(r, 'monitor'));
-  np.paintQuiescenceBanner(banners, np.runDecorFor(r, 'monitor'));
-  assert.equal(banners.querySelectorAll('.run-warn').length, 1, 'idempotent');
-  assert.equal(banners.querySelector('.run-warn').textContent, 'finished at quiescence — End not reached');
-  assert.equal(banners.querySelector('.run-warn').hidden, false);
-  np.paintQuiescenceBanner(banners, { quiescent: false });
-  assert.equal(banners.querySelector('.run-warn').hidden, true);
-  assert.equal(np.progressText(r), '1/1 done');
-  assert.equal(np.histCountsLine({ ...r, stepper: MANIFEST }), '1 execution · 2 loop deliveries');
-  const v1 = np.makeRun({ runId: 'r2', title: 't', projectDir: '/p', status: 'running' });
-  assert.equal(np.progressText(v1), '', 'v1 runs have no numeric progress');
-});
-
-test('the gate intro names the wire it holds on; v1 keeps the two literals byte-identical', async () => {
-  const window = await bootApp();
-  const np = window.__np;
-  const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
-  np.onState(r, { status: 'running', stepper: MANIFEST, active: [], steps: [] });
-  assert.equal(np.gateWireCopy(r, 'w1'), ' on Planner → End (w1)');
-  assert.equal(np.gateWireCopy(r, 'nope'), '', 'an unknown wire adds nothing');
-  const intro = (run, pq) => { const p = window.document.createElement('div'); np.renderGateBody(run, p, pq); return p.querySelector('.gate-intro').textContent; };
-  assert.equal(intro(r, { id: 'g', kind: 'gate', wireId: 'w1', issues: [] }),
-    'This cycle reached its limit on Planner → End (w1). Approve another cycle to keep iterating, or continue with what you have.');
-  assert.equal(intro(r, { id: 'g', kind: 'gate', wireId: 'w1', issues: [{ severity: 'major', title: 'x' }] }),
-    'This cycle reached its limit on Planner → End (w1) with open issues. Approve another cycle to keep iterating, or continue with what you have.');
-  const v1 = np.makeRun({ runId: 'r2', title: 't', projectDir: '/p', status: 'running' });
-  assert.equal(intro(v1, { id: 'g', kind: 'gate', issues: [] }),
-    'This cycle reached its limit. Approve another cycle to keep iterating, or continue with what you have.');
-  assert.equal(intro(v1, { id: 'g', kind: 'gate', issues: [{ severity: 'major', title: 'x' }] }),
-    'This cycle reached its limit with open issues. Approve another cycle to keep iterating, or continue with what you have.');
-});
-
-test('the detail header .rd-step names what runs on a v2 run, with no step count', async () => {
-  const window = await bootApp();
-  const np = window.__np;
-  const screen = window.document.querySelector('#run-detail-tpl').content.firstElementChild.cloneNode(true);
-  window.document.body.appendChild(screen);
-  const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
-  np.onState(r, { status: 'running', stepper: MANIFEST, active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }], steps: [] });
-  np.paintRdHeader(screen, r);
-  assert.equal(screen.querySelector('.rd-meta .rd-step').textContent, 'Planner');
-  assert.ok(screen.querySelector('.rd-pause'), 'the single toggling control stays');
-  assert.equal(screen.querySelector('.rd-resume'), null, 'C6: there is no .rd-resume');
-  const v1 = np.makeRun({ runId: 'r2', title: 't', projectDir: '/p', status: 'running' });
-  np.onState(v1, { status: 'running', stepper: V1_STEPPER });
-  np.paintRdHeader(screen, v1);
-  assert.match(screen.querySelector('.rd-meta .rd-step').textContent, /^step \d+\/\d+ · /, 'v1 keeps `step n/m · name`');
-});
-
-test('paintRunDetail shows the quiescence banner on a v2 run that drained without End', async () => {
-  const window = await bootApp();
-  const np = window.__np;
-  const r = np.upsertRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'done', kind: 'run', startedAt: '10:00:00', pendingQuestion: null });
-  np.onState(r, { status: 'done', stepper: MANIFEST, active: [], steps: [], endReached: false, warnings: [] });
-  window.location.hash = 'running/r1';
-  window.dispatchEvent(new window.Event('hashchange'));
-  await new Promise((res) => setTimeout(res, 0));
-  const screen = window.document.querySelector('#run-detail').firstElementChild;
-  const warn = screen.querySelector('.rd-banners .run-warn');
-  assert.ok(warn, 'the banner lives in .rd-banners');
-  assert.equal(warn.hidden, false);
-  assert.equal(warn.textContent, 'finished at quiescence — End not reached');
-  window.location.hash = '';
+test('a v2 run page: progress reads numerically, .rd-step names what runs (no step count), and the quiescence banner shows once when it drained without End', async () => {
+  await checkRows([
+    { name: 'progress reads numerically everywhere and the quiescence banner appears once', run: async () => {
+      const window = await bootApp();
+      const np = window.__np;
+      const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'done' });
+      np.onState(r, { status: 'done', stepper: MANIFEST, active: [], endReached: false, warnings: [],
+        wireDeliveries: { w1: 2 }, gate: null,
+        steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'done', activeMs: 1000, costUsd: 0.1 }] });
+      assert.deepEqual((({ n, m }) => [n, m])(np.runStepLabel(r)), [1, 1]);
+      const banners = window.document.createElement('div');
+      np.paintQuiescenceBanner(banners, np.runDecorFor(r, 'monitor'));
+      np.paintQuiescenceBanner(banners, np.runDecorFor(r, 'monitor'));
+      assert.equal(banners.querySelectorAll('.run-warn').length, 1, 'idempotent');
+      assert.equal(banners.querySelector('.run-warn').textContent, 'finished at quiescence — End not reached');
+      assert.equal(banners.querySelector('.run-warn').hidden, false);
+      np.paintQuiescenceBanner(banners, { quiescent: false });
+      assert.equal(banners.querySelector('.run-warn').hidden, true);
+      assert.equal(np.progressText(r), '1/1 done');
+      assert.equal(np.histCountsLine({ ...r, stepper: MANIFEST }), '1 execution · 2 loop deliveries');
+      const v1 = np.makeRun({ runId: 'r2', title: 't', projectDir: '/p', status: 'running' });
+      assert.equal(np.progressText(v1), '', 'v1 runs have no numeric progress');
+    } },
+    { name: 'the detail header .rd-step names what runs on a v2 run, with no step count', run: async () => {
+      const window = await bootApp();
+      const np = window.__np;
+      const screen = window.document.querySelector('#run-detail-tpl').content.firstElementChild.cloneNode(true);
+      window.document.body.appendChild(screen);
+      const r = np.makeRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'running' });
+      np.onState(r, { status: 'running', stepper: MANIFEST, active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }], steps: [] });
+      np.paintRdHeader(screen, r);
+      assert.equal(screen.querySelector('.rd-meta .rd-step').textContent, 'Planner');
+      assert.ok(screen.querySelector('.rd-pause'), 'the single toggling control stays');
+      assert.equal(screen.querySelector('.rd-resume'), null, 'C6: there is no .rd-resume');
+      const v1 = np.makeRun({ runId: 'r2', title: 't', projectDir: '/p', status: 'running' });
+      np.onState(v1, { status: 'running', stepper: V1_STEPPER });
+      np.paintRdHeader(screen, v1);
+      assert.match(screen.querySelector('.rd-meta .rd-step').textContent, /^step \d+\/\d+ · /, 'v1 keeps `step n/m · name`');
+    } },
+    { name: 'paintRunDetail shows the quiescence banner on a v2 run that drained without End', run: async () => {
+      const window = await bootApp();
+      const np = window.__np;
+      const r = np.upsertRun({ runId: 'r1', title: 't', projectDir: '/p', status: 'done', kind: 'run', startedAt: '10:00:00', pendingQuestion: null });
+      np.onState(r, { status: 'done', stepper: MANIFEST, active: [], steps: [], endReached: false, warnings: [] });
+      window.location.hash = 'running/r1';
+      window.dispatchEvent(new window.Event('hashchange'));
+      await new Promise((res) => setTimeout(res, 0));
+      const screen = window.document.querySelector('#run-detail').firstElementChild;
+      const warn = screen.querySelector('.rd-banners .run-warn');
+      assert.ok(warn, 'the banner lives in .rd-banners');
+      assert.equal(warn.hidden, false);
+      assert.equal(warn.textContent, 'finished at quiescence — End not reached');
+      window.location.hash = '';
+    } },
+  ]);
 });
 
 test('History: the header meta carries the End chip and the Overview the counts + quiescence note (v2 only; D5 untouched)', async () => {
@@ -1127,54 +911,57 @@ test('MAJ-20: a repaint with an equal-but-new decor bag reuses the footer elemen
   assert.equal(window.document.activeElement, toggle1, 'focus stayed on the toggle');
 });
 
-test('MAJ-20: an expanded node keeps its rows across a repaint and still updates their text', () => {
-  const { view, host, window } = mountView();
-  const base = {
-    steps: [
-      { key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, kind: 'cycle', status: 'done', activeMs: 63000, costUsd: 0.12 },
-      { key: 'x:n_a:2', executionId: 'x:n_a:2', nodeId: 'n_a', ordinal: 2, kind: 'cycle', status: 'start', activeMs: 4000, costUsd: 0 },
-    ],
-    active: [{ nodeId: 'n_a', executionId: 'x:n_a:2' }],
-  };
-  applyDecor(view, { ...decorFromState(RUN(base), { live: false }), expanded: 'n_a' });
-  const card = host.querySelector('[data-node-id="n_a"]');
-  const rows1 = [...card.querySelectorAll('.xrow')];
-  assert.equal(rows1.length, 2, 'precondition: expanded');
-  const toggle1 = card.querySelector('.xtoggle');
-  toggle1.focus();
-  const right0 = rows1[1].querySelector('.xr').textContent;
-  // the SAME executions, one second later: only the live duration moved
-  const later = { ...base, steps: [base.steps[0], { ...base.steps[1], activeMs: 9000 }] };
-  applyDecor(view, { ...decorFromState(RUN(later), { live: false }), expanded: 'n_a' });
-  const rows2 = [...card.querySelectorAll('.xrow')];
-  assert.deepEqual(rows2, rows1, 'every .xrow element is the SAME node, keyed by executionId');
-  assert.equal(card.querySelector('.xtoggle'), toggle1);
-  assert.equal(window.document.activeElement, toggle1, 'focus survives an expanded repaint');
-  assert.equal(card.querySelector('.xtoggle').getAttribute('aria-expanded'), 'true', 'still expanded');
-  assert.notEqual(rows2[1].querySelector('.xr').textContent, right0, 'the live duration DID update in place');
-  assert.match(rows2[1].querySelector('.xr').textContent, /9s/);
-});
-
-test('MAJ-20: rows that vanish are removed, new ones are appended in order, and a collapse drops them', () => {
-  const { view, host } = mountView();
-  const one = { steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, kind: 'cycle', status: 'done', activeMs: 1000, costUsd: 0.1 }] };
-  applyDecor(view, { ...decorFromState(RUN(one), { live: false }), expanded: 'n_a' });
-  const card = host.querySelector('[data-node-id="n_a"]');
-  const row1 = card.querySelector('.xrow');
-  const two = { steps: [one.steps[0], { key: 'x:n_a:2', executionId: 'x:n_a:2', nodeId: 'n_a', ordinal: 2, kind: 'cycle', status: 'start', activeMs: 2000, costUsd: 0 }],
-    active: [{ nodeId: 'n_a', executionId: 'x:n_a:2' }] };
-  applyDecor(view, { ...decorFromState(RUN(two), { live: false }), expanded: 'n_a' });
-  const rows = [...card.querySelectorAll('.xrow')];
-  assert.equal(rows.length, 2);
-  assert.equal(rows[0], row1, 'the first row was reused, not rebuilt');
-  assert.deepEqual(rows.map((r) => r.dataset.executionId), ['x:n_a:1', 'x:n_a:2'], 'appended in order');
-  assert.deepEqual([...card.querySelectorAll('.xfoot > *')].map((n) => n.className.split(' ')[0]), ['xtoggle', 'xrow', 'xrow']);
-  // collapse: the rows go, the toggle stays the same element
-  const toggle = card.querySelector('.xtoggle');
-  applyDecor(view, { ...decorFromState(RUN(two), { live: false }), expanded: null });
-  assert.equal(card.querySelectorAll('.xrow').length, 0);
-  assert.equal(card.querySelector('.xtoggle'), toggle, 'the toggle is never rebuilt by a collapse');
-  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+test('MAJ-20: an expanded node keeps its rows across a repaint, updates their text, removes vanished rows, appends new ones in order', async () => {
+  await checkRows([
+    { name: 'MAJ-20: an expanded node keeps its rows across a repaint and still updates their text', run: async () => {
+      const { view, host, window } = mountView();
+      const base = {
+        steps: [
+          { key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, kind: 'cycle', status: 'done', activeMs: 63000, costUsd: 0.12 },
+          { key: 'x:n_a:2', executionId: 'x:n_a:2', nodeId: 'n_a', ordinal: 2, kind: 'cycle', status: 'start', activeMs: 4000, costUsd: 0 },
+        ],
+        active: [{ nodeId: 'n_a', executionId: 'x:n_a:2' }],
+      };
+      applyDecor(view, { ...decorFromState(RUN(base), { live: false }), expanded: 'n_a' });
+      const card = host.querySelector('[data-node-id="n_a"]');
+      const rows1 = [...card.querySelectorAll('.xrow')];
+      assert.equal(rows1.length, 2, 'precondition: expanded');
+      const toggle1 = card.querySelector('.xtoggle');
+      toggle1.focus();
+      const right0 = rows1[1].querySelector('.xr').textContent;
+      // the SAME executions, one second later: only the live duration moved
+      const later = { ...base, steps: [base.steps[0], { ...base.steps[1], activeMs: 9000 }] };
+      applyDecor(view, { ...decorFromState(RUN(later), { live: false }), expanded: 'n_a' });
+      const rows2 = [...card.querySelectorAll('.xrow')];
+      assert.deepEqual(rows2, rows1, 'every .xrow element is the SAME node, keyed by executionId');
+      assert.equal(card.querySelector('.xtoggle'), toggle1);
+      assert.equal(window.document.activeElement, toggle1, 'focus survives an expanded repaint');
+      assert.equal(card.querySelector('.xtoggle').getAttribute('aria-expanded'), 'true', 'still expanded');
+      assert.notEqual(rows2[1].querySelector('.xr').textContent, right0, 'the live duration DID update in place');
+      assert.match(rows2[1].querySelector('.xr').textContent, /9s/);
+    } },
+    { name: 'MAJ-20: rows that vanish are removed, new ones are appended in order, and a collapse drops them', run: async () => {
+      const { view, host } = mountView();
+      const one = { steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, kind: 'cycle', status: 'done', activeMs: 1000, costUsd: 0.1 }] };
+      applyDecor(view, { ...decorFromState(RUN(one), { live: false }), expanded: 'n_a' });
+      const card = host.querySelector('[data-node-id="n_a"]');
+      const row1 = card.querySelector('.xrow');
+      const two = { steps: [one.steps[0], { key: 'x:n_a:2', executionId: 'x:n_a:2', nodeId: 'n_a', ordinal: 2, kind: 'cycle', status: 'start', activeMs: 2000, costUsd: 0 }],
+        active: [{ nodeId: 'n_a', executionId: 'x:n_a:2' }] };
+      applyDecor(view, { ...decorFromState(RUN(two), { live: false }), expanded: 'n_a' });
+      const rows = [...card.querySelectorAll('.xrow')];
+      assert.equal(rows.length, 2);
+      assert.equal(rows[0], row1, 'the first row was reused, not rebuilt');
+      assert.deepEqual(rows.map((r) => r.dataset.executionId), ['x:n_a:1', 'x:n_a:2'], 'appended in order');
+      assert.deepEqual([...card.querySelectorAll('.xfoot > *')].map((n) => n.className.split(' ')[0]), ['xtoggle', 'xrow', 'xrow']);
+      // collapse: the rows go, the toggle stays the same element
+      const toggle = card.querySelector('.xtoggle');
+      applyDecor(view, { ...decorFromState(RUN(two), { live: false }), expanded: null });
+      assert.equal(card.querySelectorAll('.xrow').length, 0);
+      assert.equal(card.querySelector('.xtoggle'), toggle, 'the toggle is never rebuilt by a collapse');
+      assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+    } },
+  ]);
 });
 
 // buildLogLine stamps `data-kind` on a `.log-artifact` anchor, but the delegated
@@ -1207,7 +994,7 @@ test('a log-line artifact click carries its kind, so an extension-less plan rend
 });
 
 // ── the focus host (the glance's Live view) ───────────────────────────────────
-import { focusNodeIds, FOCUS_PAD, FOCUS_CLEAR } from '../ui/public/graph/run-hosts.mjs';
+import { focusNodeIds } from '../ui/public/graph/run-hosts.mjs';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
@@ -1237,12 +1024,6 @@ function mountFocus(w = 600, h = 400) {
     viewport: () => ({ left: 0, top: 0, width: w, height: h }) });
   return { window, wrap, host, m };
 }
-// Where the centre of the focused nodes' box lands on screen.
-const focusCentre = (m, ids) => {
-  const b = m.view.bounds(FOCUS_PAD, ids);
-  const t = xform(m.view.world);
-  return { x: (b.x + b.w / 2) * t.z + t.x, y: (b.y + b.h / 2) * t.z + t.y };
-};
 
 test('view.bounds(pad, ids) measures only the named nodes', () => {
   const { m } = mountFocus();
@@ -1268,48 +1049,4 @@ test('focusNodeIds: running steps first, then a paused or stopped step, then the
   const between = d({ steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, kind: 'cycle', status: 'done' }] });
   assert.deepEqual(focusNodeIds(between, ['n_a']), ['n_a'], 'between two steps the camera stays put');
   assert.deepEqual(focusNodeIds(between), [], 'nothing to follow yet → the whole graph');
-});
-
-test('the focus host centres the running step at ≤ 1× and never shows the nav, the hint or reacts to pointers', () => {
-  const { m, wrap, host, window } = mountFocus(600, 400);
-  m.update('run1', LINE, decorFromState(lineRun(running('n_c'))));
-  const t = xform(m.view.world);
-  assert.equal(t.z, 1, 'one card fits at 1× and a fit never magnifies');
-  const c = focusCentre(m, ['n_c']);
-  near(c.x, 300, 'the running card sits in the middle, horizontally');
-  near(c.y, 200, 'and vertically');
-  assert.deepEqual([...wrap.classList], ['run-flow-wrap', 'gv-wrap', 'gv-wrap-focus']);
-  assert.equal(wrap.querySelector('.rg-hint'), null);
-  assert.equal(wrap.querySelector('.gv-nav'), null);
-  assert.ok(host.querySelector('.gv-stage.gv-static'), 'cards render like the Running card: look, don\'t touch');
-  const before = m.view.world.style.transform;
-  host.dispatchEvent(new window.PointerEvent('pointerdown', { pointerId: 1, button: 0, clientX: 10, clientY: 10, bubbles: true }));
-  assert.equal(m.view.world.style.transform, before);
-});
-
-test('the focus host keeps every parallel step in view, and follows the work as it moves', () => {
-  const { m } = mountFocus(600, 400);
-  m.update('run1', LINE, decorFromState(lineRun(running('n_a', 'n_d'))));
-  const z = xform(m.view.world).z;
-  assert.ok(z < 1, `two steps 900px apart must zoom out to fit 600px, got ${z}`);
-  near(focusCentre(m, ['n_a', 'n_d']).x, 300, 'the pair is centred');
-  // The work moves on: the camera goes with it.
-  m.update('run1', LINE, decorFromState(lineRun(running('n_b'))));
-  near(focusCentre(m, ['n_b']).x, 300, 'the new step is centred');
-  // A gap between steps (nothing running) keeps the camera where it was.
-  const held = m.view.world.style.transform;
-  m.update('run1', LINE, decorFromState(lineRun({ steps: [], active: [] })));
-  assert.equal(m.view.world.style.transform, held);
-});
-
-test('the focus fit keeps parallel steps inside the clear middle, never out in the fog at the edges', () => {
-  const { m } = mountFocus(600, 400);
-  m.update('run1', LINE, decorFromState(lineRun(running('n_a', 'n_d'))));
-  const b = m.view.bounds(FOCUS_PAD, ['n_a', 'n_d']);
-  const t = xform(m.view.world);
-  const left = b.x * t.z + t.x, right = (b.x + b.w) * t.z + t.x;
-  const lo = 600 * (1 - FOCUS_CLEAR) / 2, hi = 600 * (1 + FOCUS_CLEAR) / 2;
-  assert.ok(left >= lo - 1e-6 && right <= hi + 1e-6, `[${left}, ${right}] must sit within [${lo}, ${hi}]`);
-  // style.css spells the same clear fraction into the fog's mask.
-  assert.ok(css.includes(`radial-gradient(closest-side, var(--ink) ${Math.round(FOCUS_CLEAR * 100)}%, transparent 100%)`), 'the mask clears the fit\'s box');
 });

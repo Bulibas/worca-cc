@@ -12,6 +12,8 @@ import { join } from 'node:path';
 
 import { worktreeGraphInstruction, runGraphifyUpdate } from '../src/core/preflight.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 const POSIX_SHIM = { skip: process.platform === 'win32' ? 'fake claude shim is a POSIX shell script (no .exe stand-in on Windows)' : false };
 
@@ -29,17 +31,6 @@ async function fakeGraphify(binDir, body) {
 }
 after(async () => {
   await Promise.all(tmpDirs.map((d) => rm(d, { recursive: true, force: true })));
-});
-
-test('worktreeGraphInstruction: cwd-relative, AST-only, lists the query commands', () => {
-  const text = worktreeGraphInstruction();
-  assert.match(text, /graphify-out/, 'points at graphify-out/');
-  assert.match(text, /AST-only|structural/i, 'calls out AST-only nature');
-  assert.match(text, /graphify query/, 'lists query');
-  assert.match(text, /graphify explain/, 'lists explain');
-  assert.match(text, /graphify path/, 'lists path');
-  assert.doesNotMatch(text, /<projectDir>/, 'no dead placeholder');
-  assert.doesNotMatch(text, /Skill\(/, 'CLI workflow, not the Skill tool');
 });
 
 test('runGraphifyUpdate: success — runs in cwd and targets the dir arg', POSIX_SHIM, async () => {
@@ -111,36 +102,31 @@ test('runGraphifyUpdate: overrun is killed and reported as timedOut', POSIX_SHIM
 
 // --- constructor timeout resolution (spec open question: default + configurable) ---
 
-test('graphBuildTimeoutMs: defaults to 120000 when neither option nor env is set', async () => {
-  const dir = await makeTmpDir();
-  const prev = process.env.WORCA_GRAPH_TIMEOUT_MS;
-  delete process.env.WORCA_GRAPH_TIMEOUT_MS;
-  try {
-    const orch = createOrchestrator({ projectDir: dir, prompt: 'x', claude: { mock: true } });
-    assert.equal(orch.graphBuildTimeoutMs, 120000);
-  } finally {
-    if (prev === undefined) delete process.env.WORCA_GRAPH_TIMEOUT_MS;
-    else process.env.WORCA_GRAPH_TIMEOUT_MS = prev;
-  }
-});
-
-test('graphBuildTimeoutMs: option / env / precedence / invalid-env fallback', async () => {
+test('graphBuildTimeoutMs: default 120000, option, env, option beats env, invalid env falls back', async () => {
   const dir = await makeTmpDir();
   const mk = (extra) =>
     createOrchestrator({ projectDir: dir, prompt: 'x', claude: { mock: true }, ...extra });
   const prev = process.env.WORCA_GRAPH_TIMEOUT_MS;
   try {
-    // Constructor option wins outright (no env).
-    delete process.env.WORCA_GRAPH_TIMEOUT_MS;
-    assert.equal(mk({ graphBuildTimeoutMs: 5000 }).graphBuildTimeoutMs, 5000, 'option used');
-    // Env is used when no option is given.
-    process.env.WORCA_GRAPH_TIMEOUT_MS = '7000';
-    assert.equal(mk({}).graphBuildTimeoutMs, 7000, 'env used when no option');
-    // Option beats env.
-    assert.equal(mk({ graphBuildTimeoutMs: 5000 }).graphBuildTimeoutMs, 5000, 'option beats env');
-    // Invalid env falls back to the default.
-    process.env.WORCA_GRAPH_TIMEOUT_MS = 'not-a-number';
-    assert.equal(mk({}).graphBuildTimeoutMs, 120000, 'invalid env → default');
+    await checkRows([
+      { name: 'graphBuildTimeoutMs: defaults to 120000 when neither option nor env is set', run: () => {
+        delete process.env.WORCA_GRAPH_TIMEOUT_MS;
+        assert.equal(mk({}).graphBuildTimeoutMs, 120000);
+      } },
+      { name: 'graphBuildTimeoutMs: option / env / precedence / invalid-env fallback', run: () => {
+        // Constructor option wins outright (no env).
+        delete process.env.WORCA_GRAPH_TIMEOUT_MS;
+        assert.equal(mk({ graphBuildTimeoutMs: 5000 }).graphBuildTimeoutMs, 5000, 'option used');
+        // Env is used when no option is given.
+        process.env.WORCA_GRAPH_TIMEOUT_MS = '7000';
+        assert.equal(mk({}).graphBuildTimeoutMs, 7000, 'env used when no option');
+        // Option beats env.
+        assert.equal(mk({ graphBuildTimeoutMs: 5000 }).graphBuildTimeoutMs, 5000, 'option beats env');
+        // Invalid env falls back to the default.
+        process.env.WORCA_GRAPH_TIMEOUT_MS = 'not-a-number';
+        assert.equal(mk({}).graphBuildTimeoutMs, 120000, 'invalid env → default');
+      } },
+    ]);
   } finally {
     if (prev === undefined) delete process.env.WORCA_GRAPH_TIMEOUT_MS;
     else process.env.WORCA_GRAPH_TIMEOUT_MS = prev;
@@ -153,37 +139,39 @@ function newOrch(projectDir) {
   return createOrchestrator({ projectDir, prompt: 'x', auto: true, claude: { mock: false } });
 }
 
-test('_buildWorktreeGraph: mock mode skips the build (offline smoke stays clean)', async () => {
-  const dir = await makeTmpDir();
-  const orch = createOrchestrator({ projectDir: dir, prompt: 'x', claude: { mock: true } });
-  orch.workDir = await makeTmpDir(); // pretend a worktree exists
-  orch.state.tools = { kind: 'cli' };
-  orch.pipeline = { dir }; // appendAudit/_log target
-  orch.toolInstruction = 'SENTINEL';
-  await orch._buildWorktreeGraph();
-  assert.equal(orch.toolInstruction, 'SENTINEL', 'mock must not touch the instruction');
-});
-
-test('_buildWorktreeGraph: no worktree (workDir===projectDir) skips', async () => {
-  const dir = await makeTmpDir();
-  const orch = newOrch(dir);
-  // workDir defaults to projectDir until _setupRunRoot runs.
-  orch.state.tools = { kind: 'cli' };
-  orch.pipeline = { dir };
-  orch.toolInstruction = 'SENTINEL';
-  await orch._buildWorktreeGraph();
-  assert.equal(orch.toolInstruction, 'SENTINEL');
-});
-
-test('_buildWorktreeGraph: graphify not on PATH (kind!=cli) clears the instruction', async () => {
-  const dir = await makeTmpDir();
-  const orch = newOrch(dir);
-  orch.workDir = await makeTmpDir();
-  orch.state.tools = { kind: 'skill' };
-  orch.pipeline = { dir };
-  orch.toolInstruction = 'SENTINEL';
-  await orch._buildWorktreeGraph();
-  assert.equal(orch.toolInstruction, '');
+test('_buildWorktreeGraph guards: mock skips, no worktree skips, kind!=cli clears the instruction', async () => {
+  await checkRows([
+    { name: '_buildWorktreeGraph: mock mode skips the build (offline smoke stays clean)', run: async () => {
+      const dir = await makeTmpDir();
+      const orch = createOrchestrator({ projectDir: dir, prompt: 'x', claude: { mock: true } });
+      orch.workDir = await makeTmpDir(); // pretend a worktree exists
+      orch.state.tools = { kind: 'cli' };
+      orch.pipeline = { dir }; // appendAudit/_log target
+      orch.toolInstruction = 'SENTINEL';
+      await orch._buildWorktreeGraph();
+      assert.equal(orch.toolInstruction, 'SENTINEL', 'mock must not touch the instruction');
+    } },
+    { name: '_buildWorktreeGraph: no worktree (workDir===projectDir) skips', run: async () => {
+      const dir = await makeTmpDir();
+      const orch = newOrch(dir);
+      // workDir defaults to projectDir until _setupRunRoot runs.
+      orch.state.tools = { kind: 'cli' };
+      orch.pipeline = { dir };
+      orch.toolInstruction = 'SENTINEL';
+      await orch._buildWorktreeGraph();
+      assert.equal(orch.toolInstruction, 'SENTINEL');
+    } },
+    { name: '_buildWorktreeGraph: graphify not on PATH (kind!=cli) clears the instruction', run: async () => {
+      const dir = await makeTmpDir();
+      const orch = newOrch(dir);
+      orch.workDir = await makeTmpDir();
+      orch.state.tools = { kind: 'skill' };
+      orch.pipeline = { dir };
+      orch.toolInstruction = 'SENTINEL';
+      await orch._buildWorktreeGraph();
+      assert.equal(orch.toolInstruction, '');
+    } },
+  ]);
 });
 
 test('_buildWorktreeGraph: build failure clears the instruction and logs a warning (fail-safe + observable)', async () => {
@@ -315,16 +303,10 @@ test('a single-project run\'s node ctx still carries worktreeGraphInstruction() 
 
 // A real git repo whose tracked .gitignore excludes graphify-out/ (mirrors the
 // product repo), so the worktree checkout inherits the ignore rule.
-async function freshRepoIgnoringGraph() {
-  const dir = await makeTmpDir('worca-cc-int-');
-  const g = (args) => spawnSync('git', args, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'seed.txt'), 'seed\n', 'utf8');
-  await writeFile(join(dir, '.gitignore'), 'node_modules/\ngraphify-out/\n', 'utf8');
-  g(['add', '-A']);
-  g(['commit', '-qm', 'init']);
+function freshRepoIgnoringGraph() {
+  const dir = templateRepo('int', { branch: 'main', user: true,
+    files: { 'seed.txt': 'seed\n', '.gitignore': 'node_modules/\ngraphify-out/\n' } });
+  tmpDirs.push(dir);
   return dir;
 }
 

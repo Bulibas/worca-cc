@@ -8,6 +8,7 @@ import { _resetForTests } from '../src/core/db.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { listArtifacts } from '../src/core/artifacts.mjs';
 import { RUN_LOG_FILE, RUN_LOG_KIND } from '../src/core/run-log.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const homes = [];
 beforeEach(async () => {
@@ -22,31 +23,11 @@ after(async () => {
   await Promise.all(homes.map((d) => rm(d, { recursive: true, force: true })));
 });
 
-test('a mock run persists the full log stream to live-log.ndjson and indexes it', async () => {
+test('a mock run persists the full log stream (incl. a pre-bind stderr line with its provenance tag) to live-log.ndjson and indexes it', async () => {
   const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-rlp-proj-'));
   const orch = createOrchestrator({ projectDir, prompt: 'demo task', auto: true, claude: { mock: true } });
   const emitted = [];
   orch.on('log', (l) => emitted.push(l));
-  const res = await orch.run();
-  assert.equal(res.status, 'done', 'pipeline converges');
-
-  const id = orch.getState().id;
-  // (a) indexed as an artifact, dir-relative, kind 'live-log'
-  const arts = await listArtifacts(id);
-  assert.ok(arts.some((a) => a.kind === RUN_LOG_KIND && a.relPath === RUN_LOG_FILE), 'live-log indexed');
-
-  // (b) on-disk NDJSON parses and carries the SAME stream the run emitted (uncapped)
-  const ndjson = await readFile(join(res.pipelineDir, RUN_LOG_FILE), 'utf8');
-  const lines = ndjson.split('\n').filter(Boolean).map((l) => JSON.parse(l));
-  assert.ok(lines.length >= emitted.length, 'every emitted line persisted (no cap)');
-  assert.ok(lines.every((l) => typeof l.ts === 'string' && 'text' in l), 'line shape == event shape');
-  // the preflight line is emitted BEFORE the pipeline dir exists -> proves pre-bind buffering
-  assert.ok(lines.some((l) => l.source === 'preflight'), 'pre-pipeline (preflight) lines captured');
-});
-
-test('the stderr provenance tag round-trips to the NDJSON', async () => {
-  const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-rlp-proj-'));
-  const orch = createOrchestrator({ projectDir, prompt: 'demo task', auto: true, claude: { mock: true } });
 
   // The mock spawns nothing, so a real run's stderr never appears here — push one
   // through the same reducer the runner feeds to prove the field is persisted and
@@ -55,13 +36,29 @@ test('the stderr provenance tag round-trips to the NDJSON', async () => {
   orch._onAgentEvent('planner', { type: 'stderr', stream: 'err', text: 'Overloaded, retrying in 4s' },
     { nodeId: 'n1', stepIndex: 0, cycle: 1 });
   const res = await orch.run();
-
+  const id = orch.getState().id;
   const lines = (await readFile(join(res.pipelineDir, RUN_LOG_FILE), 'utf8'))
     .split('\n').filter(Boolean).map((l) => JSON.parse(l));
-  const errLine = lines.find((l) => l.text === 'Overloaded, retrying in 4s');
-  assert.ok(errLine, 'the stderr line persisted');
-  assert.equal(errLine.stream, 'err', 'provenance survives to disk');
-  assert.equal(errLine.level, 'warn');
-  assert.ok(lines.every((l) => l.stream === undefined || l.stream === 'err'),
-    'no other line invents a stream value');
+
+  await checkRows([
+    { name: 'a mock run persists the full log stream to live-log.ndjson and indexes it', run: async () => {
+      assert.equal(res.status, 'done', 'pipeline converges');
+      // (a) indexed as an artifact, dir-relative, kind 'live-log'
+      const arts = await listArtifacts(id);
+      assert.ok(arts.some((a) => a.kind === RUN_LOG_KIND && a.relPath === RUN_LOG_FILE), 'live-log indexed');
+      // (b) on-disk NDJSON parses and carries the SAME stream the run emitted (uncapped)
+      assert.ok(lines.length >= emitted.length, 'every emitted line persisted (no cap)');
+      assert.ok(lines.every((l) => typeof l.ts === 'string' && 'text' in l), 'line shape == event shape');
+      // the preflight line is emitted BEFORE the pipeline dir exists -> proves pre-bind buffering
+      assert.ok(lines.some((l) => l.source === 'preflight'), 'pre-pipeline (preflight) lines captured');
+    } },
+    { name: 'the stderr provenance tag round-trips to the NDJSON', run: () => {
+      const errLine = lines.find((l) => l.text === 'Overloaded, retrying in 4s');
+      assert.ok(errLine, 'the stderr line persisted');
+      assert.equal(errLine.stream, 'err', 'provenance survives to disk');
+      assert.equal(errLine.level, 'warn');
+      assert.ok(lines.every((l) => l.stream === undefined || l.stream === 'err'),
+        'no other line invents a stream value');
+    } },
+  ]);
 });

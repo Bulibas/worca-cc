@@ -7,6 +7,7 @@ import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createTurnReducer, normalizeUsage } from '../src/core/ask/events.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const DIR = fileURLToPath(new URL('./fixtures/ask/', import.meta.url));
 const FRAME_TYPES = new Set(['ask-label', 'ask-delta', 'ask-block', 'ask-card', 'ask-usage']);
@@ -64,36 +65,51 @@ test('every replay: only known frame types, no reducer errors, session id from i
   }
 });
 
-test('plain-text: text equals the assistant blocks, usage/cost equal the result frame, no blocks', () => {
-  const r = replay('plain-text');
-  assert.equal(r.summary.text, mainText(r.frames));
-  assert.ok(r.summary.text.length > 0);
-  assert.deepEqual(r.summary.blocks, []);
-  const { ctx, ctxWindow, ...buckets } = r.summary.usage;
-  assert.deepEqual(buckets, normalizeUsage(r.result.usage));
-  assert.ok(Number.isFinite(ctx) && ctx > 0, 'context fill carries the last main call figure');
-  assert.equal(ctxWindow, 200000, 'the real capture reports the main model\'s contextWindow');
-  assert.equal(r.summary.costUsd, r.result.total_cost_usd);
-  assert.equal(r.summary.status, 'done');
-  assert.equal(r.summary.sawAssistant, true);
-  const deltas = r.out.filter((f) => f.type === 'ask-delta').map((f) => f.text).join('');
-  assert.ok(deltas.length > 0, 'text deltas streamed (--include-partial-messages)');
-  assert.ok(r.out.some((f) => f.type === 'ask-usage' && f.costUsd === r.result.total_cost_usd));
-});
-
-test('tool-list-runs: one tool block, running then done, input from the fixture, label', () => {
-  const r = replay('tool-list-runs');
-  const tools = r.summary.blocks.filter((b) => b.kind === 'tool');
-  assert.equal(tools.length, 1);
-  assert.equal(tools[0].name, 'mcp__worca__list_runs');
-  assert.equal(tools[0].status, 'done');
-  assert.ok(tools[0].durationMs >= 0);
-  const use = r.frames.flatMap((f) => (f.type === 'assistant' && (f.parent_tool_use_id ?? null) === null ? f.message.content : [])).find((c) => c.type === 'tool_use');
-  assert.deepEqual(tools[0].input, use.input);
-  const blockFrames = r.out.filter((f) => f.type === 'ask-block' && f.block.id === tools[0].id).map((f) => f.block.status);
-  assert.deepEqual(blockFrames, ['running', 'done']);
-  assert.ok(r.summary.labels.includes('Finding runs'));
-  assert.ok(r.summary.labels.indexOf('Finding runs') < r.summary.labels.lastIndexOf('Writing'), 'Writing after the tool');
+test('replay: plain-text, tool-list-runs and propose-run captures (text/usage/cost, tool block running→done, proposal hook input)', async () => {
+  await checkRows([
+    { name: 'plain-text: text equals the assistant blocks, usage/cost equal the result frame, no blocks', run: () => {
+      const r = replay('plain-text');
+      assert.equal(r.summary.text, mainText(r.frames));
+      assert.ok(r.summary.text.length > 0);
+      assert.deepEqual(r.summary.blocks, []);
+      const { ctx, ctxWindow, ...buckets } = r.summary.usage;
+      assert.deepEqual(buckets, normalizeUsage(r.result.usage));
+      assert.ok(Number.isFinite(ctx) && ctx > 0, 'context fill carries the last main call figure');
+      assert.equal(ctxWindow, 200000, 'the real capture reports the main model\'s contextWindow');
+      assert.equal(r.summary.costUsd, r.result.total_cost_usd);
+      assert.equal(r.summary.status, 'done');
+      assert.equal(r.summary.sawAssistant, true);
+      const deltas = r.out.filter((f) => f.type === 'ask-delta').map((f) => f.text).join('');
+      assert.ok(deltas.length > 0, 'text deltas streamed (--include-partial-messages)');
+      assert.ok(r.out.some((f) => f.type === 'ask-usage' && f.costUsd === r.result.total_cost_usd));
+    } },
+    { name: 'tool-list-runs: one tool block, running then done, input from the fixture, label', run: () => {
+      const r = replay('tool-list-runs');
+      const tools = r.summary.blocks.filter((b) => b.kind === 'tool');
+      assert.equal(tools.length, 1);
+      assert.equal(tools[0].name, 'mcp__worca__list_runs');
+      assert.equal(tools[0].status, 'done');
+      assert.ok(tools[0].durationMs >= 0);
+      const use = r.frames.flatMap((f) => (f.type === 'assistant' && (f.parent_tool_use_id ?? null) === null ? f.message.content : [])).find((c) => c.type === 'tool_use');
+      assert.deepEqual(tools[0].input, use.input);
+      const blockFrames = r.out.filter((f) => f.type === 'ask-block' && f.block.id === tools[0].id).map((f) => f.block.status);
+      assert.deepEqual(blockFrames, ['running', 'done']);
+      assert.ok(r.summary.labels.includes('Finding runs'));
+      assert.ok(r.summary.labels.indexOf('Finding runs') < r.summary.labels.lastIndexOf('Writing'), 'Writing after the tool');
+    } },
+    { name: 'propose-run: the tool block and the proposal hook with the full input', run: () => {
+      const r = replay('propose-run');
+      const p = r.summary.blocks.find((b) => b.kind === 'tool' && b.name === 'mcp__worca__propose_run');
+      assert.ok(p);
+      assert.equal(p.status, 'done');
+      assert.equal(r.proposals.length, 1);
+      assert.equal(r.proposals[0].childOk, true);
+      assert.equal(r.proposals[0].input.workflowId, 'wf_default');
+      assert.equal(r.proposals[0].input.guardrailsId, 'normal');
+      assert.match(r.proposals[0].input.projectKey, /^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/);
+      assert.ok(r.summary.labels.includes('Preparing a run'));
+    } },
+  ]);
 });
 
 test('task-subagent (foreground, probe F3): one agent block with model, tokens, usage, child log; prompt never stored; cost estimated', () => {
@@ -117,38 +133,28 @@ test('task-subagent (foreground, probe F3): one agent block with model, tokens, 
   assert.equal(r.frames.filter((f) => f.type === 'result').length, 1, 'foreground mode: one result');
 });
 
-test('propose-run: the tool block and the proposal hook with the full input', () => {
-  const r = replay('propose-run');
-  const p = r.summary.blocks.find((b) => b.kind === 'tool' && b.name === 'mcp__worca__propose_run');
-  assert.ok(p);
-  assert.equal(p.status, 'done');
-  assert.equal(r.proposals.length, 1);
-  assert.equal(r.proposals[0].childOk, true);
-  assert.equal(r.proposals[0].input.workflowId, 'wf_default');
-  assert.equal(r.proposals[0].input.guardrailsId, 'normal');
-  assert.match(r.proposals[0].input.projectKey, /^[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/);
-  assert.ok(r.summary.labels.includes('Preparing a run'));
-});
-
-test('max-turns / max-budget (probe F5): stopped with the reason; the capture recorded exit code 1', () => {
-  for (const [name, reason] of [['max-turns', 'max_turns'], ['max-budget', 'max_budget']]) {
-    const r = replay(name);
-    assert.equal(r.summary.status, 'stopped', name);
-    assert.equal(r.summary.reason, reason, name);
-    assert.equal(r.summary.isError, true);
-    assert.ok(r.summary.errors.length >= 1);
-    assert.equal(r.meta.exitCode, 1, `${name}: the CLI exits 1 on this subtype`);
-    assert.ok(r.meta.error, 'the runner rejected');
-  }
-});
-
-test('bogus-resume (probe F9): no assistant, a result with the error, $0, exit 1', () => {
-  const r = replay('bogus-resume');
-  assert.equal(r.summary.sawAssistant, false);
-  assert.equal(r.summary.sawResult, true);
-  assert.equal(r.summary.costUsd, 0);
-  assert.equal(r.summary.resultSubtype, 'error_during_execution');
-  assert.match(r.summary.errors.join(' '), /No conversation found/);
-  assert.equal(r.meta.exitCode, 1);
-  assert.match(r.meta.error, /No conversation found/);
+test('replay: terminal captures — max-turns/max-budget stop with the reason, bogus-resume has no assistant, $0, exit 1', async () => {
+  await checkRows([
+    { name: 'max-turns / max-budget (probe F5): stopped with the reason; the capture recorded exit code 1', run: () => {
+      for (const [name, reason] of [['max-turns', 'max_turns'], ['max-budget', 'max_budget']]) {
+        const r = replay(name);
+        assert.equal(r.summary.status, 'stopped', name);
+        assert.equal(r.summary.reason, reason, name);
+        assert.equal(r.summary.isError, true);
+        assert.ok(r.summary.errors.length >= 1);
+        assert.equal(r.meta.exitCode, 1, `${name}: the CLI exits 1 on this subtype`);
+        assert.ok(r.meta.error, 'the runner rejected');
+      }
+    } },
+    { name: 'bogus-resume (probe F9): no assistant, a result with the error, $0, exit 1', run: () => {
+      const r = replay('bogus-resume');
+      assert.equal(r.summary.sawAssistant, false);
+      assert.equal(r.summary.sawResult, true);
+      assert.equal(r.summary.costUsd, 0);
+      assert.equal(r.summary.resultSubtype, 'error_during_execution');
+      assert.match(r.summary.errors.join(' '), /No conversation found/);
+      assert.equal(r.meta.exitCode, 1);
+      assert.match(r.meta.error, /No conversation found/);
+    } },
+  ]);
 });

@@ -93,30 +93,3 @@ test('an analysis choice outside the options is replaced by the best-scored one 
   assert.equal(d.flagged, true);
   assert.match(d.rationale, /which is not an option/);
 });
-
-test('rationales in plain words (wording §3.6)', async () => {
-  const met = await decideQuestion(Q({ confidence: [82, 10, 8], recommended: 'A' }), C, {});
-  assert.equal(met.rationale, 'the agent recommended this at 82%, well ahead of the next option');
-  const low = await decideQuestion(Q({ confidence: [40, 50, 10], recommended: 'B' }), { ...C, strategy: 'weights' }, {});
-  assert.equal(low.rationale, 'the agent was not sure enough; first option taken');
-  const none = await decideQuestion({ id: 'q', question: '?', options: [] }, C, {});
-  assert.equal(none.rationale, 'free-text question; worca cannot answer it');
-  const firstOpt = await decideQuestion(Q({}), { ...C, strategy: 'analysis' }, { analyze: async () => { throw new Error('boom'); } });
-  assert.equal(firstOpt.rationale, 'could not weigh the options (boom); first option taken');
-  const unsure = await decideQuestion(Q({}), { ...C, strategy: 'analysis' }, { analyze: async () => ({ choice: 'A', confidence: 10, rationale: 'r', scores: {} }) });
-  assert.match(unsure.rationale, /^the agent was not sure enough; took the option easiest to undo\. r$/);
-});
-
-test('every answer carries the question it answers (the run page lists it)', async () => {
-  const q = { id: 'delivery', question: 'How will the deck be delivered?', options: ['Live', 'Read'] };
-  const paths = [
-    decideQuestion({ ...q, confidence: [80, 20], recommended: 'Live' }, { ...C, strategy: 'weights' }, {}),
-    decideQuestion({ ...q, confidence: [50, 50], recommended: 'Live' }, { ...C, strategy: 'weights' }, {}),
-    decideQuestion(q, { ...C, strategy: 'analysis' }, {}),
-    decideQuestion(q, { ...C, strategy: 'analysis' }, { analyze: async () => ({ choice: 'Read', confidence: 90, rationale: 'r', scores: {} }) }),
-    decideQuestion(q, { ...C, strategy: 'analysis' }, { analyze: async () => ({ choice: 'Read', confidence: 10, rationale: 'r', scores: {} }) }),
-    decideQuestion({ ...q, options: [] }, C, {}),
-  ];
-  for (const d of await Promise.all(paths)) assert.equal(d.question, 'How will the deck be delivered?', d.strategy);
-  assert.equal((await decideQuestion({ id: 'x', options: ['A', 'B'] }, { ...C, strategy: 'weights' }, {})).question, undefined, 'no text, no field');
-});

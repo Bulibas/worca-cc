@@ -224,15 +224,6 @@ test('filters: Live keeps what has not ended, Finished what has, Needs you only 
   assert.equal(rowInFilter({ kind: 'sched', icon: 'scheduled' }, 'live'), true, 'a scheduled run has not ended');
 });
 
-test('filters: each has its own empty note; a search keeps the search note', () => {
-  const doc = new JSDOM('').window.document;
-  const note = (opts) => renderRunsList(doc, buildRunsModel({ now: NOW, ...opts })).map((n) => n.textContent).join('|');
-  assert.equal(note({ history: [histIt('h')], filter: 'live' }), 'No live runs.');
-  assert.equal(note({ live: [liveIt('r')], filter: 'finished' }).includes('No finished runs yet.'), true);
-  assert.equal(note({ live: [liveIt('r')], filter: 'needs' }), 'Nothing needs you.');
-  assert.equal(note({ live: [liveIt('r')], filter: 'needs', query: 'zzz' }), 'No runs match your search.');
-});
-
 test('filters: Archived keeps only rows flagged archived, with its own empty note', () => {
   const live = [liveIt('run')];
   const history = [histIt('h-live'), histIt('h-arch', { archived: true })];

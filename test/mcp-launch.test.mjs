@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { keepListNames } from '../src/core/mcp/keep-list.mjs';
 import { childEnv, parseLaunchArgs, spawnPlan, winShimLine, scopeLauncherEnv } from '../src/core/mcp/launch.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const LAUNCH = fileURLToPath(new URL('../src/core/mcp/launch.mjs', import.meta.url));
 const POSIX = { skip: process.platform === 'win32' ? 'POSIX signals and env casing' : false };
@@ -151,8 +152,9 @@ test('the launcher never detaches: a kill of its process group ends the server t
   assert.equal(survived, false);
 });
 
-for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-  test(`${sig} to the launcher reaches the server`, POSIX, async () => {
+// The three launchers run at once; each server writes its own got-<sig> file.
+test('SIGINT, SIGTERM and SIGHUP to the launcher reach the server', POSIX, async () => {
+  const runs = await Promise.all(['SIGINT', 'SIGTERM', 'SIGHUP'].map(async (sig) => {
     const got = join(dir, `got-${sig}`);
     const script = `process.on(${JSON.stringify(sig)}, () => { require('fs').writeFileSync(${JSON.stringify(got)}, ${JSON.stringify(sig)}); process.exit(0); });`
       + "process.stdout.write('ready\\n'); setTimeout(() => process.exit(9), 5000);";
@@ -160,7 +162,13 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     const r = await launch(['--copy', 'x', '--', process.execPath, '-e', script], BASE, {
       onStdout: (out, p) => { if (!sent && out.includes('ready')) { sent = true; p.kill(sig); } },
     });
-    assert.equal(r.code, 0, r.stderr);
-    assert.ok(existsSync(got) && readFileSync(got, 'utf8') === sig);
-  });
-}
+    return { sig, got, r };
+  }));
+  await checkRows(runs.map(({ sig, got, r }) => ({
+    name: `${sig} to the launcher reaches the server`,
+    run: () => {
+      assert.equal(r.code, 0, r.stderr);
+      assert.ok(existsSync(got) && readFileSync(got, 'utf8') === sig);
+    },
+  })));
+});

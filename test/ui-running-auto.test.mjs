@@ -5,6 +5,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { proposalFor } from './helpers/auto-proposal-fixture.mjs';
 import { bootApp, helloRun, runCard } from './helpers/run-page-boot.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const wins = [];
 afterEach(() => { for (const w of wins.splice(0)) w.close(); });
@@ -95,23 +96,26 @@ test('a run STOPPED while deciding is frozen: no orb, and A24’s "did not decid
 
 const DECIDED = (p) => ({ ...p.manifest, template: { id: 'wf_theme', name: 'Theme switch' }, auto: { status: 'decided', via: 'created', rounds: 1, humanInLoop: true, workflowId: 'wf_theme' } });
 
-test('badge: "Auto" while deciding, "Auto → name" after adoption — on the Running detail', async () => {
-  const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING });
-  ctx.go(`running/${RUN_ID}`); await settle(ctx.window);
-  const badge = rdBadge(ctx);
-  assert.ok(badge, 'the run page header carries the badge');
-  assert.equal(badge.hidden, false); assert.equal(badge.textContent, 'Auto'); assert.equal(badge.title, 'Auto is deciding the workflow');
-  ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'running', stepper: DECIDED(proposalFor()), steps: [], subAgents: [] });
-  await settle(ctx.window);
-  assert.equal(rdBadge(ctx).textContent, 'Auto → Theme switch'); assert.equal(rdBadge(ctx).title, 'Auto created the workflow "Theme switch"');
-  ctx.window.location.hash = `running/${RUN_ID}`; ctx.window.dispatchEvent(new ctx.window.Event('hashchange')); await settle(ctx.window);
-  const rd = ctx.window.document.querySelector('#run-detail .rd-row1 .auto-badge');
-  assert.equal(rd.hidden, false); assert.equal(rd.textContent, 'Auto → Theme switch');
-});
-
-test('a saved-workflow run shows no badge', async () => {
-  const ctx = await boot(); helloRunning(ctx, { stepper: proposalFor().manifest });
-  ctx.go(`running/${RUN_ID}`); await settle(ctx.window);
-  assert.ok(rdBadge(ctx), 'the run page header carries the badge slot');
-  assert.equal(rdBadge(ctx).hidden, true);
+test('the run page header badge reads "Auto" while deciding and "Auto → name" after adoption; a saved-workflow run hides it', async () => {
+  await checkRows([
+    { name: 'badge: "Auto" while deciding, "Auto → name" after adoption — on the Running detail', run: async () => {
+      const ctx = await boot(); helloRunning(ctx, { stepper: DECIDING });
+      ctx.go(`running/${RUN_ID}`); await settle(ctx.window);
+      const badge = rdBadge(ctx);
+      assert.ok(badge, 'the run page header carries the badge');
+      assert.equal(badge.hidden, false); assert.equal(badge.textContent, 'Auto'); assert.equal(badge.title, 'Auto is deciding the workflow');
+      ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'running', stepper: DECIDED(proposalFor()), steps: [], subAgents: [] });
+      await settle(ctx.window);
+      assert.equal(rdBadge(ctx).textContent, 'Auto → Theme switch'); assert.equal(rdBadge(ctx).title, 'Auto created the workflow "Theme switch"');
+      ctx.window.location.hash = `running/${RUN_ID}`; ctx.window.dispatchEvent(new ctx.window.Event('hashchange')); await settle(ctx.window);
+      const rd = ctx.window.document.querySelector('#run-detail .rd-row1 .auto-badge');
+      assert.equal(rd.hidden, false); assert.equal(rd.textContent, 'Auto → Theme switch');
+    } },
+    { name: 'a saved-workflow run shows no badge', run: async () => {
+      const ctx = await boot(); helloRunning(ctx, { stepper: proposalFor().manifest });
+      ctx.go(`running/${RUN_ID}`); await settle(ctx.window);
+      assert.ok(rdBadge(ctx), 'the run page header carries the badge slot');
+      assert.equal(rdBadge(ctx).hidden, true);
+    } },
+  ]);
 });

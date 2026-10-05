@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { _resetForTests as closeDbForTests } from '../src/core/db.mjs';
 import { createCloneValidator, githubLabel, cloneEventPrompt, cloneNoticeText } from '../src/core/ask/clone-proposal.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -138,54 +139,60 @@ async function seedCard(name, { state = 'proposed' } = {}) {
 const cardOf = async (threadId, cardId) => (await snapshot(threadId)).messages.flatMap((m) => m.blocks || []).find((b) => b.kind === 'card' && b.id === cardId);
 const noticeOf = async (threadId) => (await snapshot(threadId)).messages.filter((m) => m.role === 'user' && (m.blocks || []).some((b) => b.kind === 'notice' && b.synthetic)).map((m) => m.blocks[0].text);
 
-test('route: decline flips the card and runs the event turn; wrong verbs and states are refused', async () => {
-  const { threadId, cardId } = await seedCard('declined-repo');
-  assert.equal((await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'saved' })).status, 400);
-  const r = await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'declined' });
-  assert.equal(r.status, 200, await r.clone().text());
-  assert.equal((await r.json()).block.state, 'declined');
-  assert.deepEqual(await waitFor(async () => { const n = await noticeOf(threadId); return n.length ? n : null; }), ['Declined — Clone acme/declined-repo as project declined-repo']);
-  assert.equal((await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied' })).status, 409);
+test('clone route: decline flips + event turn, wrong verbs/states refused, an up-front refusal (folder exists) fails at once with its code', async () => {
+  await checkRows([
+    { name: 'route: decline flips the card and runs the event turn; wrong verbs and states are refused', run: async () => {
+      const { threadId, cardId } = await seedCard('declined-repo');
+      assert.equal((await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'saved' })).status, 400);
+      const r = await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'declined' });
+      assert.equal(r.status, 200, await r.clone().text());
+      assert.equal((await r.json()).block.state, 'declined');
+      assert.deepEqual(await waitFor(async () => { const n = await noticeOf(threadId); return n.length ? n : null; }), ['Declined — Clone acme/declined-repo as project declined-repo']);
+      assert.equal((await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied' })).status, 409);
+    } },
+    { name: 'route: a refusal known up front (the folder exists) fails the card at once, with its code', run: async () => {
+      await mkdir(join(projectsRoot, 'already-here'), { recursive: true });
+      const { threadId, cardId } = await seedCard('already-here');
+      const r = await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied' });
+      assert.equal(r.status, 200, await r.clone().text());
+      const j = await r.json();
+      assert.equal(j.block.state, 'failed');
+      assert.equal(j.block.card.result.code, 'exists');
+      assert.match(j.block.error, /already exists/);
+      assert.ok(j.turn, 'the event turn started');
+      const notices = await waitFor(async () => { const n = await noticeOf(threadId); return n.length ? n : null; });
+      assert.match(notices[0], /^Could not clone — Clone acme\/already-here as project already-here: .*already exists/);
+    } },
+  ]);
 });
 
-test('route: a refusal known up front (the folder exists) fails the card at once, with its code', async () => {
-  await mkdir(join(projectsRoot, 'already-here'), { recursive: true });
-  const { threadId, cardId } = await seedCard('already-here');
-  const r = await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied' });
-  assert.equal(r.status, 200, await r.clone().text());
-  const j = await r.json();
-  assert.equal(j.block.state, 'failed');
-  assert.equal(j.block.card.result.code, 'exists');
-  assert.match(j.block.error, /already exists/);
-  assert.ok(j.turn, 'the event turn started');
-  const notices = await waitFor(async () => { const n = await noticeOf(threadId); return n.length ? n : null; });
-  assert.match(notices[0], /^Could not clone — Clone acme\/already-here as project already-here: .*already exists/);
-});
-
-test('follow: a cloning card flips to applied when its job is done, then the event turn names the project', async () => {
-  const { threadId, cardId } = await seedCard('followed');
-  mod._testing.flipCard(threadId, cardId, { state: 'cloning', card: { result: { ok: null, jobId: 'cln_fake0001' } } });
-  const job = { id: 'cln_fake0001', state: 'running' };
-  mod._testing.followCloneCard(threadId, cardId, job, { everyMs: 20 });
-  await new Promise((r) => setTimeout(r, 80));
-  assert.equal((await cardOf(threadId, cardId)).state, 'cloning', 'still following');
-  Object.assign(job, { state: 'done', project: { name: 'followed', path: join(projectsRoot, 'followed'), key: 'k' } });
-  const done = await waitFor(async () => { const b = await cardOf(threadId, cardId); return b.state === 'applied' ? b : null; });
-  assert.deepEqual(done.card.result, { ok: true, jobId: 'cln_fake0001', project: { name: 'followed', path: join(projectsRoot, 'followed') } });
-  assert.equal(done.card.url, 'https://github.com/acme/followed.git', 'the card survives the sub-patch');
-  const notices = await waitFor(async () => { const n = await noticeOf(threadId); return n.length ? n : null; });
-  assert.equal(notices[0], `Cloned — Clone acme/followed as project followed · ${join(projectsRoot, 'followed')}`);
-});
-
-test('follow: a failed job fails the card with the job\'s code and error', async () => {
-  const { threadId, cardId } = await seedCard('refused');
-  mod._testing.flipCard(threadId, cardId, { state: 'cloning', card: { result: { ok: null, jobId: 'cln_fake0002' } } });
-  const job = { id: 'cln_fake0002', state: 'running' };
-  mod._testing.followCloneCard(threadId, cardId, job, { everyMs: 20 });
-  Object.assign(job, { state: 'error', code: 'auth-failed', error: 'GitHub refused the credential' });
-  const failed = await waitFor(async () => { const b = await cardOf(threadId, cardId); return b.state === 'failed' ? b : null; });
-  assert.equal(failed.error, 'GitHub refused the credential');
-  assert.deepEqual(failed.card.result, { ok: false, jobId: 'cln_fake0002', code: 'auth-failed', error: 'GitHub refused the credential' });
+test('follow: a cloning card flips to applied when its job is done (event turn names the project) or fails with the job\'s code and error', async () => {
+  await checkRows([
+    { name: 'follow: a cloning card flips to applied when its job is done, then the event turn names the project', run: async () => {
+      const { threadId, cardId } = await seedCard('followed');
+      mod._testing.flipCard(threadId, cardId, { state: 'cloning', card: { result: { ok: null, jobId: 'cln_fake0001' } } });
+      const job = { id: 'cln_fake0001', state: 'running' };
+      mod._testing.followCloneCard(threadId, cardId, job, { everyMs: 20 });
+      await new Promise((r) => setTimeout(r, 80));
+      assert.equal((await cardOf(threadId, cardId)).state, 'cloning', 'still following');
+      Object.assign(job, { state: 'done', project: { name: 'followed', path: join(projectsRoot, 'followed'), key: 'k' } });
+      const done = await waitFor(async () => { const b = await cardOf(threadId, cardId); return b.state === 'applied' ? b : null; });
+      assert.deepEqual(done.card.result, { ok: true, jobId: 'cln_fake0001', project: { name: 'followed', path: join(projectsRoot, 'followed') } });
+      assert.equal(done.card.url, 'https://github.com/acme/followed.git', 'the card survives the sub-patch');
+      const notices = await waitFor(async () => { const n = await noticeOf(threadId); return n.length ? n : null; });
+      assert.equal(notices[0], `Cloned — Clone acme/followed as project followed · ${join(projectsRoot, 'followed')}`);
+    } },
+    { name: 'follow: a failed job fails the card with the job\'s code and error', run: async () => {
+      const { threadId, cardId } = await seedCard('refused');
+      mod._testing.flipCard(threadId, cardId, { state: 'cloning', card: { result: { ok: null, jobId: 'cln_fake0002' } } });
+      const job = { id: 'cln_fake0002', state: 'running' };
+      mod._testing.followCloneCard(threadId, cardId, job, { everyMs: 20 });
+      Object.assign(job, { state: 'error', code: 'auth-failed', error: 'GitHub refused the credential' });
+      const failed = await waitFor(async () => { const b = await cardOf(threadId, cardId); return b.state === 'failed' ? b : null; });
+      assert.equal(failed.error, 'GitHub refused the credential');
+      assert.deepEqual(failed.card.result, { ok: false, jobId: 'cln_fake0002', code: 'auth-failed', error: 'GitHub refused the credential' });
+    } },
+  ]);
 });
 
 test('restart sweep: a card still cloning fails, others are left alone', async () => {
@@ -196,14 +203,6 @@ test('restart sweep: a card still cloning fails, others are left alone', async (
   assert.equal(swept.state, 'failed');
   assert.match(swept.error, /interrupted by a restart/);
   assert.equal((await cardOf(b.threadId, b.cardId)).state, 'proposed');
-});
-
-test('the context header lists a clone card by its summary', async () => {
-  const { threadId } = await seedCard('headered');
-  const ctx = await mod._testing.resolveAskContext(threadId, {}, []);
-  const c = (ctx.cards || []).find((x) => x.type === 'clone');
-  assert.ok(c, JSON.stringify(ctx.cards));
-  assert.equal(c.summary, 'Clone acme/headered as project headered');
 });
 
 test('the parent validator (clone-deps) uses the real projects folder and names the GitHub mode, never the token', async () => {

@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { fieldErrorText, edit } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -67,24 +68,28 @@ const read = (doc) => {
   return { beforeRun: b.checked, onDiverged: d.value, remote: r.value, refreshMinutes: m.value };
 };
 
-test('the Sync before run card sits on the Runs tab before Scheduled runs, Advanced level, and paints the stored defaults', async () => {
-  const { window, openSettings } = await boot({ settings: { ...SETTINGS, sync: { beforeRun: false, remote: 'upstream', refreshMinutes: 30, onDiverged: 'fail' } } });
-  await openSettings();
-  const doc = window.document;
-  const card = doc.getElementById('sync-settings-card');
-  assert.ok(card.closest('.settings-pane[data-tab="runs"]'), 'on the Runs tab');
-  assert.equal(card.dataset.minLevel, 'advanced');
-  assert.equal(card.querySelector('h2').textContent.trim(), 'Sync before run');
-  assert.equal(card.nextElementSibling.id, 'schedule-settings-card');
-  assert.deepEqual(read(doc), { beforeRun: false, onDiverged: 'fail', remote: 'upstream', refreshMinutes: '30' });
-  assert.deepEqual([...doc.getElementById('syncDefOnDiverged').options].map((o) => o.value), ['ask', 'origin', 'fail']);
-  assert.match(card.textContent, /scheduled run cannot ask/i, 'the tip says what Ask me means for a schedule');
-});
-
-test('an off-list refresh interval is added as an option rather than painted as a blank select', async () => {
-  const { window, openSettings } = await boot({ settings: { ...SETTINGS, sync: { ...BUILT_IN, refreshMinutes: 15 } } });
-  await openSettings();
-  assert.equal(window.document.getElementById('syncDefRefresh').value, '15');
+// One boot per stored sync value (cuts the count, not the time).
+test('the Sync before run card (Runs tab, Advanced) paints the stored defaults, adding an off-list refresh interval as an option rather than a blank select', async () => {
+  await checkRows([
+    { name: 'the Sync before run card sits on the Runs tab before Scheduled runs, Advanced level, and paints the stored defaults', run: async () => {
+      const { window, openSettings } = await boot({ settings: { ...SETTINGS, sync: { beforeRun: false, remote: 'upstream', refreshMinutes: 30, onDiverged: 'fail' } } });
+      await openSettings();
+      const doc = window.document;
+      const card = doc.getElementById('sync-settings-card');
+      assert.ok(card.closest('.settings-pane[data-tab="runs"]'), 'on the Runs tab');
+      assert.equal(card.dataset.minLevel, 'advanced');
+      assert.equal(card.querySelector('h2').textContent.trim(), 'Sync before run');
+      assert.equal(card.nextElementSibling.id, 'schedule-settings-card');
+      assert.deepEqual(read(doc), { beforeRun: false, onDiverged: 'fail', remote: 'upstream', refreshMinutes: '30' });
+      assert.deepEqual([...doc.getElementById('syncDefOnDiverged').options].map((o) => o.value), ['ask', 'origin', 'fail']);
+      assert.match(card.textContent, /scheduled run cannot ask/i, 'the tip says what Ask me means for a schedule');
+    } },
+    { name: 'an off-list refresh interval is added as an option rather than painted as a blank select', run: async () => {
+      const { window, openSettings } = await boot({ settings: { ...SETTINGS, sync: { ...BUILT_IN, refreshMinutes: 15 } } });
+      await openSettings();
+      assert.equal(window.document.getElementById('syncDefRefresh').value, '15');
+    } },
+  ]);
 });
 
 test('Save posts all four fields (an empty remote resets it); Use defaults posts sync:null and repaints', async () => {

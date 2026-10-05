@@ -14,6 +14,8 @@ import { prepare } from '../src/core/db.mjs';
 import { projectKey } from '../src/core/store.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { posix } from './helpers/posix-path.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { stopAt, afterStarts } from './helpers/engines.mjs';
 
 useTempHome(after);
 
@@ -27,19 +29,71 @@ after(async () => {
   await Promise.all(tmpDirs.map((d) => rm(d, { recursive: true, force: true })));
 });
 
-test('emits a title event with the LLM title after createPipeline', async () => {
-  process.env.WORCA_MOCK = '1';
-  const projectDir = await makeTmpDir();
-  const orch = createOrchestrator({ projectDir, prompt: 'Add a settings page with dark mode', auto: true, claude: { mock: true } });
-  const seen = [];
-  orch.on('title', (p) => seen.push(p));
-  await orch.run();
-  await orch._titlePromise;                 // ensure the detached kickoff has settled
-  assert.equal(seen.length, 1, 'exactly one title event');
-  assert.equal(seen[0].provisional, false);
-  assert.ok(seen[0].pipelineId, 'payload carries the pipeline id');
-  assert.ok(seen[0].title && seen[0].title.length <= 70);
+test('a mock run emits the stepper before the first exec, exactly one title event, and books its $0 title call', async () => {
+  // One run serves four former tests. WORCA_MOCK stays UNSET and the bin cannot spawn, so
+  // claude.mock alone must carry the title kickoff (a missed mock shows as zero title events).
+  const prevMock = process.env.WORCA_MOCK;
   delete process.env.WORCA_MOCK;
+  const projectDir = await makeTmpDir();
+  try {
+    const orch = createOrchestrator({
+      projectDir, workflowId: 'wf_default', prompt: 'Add a settings page with dark mode', auto: true,
+      claude: { mock: true, bin: '/nonexistent/claude-must-not-spawn' },
+    });
+    const seen = [];
+    orch.on('title', (p) => seen.push(p));
+
+    const events = []; // ordered { event, hasStepper?, nodeId? }
+    let firstStepperAt = -1;
+    let firstExecAt = -1;
+    let firstClarifyExecAt = -1;
+
+    orch.on('state', (s) => {
+      const i = events.push({ event: 'state', hasStepper: !!(s && s.stepper) }) - 1;
+      if (firstStepperAt < 0 && s && s.stepper) firstStepperAt = i;
+    });
+    orch.on('exec', (p) => {
+      const i = events.push({ event: 'exec', nodeId: p && p.nodeId }) - 1;
+      if (firstExecAt < 0) firstExecAt = i;
+      if (firstClarifyExecAt < 0 && p && String(p.nodeId).includes('clarify')) firstClarifyExecAt = i;
+    });
+
+    // In case clarify emits a question (non-auto path), answer it immediately.
+    orch.on('question', (q) => orch.answer(q.id, { answers: [] }));
+
+    await orch.run();
+    await orch._titlePromise;                 // ensure the detached kickoff has settled
+    await checkRows([
+      { name: 'stepper manifest is emitted before the first exec event (i.e. before preflight/clarify)', run: () => {
+        assert.ok(firstStepperAt >= 0, 'a state event with a stepper was emitted');
+        assert.ok(firstExecAt >= 0, 'at least one exec event was emitted');
+        assert.ok(
+          firstStepperAt < firstExecAt,
+          `stepper (idx ${firstStepperAt}) must precede the first exec event (idx ${firstExecAt})`,
+        );
+        // Secondary, for readability: the blocking clarify execution comes strictly later.
+        if (firstClarifyExecAt >= 0) {
+          assert.ok(firstStepperAt < firstClarifyExecAt, 'stepper precedes the clarify execution');
+        }
+      } },
+      { name: 'emits a title event with the LLM title after createPipeline', run: () => {
+        assert.equal(seen.length, 1, 'exactly one title event');
+        assert.equal(seen[0].provisional, false);
+        assert.ok(seen[0].pipelineId, 'payload carries the pipeline id');
+        assert.ok(seen[0].title && seen[0].title.length <= 70);
+      } },
+      { name: 'title kickoff inherits claude.mock — no WORCA_MOCK env, no real claude spawn', run: () => {
+        assert.equal(seen.length, 1, 'exactly one title event');
+        assert.equal(seen[0].title, '[mock] role unknown complete');
+      } },
+      { name: 'a mock run books its $0 title call too (the call count is never hidden as "no cost")', run: () => {
+        assert.deepEqual(orch.state.steps.find((s) => s.key === 'x:preflight:1').auxCosts?.title, { usd: 0, calls: 1 });
+        assert.equal(orch.state.subAgents.filter((s) => s.subagentType === 'run-title').length, 1);
+      } },
+    ]);
+  } finally {
+    if (prevMock === undefined) delete process.env.WORCA_MOCK; else process.env.WORCA_MOCK = prevMock;
+  }
 });
 
 // ── §2.1 row 3: generateTitle is the LAST worca-cc process that used to start ──
@@ -108,8 +162,10 @@ test('the title kickoff is still SKIPPED on a resumed run (the gate is preserved
     let fired = false;
     orch._kickoffTitleGeneration = () => { fired = true; };
     // run() is never the resume entry point in production, but the gate must hold
-    // here too (belt-and-suspenders, exactly as the comment at the site says).
-    await orch.run().catch(() => {});
+    // here too (belt-and-suspenders, exactly as the comment at the site says). The gate is a
+    // synchronous call in run()'s setup, before the Preflight bookend closes, so the Task
+    // card's start is past it: stop there (stopAt throws if the run never got that far).
+    assert.equal((await stopAt(orch, afterStarts(1, { agentsOnly: false }))).status, 'stopped');
     assert.equal(fired, false, 'a resumed run never re-generates its title');
   } finally {
     delete process.env.WORCA_MOCK;
@@ -129,81 +185,54 @@ test('_titleGenOpts mirrors the run\'s claude policy: bin + mock travel with the
   assert.equal(o.cwd, orch.projectDir, 'before _setupRunRoot the cwd falls back to projectDir');
 });
 
-test('title kickoff inherits claude.mock — no WORCA_MOCK env, no real claude spawn', async () => {
-  const prevMock = process.env.WORCA_MOCK;
-  delete process.env.WORCA_MOCK;
-  const projectDir = await makeTmpDir();
-  try {
-    const orch = createOrchestrator({
-      projectDir, prompt: 'Add a settings page with dark mode', auto: true,
-      claude: { mock: true, bin: '/nonexistent/claude-must-not-spawn' },
-    });
-    const seen = [];
-    orch.on('title', (p) => seen.push(p));
-    await orch.run();
-    await orch._titlePromise;
-    assert.equal(seen.length, 1, 'exactly one title event');
-    assert.equal(seen[0].title, '[mock] role unknown complete');
-  } finally {
-    if (prevMock === undefined) delete process.env.WORCA_MOCK; else process.env.WORCA_MOCK = prevMock;
-  }
-});
-
 // ── Away mode cost visibility (T4): the run-title call is worca's own AI spend during the run ──
 const titleResult = (o) => o.onEvent({ type: 'result', costUsd: 0.0021, raw: { type: 'result', usage: { input_tokens: 90, output_tokens: 8 } } });
 
-test('the run-title call is booked: a run-title row, aux "title" on the preflight bookend, in the total', async () => {
-  const projectDir = await makeTmpDir();
-  const titleRunClaude = async (o) => { titleResult(o); return { text: 'Add a settings page' }; };
-  const orch = createOrchestrator({ projectDir, prompt: 'Add a settings page with dark mode', auto: true,
-    claude: { mock: true, bin: '/nonexistent/claude-must-not-spawn' }, titleRunClaude });
-  const res = await orch.run();
-  await orch._titlePromise;
-  assert.equal(res.status, 'done', JSON.stringify(res));
-  const pre = orch.state.steps.find((s) => s.key === 'x:preflight:1');
-  assert.deepEqual(pre.auxCosts?.title, { usd: 0.0021, calls: 1 });
-  const rows = orch.state.subAgents.filter((s) => s.subagentType === 'run-title');
-  assert.equal(rows.length, 1);
-  assert.match(rows[0].id, /^run-title-[0-9a-f]{8}$/);
-  assert.deepEqual([rows[0].costUsd, rows[0].tokens, rows[0].nodeId, rows[0].stepKey, rows[0].status], [0.0021, 98, 'preflight', 'x:preflight:1', 'finished']);
-  assert.equal(orch.state.totalCostUsd, 0.0021, 'mock agents cost $0: the total is the title call');
-  assert.equal(orch.state.title, 'Add a settings page');
-});
-
-test('a title that settles after run() returned is still booked and persisted (History reads the DB)', async () => {
-  const projectDir = await makeTmpDir();
-  // Hold the title until run() has returned: every state write of the run (the done persist, the
-  // run-root teardown in its finally) is behind it, so only _recordCost's own persist can land it.
-  let release;
-  const released = new Promise((r) => { release = r; });
-  const titleRunClaude = async (o) => { await released; titleResult(o); return { text: 'Add a settings page' }; };
-  const orch = createOrchestrator({ projectDir, prompt: 'Add a settings page with dark mode', auto: true,
-    claude: { mock: true, bin: '/nonexistent/claude-must-not-spawn' }, titleRunClaude });
-  orch._recordRunMetrics = async () => {};   // its 5 s title grace would otherwise wait for the held title
-  const res = await orch.run();
-  assert.equal(res.status, 'done');
-  const id = orch.getState().id;
-  assert.equal(readPipelineForResume(id).row.total_cost_usd, 0, 'nothing booked yet');
-  release();
-  await orch._titlePromise;
-  const { row, steps } = readPipelineForResume(id);
-  assert.equal(row.status, 'done');
-  assert.equal(row.total_cost_usd, 0.0021, 'the late cost reached pipelines.total_cost_usd');
-  assert.deepEqual(steps.find((s) => s.key === 'x:preflight:1').auxCosts, { title: { usd: 0.0021, calls: 1 } });
-  const sub = prepare("SELECT cost_usd FROM sub_agents WHERE pipeline_id = ? AND subagent_type = 'run-title'").all(id);
-  assert.deepEqual(sub.map((r) => r.cost_usd), [0.0021]);
-  const ledger = prepare('SELECT SUM(amount_usd) AS s FROM cost_ledger WHERE pipeline_id = ?').get(id).s;
-  assert.ok(Math.abs(ledger - row.total_cost_usd) < 1e-4, 'I2: ledger = total');
-});
-
-test('a mock run books its $0 title call too (the call count is never hidden as "no cost")', async () => {
-  const projectDir = await makeTmpDir();
-  const orch = createOrchestrator({ projectDir, prompt: 'Add a settings page with dark mode', auto: true,
-    claude: { mock: true, bin: '/nonexistent/claude-must-not-spawn' } });
-  await orch.run();
-  await orch._titlePromise;
-  assert.deepEqual(orch.state.steps.find((s) => s.key === 'x:preflight:1').auxCosts?.title, { usd: 0, calls: 1 });
-  assert.equal(orch.state.subAgents.filter((s) => s.subagentType === 'run-title').length, 1);
+test('the run-title call is booked (row, aux title, total) whether it settles before or after run() returns, and persists to the DB', async () => {
+  await checkRows([
+    { name: 'the run-title call is booked: a run-title row, aux "title" on the preflight bookend, in the total', run: async () => {
+      const projectDir = await makeTmpDir();
+      const titleRunClaude = async (o) => { titleResult(o); return { text: 'Add a settings page' }; };
+      const orch = createOrchestrator({ projectDir, prompt: 'Add a settings page with dark mode', auto: true,
+        claude: { mock: true, bin: '/nonexistent/claude-must-not-spawn' }, titleRunClaude });
+      const res = await orch.run();
+      await orch._titlePromise;
+      assert.equal(res.status, 'done', JSON.stringify(res));
+      const pre = orch.state.steps.find((s) => s.key === 'x:preflight:1');
+      assert.deepEqual(pre.auxCosts?.title, { usd: 0.0021, calls: 1 });
+      const rows = orch.state.subAgents.filter((s) => s.subagentType === 'run-title');
+      assert.equal(rows.length, 1);
+      assert.match(rows[0].id, /^run-title-[0-9a-f]{8}$/);
+      assert.deepEqual([rows[0].costUsd, rows[0].tokens, rows[0].nodeId, rows[0].stepKey, rows[0].status], [0.0021, 98, 'preflight', 'x:preflight:1', 'finished']);
+      assert.equal(orch.state.totalCostUsd, 0.0021, 'mock agents cost $0: the total is the title call');
+      assert.equal(orch.state.title, 'Add a settings page');
+    } },
+    { name: 'a title that settles after run() returned is still booked and persisted (History reads the DB)', run: async () => {
+      const projectDir = await makeTmpDir();
+      // Hold the title until run() has returned: every state write of the run (the done persist, the
+      // run-root teardown in its finally) is behind it, so only _recordCost's own persist can land it.
+      let release;
+      const released = new Promise((r) => { release = r; });
+      const titleRunClaude = async (o) => { await released; titleResult(o); return { text: 'Add a settings page' }; };
+      const orch = createOrchestrator({ projectDir, prompt: 'Add a settings page with dark mode', auto: true,
+        claude: { mock: true, bin: '/nonexistent/claude-must-not-spawn' }, titleRunClaude });
+      orch._recordRunMetrics = async () => {};   // its 5 s title grace would otherwise wait for the held title
+      const res = await orch.run();
+      assert.equal(res.status, 'done');
+      const id = orch.getState().id;
+      assert.equal(readPipelineForResume(id).row.total_cost_usd, 0, 'nothing booked yet');
+      release();
+      await orch._titlePromise;
+      const { row, steps } = readPipelineForResume(id);
+      assert.equal(row.status, 'done');
+      assert.equal(row.total_cost_usd, 0.0021, 'the late cost reached pipelines.total_cost_usd');
+      assert.deepEqual(steps.find((s) => s.key === 'x:preflight:1').auxCosts, { title: { usd: 0.0021, calls: 1 } });
+      const sub = prepare("SELECT cost_usd FROM sub_agents WHERE pipeline_id = ? AND subagent_type = 'run-title'").all(id);
+      assert.deepEqual(sub.map((r) => r.cost_usd), [0.0021]);
+      const ledger = prepare('SELECT SUM(amount_usd) AS s FROM cost_ledger WHERE pipeline_id = ?').get(id).s;
+      assert.ok(Math.abs(ledger - row.total_cost_usd) < 1e-4, 'I2: ledger = total');
+    } },
+  ]);
 });
 
 // ── A paused harness's title can land after a NEW harness resumed the run ────────────────────
@@ -318,29 +347,30 @@ const lateReview = (orch, executionId, n) => orch._nightBookAnalysis(`night-deci
 const lateStopped = (orch, executionId, n) => orch._nightBookStopped(`night-decider-5e0d000${n}`, { kind: 'questions', executionId },
   new Date().toISOString(), { input_tokens: 10, output_tokens: 0 }, { model: null, effort: null });
 
-test('after its own late title, a paused run nobody resumed still saves its Away mode switch', async () => {
+test('after its own late title, a paused run nobody resumed still saves its Away mode switch and books a late review (ledger = total)', async () => {
   const { orch1, id, land } = await pausedRunWithHeldTitle({ titleGapMs: 5 });
   await land();
-  assert.equal(readPipelineForResume(id).resumePoint.night.override, 'auto');
-  orch1.setNightOverride('on');
-  await tick();
-  assert.equal(readPipelineForResume(id).resumePoint.night.override, 'on', 'the resumed run (a new harness built from the row) runs with it');
-  assert.equal(readPipelineForResume(id).row.title, 'Add a settings page');
-});
-
-test('after its own late title, a paused run nobody resumed books a late review into its total (ledger = total)', async () => {
-  const { orch1, id, land } = await pausedRunWithHeldTitle({ titleGapMs: 5 });
-  await land();
-  const execKey = orch1.state.steps.at(-1).key;
-  // Two bookings in the same tick: the first one's write must not make the harness doubt its own row.
-  lateReview(orch1, execKey, 1);
-  lateStopped(orch1, execKey, 1);
-  await tick();
-  const { row, steps } = readPipelineForResume(id);
-  assert.equal(row.status, 'paused');
-  assert.equal(row.total_cost_usd, 0.0521, 'the title and the late review are in the total');
-  assert.ok(Math.abs(ledgerSum(id) - row.total_cost_usd) < 1e-9, `I2: ledger ${ledgerSum(id)} = total ${row.total_cost_usd}`);
-  assert.deepEqual(steps.find((s) => s.key === execKey).auxCosts?.away, { usd: 0.05, calls: 1, stopped: 1 }, 'the stopped review is counted too');
+  await checkRows([
+    { name: 'after its own late title, a paused run nobody resumed still saves its Away mode switch', run: async () => {
+      assert.equal(readPipelineForResume(id).resumePoint.night.override, 'auto');
+      orch1.setNightOverride('on');
+      await tick();
+      assert.equal(readPipelineForResume(id).resumePoint.night.override, 'on', 'the resumed run (a new harness built from the row) runs with it');
+      assert.equal(readPipelineForResume(id).row.title, 'Add a settings page');
+    } },
+    { name: 'after its own late title, a paused run nobody resumed books a late review into its total (ledger = total)', run: async () => {
+      const execKey = orch1.state.steps.at(-1).key;
+      // Two bookings in the same tick: the first one's write must not make the harness doubt its own row.
+      lateReview(orch1, execKey, 1);
+      lateStopped(orch1, execKey, 1);
+      await tick();
+      const { row, steps } = readPipelineForResume(id);
+      assert.equal(row.status, 'paused');
+      assert.equal(row.total_cost_usd, 0.0521, 'the title and the late review are in the total');
+      assert.ok(Math.abs(ledgerSum(id) - row.total_cost_usd) < 1e-9, `I2: ledger ${ledgerSum(id)} = total ${row.total_cost_usd}`);
+      assert.deepEqual(steps.find((s) => s.key === execKey).auxCosts?.away, { usd: 0.05, calls: 1, stopped: 1 }, 'the stopped review is counted too');
+    } },
+  ]);
 });
 
 test('a resumed run that paused again keeps saving its Away mode switch after the old harness\'s title lands', async () => {

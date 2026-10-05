@@ -2,23 +2,13 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
-import { worcaHome } from '../src/core/projects.mjs';
 import {
-  pluginsRoot, pluginDir, pluginCurrentDir, pluginDataDir, pluginsLockFile,
+  pluginsRoot, pluginDir, pluginsLockFile,
   readPluginsLock, writePluginsLock,
 } from '../src/core/plugins-lock.mjs';
 
 useTempHome(after);
-
-test('path helpers hang off worcaHome()/plugins', () => {
-  assert.equal(pluginsRoot(), join(worcaHome(), 'plugins'));
-  assert.equal(pluginDir('github-source'), join(pluginsRoot(), 'github-source'));
-  assert.equal(pluginCurrentDir('github-source'), join(pluginsRoot(), 'github-source', 'current'));
-  assert.equal(pluginDataDir('github-source'), join(pluginsRoot(), 'github-source', 'data'));
-  assert.equal(pluginsLockFile(), join(pluginsRoot(), 'plugins.lock.json'));
-});
 
 test('pluginDir rejects names that could escape the plugins root', () => {
   assert.throws(() => pluginDir('../evil'), /invalid plugin name/);

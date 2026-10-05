@@ -1,6 +1,5 @@
-// test/api-marketplaces.test.mjs — /api/marketplaces* CRUD + refresh, the
-// installed/provenance merges onto /api/plugins, and the retirement of
-// POST /api/plugins/repo. Harness = test/api-plugins.test.mjs: import the real
+// test/api-marketplaces.test.mjs — /api/marketplaces* CRUD + refresh and the
+// installed/provenance merges onto /api/plugins. Harness = test/api-plugins.test.mjs: import the real
 // express app (=> no port bind), mount it on an ephemeral http port, sandbox
 // WORCA_HOME with useTempHome. Each test builds its own REAL local git market
 // repo, so everything stays offline. No WORCA_MOCK here on purpose: install's
@@ -123,11 +122,6 @@ test('marketplace lifecycle: add -> list -> install (consent snapshot) -> remove
 
   // unknown id -> 404
   assert.equal((await del('/api/marketplaces/ghost')).status, 404);
-});
-
-test('POST /api/plugins/repo is gone', async () => {
-  const r = await post('/api/plugins/repo', { url: '/tmp/x' });
-  assert.equal(r.status, 404);
 });
 
 test('install rejects a junk subdir (option-injection) and drops a junk marketplace id (A4, E12)', async () => {

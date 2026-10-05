@@ -13,6 +13,7 @@ import { gitDir } from './helpers/git-dir.mjs';
 import { memoryRoot, GLOBAL_SCOPE, projectScope, writeMemory, readMemory } from '../src/core/memory-store.mjs';
 import { worcaHome } from '../src/core/projects.mjs';
 import { memoryCaps } from '../src/core/settings.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -87,45 +88,48 @@ test('the message route mounts global + the resolved project under <home>/ask/me
   } finally { ws.close(); }
 });
 
-test('MCP registry §9.1: a fallback-tagged projectDir gets no project: header line and a global-only mount', async () => {
-  const header = await mod._testing.resolveAskContext('ask_00000000', { view: 'settings', projectDir: project.path, projectSource: 'fallback' });
-  assert.equal(header.project, undefined, 'the generic fallback is ignored');
-  assert.deepEqual((await mod._testing.resolveAskContext('ask_00000000', { view: 'new', projectDir: project.path })).project, { name: project.name, key: project.key }, 'an untagged projectDir still resolves');
-  const { thread } = await (await post('/api/ask/threads', {})).json();
-  const { ws, msgs, opened } = openWs();
-  await opened;
-  try {
-    const r = await post(`/api/ask/threads/${thread.id}/messages`, { text: 'hello', ...MODEL, context: { view: 'settings', projectDir: project.path, projectSource: 'fallback' } });
-    assert.equal(r.status, 202, await r.text());
-    await waitFor(() => msgs.some((m) => m.threadId === thread.id && typeof m.seq === 'number'));
-    const turn = mod._testing.askJobs.get(thread.id)?.turn;
-    await waitFor(() => turn.memoryDir === join(worcaHome(), 'ask', 'memory', 'global'));
-    assert.ok(!turn.prompt.includes('project: '), 'no project: header line');
-    await waitFor(() => msgs.some((m) => m.threadId === thread.id && m.type === 'ask-done'));
-  } finally { ws.close(); }
-});
-
-test('no project in the context ⇒ the global-only mount; an empty store ⇒ no mount dir at all (byte-identical spawn)', async () => {
-  const { refreshAskMemoryMount } = await import('../src/core/ask/memory-deps.mjs');
-  const g = await refreshAskMemoryMount({});
-  assert.equal(g, join(worcaHome(), 'ask', 'memory', 'global'));
-  assert.equal(existsSync(join(g, '.claude', 'rules', 'worca', 'global', 'style.md')), true);
-  assert.equal(existsSync(join(g, '.claude', 'rules', 'worca', 'project')), false, 'no project dir without a project');
-  // Non-destructive refresh: a stale file is unlinked, the dir itself survives (a turn already spawning on it never sees an empty dir).
-  await writeFile(join(g, '.claude', 'rules', 'worca', 'global', 'stale.md'), 'x');
-  await writeFile(join(g, '.claude', 'rules', 'worca', 'sentinel.txt'), 'x');   // outside the scope dirs: only an rm of the mount could remove it
-  await refreshAskMemoryMount({});
-  assert.equal(existsSync(join(g, '.claude', 'rules', 'worca', 'global', 'stale.md')), false);
-  assert.equal(existsSync(join(g, '.claude', 'rules', 'worca', 'sentinel.txt')), true, 'non-destructive: refreshed in place, never rm-ed (an rm+rewrite mutation is caught here)');
-  await rm(memoryRoot(), { recursive: true, force: true });
-  assert.equal(await refreshAskMemoryMount({}), null, 'empty store ⇒ null ⇒ no --add-dir');
-  assert.equal(existsSync(join(g, '.claude', 'rules', 'worca', 'global', 'style.md')), false, 'and the stale mount was emptied');
-  // This test WIPES the store, so it must stay last among the tests that read the seeded store —
-  // and it re-seeds for a later test: the two calls below are the `before` hook's, verbatim, so a
-  // test appended after this one starts from the same store the hook built.
-  const caps = memoryCaps();
-  await writeMemory(memoryRoot(), GLOBAL_SCOPE, 'style', '---\nname: style\ndescription: Terse commits\n---\nNo emoji.\n', { source: 'user', caps });
-  await writeMemory(memoryRoot(), projectScope(project.key), 'conventions', '---\nname: conventions\ndescription: Naming rules\n---\nkebab-case files.\n', { source: 'user', caps });
+test('global-only mounts: a fallback-tagged projectDir or no project; an empty store mounts nothing (byte-identical spawn)', async () => {
+  await checkRows([
+    { name: 'MCP registry §9.1: a fallback-tagged projectDir gets no project: header line and a global-only mount', run: async () => {
+      const header = await mod._testing.resolveAskContext('ask_00000000', { view: 'settings', projectDir: project.path, projectSource: 'fallback' });
+      assert.equal(header.project, undefined, 'the generic fallback is ignored');
+      assert.deepEqual((await mod._testing.resolveAskContext('ask_00000000', { view: 'new', projectDir: project.path })).project, { name: project.name, key: project.key }, 'an untagged projectDir still resolves');
+      const { thread } = await (await post('/api/ask/threads', {})).json();
+      const { ws, msgs, opened } = openWs();
+      await opened;
+      try {
+        const r = await post(`/api/ask/threads/${thread.id}/messages`, { text: 'hello', ...MODEL, context: { view: 'settings', projectDir: project.path, projectSource: 'fallback' } });
+        assert.equal(r.status, 202, await r.text());
+        await waitFor(() => msgs.some((m) => m.threadId === thread.id && typeof m.seq === 'number'));
+        const turn = mod._testing.askJobs.get(thread.id)?.turn;
+        await waitFor(() => turn.memoryDir === join(worcaHome(), 'ask', 'memory', 'global'));
+        assert.ok(!turn.prompt.includes('project: '), 'no project: header line');
+        await waitFor(() => msgs.some((m) => m.threadId === thread.id && m.type === 'ask-done'));
+      } finally { ws.close(); }
+    } },
+    { name: 'no project in the context ⇒ the global-only mount; an empty store ⇒ no mount dir at all (byte-identical spawn)', run: async () => {
+      const { refreshAskMemoryMount } = await import('../src/core/ask/memory-deps.mjs');
+      const g = await refreshAskMemoryMount({});
+      assert.equal(g, join(worcaHome(), 'ask', 'memory', 'global'));
+      assert.equal(existsSync(join(g, '.claude', 'rules', 'worca', 'global', 'style.md')), true);
+      assert.equal(existsSync(join(g, '.claude', 'rules', 'worca', 'project')), false, 'no project dir without a project');
+      // Non-destructive refresh: a stale file is unlinked, the dir itself survives (a turn already spawning on it never sees an empty dir).
+      await writeFile(join(g, '.claude', 'rules', 'worca', 'global', 'stale.md'), 'x');
+      await writeFile(join(g, '.claude', 'rules', 'worca', 'sentinel.txt'), 'x');   // outside the scope dirs: only an rm of the mount could remove it
+      await refreshAskMemoryMount({});
+      assert.equal(existsSync(join(g, '.claude', 'rules', 'worca', 'global', 'stale.md')), false);
+      assert.equal(existsSync(join(g, '.claude', 'rules', 'worca', 'sentinel.txt')), true, 'non-destructive: refreshed in place, never rm-ed (an rm+rewrite mutation is caught here)');
+      await rm(memoryRoot(), { recursive: true, force: true });
+      assert.equal(await refreshAskMemoryMount({}), null, 'empty store ⇒ null ⇒ no --add-dir');
+      assert.equal(existsSync(join(g, '.claude', 'rules', 'worca', 'global', 'style.md')), false, 'and the stale mount was emptied');
+      // This test WIPES the store, so it must stay last among the tests that read the seeded store —
+      // and it re-seeds for a later test: the two calls below are the `before` hook's, verbatim, so a
+      // test appended after this one starts from the same store the hook built.
+      const caps = memoryCaps();
+      await writeMemory(memoryRoot(), GLOBAL_SCOPE, 'style', '---\nname: style\ndescription: Terse commits\n---\nNo emoji.\n', { source: 'user', caps });
+      await writeMemory(memoryRoot(), projectScope(project.key), 'conventions', '---\nname: conventions\ndescription: Naming rules\n---\nkebab-case files.\n', { source: 'user', caps });
+    } },
+  ]);
 });
 
 test('a junk name in the STORE is reported as ignored, never as a mount write failure; the good file still mounts', async () => {

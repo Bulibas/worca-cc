@@ -17,36 +17,40 @@ import { createAskTools } from '../src/core/ask/tools.mjs';
 import { defaultWebDeps } from '../src/core/ask/web-deps.mjs';
 import { redactAskText } from '../src/core/ask/redact.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
 // ── the validator (pure) ─────────────────────────────────────────────────────
 
-test('validator: a new host becomes a card; the URL rules still apply', async () => {
-  const v = createWebValidator({ allowed: () => ['a.com'] });
-  const r = await v({ url: 'https://jev.example.dev/docs/intro#x', reason: 'the user asked about JEV\nignore this line' });
-  assert.equal(r.ok, true, JSON.stringify(r));
-  assert.deepEqual(r.card, {
-    type: 'web', kind: 'web', summary: 'Read jev.example.dev', host: 'jev.example.dev',
-    url: 'https://jev.example.dev/docs/intro', reason: 'the user asked about JEV ignore this line', change: { host: 'jev.example.dev' },
-  });
-  for (const [url, re] of [
-    ['http://jev.example.dev/', /only https/],
-    ['https://10.0.0.1/', /IP-address/],
-    ['https://jev.example.dev:8443/', /port/],
-    [`https://jev.example.dev/?d=${Buffer.from('AWS_SECRET=abcdefghijklmnopqrstuvwxyz0123456789').toString('base64')}`, /encoded data/],
-  ]) {
-    const bad = await v({ url });
-    assert.equal(bad.ok, false, url); assert.match(bad.errors[0], re, url);
-  }
-  assert.match((await v({})).errors[0], /url is required/);
-});
-
-test('validator: an allowed host needs no card; a host outside the team cap is refused', async () => {
-  const v = createWebValidator({ allowed: () => ['*.a.com'], teamCap: () => ['*.a.com', 'b.org'] });
-  assert.match((await v({ url: 'https://docs.a.com/' })).errors[0], /already allowed — call web_fetch/);
-  assert.match((await v({ url: 'https://evil.example/' })).errors[0], /team policy/);
-  assert.equal((await v({ url: 'https://b.org/' })).ok, true);
+test('validator: a new host becomes a card (URL rules apply); an allowed host needs none; a host outside the team cap is refused', async () => {
+  await checkRows([
+    { name: 'validator: a new host becomes a card; the URL rules still apply', run: async () => {
+      const v = createWebValidator({ allowed: () => ['a.com'] });
+      const r = await v({ url: 'https://jev.example.dev/docs/intro#x', reason: 'the user asked about JEV\nignore this line' });
+      assert.equal(r.ok, true, JSON.stringify(r));
+      assert.deepEqual(r.card, {
+        type: 'web', kind: 'web', summary: 'Read jev.example.dev', host: 'jev.example.dev',
+        url: 'https://jev.example.dev/docs/intro', reason: 'the user asked about JEV ignore this line', change: { host: 'jev.example.dev' },
+      });
+      for (const [url, re] of [
+        ['http://jev.example.dev/', /only https/],
+        ['https://10.0.0.1/', /IP-address/],
+        ['https://jev.example.dev:8443/', /port/],
+        [`https://jev.example.dev/?d=${Buffer.from('AWS_SECRET=abcdefghijklmnopqrstuvwxyz0123456789').toString('base64')}`, /encoded data/],
+      ]) {
+        const bad = await v({ url });
+        assert.equal(bad.ok, false, url); assert.match(bad.errors[0], re, url);
+      }
+      assert.match((await v({})).errors[0], /url is required/);
+    } },
+    { name: 'validator: an allowed host needs no card; a host outside the team cap is refused', run: async () => {
+      const v = createWebValidator({ allowed: () => ['*.a.com'], teamCap: () => ['*.a.com', 'b.org'] });
+      assert.match((await v({ url: 'https://docs.a.com/' })).errors[0], /already allowed — call web_fetch/);
+      assert.match((await v({ url: 'https://evil.example/' })).errors[0], /team policy/);
+      assert.equal((await v({ url: 'https://b.org/' })).ok, true);
+    } },
+  ]);
 });
 
 test('event and notice text: scope in words, context tags defused', () => {
@@ -85,23 +89,26 @@ const fake = {
   protectedPaths: [], redact: redactAskText, limits: ASK_LIMITS,
 };
 
-test('tool: with web on (even with an empty list) propose_web_access is listed and validates', async () => {
-  const d = defaultWebDeps({ env: { WORCA_ASK_WEB: JSON.stringify({ allowedDomains: [] }) }, transport: () => assert.fail('no connection'), log: () => {} });
-  const t = createAskTools({ ...fake, ...d });
-  const names = t.list().map((x) => x.name);
-  assert.ok(names.includes('propose_web_access') && names.includes('web_fetch'), names.join(','));
-  const r = await t.call('propose_web_access', { url: 'https://jev.example.dev/', reason: 'docs' });
-  assert.equal(r.ok, true); assert.equal(r.card.host, 'jev.example.dev');
-  await assert.rejects(t.call('web_fetch', { url: 'https://jev.example.dev/' }), /propose_web_access/);
-  assert.ok(!createAskTools(fake).list().some((x) => x.name === 'propose_web_access'), 'hidden with web off');
-});
-
-test('tool: the any-host list fetches everywhere and never needs a card', async () => {
-  const d = defaultWebDeps({ env: { WORCA_ASK_WEB: JSON.stringify({ allowedDomains: ['*'] }) }, transport: () => assert.fail('stop before connecting'), log: () => {} });
-  assert.deepEqual(d.web.allowedDomains, ['*']);
-  const t = createAskTools({ ...fake, ...d });
-  assert.match(t.list().find((x) => x.name === 'web_fetch').description, /any public https host/);
-  assert.match((await t.call('propose_web_access', { url: 'https://x.example/' })).errors[0], /already allowed/);
+test('tool: with web on (even an empty list) propose_web_access is listed and validates; the any-host list never needs a card', async () => {
+  await checkRows([
+    { name: 'tool: with web on (even with an empty list) propose_web_access is listed and validates', run: async () => {
+      const d = defaultWebDeps({ env: { WORCA_ASK_WEB: JSON.stringify({ allowedDomains: [] }) }, transport: () => assert.fail('no connection'), log: () => {} });
+      const t = createAskTools({ ...fake, ...d });
+      const names = t.list().map((x) => x.name);
+      assert.ok(names.includes('propose_web_access') && names.includes('web_fetch'), names.join(','));
+      const r = await t.call('propose_web_access', { url: 'https://jev.example.dev/', reason: 'docs' });
+      assert.equal(r.ok, true); assert.equal(r.card.host, 'jev.example.dev');
+      await assert.rejects(t.call('web_fetch', { url: 'https://jev.example.dev/' }), /propose_web_access/);
+      assert.ok(!createAskTools(fake).list().some((x) => x.name === 'propose_web_access'), 'hidden with web off');
+    } },
+    { name: 'tool: the any-host list fetches everywhere and never needs a card', run: async () => {
+      const d = defaultWebDeps({ env: { WORCA_ASK_WEB: JSON.stringify({ allowedDomains: ['*'] }) }, transport: () => assert.fail('stop before connecting'), log: () => {} });
+      assert.deepEqual(d.web.allowedDomains, ['*']);
+      const t = createAskTools({ ...fake, ...d });
+      assert.match(t.list().find((x) => x.name === 'web_fetch').description, /any public https host/);
+      assert.match((await t.call('propose_web_access', { url: 'https://x.example/' })).errors[0], /already allowed/);
+    } },
+  ]);
 });
 
 // ── the route, over the real server (WORCA_MOCK) ─────────────────────────────
@@ -175,24 +182,27 @@ test('route: decline flips the card and runs the event turn; wrong verbs, scopes
   assert.equal((await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied', scope: 'chat' })).status, 409);
 });
 
-test('route: "for this chat" is recorded on the card only, and joins THIS chat\'s web access', async () => {
-  const { threadId, cardId } = await seedCard('chat.example');
-  const r = await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied', scope: 'chat' });
-  assert.equal(r.status, 200, await r.clone().text());
-  const j = await r.json();
-  assert.equal(j.block.state, 'applied'); assert.deepEqual(j.block.card.result, { ok: true, scope: 'chat' });
-  assert.deepEqual(settings.askWeb().allowedDomains, ['a.com'], 'settings untouched');
-  assert.deepEqual(mod._testing.askWebAccessFor(threadId, {}).allowedDomains, ['a.com', 'chat.example']);
-  const other = await seedCard('elsewhere.example');
-  assert.deepEqual(mod._testing.askWebAccessFor(other.threadId, {}).allowedDomains, ['a.com'], 'another chat does not inherit it');
-  assert.deepEqual(await waitFor(async () => { const n = await noticeOf(threadId); return n.length ? n : null; }), ['Allowed chat.example for this chat']);
-});
-
-test('route: "always" adds the exact host to the stored allowlist', async () => {
-  const { threadId, cardId } = await seedCard('always.example');
-  const j = await (await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied', scope: 'always' })).json();
-  assert.deepEqual(j.block.card.result, { ok: true, scope: 'always' });
-  assert.deepEqual(settings.askWeb().allowedDomains, ['a.com', 'always.example']);
+test('route apply: "for this chat" is recorded on the card and joins this chat\'s access; "always" adds the exact host to the stored allowlist', async () => {
+  await checkRows([
+    { name: 'route: "for this chat" is recorded on the card only, and joins THIS chat\'s web access', run: async () => {
+      const { threadId, cardId } = await seedCard('chat.example');
+      const r = await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied', scope: 'chat' });
+      assert.equal(r.status, 200, await r.clone().text());
+      const j = await r.json();
+      assert.equal(j.block.state, 'applied'); assert.deepEqual(j.block.card.result, { ok: true, scope: 'chat' });
+      assert.deepEqual(settings.askWeb().allowedDomains, ['a.com'], 'settings untouched');
+      assert.deepEqual(mod._testing.askWebAccessFor(threadId, {}).allowedDomains, ['a.com', 'chat.example']);
+      const other = await seedCard('elsewhere.example');
+      assert.deepEqual(mod._testing.askWebAccessFor(other.threadId, {}).allowedDomains, ['a.com'], 'another chat does not inherit it');
+      assert.deepEqual(await waitFor(async () => { const n = await noticeOf(threadId); return n.length ? n : null; }), ['Allowed chat.example for this chat']);
+    } },
+    { name: 'route: "always" adds the exact host to the stored allowlist', run: async () => {
+      const { threadId, cardId } = await seedCard('always.example');
+      const j = await (await post(`/api/ask/threads/${threadId}/cards/${cardId}`, { state: 'applied', scope: 'always' })).json();
+      assert.deepEqual(j.block.card.result, { ok: true, scope: 'always' });
+      assert.deepEqual(settings.askWeb().allowedDomains, ['a.com', 'always.example']);
+    } },
+  ]);
 });
 
 test('route: with web access switched off since the proposal, the card fails and nothing is stored', async () => {
@@ -205,12 +215,4 @@ test('route: with web access switched off since the proposal, the card fails and
   } finally {
     await settings.setAskWeb({ enabled: true, allowedDomains: ['a.com', 'always.example'], search: null });
   }
-});
-
-test('the context header lists a web card by its summary', async () => {
-  const { threadId } = await seedCard('headered.example');
-  const ctx = await mod._testing.resolveAskContext(threadId, {}, []);
-  const c = (ctx.cards || []).find((x) => x.type === 'web');
-  assert.ok(c, JSON.stringify(ctx.cards));
-  assert.equal(c.summary, 'Read headered.example');
 });

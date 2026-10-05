@@ -4,11 +4,12 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { WebSocket } from 'ws';
 import { _resetForTests } from '../src/core/db.mjs';
 import { recordArtifact, writeStoreMeta } from '../src/core/artifacts.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 let srv, httpBase, wsBase, homeDir, prevHome;
 const created = []; // throwaway git repos to clean up
@@ -52,15 +53,8 @@ const open = (ws) => new Promise((res, rej) => { ws.on('open', res); ws.on('erro
 
 /** A real git repo so the server's per-member isGitRepo resolution passes. */
 async function freshRepo(prefix = 'worca-cc-bcast-repo-') {
-  const dir = await mkdtemp(join(tmpdir(), prefix));
+  const dir = templateRepo('bcast-repo', { branch: 'main', user: true, files: { 'README.md': '# hi\n' }, prefix });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']);
-  g(['commit', '-qm', 'init']);
   return dir;
 }
 
@@ -84,16 +78,31 @@ test('project create + delete each broadcast projects-changed to EVERY client', 
   a.ws.close(); b.ws.close();
 });
 
-test('a rejected (400) project create does NOT broadcast', async () => {
+// One client sees both rejected creates, then ONE 60 ms settle covers both negatives.
+test('a rejected (400) project or workspace create does NOT broadcast', async () => {
   const a = connect();
   await open(a.ws);
-  const res = await fetch(`${httpBase}/api/projects`, {
+  const projectRes = await fetch(`${httpBase}/api/projects`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: '', path: '' }),
   });
-  assert.equal(res.status, 400);
+  const workspaceRes = await fetch(`${httpBase}/api/workspaces`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: '', projectPaths: [] }),
+  });
   await new Promise((r) => setTimeout(r, 60));
-  assert.equal(a.msgs.filter((m) => m.type === 'projects-changed').length, 0);
-  a.ws.close();
+  try {
+    await checkRows([
+      { name: 'a rejected (400) project create does NOT broadcast', run: () => {
+        assert.equal(projectRes.status, 400);
+        assert.equal(a.msgs.filter((m) => m.type === 'projects-changed').length, 0);
+      } },
+      { name: 'a rejected (400) workspace create does NOT broadcast', run: () => {
+        assert.ok(workspaceRes.status >= 400);
+        assert.equal(a.msgs.filter((m) => m.type === 'workspaces-changed').length, 0);
+      } },
+    ]);
+  } finally {
+    a.ws.close();
+  }
 });
 
 test('workspace create + delete each broadcast workspaces-changed to EVERY client', async () => {
@@ -116,18 +125,6 @@ test('workspace create + delete each broadcast workspaces-changed to EVERY clien
   await waitFor(() => a.msgs.some((m) => m.type === 'workspaces-changed' && m.action === 'deleted'));
 
   a.ws.close(); b.ws.close();
-});
-
-test('a rejected (400) workspace create does NOT broadcast', async () => {
-  const a = connect();
-  await open(a.ws);
-  const res = await fetch(`${httpBase}/api/workspaces`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: '', projectPaths: [] }),
-  });
-  assert.ok(res.status >= 400);
-  await new Promise((r) => setTimeout(r, 60));
-  assert.equal(a.msgs.filter((m) => m.type === 'workspaces-changed').length, 0);
-  a.ws.close();
 });
 
 test('pipeline delete broadcasts pipelines-changed to EVERY client', async () => {

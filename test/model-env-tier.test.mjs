@@ -12,6 +12,7 @@ import { withTierModelEnv, TIER_MODEL_ENV_KEYS, isReservedModelEnvKey, withProvi
 import { resolveModelEnv } from '../src/core/config.mjs';
 import { addGlobalModel } from '../src/core/settings.mjs';
 import { _resetForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const dirs = [];
 const prevEnv = {
@@ -38,63 +39,69 @@ after(async () => {
 const allTier = (wire) => Object.fromEntries(TIER_MODEL_ENV_KEYS.map((k) => [k, wire]));
 const modesOff = () => ({ CLAUDE_CODE_USE_VERTEX: '0', CLAUDE_CODE_USE_BEDROCK: '0', CLAUDE_CODE_USE_FOUNDRY: '0' });
 
-test('TIER_MODEL_ENV_KEYS: the four DEFAULT tiers + the legacy small-fast key, none reserved', () => {
-  assert.deepEqual([...TIER_MODEL_ENV_KEYS], [
-    'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',
-    'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_FABLE_MODEL',
-    'ANTHROPIC_SMALL_FAST_MODEL',
+test('TIER_MODEL_ENV_KEYS and PROVIDER_MODE_ENV_KEYS: exact key sets, none reserved', async () => {
+  await checkRows([
+    { name: 'TIER_MODEL_ENV_KEYS: the four DEFAULT tiers + the legacy small-fast key, none reserved', run: () => {
+      assert.deepEqual([...TIER_MODEL_ENV_KEYS], [
+        'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+        'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_FABLE_MODEL',
+        'ANTHROPIC_SMALL_FAST_MODEL',
+      ]);
+      for (const k of TIER_MODEL_ENV_KEYS) assert.equal(isReservedModelEnvKey(k), false, k);
+    } },
+    { name: 'PROVIDER_MODE_ENV_KEYS: the Vertex / Bedrock / Foundry transport switches, none reserved', run: () => {
+      assert.deepEqual([...PROVIDER_MODE_ENV_KEYS], ['CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_FOUNDRY']);
+      for (const k of PROVIDER_MODE_ENV_KEYS) assert.equal(isReservedModelEnvKey(k), false, k);
+    } },
   ]);
-  for (const k of TIER_MODEL_ENV_KEYS) assert.equal(isReservedModelEnvKey(k), false, k);
 });
 
-test('withTierModelEnv: routed env gets every unset tier key = the catalog id', () => {
-  const env = { ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_AUTH_TOKEN: 't' };
-  const out = withTierModelEnv(env, 'my-model');
-  assert.deepEqual(out, { ...env, ...allTier('my-model') });
-  assert.deepEqual(env, { ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_AUTH_TOKEN: 't' }, 'input untouched');
+test('withTierModelEnv: tier keys = catalog id (wire id wins), explicit keys kept, non-routed/undefined/no-id pass through', async () => {
+  await checkRows([
+    { name: 'withTierModelEnv: routed env gets every unset tier key = the catalog id', run: () => {
+      const env = { ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_AUTH_TOKEN: 't' };
+      const out = withTierModelEnv(env, 'my-model');
+      assert.deepEqual(out, { ...env, ...allTier('my-model') });
+      assert.deepEqual(env, { ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_AUTH_TOKEN: 't' }, 'input untouched');
+    } },
+    { name: 'withTierModelEnv: ANTHROPIC_MODEL (the wire id, #374) outranks the catalog id', run: () => {
+      const out = withTierModelEnv({ ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_MODEL: 'wire-7' }, 'catalog-id');
+      assert.deepEqual(out, { ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_MODEL: 'wire-7', ...allTier('wire-7') });
+    } },
+    { name: 'withTierModelEnv: an explicit tier key is never overwritten', run: () => {
+      const out = withTierModelEnv({ ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_DEFAULT_HAIKU_MODEL: 'small-one' }, 'big-one');
+      assert.equal(out.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'small-one');
+      assert.equal(out.ANTHROPIC_DEFAULT_OPUS_MODEL, 'big-one');
+    } },
+    { name: 'withTierModelEnv: non-routed env, undefined env, and no wire id all pass through untouched', run: () => {
+      const plain = { ANTHROPIC_AUTH_TOKEN: 't' };
+      assert.equal(withTierModelEnv(plain, 'x'), plain);
+      assert.equal(withTierModelEnv(undefined, 'x'), undefined);
+      const routedNoId = { ANTHROPIC_BASE_URL: 'https://gw' };
+      assert.deepEqual(withTierModelEnv(routedNoId, ''), routedNoId);
+      assert.deepEqual(withTierModelEnv(routedNoId, undefined), routedNoId);
+    } },
+  ]);
 });
 
-test('withTierModelEnv: ANTHROPIC_MODEL (the wire id, #374) outranks the catalog id', () => {
-  const out = withTierModelEnv({ ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_MODEL: 'wire-7' }, 'catalog-id');
-  assert.deepEqual(out, { ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_MODEL: 'wire-7', ...allTier('wire-7') });
-});
-
-test('withTierModelEnv: an explicit tier key is never overwritten', () => {
-  const out = withTierModelEnv({ ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_DEFAULT_HAIKU_MODEL: 'small-one' }, 'big-one');
-  assert.equal(out.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'small-one');
-  assert.equal(out.ANTHROPIC_DEFAULT_OPUS_MODEL, 'big-one');
-});
-
-test('withTierModelEnv: non-routed env, undefined env, and no wire id all pass through untouched', () => {
-  const plain = { ANTHROPIC_AUTH_TOKEN: 't' };
-  assert.equal(withTierModelEnv(plain, 'x'), plain);
-  assert.equal(withTierModelEnv(undefined, 'x'), undefined);
-  const routedNoId = { ANTHROPIC_BASE_URL: 'https://gw' };
-  assert.deepEqual(withTierModelEnv(routedNoId, ''), routedNoId);
-  assert.deepEqual(withTierModelEnv(routedNoId, undefined), routedNoId);
-});
-
-test('PROVIDER_MODE_ENV_KEYS: the Vertex / Bedrock / Foundry transport switches, none reserved', () => {
-  assert.deepEqual([...PROVIDER_MODE_ENV_KEYS], ['CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_FOUNDRY']);
-  for (const k of PROVIDER_MODE_ENV_KEYS) assert.equal(isReservedModelEnvKey(k), false, k);
-});
-
-test('withProviderModesOff: routed env turns every unset cloud transport off', () => {
-  const env = { ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_AUTH_TOKEN: 't' };
-  assert.deepEqual(withProviderModesOff(env), { ...env, ...modesOff() });
-  assert.deepEqual(env, { ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_AUTH_TOKEN: 't' }, 'input untouched');
-});
-
-test('withProviderModesOff: a transport key the entry sets itself is never overwritten', () => {
-  const out = withProviderModesOff({ ANTHROPIC_BASE_URL: 'https://gw', CLAUDE_CODE_USE_BEDROCK: '1' });
-  assert.equal(out.CLAUDE_CODE_USE_BEDROCK, '1');
-  assert.equal(out.CLAUDE_CODE_USE_VERTEX, '0');
-});
-
-test('withProviderModesOff: non-routed and undefined env pass through untouched', () => {
-  const plain = { ANTHROPIC_AUTH_TOKEN: 't' };
-  assert.equal(withProviderModesOff(plain), plain);
-  assert.equal(withProviderModesOff(undefined), undefined);
+test('withProviderModesOff: routed env turns unset transports off, explicit keys kept, non-routed/undefined pass through', async () => {
+  await checkRows([
+    { name: 'withProviderModesOff: routed env turns every unset cloud transport off', run: () => {
+      const env = { ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_AUTH_TOKEN: 't' };
+      assert.deepEqual(withProviderModesOff(env), { ...env, ...modesOff() });
+      assert.deepEqual(env, { ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_AUTH_TOKEN: 't' }, 'input untouched');
+    } },
+    { name: 'withProviderModesOff: a transport key the entry sets itself is never overwritten', run: () => {
+      const out = withProviderModesOff({ ANTHROPIC_BASE_URL: 'https://gw', CLAUDE_CODE_USE_BEDROCK: '1' });
+      assert.equal(out.CLAUDE_CODE_USE_BEDROCK, '1');
+      assert.equal(out.CLAUDE_CODE_USE_VERTEX, '0');
+    } },
+    { name: 'withProviderModesOff: non-routed and undefined env pass through untouched', run: () => {
+      const plain = { ANTHROPIC_AUTH_TOKEN: 't' };
+      assert.equal(withProviderModesOff(plain), plain);
+      assert.equal(withProviderModesOff(undefined), undefined);
+    } },
+  ]);
 });
 
 test('resolveModelEnv: an endpoint-routed GLOBAL entry carries the tier keys; a plain one does not', async () => {

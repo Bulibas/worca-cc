@@ -15,6 +15,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { getDb } from '../src/core/db.mjs';
 import { projectStorePath } from '../src/core/store.mjs';
 import { RUN_LOG_FILE } from '../src/core/run-log.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, '..', 'src', 'cli', 'worca-cc.mjs');
@@ -64,86 +65,78 @@ const FIVE = [
 
 // ── the dispatch contract ────────────────────────────────────────────────────────
 
-test('help prints the logs usage; missing id, unknown option, bad level and two ids fail cleanly', async () => {
+// The usage refusals (missing id, unknown option, two ids, unknown id, ambiguous prefix) are
+// pinned in-process in test/cli-verbs-inproc.test.mjs; one of them stays here end to end.
+test('help prints the logs usage; a bad flag fails with exit 2 and its message', async () => {
   const help = await run(['logs', 'help']);
   assert.equal(help.code, 0, help.stderr);
   assert.match(help.stdout, /worca logs — read a run's live log/);
-  assert.equal((await run(['logs'])).code, 2, 'an id is required');
-  assert.equal((await run(['logs', '--watch', 'aaaaaaaa'])).code, 2, 'unknown option');
-  assert.match((await run(['logs', '--level', 'verbose', 'aaaaaaaa'])).stderr, /--level must be one of debug, info, warn, error/);
-  assert.equal((await run(['logs', 'aaaaaaaa', 'bbbbbbbb'])).code, 2, 'one run at a time');
-});
-
-test('an unknown run id refuses like worca runs does (exit 2, no run matches)', async () => {
-  const r = await run(['logs', 'zzzz9999']);
-  assert.equal(r.code, 2);
-  assert.match(r.stderr, /no run matches "zzzz9999"/);
-});
-
-test('an ambiguous prefix refuses with the match count', async () => {
-  seedLog('1111aaa1', FIVE);
-  seedLog('1111aaa2', FIVE);
-  const r = await run(['logs', '1111']);
-  assert.equal(r.code, 2);
-  assert.match(r.stderr, /matches 2 runs/);
+  const bad = await run(['logs', '--level', 'verbose', 'aaaaaaaa']);
+  assert.equal(bad.code, 2);
+  assert.match(bad.stderr, /--level must be one of debug, info, warn, error/);
 });
 
 // ── the pretty tail ──────────────────────────────────────────────────────────────
 
-test('pretty mode renders the records the foreground run prints: [source] text, level-colored', async () => {
+test('pretty mode renders [source] text level-colored; --tail cuts from the END of the log', async () => {
   seedLog('22220001', FIVE);
-  const r = await run(['logs', '22220001']);
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /info\s+\[orchestrator\] run started/, 'timestamp, level, [source], text — the conventional log order');
-  assert.match(r.stdout, /warn\s+\[claude\] context window at 80%/);
-  assert.match(r.stdout, /error\s+\[claude\] execution failed: timeout/);
-  assert.match(r.stdout, / \d{2}:\d{2}:\d{2} (info|warn|error) /, 'the dim clock leads the line');
-  assert.doesNotMatch(r.stdout, /"source"/, 'raw JSON does not leak into pretty mode');
+  await checkRows([
+    { name: 'pretty mode renders the records the foreground run prints: [source] text, level-colored', run: async () => {
+      const r = await run(['logs', '22220001']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /info\s+\[orchestrator\] run started/, 'timestamp, level, [source], text — the conventional log order');
+      assert.match(r.stdout, /warn\s+\[claude\] context window at 80%/);
+      assert.match(r.stdout, /error\s+\[claude\] execution failed: timeout/);
+      assert.match(r.stdout, / \d{2}:\d{2}:\d{2} (info|warn|error) /, 'the dim clock leads the line');
+      assert.doesNotMatch(r.stdout, /"source"/, 'raw JSON does not leak into pretty mode');
+    } },
+    { name: '--tail cuts from the END of the log, not the beginning', run: async () => {
+      const r = await run(['logs', '22220001', '--tail', '2']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /retrying execution/);
+      assert.match(r.stdout, /execution failed: timeout/);
+      assert.doesNotMatch(r.stdout, /run started/, 'older lines are gone');
+    } },
+  ]);
 });
 
-test('--tail cuts from the END of the log, not the beginning', async () => {
-  seedLog('22220002', FIVE);
-  const r = await run(['logs', '22220002', '--tail', '2']);
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /retrying execution/);
-  assert.match(r.stdout, /execution failed: timeout/);
-  assert.doesNotMatch(r.stdout, /run started/, 'older lines are gone');
-});
-
-test('--component filters; --level is a THRESHOLD (warn shows warn and error); unparseable lines survive unfiltered views', async () => {
-  // 'artifact' is a real level the writer emits (provenance records) that sits
-  // outside the severity ladder; a record with no level counts as 'info'.
-  seedLog('22220003', [...FIVE, line('artifact', 'artifact', 'wrote review.md'), '{"source":"x","text":"no level here"}', '{not json']);
-  const comp = await run(['logs', '22220003', '--component', 'claude']);
-  assert.match(comp.stdout, /context window at 80%/);
-  assert.doesNotMatch(comp.stdout, /run started/);
-  const warn = await run(['logs', '22220003', '--level', 'warn']);
-  assert.match(warn.stdout, /context window at 80%/, 'warn itself is shown');
-  assert.match(warn.stdout, /execution failed: timeout/, 'error is above the threshold');
-  assert.doesNotMatch(warn.stdout, /run started/, 'info is below it');
-  const all = await run(['logs', '22220003', '--level', 'debug']);
-  assert.match(all.stdout, /run started/, 'debug is the floor: everything on the ladder shows');
-  const both = await run(['logs', '22220003', '--component', 'claude', '--level', 'error']);
-  assert.match(both.stdout, /execution failed: timeout/);
-  assert.doesNotMatch(both.stdout, /context window at 80%/);
-  const zero = await run(['logs', '22220003', '--component', 'orchestrator', '--level', 'error']);
-  assert.match(zero.stdout, /No log lines match the given filters/);
-  const noLevel = await run(['logs', '22220003', '--level', 'info']);
-  assert.match(noLevel.stdout, /no level here/, 'a record with no level counts as info (the UI rule)');
-  assert.doesNotMatch(noLevel.stdout, /wrote review\.md/, 'ladder-out levels only appear unfiltered');
-  const raw = await run(['logs', '22220003', '--tail', '1']);
-  assert.match(raw.stdout, /\{not json/, 'an unparseable line renders raw, it is not hidden');
-});
-
-test('--json emits the NDJSON lines verbatim (and --component= inline form parses)', async () => {
-  seedLog('22220004', FIVE);
-  const r = await run(['logs', '22220004', '--json']);
-  assert.equal(r.code, 0, r.stderr);
-  const lines = r.stdout.trim().split('\n');
-  assert.equal(lines.length, FIVE.length);
-  assert.deepEqual(JSON.parse(lines[0]), { source: 'orchestrator', level: 'info', text: 'run started', ts: '2026-09-30T10:00:00.000Z' });
-  const inline = await run(['logs', '22220004', '--json', '--component=claude']);
-  assert.equal(inline.stdout.trim().split('\n').length, 2);
+test('--component / --level THRESHOLD filters, unparseable lines survive, --json is verbatim (and --component= parses)', async () => {
+  await checkRows([
+    { name: '--component filters; --level is a THRESHOLD (warn shows warn and error); unparseable lines survive unfiltered views', run: async () => {
+      // 'artifact' is a real level the writer emits (provenance records) that sits
+      // outside the severity ladder; a record with no level counts as 'info'.
+      seedLog('22220003', [...FIVE, line('artifact', 'artifact', 'wrote review.md'), '{"source":"x","text":"no level here"}', '{not json']);
+      const comp = await run(['logs', '22220003', '--component', 'claude']);
+      assert.match(comp.stdout, /context window at 80%/);
+      assert.doesNotMatch(comp.stdout, /run started/);
+      const warn = await run(['logs', '22220003', '--level', 'warn']);
+      assert.match(warn.stdout, /context window at 80%/, 'warn itself is shown');
+      assert.match(warn.stdout, /execution failed: timeout/, 'error is above the threshold');
+      assert.doesNotMatch(warn.stdout, /run started/, 'info is below it');
+      const all = await run(['logs', '22220003', '--level', 'debug']);
+      assert.match(all.stdout, /run started/, 'debug is the floor: everything on the ladder shows');
+      const both = await run(['logs', '22220003', '--component', 'claude', '--level', 'error']);
+      assert.match(both.stdout, /execution failed: timeout/);
+      assert.doesNotMatch(both.stdout, /context window at 80%/);
+      const zero = await run(['logs', '22220003', '--component', 'orchestrator', '--level', 'error']);
+      assert.match(zero.stdout, /No log lines match the given filters/);
+      const noLevel = await run(['logs', '22220003', '--level', 'info']);
+      assert.match(noLevel.stdout, /no level here/, 'a record with no level counts as info (the UI rule)');
+      assert.doesNotMatch(noLevel.stdout, /wrote review\.md/, 'ladder-out levels only appear unfiltered');
+      const raw = await run(['logs', '22220003', '--tail', '1']);
+      assert.match(raw.stdout, /\{not json/, 'an unparseable line renders raw, it is not hidden');
+    } },
+    { name: '--json emits the NDJSON lines verbatim (and --component= inline form parses)', run: async () => {
+      seedLog('22220004', FIVE);
+      const r = await run(['logs', '22220004', '--json']);
+      assert.equal(r.code, 0, r.stderr);
+      const lines = r.stdout.trim().split('\n');
+      assert.equal(lines.length, FIVE.length);
+      assert.deepEqual(JSON.parse(lines[0]), { source: 'orchestrator', level: 'info', text: 'run started', ts: '2026-09-30T10:00:00.000Z' });
+      const inline = await run(['logs', '22220004', '--json', '--component=claude']);
+      assert.equal(inline.stdout.trim().split('\n').length, 2);
+    } },
+  ]);
 });
 
 test('a run with no log file yet says so honestly and exits 0; a unique prefix resolves', async () => {
@@ -186,13 +179,23 @@ test('follow appends new lines as they land; Ctrl-C detaches with exit 0, the ru
   assert.equal(getDb().prepare('SELECT status FROM pipelines WHERE id = ?').get(id).status, 'running', 'the run was never touched');
 });
 
-test('a settled run ends the follow on its own, with the terminal status line', { timeout: 15000 }, async () => {
-  seedLog('33330002', [line('orchestrator', 'info', 'done line')], { status: 'done' });
-  const child = spawnFollow(['logs', '33330002', '-f', '--json']);
-  const { code, text } = await collect(child);
-  assert.equal(code, 0, text);
-  assert.match(text, /done line/);
-  assert.match(text, /run 33330002 done\./);
+test('a settled run (done or error) ends the follow on its own, with the terminal status line', { timeout: 15000 }, async () => {
+  await checkRows([
+    { name: 'a settled run ends the follow on its own, with the terminal status line', run: async () => {
+      seedLog('33330002', [line('orchestrator', 'info', 'done line')], { status: 'done' });
+      const child = spawnFollow(['logs', '33330002', '-f', '--json']);
+      const { code, text } = await collect(child);
+      assert.equal(code, 0, text);
+      assert.match(text, /done line/);
+      assert.match(text, /run 33330002 done\./);
+    } },
+    { name: 'follow on a run that ended in error ends on its own', run: async () => {
+      seedLog('33330006', [line('orchestrator', 'error', 'boom')], { status: 'error' });
+      const { code, text } = await collect(spawnFollow(['logs', '33330006', '-f', '--json']));
+      assert.equal(code, 0, text);
+      assert.match(text, /run 33330006 error\./);
+    } },
+  ]);
 });
 
 test('follow picks up a truncation (the log resets) without dying', { timeout: 15000 }, async () => {
@@ -247,13 +250,6 @@ test('follow applies --level and --component to appended lines too', { timeout: 
   assert.match(text, /kept warn/);
   assert.doesNotMatch(text, /below the threshold/);
   assert.doesNotMatch(text, /other component/);
-});
-
-test('follow on a run that ended in error ends on its own', { timeout: 15000 }, async () => {
-  seedLog('33330006', [line('orchestrator', 'error', 'boom')], { status: 'error' });
-  const { code, text } = await collect(spawnFollow(['logs', '33330006', '-f', '--json']));
-  assert.equal(code, 0, text);
-  assert.match(text, /run 33330006 error\./);
 });
 
 test('follow never splits a record that is mid-append when read', { timeout: 15000 }, async () => {

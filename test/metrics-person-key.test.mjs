@@ -9,6 +9,7 @@ import { buildRunRecord, personKey, RECORD_FIELDS } from '../src/core/metrics/re
 import { groupByPerson } from '../src/shared/team-metrics/timeline.mjs';
 import { NOW, projectDone } from './fixtures/team-metrics/snapshots.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -34,25 +35,39 @@ test('a run record carries actorKey after actor, and never under attribution "no
   assert.deepEqual(Object.keys(buildRunRecord(projectDone, { now: new Date(NOW) })), RECORD_FIELDS, 'no key: the record is unchanged');
 });
 
-test('groupByPerson: one person across runs and PRs, by key, name or login; the git name wins', () => {
-  const K = personKey('sini@example.com');
-  const items = [
-    { key: 'run-new', actor: 'Siniša Đukić', actorKey: K, login: null },         // a run with a key
-    { key: 'run-old', actor: 'Siniša Đukić', actorKey: null, login: null },      // an old run: joins by name
-    { key: 'pr-1', actor: 'Siniša Đukić', actorKey: K, login: 'SinishaDjukic' },  // PR: git author + login
-    { key: 'pr-2', actor: 'SinishaDjukic', actorKey: null, login: 'SinishaDjukic' }, // PR without commit author: joins by login
-    { key: 'pr-3', actor: 'Denislav Prinov', actorKey: personKey('d@example.com'), login: 'dprinov' },
-    { key: 'pr-4', actor: null, actorKey: null, login: null },                   // attribution none
-  ];
-  const groups = groupByPerson(items);
-  assert.deepEqual(groups.map((g) => [g.label, g.items.map((i) => i.key)]), [
-    ['Denislav Prinov', ['pr-3']],
-    ['Siniša Đukić', ['run-new', 'run-old', 'pr-1', 'pr-2']],
-    ['Unattributed', ['pr-4']],
+test('groupByPerson: one person across runs and PRs by key/name/login; an off-screen key carrier still resolves via `known`', async () => {
+  await checkRows([
+    { name: 'groupByPerson: one person across runs and PRs, by key, name or login; the git name wins', run: () => {
+      const K = personKey('sini@example.com');
+      const items = [
+        { key: 'run-new', actor: 'Siniša Đukić', actorKey: K, login: null },         // a run with a key
+        { key: 'run-old', actor: 'Siniša Đukić', actorKey: null, login: null },      // an old run: joins by name
+        { key: 'pr-1', actor: 'Siniša Đukić', actorKey: K, login: 'SinishaDjukic' },  // PR: git author + login
+        { key: 'pr-2', actor: 'SinishaDjukic', actorKey: null, login: 'SinishaDjukic' }, // PR without commit author: joins by login
+        { key: 'pr-3', actor: 'Denislav Prinov', actorKey: personKey('d@example.com'), login: 'dprinov' },
+        { key: 'pr-4', actor: null, actorKey: null, login: null },                   // attribution none
+      ];
+      const groups = groupByPerson(items);
+      assert.deepEqual(groups.map((g) => [g.label, g.items.map((i) => i.key)]), [
+        ['Denislav Prinov', ['pr-3']],
+        ['Siniša Đukić', ['run-new', 'run-old', 'pr-1', 'pr-2']],
+        ['Unattributed', ['pr-4']],
+      ]);
+      // The key-carrying item may be off screen: `known` still resolves the alias.
+      const shownOld = groupByPerson([items[1]], { known: items });
+      assert.equal(shownOld.length, 1);
+    } },
+    { name: 'groupByPerson: off-screen key carriers', run: () => {
+      const K = personKey('sini@example.com');
+      const items = [
+        { key: 'run-new', actor: 'Siniša Đukić', actorKey: K, login: null },
+        { key: 'run-old', actor: 'Siniša Đukić', actorKey: null, login: null },
+      ];
+      const shown = groupByPerson([items[1]], { known: items });
+      assert.equal(shown[0].key, groupByPerson([items[0]], { known: items })[0].key, 'the old run joins the keyed run\'s person');
+      assert.notEqual(shown[0].key, '');
+    } },
   ]);
-  // The key-carrying item may be off screen: `known` still resolves the alias.
-  const shownOld = groupByPerson([items[1]], { known: items });
-  assert.equal(shownOld.length, 1);
 });
 
 test('groupByPerson: keys with the same git name are one person (two emails); logins never join keys', () => {
@@ -76,15 +91,4 @@ test('groupByPerson: keys with the same git name are one person (two emails); lo
   ]);
   // Order does not matter: the same groups from the reversed list.
   assert.deepEqual(groupByPerson([...items].reverse()).map((g) => g.items.length).sort(), [1, 1, 1, 2]);
-});
-
-test('groupByPerson: off-screen key carriers', () => {
-  const K = personKey('sini@example.com');
-  const items = [
-    { key: 'run-new', actor: 'Siniša Đukić', actorKey: K, login: null },
-    { key: 'run-old', actor: 'Siniša Đukić', actorKey: null, login: null },
-  ];
-  const shown = groupByPerson([items[1]], { known: items });
-  assert.equal(shown[0].key, groupByPerson([items[0]], { known: items })[0].key, 'the old run joins the keyed run\'s person');
-  assert.notEqual(shown[0].key, '');
 });

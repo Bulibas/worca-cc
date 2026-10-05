@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -15,7 +16,7 @@ const trackDom = useDomRelease(afterEach);
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 
-async function bootLive({ resumeFails = false } = {}) {
+async function bootLive({ resumeFails = false, hooks = null } = {}) {
   let lastWs = null;
   const dom = trackDom(new JSDOM(readFileSync(htmlPath, 'utf8'), { url: 'http://localhost:4317/' }));
   const { window } = dom;
@@ -48,6 +49,7 @@ async function bootLive({ resumeFails = false } = {}) {
     try { Object.defineProperty(globalThis, k, { value: window[k], configurable: true, writable: true }); } catch {}
   }
   globalThis.window = window; globalThis.document = window.document;
+  if (hooks) window.__worcaTestHooks = { ...hooks };
   await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
   await new Promise((r) => setTimeout(r, 0));
   (lastWs._listeners.open || []).forEach((fn) => fn());
@@ -59,14 +61,15 @@ const go = (window, hash) => { window.location.hash = hash; window.dispatchEvent
 
 // Registers a running run and opens its run page on Details › Live log. Lines
 // logged AFTER this call take the live path (rdAppendLogFrame); lines logged
-// before it are hydrated from r.logLines when the tab is built.
-async function openLogs(ctx, runId) {
+// before it (`beforeOpen(np, r)`) are hydrated from r.logLines when the tab is built.
+async function openLogs(ctx, runId, beforeOpen = null) {
   const { window, recv } = ctx;
   const np = window.__np;
   recv({ type: 'hello', runs: [{ runId, title: 't', projectDir: '/tmp/proj', status: 'running', kind: 'run', startedAt: '10:00:00', pendingQuestion: null }] });
   await settle();
   const r = np.getRun(runId);
   np.onState(r, { status: 'running', id: 'p1', steps: [] });
+  beforeOpen?.(np, r);
   go(window, `running/${runId}/details/logs`);
   await settle();
   const sec = window.document.querySelector('#run-detail .rd-sec-logs');
@@ -88,28 +91,35 @@ test('the run page\'s live pane draws the Cycle rule even when an artifact line 
 });
 
 test('the DOM cap counts record lines — separators do not cause over-eviction', async () => {
-  const ctx = await bootLive();
-  const { np, r, pane } = await openLogs(ctx, 'r-cap');
+  // A 40-line cap (the maxLogLines test hook): the bulk is hydrated in one fragment when
+  // the tab opens, then ONE live line performs the eviction under test.
+  const ctx = await bootLive({ hooks: { maxLogLines: 40 } });
+  const { np, r, pane } = await openLogs(ctx, 'r-cap', (api, run) => {
+    for (let i = 0; i < 40; i++) {
+      api.onLog(run, { source: 'planner', level: 'info', text: `l${i}`, ts: 0, stepIndex: 0, cycle: 1 });
+    }
+  });
   const { onLog } = np;
-  for (let i = 0; i < 4000; i++) {
-    onLog(r, { source: 'planner', level: 'info', text: `l${i}`, ts: 0, stepIndex: 0, cycle: 1 });
-  }
   onLog(r, { source: 'implementer', level: 'info', text: 'first of cycle 2', ts: 0, stepIndex: 0, cycle: 2 });
-  // 4001 records + 1 separator entered; the cap must evict exactly ONE record.
-  assert.equal(pane.querySelectorAll('.log-line').length, 4000, 'record cap, not childElementCount');
+  // 41 records + 1 separator entered; the cap must evict exactly ONE record.
+  assert.equal(pane.querySelectorAll('.log-line').length, 40, 'record cap, not childElementCount');
   assert.equal(pane.querySelectorAll('.log-sep').length, 1, 'the mid-pane separator survives');
   assert.match(pane.querySelector('.log-line').textContent, /l1$/, 'only the oldest record evicted');
 });
 
 test('eviction never leaves a separator leading the pane', async () => {
-  const ctx = await bootLive();
-  const { np, r, pane } = await openLogs(ctx, 'r-lead');
-  const { onLog } = np;
-  onLog(r, { source: 'planner', level: 'info', text: 'only cycle-1 line', ts: 0, stepIndex: 0, cycle: 1 });
-  for (let i = 0; i < 4000; i++) {
-    onLog(r, { source: 'implementer', level: 'info', text: `c2-${i}`, ts: 0, stepIndex: 0, cycle: 2 });
-  }
-  assert.equal(pane.querySelectorAll('.log-line').length, 4000);
+  // A 40-line cap (the maxLogLines test hook): 40 lines hydrate with the Cycle 2 rule
+  // after the first one, then one live line evicts that first line.
+  const ctx = await bootLive({ hooks: { maxLogLines: 40 } });
+  const { np, r, pane } = await openLogs(ctx, 'r-lead', (api, run) => {
+    api.onLog(run, { source: 'planner', level: 'info', text: 'only cycle-1 line', ts: 0, stepIndex: 0, cycle: 1 });
+    for (let i = 0; i < 39; i++) {
+      api.onLog(run, { source: 'implementer', level: 'info', text: `c2-${i}`, ts: 0, stepIndex: 0, cycle: 2 });
+    }
+  });
+  assert.equal(pane.querySelectorAll('.log-sep').length, 1, 'the hydrated pane holds the Cycle 2 rule');
+  np.onLog(r, { source: 'implementer', level: 'info', text: 'c2-39', ts: 0, stepIndex: 0, cycle: 2 });
+  assert.equal(pane.querySelectorAll('.log-line').length, 40);
   assert.ok(pane.firstElementChild.classList.contains('log-line'),
     'the now-boundary-less "Cycle 2" rule was dropped with its predecessor');
   assert.equal(pane.querySelectorAll('.log-sep').length, 0);
@@ -144,46 +154,46 @@ test('re-opening the run page keeps the search term when a dropdown selection va
 // alongside `nodeId`), so alternating between two concurrently-streaming nodes
 // used to draw a rule on almost every line. The live pane and the clipboard
 // must agree, and both must count per node.
-test('MIN-37: interleaved nodes at different ordinals draw no separator in the live pane', async () => {
+test('MIN-37: per-node cycle ordinals — interleaved nodes draw no rule, a re-running node draws exactly one before its higher-ordinal line, and a filter repaint agrees with the live stream', async () => {
   const ctx = await bootLive();
-  const { np, r, pane } = await openLogs(ctx, 'r-min37');
-  const { onLog } = np;
-  const lines = [
-    { source: 'implementer', text: 'patching a.js', nodeId: 'n_impl', executionId: 'x:n_impl:2', cycle: 2 },
-    { source: 'tester', text: 'running suite', nodeId: 'n_test', executionId: 'x:n_test:1', cycle: 1 },
-    { source: 'implementer', text: 'patching b.js', nodeId: 'n_impl', executionId: 'x:n_impl:2', cycle: 2 },
-    { source: 'tester', text: '12 passed', nodeId: 'n_test', executionId: 'x:n_test:1', cycle: 1 },
-    { source: 'implementer', text: 'done', nodeId: 'n_impl', executionId: 'x:n_impl:2', cycle: 2 },
-  ];
-  for (const l of lines) onLog(r, { level: 'info', ts: Date.now(), ...l });
-  assert.equal(pane.querySelectorAll('.log-line').length, 5);
-  assert.equal(pane.querySelectorAll('.log-sep').length, 0, 'no rewind happened — no rule');
-});
-
-test('MIN-37: a node re-running draws exactly one rule, before ITS higher-ordinal line', async () => {
-  const ctx = await bootLive();
-  const { np, r, pane } = await openLogs(ctx, 'r-min37b');
-  const { onLog } = np;
-  onLog(r, { source: 'refiner', level: 'info', text: 'refining', ts: Date.now(), nodeId: 'n_refine', cycle: 1 });
-  onLog(r, { source: 'refiner', level: 'info', text: 'refining again', ts: Date.now(), nodeId: 'n_refine', cycle: 2 });
-  onLog(r, { source: 'implementer', level: 'info', text: 'implementing', ts: Date.now(), nodeId: 'n_impl', cycle: 1 });
-  const seps = pane.querySelectorAll('.log-sep');
-  assert.equal(seps.length, 1);
-  assert.equal(seps[0].textContent, 'Cycle 2');
-  assert.equal(seps[0].nextElementSibling.textContent.includes('refining again'), true,
-    'the rule sits directly above the refiner\'s ordinal-2 line');
-});
-
-test('MIN-37: a filter repaint and the live stream agree on the per-node cursor', async () => {
-  const ctx = await bootLive();
-  const { np, r, sec, pane } = await openLogs(ctx, 'r-min37c');
-  const { onLog, paintLogFilters } = np;
-  onLog(r, { source: 'refiner', level: 'info', text: 'a', ts: Date.now(), nodeId: 'n_refine', cycle: 1 });
-  onLog(r, { source: 'tester', level: 'info', text: 'b', ts: Date.now(), nodeId: 'n_test', cycle: 1 });
-  paintLogFilters(r, sec);                             // full wipe + rebuild from the model
-  onLog(r, { source: 'tester', level: 'info', text: 'c', ts: Date.now(), nodeId: 'n_test', cycle: 1 });
-  onLog(r, { source: 'refiner', level: 'info', text: 'd', ts: Date.now(), nodeId: 'n_refine', cycle: 2 });
-  const seps = pane.querySelectorAll('.log-sep');
-  assert.equal(seps.length, 1, 'exactly one rule survives the repaint boundary');
-  assert.equal(seps[0].textContent, 'Cycle 2');
+  await checkRows([
+    { name: 'MIN-37: interleaved nodes at different ordinals draw no separator in the live pane', run: async () => {
+      const { np, r, pane } = await openLogs(ctx, 'r-min37');
+      const { onLog } = np;
+      const lines = [
+        { source: 'implementer', text: 'patching a.js', nodeId: 'n_impl', executionId: 'x:n_impl:2', cycle: 2 },
+        { source: 'tester', text: 'running suite', nodeId: 'n_test', executionId: 'x:n_test:1', cycle: 1 },
+        { source: 'implementer', text: 'patching b.js', nodeId: 'n_impl', executionId: 'x:n_impl:2', cycle: 2 },
+        { source: 'tester', text: '12 passed', nodeId: 'n_test', executionId: 'x:n_test:1', cycle: 1 },
+        { source: 'implementer', text: 'done', nodeId: 'n_impl', executionId: 'x:n_impl:2', cycle: 2 },
+      ];
+      for (const l of lines) onLog(r, { level: 'info', ts: Date.now(), ...l });
+      assert.equal(pane.querySelectorAll('.log-line').length, 5);
+      assert.equal(pane.querySelectorAll('.log-sep').length, 0, 'no rewind happened — no rule');
+    } },
+    { name: 'MIN-37: a node re-running draws exactly one rule, before ITS higher-ordinal line', run: async () => {
+      const { np, r, pane } = await openLogs(ctx, 'r-min37b');
+      const { onLog } = np;
+      onLog(r, { source: 'refiner', level: 'info', text: 'refining', ts: Date.now(), nodeId: 'n_refine', cycle: 1 });
+      onLog(r, { source: 'refiner', level: 'info', text: 'refining again', ts: Date.now(), nodeId: 'n_refine', cycle: 2 });
+      onLog(r, { source: 'implementer', level: 'info', text: 'implementing', ts: Date.now(), nodeId: 'n_impl', cycle: 1 });
+      const seps = pane.querySelectorAll('.log-sep');
+      assert.equal(seps.length, 1);
+      assert.equal(seps[0].textContent, 'Cycle 2');
+      assert.equal(seps[0].nextElementSibling.textContent.includes('refining again'), true,
+        'the rule sits directly above the refiner\'s ordinal-2 line');
+    } },
+    { name: 'MIN-37: a filter repaint and the live stream agree on the per-node cursor', run: async () => {
+      const { np, r, sec, pane } = await openLogs(ctx, 'r-min37c');
+      const { onLog, paintLogFilters } = np;
+      onLog(r, { source: 'refiner', level: 'info', text: 'a', ts: Date.now(), nodeId: 'n_refine', cycle: 1 });
+      onLog(r, { source: 'tester', level: 'info', text: 'b', ts: Date.now(), nodeId: 'n_test', cycle: 1 });
+      paintLogFilters(r, sec);                             // full wipe + rebuild from the model
+      onLog(r, { source: 'tester', level: 'info', text: 'c', ts: Date.now(), nodeId: 'n_test', cycle: 1 });
+      onLog(r, { source: 'refiner', level: 'info', text: 'd', ts: Date.now(), nodeId: 'n_refine', cycle: 2 });
+      const seps = pane.querySelectorAll('.log-sep');
+      assert.equal(seps.length, 1, 'exactly one rule survives the repaint boundary');
+      assert.equal(seps[0].textContent, 'Cycle 2');
+    } },
+  ]);
 });

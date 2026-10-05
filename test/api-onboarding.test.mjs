@@ -8,6 +8,7 @@ import http from 'node:http';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const home = useTempHome(after);
 const REAL_HOME = process.env.HOME;
@@ -32,48 +33,54 @@ after(async () => {
   process.env.HOME = REAL_HOME;
 });
 
-test('GET answers the nine derived steps, counts, the CLI probe and both flags', async () => {
-  const r = await get();
-  assert.equal(r.status, 200);
-  const s = await r.json();
-  assert.deepEqual(Object.keys(s.steps).sort(),
-    ['ask', 'claude', 'project', 'realRun', 'run', 'teamMetrics', 'teamPolicy', 'workflows', 'workspace']);
-  assert.equal(s.total, 9);
-  assert.equal(s.done, Object.values(s.steps).filter(Boolean).length);
-  assert.equal(s.hidden, false);
-  assert.equal(s.welcomeSeen, false);
-  assert.equal(typeof s.claude.bin, 'string');
-  assert.ok('hint' in s.claude);
+test('GET answers the nine derived steps, counts, the CLI probe and both flags; a step ticks by itself once product state changes', async () => {
+  await checkRows([
+    { name: 'GET answers the nine derived steps, counts, the CLI probe and both flags', run: async () => {
+      const r = await get();
+      assert.equal(r.status, 200);
+      const s = await r.json();
+      assert.deepEqual(Object.keys(s.steps).sort(),
+        ['ask', 'claude', 'project', 'realRun', 'run', 'teamMetrics', 'teamPolicy', 'workflows', 'workspace']);
+      assert.equal(s.total, 9);
+      assert.equal(s.done, Object.values(s.steps).filter(Boolean).length);
+      assert.equal(s.hidden, false);
+      assert.equal(s.welcomeSeen, false);
+      assert.equal(typeof s.claude.bin, 'string');
+      assert.ok('hint' in s.claude);
+    } },
+    { name: 'a step ticks by itself once the product state changes (no client write)', run: async () => {
+      const proj = join(home, 'p1');
+      mkdirSync(proj, { recursive: true });
+      const add = await fetch(`${base}/api/projects`, { method: 'POST', headers: JSONH, body: JSON.stringify({ name: 'p1', path: proj }) });
+      assert.equal(add.status, 200, await add.text());
+      const s = await (await get()).json();
+      assert.equal(s.steps.project, true);
+    } },
+  ]);
 });
 
-test('a step ticks by itself once the product state changes (no client write)', async () => {
-  const proj = join(home, 'p1');
-  mkdirSync(proj, { recursive: true });
-  const add = await fetch(`${base}/api/projects`, { method: 'POST', headers: JSONH, body: JSON.stringify({ name: 'p1', path: proj }) });
-  assert.equal(add.status, 200, await add.text());
-  const s = await (await get()).json();
-  assert.equal(s.steps.project, true);
-});
-
-test('POST writes ONLY the flags and echoes the full payload; Show again keeps welcomeSeen', async () => {
-  let s = await (await post({ hidden: true })).json();
-  assert.equal(s.hidden, true);
-  assert.equal(s.welcomeSeen, false);
-  assert.equal(s.steps.project, true, 'the derived ticks ride along');
-  s = await (await post({ welcomeSeen: true })).json();
-  assert.deepEqual([s.hidden, s.welcomeSeen], [true, true]);
-  s = await (await post({ hidden: false })).json();
-  assert.deepEqual([s.hidden, s.welcomeSeen], [false, true], 'only the checklist comes back, not the welcome');
-  s = await (await get()).json();
-  assert.deepEqual([s.hidden, s.welcomeSeen], [false, true], 'persisted');
-});
-
-test('POST refuses non-booleans and unknown keys with 400, writing nothing', async () => {
-  for (const body of [{ hidden: 'yes' }, { steps: { project: true } }, { welcomeSeen: 1 }]) {
-    const r = await post(body);
-    assert.equal(r.status, 400, JSON.stringify(body));
-    assert.match((await r.json()).error, /onboarding/);
-  }
-  const s = await (await get()).json();
-  assert.deepEqual([s.hidden, s.welcomeSeen], [false, true], 'unchanged');
+test('POST writes ONLY the two flags (Show again keeps welcomeSeen) and refuses non-booleans/unknown keys with 400, writing nothing', async () => {
+  await checkRows([
+    { name: 'POST writes ONLY the flags and echoes the full payload; Show again keeps welcomeSeen', run: async () => {
+      let s = await (await post({ hidden: true })).json();
+      assert.equal(s.hidden, true);
+      assert.equal(s.welcomeSeen, false);
+      assert.equal(s.steps.project, true, 'the derived ticks ride along');
+      s = await (await post({ welcomeSeen: true })).json();
+      assert.deepEqual([s.hidden, s.welcomeSeen], [true, true]);
+      s = await (await post({ hidden: false })).json();
+      assert.deepEqual([s.hidden, s.welcomeSeen], [false, true], 'only the checklist comes back, not the welcome');
+      s = await (await get()).json();
+      assert.deepEqual([s.hidden, s.welcomeSeen], [false, true], 'persisted');
+    } },
+    { name: 'POST refuses non-booleans and unknown keys with 400, writing nothing', run: async () => {
+      for (const body of [{ hidden: 'yes' }, { steps: { project: true } }, { welcomeSeen: 1 }]) {
+        const r = await post(body);
+        assert.equal(r.status, 400, JSON.stringify(body));
+        assert.match((await r.json()).error, /onboarding/);
+      }
+      const s = await (await get()).json();
+      assert.deepEqual([s.hidden, s.welcomeSeen], [false, true], 'unchanged');
+    } },
+  ]);
 });

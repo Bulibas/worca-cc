@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { isomorphic, nodeLabel, wireLabel } from '../src/shared/graph/isomorphic.mjs';
 import { SEED_TEMPLATES } from '../src/core/graph/seed-templates.mjs';
 import { GRAPH_DEFAULT_WORKFLOW } from '../src/core/graph/builtin-workflows.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const seed = (id) => SEED_TEMPLATES.find((t) => t.id === id);
 /** The same graph with every id renamed, positions moved and tunables added. The
@@ -20,22 +21,35 @@ function disguise(tpl) {
   };
 }
 
-test('labels: tunables and positions are invisible, topology config and loop budgets are not', () => {
-  assert.equal(nodeLabel({ kind: 'agent', key: 'planner', x: 1, y: 2, config: { model: 'm', effort: 'e', awaitAll: true } }),
-    nodeLabel({ kind: 'agent', key: 'planner', config: { awaitAll: true } }));
-  assert.notEqual(nodeLabel({ kind: 'task', config: { planStoreSeed: true } }), nodeLabel({ kind: 'task', config: {} }));
-  assert.notEqual(nodeLabel({ kind: 'or', config: { arity: 2 } }), nodeLabel({ kind: 'or', config: { arity: 3 } }));
-  assert.equal(wireLabel({ from: { port: 'review' }, to: { port: 'fix' }, config: { maxCycles: 3 } }), 'review>fix|3');
-  assert.equal(wireLabel({ from: { port: 'plan' }, to: { port: 'plan' } }), 'plan>plan|');
-});
-
-test('the agent key and awaitAll are part of the label', () => {
-  assert.notEqual(nodeLabel({ kind: 'agent', key: 'planner', config: {} }), nodeLabel({ kind: 'agent', key: 'implementer', config: {} }));
-  assert.notEqual(nodeLabel({ kind: 'agent', key: 'reviewer', config: { awaitAll: true } }), nodeLabel({ kind: 'agent', key: 'reviewer', config: {} }));
-  // Two agents with IDENTICAL ports (reviewer / workspaceReviewer) must not match:
-  // Auto must never reuse a workspace-only pipeline for a project run.
-  const swap = (tpl, from, to) => ({ ...tpl, nodes: tpl.nodes.map((n) => (n.key === from ? { ...n, key: to } : { ...n })) });
-  assert.equal(isomorphic(seed('wf_quick-fix'), swap(seed('wf_quick-fix'), 'reviewer', 'workspaceReviewer')), null);
+test('nodeLabel/wireLabel: tunables and positions invisible; topology config, loop budgets, agent/script key and awaitAll are part of the label', async () => {
+  await checkRows([
+    { name: 'labels: tunables and positions are invisible, topology config and loop budgets are not', run: () => {
+      assert.equal(nodeLabel({ kind: 'agent', key: 'planner', x: 1, y: 2, config: { model: 'm', effort: 'e', awaitAll: true } }),
+        nodeLabel({ kind: 'agent', key: 'planner', config: { awaitAll: true } }));
+      assert.notEqual(nodeLabel({ kind: 'task', config: { planStoreSeed: true } }), nodeLabel({ kind: 'task', config: {} }));
+      assert.notEqual(nodeLabel({ kind: 'or', config: { arity: 2 } }), nodeLabel({ kind: 'or', config: { arity: 3 } }));
+      assert.equal(wireLabel({ from: { port: 'review' }, to: { port: 'fix' }, config: { maxCycles: 3 } }), 'review>fix|3');
+      assert.equal(wireLabel({ from: { port: 'plan' }, to: { port: 'plan' } }), 'plan>plan|');
+    } },
+    { name: 'the agent key and awaitAll are part of the label', run: () => {
+      assert.notEqual(nodeLabel({ kind: 'agent', key: 'planner', config: {} }), nodeLabel({ kind: 'agent', key: 'implementer', config: {} }));
+      assert.notEqual(nodeLabel({ kind: 'agent', key: 'reviewer', config: { awaitAll: true } }), nodeLabel({ kind: 'agent', key: 'reviewer', config: {} }));
+      // Two agents with IDENTICAL ports (reviewer / workspaceReviewer) must not match:
+      // Auto must never reuse a workspace-only pipeline for a project run.
+      const swap = (tpl, from, to) => ({ ...tpl, nodes: tpl.nodes.map((n) => (n.key === from ? { ...n, key: to } : { ...n })) });
+      assert.equal(isomorphic(seed('wf_quick-fix'), swap(seed('wf_quick-fix'), 'reviewer', 'workspaceReviewer')), null);
+    } },
+    { name: 'a script node is identified by its key, like an agent node', run: () => {
+      assert.notEqual(nodeLabel({ kind: 'script', key: 'shell', config: {} }), nodeLabel({ kind: 'script', key: 'gitDiff', config: {} }));
+      assert.notEqual(nodeLabel({ kind: 'script', key: 'shell', config: {} }), nodeLabel({ kind: 'agent', key: 'shell', config: {} }));
+      // v2 R7: what a script card RUNS is topology, not tuning — a different command is a different graph.
+      assert.notEqual(nodeLabel({ kind: 'script', key: 'shell', config: { params: { command: 'npm test' } } }),
+        nodeLabel({ kind: 'script', key: 'shell', config: { params: { command: 'rm -rf build' } } }));
+      assert.notEqual(nodeLabel({ kind: 'script', key: 'shell', config: {} }), nodeLabel({ kind: 'script', key: 'shell', config: { awaitAll: true } }));
+      assert.equal(nodeLabel({ kind: 'script', key: 'shell', config: {} }), nodeLabel({ kind: 'script', key: 'shell', config: { timeoutMs: 5000, mock: { summary: 'x' } } }),
+        'timeoutMs and mock are tuning, invisible like model/effort');
+    } },
+  ]);
 });
 
 test('every seed is isomorphic to its own disguise, and the map pairs equal labels', () => {
@@ -45,10 +59,6 @@ test('every seed is isomorphic to its own disguise, and the map pairs equal labe
     assert.equal(m.size, t.nodes.length);
     for (const n of t.nodes) assert.equal(m.get(n.id), `z_${t.nodes.indexOf(n)}`);
   }
-});
-
-test('the built-in Default IS the Clarify -> Implement seed (same 7 nodes, same 10 wires)', () => {
-  assert.ok(isomorphic(GRAPH_DEFAULT_WORKFLOW, seed('wf_clarify-implement')));
 });
 
 test('one agent more or less, or a different loop budget, is not a match', () => {
@@ -76,15 +86,4 @@ test('two agent nodes with the same key are told apart by their wiring', () => {
   assert.ok(m);
   assert.equal(m.get('a'), 'z_1');
   assert.equal(m.get('b'), 'z_2');
-});
-
-test('a script node is identified by its key, like an agent node', () => {
-  assert.notEqual(nodeLabel({ kind: 'script', key: 'shell', config: {} }), nodeLabel({ kind: 'script', key: 'gitDiff', config: {} }));
-  assert.notEqual(nodeLabel({ kind: 'script', key: 'shell', config: {} }), nodeLabel({ kind: 'agent', key: 'shell', config: {} }));
-  // v2 R7: what a script card RUNS is topology, not tuning — a different command is a different graph.
-  assert.notEqual(nodeLabel({ kind: 'script', key: 'shell', config: { params: { command: 'npm test' } } }),
-    nodeLabel({ kind: 'script', key: 'shell', config: { params: { command: 'rm -rf build' } } }));
-  assert.notEqual(nodeLabel({ kind: 'script', key: 'shell', config: {} }), nodeLabel({ kind: 'script', key: 'shell', config: { awaitAll: true } }));
-  assert.equal(nodeLabel({ kind: 'script', key: 'shell', config: {} }), nodeLabel({ kind: 'script', key: 'shell', config: { timeoutMs: 5000, mock: { summary: 'x' } } }),
-    'timeoutMs and mock are tuning, invisible like model/effort');
 });

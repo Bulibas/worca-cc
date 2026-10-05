@@ -1,8 +1,7 @@
 // test/workspace-map-agents.test.mjs
 // The Workspace scan's agents (wsmap P2): sidecars exactly as the index pins them, bodies that carry
-// the binding contract (the brief's first lines, <OUT> in the checker line, waves of at most 8 in the
-// foreground, member-relative 1-based evidence, the checker loop and its exit, guardrail-protected
-// files left closed), and the guardrail set every scan runs under (`normal`) leaving that checker
+// the machine-read markers (the brief's first-line marker, the checker line, <OUT>; the synthesizer
+// never fans out), and the guardrail set every scan runs under (`normal`) leaving that checker
 // runnable through Bash.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,6 +13,7 @@ import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
 import { toolsForMeta } from '../src/core/graph/executor.mjs';
 import { GUARDRAIL_PRESETS } from '../src/core/guardrails.mjs';
 import { MOCK_WRITER_ROLES } from '../src/core/claude-runner.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const AGENTS_DIR = fileURLToPath(new URL('../agents/', import.meta.url));
 const REG = loadAgentRegistry(AGENTS_DIR, { userAgentsDir: null, includePlugins: false });
@@ -51,35 +51,25 @@ test('the scan agents: sidecars exactly as the index pins them', () => {
   }
 });
 
-/** The contract every scan agent body carries (the checker loop on its own output). */
-const CHECKER_NEEDLES = ['<!-- worca:check=', 'Replace `<OUT>` with the absolute path', 'Never finish with a failing checker', 'one short line naming the path',
-  'cannot start, do not loop'];
-/** …and every fan-out body (the waves, the evidence rules). */
-const FANOUT_NEEDLES = ['waves of at most 8', 'Dispatch normally and wait for every result', 'EVERY member', '1-based', 'character for character', 'RELATIVE to',
-  'guardrails refuse to Read', 'not through Bash'];
+/** The markers code reads in a scan agent body's input: the brief's first-line marker and the checker
+ * line (written by extract / catalog / join), plus the <OUT> token the checker command leaves for the
+ * agent to replace. The bodies' prose around them is free to change. */
+const CHECKER_MARKERS = ['<!-- worca:check=', 'Replace `<OUT>`'];
+const BODY_MARKERS = [
+  { name: 'the usage mapper body: every member, waves of at most 8 in the foreground, evidence rules, the checker loop',
+    key: 'workspaceUsageMapper', markers: ['<!-- worca:catalog=', ...CHECKER_MARKERS] },
+  { name: 'the survey (scanner) body: gap members only, waves of at most 8 in the foreground, the fact rules, the checker loop',
+    key: 'workspaceScanner', markers: ['<!-- worca:extract=', ...CHECKER_MARKERS] },
+  { name: 'the synthesizer body: no sub-agents, grounded in the brief, the checker loop',
+    key: 'workspaceSynthesizer', markers: ['<!-- worca:map=', ...CHECKER_MARKERS], noFanOut: true },
+];
 
-test('the usage mapper body: every member, waves of at most 8 in the foreground, evidence rules, the checker loop', () => {
-  const b = body('workspaceUsageMapper');
-  for (const needle of ['<!-- worca:catalog=', 'usage-briefs/<key>.md', ...CHECKER_NEEDLES, ...FANOUT_NEEDLES]) assert.ok(b.includes(needle), needle);
-  assert.match(b, /never skip a member/i);
-});
-
-test('the survey (scanner) body: gap members only, waves of at most 8 in the foreground, the fact rules, the checker loop', () => {
-  const b = body('workspaceScanner');
-  for (const needle of ['Workspace Scanner', '<!-- worca:extract=', '"kind", "key", "file", "line", "match"', ...CHECKER_NEEDLES, ...FANOUT_NEEDLES]) {
-    assert.ok(b.includes(needle), needle);
-  }
-  assert.match(b, /never skip a member/i);
-  assert.match(b, /`skipped` for every member the brief lists as needing nothing/);
-  assert.match(b, /dispatch nobody — this overrides the task prompt's generic Fan-out block/, 'no gap member: no fan-out at all');
-});
-
-test('the synthesizer body: no sub-agents, grounded in the brief, the checker loop', () => {
-  const b = body('workspaceSynthesizer');
-  for (const needle of ['<!-- worca:map=', '(missing)', 'no relation that is not in the brief', 'Never dispatch sub-agents', ...CHECKER_NEEDLES]) {
-    assert.ok(b.includes(needle), needle);
-  }
-  assert.equal(b.includes('waves of'), false, 'the synthesizer never fans out');
+test('each scan agent body carries its machine-read markers', async () => {
+  await checkRows(BODY_MARKERS.map(({ name, key, markers, noFanOut }) => ({ name, run: () => {
+    const b = body(key);
+    for (const needle of markers) assert.ok(b.includes(needle), `${key}: ${needle}`);
+    if (noFanOut) assert.equal(b.includes('waves of'), false, 'the synthesizer never fans out');
+  } })));
 });
 
 test('the normal guardrail set (every scan runs under it) leaves the checker runnable: Bash granted, no node or blanket Bash deny', () => {

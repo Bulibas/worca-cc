@@ -27,7 +27,6 @@ import { mkdtemp, mkdir, writeFile, rm, readFile, readdir } from 'node:fs/promis
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
 
 import { getDb, _resetForTests, prepare, SCHEMA_VERSION } from '../src/core/db.mjs';
 import { listProjects } from '../src/core/projects.mjs';
@@ -36,6 +35,8 @@ import { readConfig, readRunConfig } from '../src/core/config.mjs';
 import { listPipelines, listAllPipelines, readPipelineByKey } from '../src/core/artifacts.mjs';
 import { listWorkflows } from '../src/core/workflows.mjs';
 import { projectKey, projectStorePath } from '../src/core/store.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 let home, prevHome, repoA, repoB;
 const RUN_ID = 'abcd1234';
@@ -43,15 +44,7 @@ const WS_KEY = 'wks-demo-9f3a1c20';
 
 /** A real git repo so projectKey()/canonicalProjectRoot() resolve a stable key. */
 async function freshRepo(prefix) {
-  const dir = await mkdtemp(join(tmpdir(), prefix));
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']);
-  g(['commit', '-qm', 'init']);
-  return dir;
+  return templateRepo('up', { branch: 'main', user: true, files: { 'README.md': '# hi\n' }, prefix });
 }
 
 before(async () => {
@@ -174,102 +167,105 @@ test('first getDb() auto-runs the fs->db migration (DB is empty + legacy JSON pr
   assert.ok(count('artifacts') >= 1, 'plan/review/extras markdown indexed in artifacts');
 });
 
-test('listProjects() returns the migrated registry', async () => {
-  const list = await listProjects();
-  const names = list.map((p) => p.name).sort();
-  assert.deepEqual(names, ['Repo A', 'Repo B']);
-  assert.ok(list.every((p) => p.exists), 'both registered repos exist on disk');
+test('the migrated registries read back: projects, legacy config view, archived workflow, workspaces + members, per-project run config', async () => {
+  await checkRows([
+    { name: 'listProjects() returns the migrated registry', run: async () => {
+      const list = await listProjects();
+      const names = list.map((p) => p.name).sort();
+      assert.deepEqual(names, ['Repo A', 'Repo B']);
+      assert.ok(list.every((p) => p.exists), 'both registered repos exist on disk');
+    } },
+    { name: 'readConfig() returns the migrated legacy {steps, customModels} view', run: async () => {
+      const cfg = await readConfig(repoA);
+      assert.deepEqual(cfg.steps.planner, { model: 'claude-opus-4-8', effort: 'high' });
+      assert.ok(cfg.customModels.some((m) => m.id === 'my-fork-4-9'), 'custom model preserved');
+    } },
+    { name: 'listWorkflows() returns the migrated user workflow template, archived by the v2 upgrade', run: async () => {
+      assert.equal((await listWorkflows()).some((w) => w.id === 'wf_quickfix'), false, 'archived rows are not listed');
+      const list = await listWorkflows({ includeArchived: true });
+      const wf = list.find((w) => w.id === 'wf_quickfix');
+      assert.ok(wf, 'wf_quickfix imported');
+      assert.equal(wf.name, 'Quick Fix');
+      assert.equal(wf.steps.length, 2, 'two-stage topology preserved');
+      assert.equal(wf.feedbacks.length, 1, 'feedback edge preserved');
+      assert.ok(wf.archivedAt, 'kept, hidden, never deleted');
+    } },
+    { name: 'listWorkspaces() + readWorkspace() return the migrated workspace + ordered members', run: async () => {
+      const list = await listWorkspaces();
+      assert.equal(list.length, 1);
+      assert.equal(list[0].name, 'Demo WS');
+      assert.equal(list[0].description, 'shared contract');
+      assert.equal(list[0].projectPaths.length, 2);
+      assert.equal(list[0].projectKeys.length, 2, 'derived member keys present');
+
+      const ws = await readWorkspace(WS_KEY);
+      assert.ok(ws, 'readWorkspace by id resolves the migrated workspace');
+      assert.equal(ws.name, 'Demo WS');
+      // members are annotated: projectKeys index-aligned with the (re-ordered) projectPaths,
+      // and the derived keys match recomputing projectKey() over the member repos.
+      assert.deepEqual([...ws.projectKeys].sort(), [projectKey(repoA), projectKey(repoB)].sort());
+      assert.equal(ws.projectKeys.length, ws.projectPaths.length, 'keys index-aligned with paths');
+      assert.equal(ws.exists.filter(Boolean).length, 2, 'both members exist on disk (derived)');
+    } },
+    { name: 'readRunConfig() returns the migrated per-project config incl. extra (webUiTesting)', run: async () => {
+      const rc = await readRunConfig(repoA);
+      assert.deepEqual(rc.steps.planner, { model: 'claude-opus-4-8', effort: 'high' });
+      assert.ok(rc.customModels.some((m) => m.id === 'my-fork-4-9'));
+      assert.equal(rc.workflows.wf_quickfix.nodes.s0_0.model, 'claude-sonnet-4-6');
+      assert.equal(rc.workflows.wf_quickfix.feedbacks.fb_0.maxCycles, 3);
+      // V24 archived the imported v1 template, so the remembered active workflow —
+      // no longer runnable — falls back to the graph default.
+      assert.equal(rc.activeWorkflowId, 'wf_default');
+      assert.equal(rc.webUiTesting.startCommand, 'npm run dev', 'unknown key preserved via project_config.extra');
+    } },
+  ]);
 });
 
-test('readConfig() returns the migrated legacy {steps, customModels} view', async () => {
-  const cfg = await readConfig(repoA);
-  assert.deepEqual(cfg.steps.planner, { model: 'claude-opus-4-8', effort: 'high' });
-  assert.ok(cfg.customModels.some((m) => m.id === 'my-fork-4-9'), 'custom model preserved');
-});
+test('the migrated run reads back through listAllPipelines, listPipelines and readPipelineByKey', async () => {
+  await checkRows([
+    { name: 'listAllPipelines() surfaces the migrated run tagged with its project', run: async () => {
+      const all = await listAllPipelines();
+      const row = all.find((p) => p.id === RUN_ID);
+      assert.ok(row, 'migrated pipeline appears in the cross-project history');
+      assert.equal(row.projectName, 'Repo A', 'project name resolved from store_meta');
+      assert.equal(row.status, 'done');
+    } },
+    { name: 'listPipelines() + readPipelineByKey() return the migrated run, steps, clarify, review, audit', run: async () => {
+      const keyA = projectKey(repoA);
+      const list = await listPipelines(repoA);
+      const row = list.find((p) => p.id === RUN_ID);
+      assert.ok(row, 'migrated pipeline listed');
+      assert.equal(row.totalCostUsd, 0.42);
+      assert.equal(row.totalActiveMs, 5000);
+      assert.equal(row.branch, 'worca-cc/add-login-abcd1234');
+      assert.equal(row.sourceBranch, 'main');
 
-test('listWorkflows() returns the migrated user workflow template, archived by the v2 upgrade', async () => {
-  assert.equal((await listWorkflows()).some((w) => w.id === 'wf_quickfix'), false, 'archived rows are not listed');
-  const list = await listWorkflows({ includeArchived: true });
-  const wf = list.find((w) => w.id === 'wf_quickfix');
-  assert.ok(wf, 'wf_quickfix imported');
-  assert.equal(wf.name, 'Quick Fix');
-  assert.equal(wf.steps.length, 2, 'two-stage topology preserved');
-  assert.equal(wf.feedbacks.length, 1, 'feedback edge preserved');
-  assert.ok(wf.archivedAt, 'kept, hidden, never deleted');
-});
+      const detail = await readPipelineByKey(keyA, RUN_ID);
+      assert.ok(detail, 'readPipelineByKey resolves the run');
+      assert.equal(detail.state.title, 'Add login');
+      assert.equal(detail.state.status, 'done');
+      assert.equal(detail.state.prompt, '# Add login\n', 'prompt.md body -> pipelines.prompt');
+      assert.equal(detail.state.steps.length, 2, 'reconstructed steps in state');
+      // audit moved from pipeline.md into pipeline_events -> surfaced as auditMarkdown
+      assert.match(detail.auditMarkdown, /Add login|created|done/i);
+      assert.match(detail.auditMarkdown, /## Timeline/, 'rebuilt audit reproduces the timeline header');
 
-test('listWorkspaces() + readWorkspace() return the migrated workspace + ordered members', async () => {
-  const list = await listWorkspaces();
-  assert.equal(list.length, 1);
-  assert.equal(list[0].name, 'Demo WS');
-  assert.equal(list[0].description, 'shared contract');
-  assert.equal(list[0].projectPaths.length, 2);
-  assert.equal(list[0].projectKeys.length, 2, 'derived member keys present');
+      // steps normalized into pipeline_steps (raw-row check)
+      const steps = prepare('SELECT key, status, cost_usd FROM pipeline_steps WHERE pipeline_id = ? ORDER BY step_index').all(RUN_ID);
+      assert.equal(steps.length, 2);
+      assert.equal(steps[1].cost_usd, 0.22);
 
-  const ws = await readWorkspace(WS_KEY);
-  assert.ok(ws, 'readWorkspace by id resolves the migrated workspace');
-  assert.equal(ws.name, 'Demo WS');
-  // members are annotated: projectKeys index-aligned with the (re-ordered) projectPaths,
-  // and the derived keys match recomputing projectKey() over the member repos.
-  assert.deepEqual([...ws.projectKeys].sort(), [projectKey(repoA), projectKey(repoB)].sort());
-  assert.equal(ws.projectKeys.length, ws.projectPaths.length, 'keys index-aligned with paths');
-  assert.equal(ws.exists.filter(Boolean).length, 2, 'both members exist on disk (derived)');
-});
+      // clarify Q&A moved into the clarify table
+      const clar = prepare('SELECT questions, answers FROM clarify WHERE pipeline_id = ?').get(RUN_ID);
+      assert.match(clar.questions, /Auth provider/);
+      assert.match(clar.answers, /OAuth/);
 
-test('readRunConfig() returns the migrated per-project config incl. extra (webUiTesting)', async () => {
-  const rc = await readRunConfig(repoA);
-  assert.deepEqual(rc.steps.planner, { model: 'claude-opus-4-8', effort: 'high' });
-  assert.ok(rc.customModels.some((m) => m.id === 'my-fork-4-9'));
-  assert.equal(rc.workflows.wf_quickfix.nodes.s0_0.model, 'claude-sonnet-4-6');
-  assert.equal(rc.workflows.wf_quickfix.feedbacks.fb_0.maxCycles, 3);
-  // V24 archived the imported v1 template, so the remembered active workflow —
-  // no longer runnable — falls back to the graph default.
-  assert.equal(rc.activeWorkflowId, 'wf_default');
-  assert.equal(rc.webUiTesting.startCommand, 'npm run dev', 'unknown key preserved via project_config.extra');
-});
-
-test('listAllPipelines() surfaces the migrated run tagged with its project', async () => {
-  const all = await listAllPipelines();
-  const row = all.find((p) => p.id === RUN_ID);
-  assert.ok(row, 'migrated pipeline appears in the cross-project history');
-  assert.equal(row.projectName, 'Repo A', 'project name resolved from store_meta');
-  assert.equal(row.status, 'done');
-});
-
-test('listPipelines() + readPipelineByKey() return the migrated run, steps, clarify, review, audit', async () => {
-  const keyA = projectKey(repoA);
-  const list = await listPipelines(repoA);
-  const row = list.find((p) => p.id === RUN_ID);
-  assert.ok(row, 'migrated pipeline listed');
-  assert.equal(row.totalCostUsd, 0.42);
-  assert.equal(row.totalActiveMs, 5000);
-  assert.equal(row.branch, 'worca-cc/add-login-abcd1234');
-  assert.equal(row.sourceBranch, 'main');
-
-  const detail = await readPipelineByKey(keyA, RUN_ID);
-  assert.ok(detail, 'readPipelineByKey resolves the run');
-  assert.equal(detail.state.title, 'Add login');
-  assert.equal(detail.state.status, 'done');
-  assert.equal(detail.state.prompt, '# Add login\n', 'prompt.md body -> pipelines.prompt');
-  assert.equal(detail.state.steps.length, 2, 'reconstructed steps in state');
-  // audit moved from pipeline.md into pipeline_events -> surfaced as auditMarkdown
-  assert.match(detail.auditMarkdown, /Add login|created|done/i);
-  assert.match(detail.auditMarkdown, /## Timeline/, 'rebuilt audit reproduces the timeline header');
-
-  // steps normalized into pipeline_steps (raw-row check)
-  const steps = prepare('SELECT key, status, cost_usd FROM pipeline_steps WHERE pipeline_id = ? ORDER BY step_index').all(RUN_ID);
-  assert.equal(steps.length, 2);
-  assert.equal(steps[1].cost_usd, 0.22);
-
-  // clarify Q&A moved into the clarify table
-  const clar = prepare('SELECT questions, answers FROM clarify WHERE pipeline_id = ?').get(RUN_ID);
-  assert.match(clar.questions, /Auth provider/);
-  assert.match(clar.answers, /OAuth/);
-
-  // review verdict moved into the reviews table. The importer captures the kind
-  // group of <kind>-review-cycleN.json, so impl-review-cycle1.json -> kind 'impl', cycle 1.
-  const rev = prepare("SELECT verdict FROM reviews WHERE pipeline_id = ? AND kind = 'impl' AND cycle = 1").get(RUN_ID);
-  assert.ok(rev && /summary|ok/.test(rev.verdict), 'impl-review-cycle1.json imported into reviews (kind=impl)');
+      // review verdict moved into the reviews table. The importer captures the kind
+      // group of <kind>-review-cycleN.json, so impl-review-cycle1.json -> kind 'impl', cycle 1.
+      const rev = prepare("SELECT verdict FROM reviews WHERE pipeline_id = ? AND kind = 'impl' AND cycle = 1").get(RUN_ID);
+      assert.ok(rev && /summary|ok/.test(rev.verdict), 'impl-review-cycle1.json imported into reviews (kind=impl)');
+    } },
+  ]);
 });
 
 test('agent markdown + extras/ + settings.json remain on the filesystem (NOT deleted by migration)', async () => {

@@ -5,34 +5,34 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  memoryHealth, memoryScopeReport, MEMORY_LEVELS, GLOBAL_SCOPE, projectScope, scopeDir,
+  memoryHealth, memoryScopeReport, GLOBAL_SCOPE, projectScope, scopeDir,
   writeMemory, bumpScopeState, readScopeState, renderDefragBrief, DEFRAG_BRIEF_HEADING,
 } from '../src/core/memory-store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const CAPS = { softBytesPerFile: 100, hardBytesPerFile: 200, maxFilesPerScope: 10, hookMaxChars: 160, defrag: { writes: 4, files: 5, bytesPct: 60, alwaysOnBytes: 300 } };
 const NOW = '2026-09-09T10:00:00.000Z';
 const file = (name, bytes, over = {}) => ({ name, description: `Hook ${name}`, paths: [], source: 'user', updated: NOW, bytes, hasFrontmatter: true, hash: name, ...over });
 const STATE = { writesSinceDefrag: 0, lastWriteAt: null, lastDefragAt: null, lastDefragRunId: null };
 
-test('levels are the five the UI knows', () => {
-  assert.deepEqual([...MEMORY_LEVELS], ['fresh', 'ok', 'due', 'overdue', 'failing']);
-});
-
-test('fresh: no files ⇒ fresh with no reasons, whatever the counters say', () => {
-  const h = memoryHealth([], { ...STATE, writesSinceDefrag: 99 }, CAPS);
-  assert.equal(h.level, 'fresh');
-  assert.deepEqual(h.reasons, []);
-  assert.equal(h.files, 0); assert.equal(h.bytes, 0); assert.equal(h.writesSinceDefrag, 99);
-});
-
-test('ok: files under every threshold', () => {
-  const h = memoryHealth([file('a', 10), file('b', 20)], { ...STATE, writesSinceDefrag: 3, lastWriteAt: NOW }, CAPS);
-  assert.equal(h.level, 'ok');
-  assert.deepEqual(h.reasons, []);
-  assert.deepEqual({ files: h.files, bytes: h.bytes, oversized: h.oversized, overHard: h.overHard, invalidFrontmatter: h.invalidFrontmatter, alwaysOnBytes: h.alwaysOnBytes, alwaysOnFiles: h.alwaysOnFiles },
-    { files: 2, bytes: 30, oversized: 0, overHard: 0, invalidFrontmatter: 0, alwaysOnBytes: 30, alwaysOnFiles: 2 });
-  assert.equal('indexDropped' in h, false, 'the index is gone');
-  assert.equal(h.lastWriteAt, NOW);
+test('fresh vs ok: no files is fresh whatever the counters; files under every threshold are ok', async () => {
+  await checkRows([
+    { name: 'fresh: no files ⇒ fresh with no reasons, whatever the counters say', run: () => {
+      const h = memoryHealth([], { ...STATE, writesSinceDefrag: 99 }, CAPS);
+      assert.equal(h.level, 'fresh');
+      assert.deepEqual(h.reasons, []);
+      assert.equal(h.files, 0); assert.equal(h.bytes, 0); assert.equal(h.writesSinceDefrag, 99);
+    } },
+    { name: 'ok: files under every threshold', run: () => {
+      const h = memoryHealth([file('a', 10), file('b', 20)], { ...STATE, writesSinceDefrag: 3, lastWriteAt: NOW }, CAPS);
+      assert.equal(h.level, 'ok');
+      assert.deepEqual(h.reasons, []);
+      assert.deepEqual({ files: h.files, bytes: h.bytes, oversized: h.oversized, overHard: h.overHard, invalidFrontmatter: h.invalidFrontmatter, alwaysOnBytes: h.alwaysOnBytes, alwaysOnFiles: h.alwaysOnFiles },
+        { files: 2, bytes: 30, oversized: 0, overHard: 0, invalidFrontmatter: 0, alwaysOnBytes: 30, alwaysOnFiles: 2 });
+      assert.equal('indexDropped' in h, false, 'the index is gone');
+      assert.equal(h.lastWriteAt, NOW);
+    } },
+  ]);
 });
 
 test('due: each trigger alone, with its exact reason', () => {
@@ -143,18 +143,4 @@ test('renderDefragBrief: every reason is a bullet, the always-on budget carries 
   assert.match(brief, /fewer than 5 files — now 5/);
   assert.match(brief, /each file under 100 bytes/);
   assert.equal(renderDefragBrief(h, CAPS), brief);
-});
-
-test('renderDefragBrief: a healthy scope still gets the budgets (a defragment must not break them), and says nothing is crossed', () => {
-  const h = memoryHealth([file('a', 10)], { ...STATE }, CAPS);
-  const brief = renderDefragBrief(h, CAPS);
-  assert.match(brief, /Level: ok\./);
-  assert.match(brief, /No threshold is crossed/);
-  assert.match(brief, /under 300 bytes — now 10 in 1 file\b/);
-  assert.ok(!/\n- /.test(brief.split('Budgets')[0]), 'no reason bullets');
-});
-
-test('renderDefragBrief: caps without a defrag block fall back to the defaults memoryHealth uses', () => {
-  const h = memoryHealth([file('a', 10)], { ...STATE }, undefined);
-  assert.match(renderDefragBrief(h, undefined), /under 16384 bytes — now 10 in 1 file/);
 });

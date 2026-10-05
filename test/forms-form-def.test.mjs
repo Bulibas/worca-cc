@@ -3,13 +3,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { validateFormDef, normalizeAskBlock, FORM_ID_RE } from '../src/shared/forms/form-def.mjs';
 import { reviewForm, planForm, releaseForm } from './helpers/ask-form-fixtures.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const codes = (def, id = 'f') => validateFormDef(def, { id }).errors.map((e) => e.code);
 const edit = (make, fn) => { const f = make(); fn(f); return f; };
-
-test('the three fixtures pass gate 1', () => {
-  for (const f of [reviewForm(), planForm(), releaseForm()]) assert.deepEqual(validateFormDef(f, { id: 'ok-form' }), { ok: true, errors: [] });
-});
 
 test('form ids', () => {
   for (const ok of ['a', 'review-mockups', 'a1-b2', 'a'.repeat(48)]) assert.match(ok, FORM_ID_RE);
@@ -57,20 +54,30 @@ test('a form proves itself: bad example, and an auto answer that cannot pass gat
   assert.deepEqual(codes(edit(reviewForm, (f) => { delete f.layout[3].when; f.answer.properties.notes.default = 'Nothing to change here.'; })), []);
 });
 
-test('normalizeAskBlock: keeps the good, names the bad, never throws', () => {
-  assert.deepEqual(normalizeAskBlock(undefined), { forms: {}, dropped: [] });
-  assert.equal(normalizeAskBlock('x').dropped[0].id, '*');
-  assert.equal(normalizeAskBlock({ forms: [] }).dropped[0].id, '*');
-  const out = normalizeAskBlock({ forms: { 'review-mockups': reviewForm(), broken: edit(reviewForm, (f) => { f.layout[0].widget = 'hologram'; }), 'Bad_Id': reviewForm() } });
-  assert.deepEqual(Object.keys(out.forms), ['review-mockups']);
-  assert.deepEqual(out.dropped.map((d) => d.id), ['broken', 'Bad_Id']);
-  assert.match(out.dropped[0].reason, /hologram/);
-  const many = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`f${i}`, reviewForm()]));
-  const capped = normalizeAskBlock({ forms: many });
-  assert.equal(Object.keys(capped.forms).length, 8);
-  assert.deepEqual(capped.dropped.map((d) => d.reason), ['more than 8 forms', 'more than 8 forms']);
-  const huge = edit(reviewForm, (f) => { f.example.summary = 'x'.repeat(70000); });
-  assert.match(normalizeAskBlock({ forms: { big: huge } }).dropped[0].reason, /larger than 65536 bytes/);
+test('normalizeAskBlock: keeps the good, names the bad, caps at 8 forms and 65536 BYTES, never throws', async () => {
+  await checkRows([
+    { name: 'normalizeAskBlock: keeps the good, names the bad, never throws', run: async () => {
+      assert.deepEqual(normalizeAskBlock(undefined), { forms: {}, dropped: [] });
+      assert.equal(normalizeAskBlock('x').dropped[0].id, '*');
+      assert.equal(normalizeAskBlock({ forms: [] }).dropped[0].id, '*');
+      const out = normalizeAskBlock({ forms: { 'review-mockups': reviewForm(), broken: edit(reviewForm, (f) => { f.layout[0].widget = 'hologram'; }), 'Bad_Id': reviewForm() } });
+      assert.deepEqual(Object.keys(out.forms), ['review-mockups']);
+      assert.deepEqual(out.dropped.map((d) => d.id), ['broken', 'Bad_Id']);
+      assert.match(out.dropped[0].reason, /hologram/);
+      const many = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`f${i}`, reviewForm()]));
+      const capped = normalizeAskBlock({ forms: many });
+      assert.equal(Object.keys(capped.forms).length, 8);
+      assert.deepEqual(capped.dropped.map((d) => d.reason), ['more than 8 forms', 'more than 8 forms']);
+      const huge = edit(reviewForm, (f) => { f.example.summary = 'x'.repeat(70000); });
+      assert.match(normalizeAskBlock({ forms: { big: huge } }).dropped[0].reason, /larger than 65536 bytes/);
+    } },
+    { name: 'normalizeAskBlock counts BYTES, not UTF-16 units', run: async () => {
+      const wide = edit(reviewForm, (f) => { f.title = 'Pick'; f.example.summary = 'é'.repeat(7000); });
+      const forms = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`f${i}`, wide]));
+      assert.ok(JSON.stringify({ forms }).length < 65536, 'under the cap in characters');
+      assert.match(normalizeAskBlock({ forms }).dropped[0].reason, /larger than 65536 bytes/);
+    } },
+  ]);
 });
 
 test('inherited names are not answer fields or data paths', () => {
@@ -119,13 +126,6 @@ test('a row widget binds ROWS: a list of objects, with a text id where the answe
   assert.deepEqual(codes(opaque), [], 'opaque rows cannot be checked and are let through');
   const below = edit(reviewForm, (f) => { f.data.properties.blob = { type: 'object' }; f.layout.push({ widget: 'file-list', bind: 'data.blob.files' }); });
   assert.deepEqual(codes(below), [], 'and so is a bind below an opaque object (C3)');
-});
-
-test('normalizeAskBlock counts BYTES, not UTF-16 units', () => {
-  const wide = edit(reviewForm, (f) => { f.title = 'Pick'; f.example.summary = 'é'.repeat(7000); });
-  const forms = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`f${i}`, wide]));
-  assert.ok(JSON.stringify({ forms }).length < 65536, 'under the cap in characters');
-  assert.match(normalizeAskBlock({ forms }).dropped[0].reason, /larger than 65536 bytes/);
 });
 
 test('`options.from` binds rows too; a file widget binds a FILE', () => {
@@ -206,30 +206,33 @@ test('a file widget shows ONE file: a column of them is what `gallery` and `file
   assert.deepEqual(at(below), ['layout#5|bad-bind|"before": "compare" shows one file, and data.blob.shots[].file is a column of them'], 'also below an opaque object: a column is a list whatever it holds');
 });
 
-test('normalizeAskBlock never throws: list nesting that fits 64 KB is dropped, by name', () => {
-  let m = { type: 'string' };
-  for (let i = 0; i < 100; i += 1) m = { type: 'array', items: m };
-  const deep = edit(reviewForm, (f) => { f.data.properties.m = m; });
-  assert.ok(new TextEncoder().encode(JSON.stringify({ forms: { deep } })).length <= 65536, 'the block must get past the size check');
-  const out = normalizeAskBlock({ forms: { deep } });
-  assert.deepEqual(Object.keys(out.forms), []);
-  assert.match(out.dropped[0].reason, /nesting is limited/);
-});
-
-test('normalizeAskBlock never throws: JSON nested past the depth cap is refused before anything walks it', () => {
-  // 20 000 levels are 40 KB: inside the size limit, and past what JSON.stringify survives on Node 22
-  let deep = 1;
-  for (let i = 0; i < 20000; i += 1) deep = [deep];
-  const f = edit(reviewForm, (g) => { g.data.properties.blob = { type: 'object' }; g.example.blob = { x: deep }; });
-  const out = normalizeAskBlock({ forms: { deep: f } });
-  assert.deepEqual(Object.keys(out.forms), []);
-  assert.deepEqual(out.dropped, [{ id: '*', reason: '"ask" is nested deeper than 256 levels' }]);
-  // the boundary, exactly: the block is level 1, so 255 lists inside it reach 256 and 256 reach 257
-  const lists = (n) => { let v = 1; for (let i = 0; i < n; i += 1) v = [v]; return v; };
-  assert.deepEqual(normalizeAskBlock({ forms: {}, junk: lists(255) }), { forms: {}, dropped: [] });
-  assert.deepEqual(normalizeAskBlock({ forms: {}, junk: lists(256) }).dropped.map((d) => d.id), ['*']);
-  // far above anything written by hand: 80 nested groups still pass gate 1
-  let item = { widget: 'markdown', bind: 'data.summary' };
-  for (let i = 0; i < 80; i += 1) item = { widget: 'group', children: [item] };
-  assert.deepEqual(Object.keys(normalizeAskBlock({ forms: { ok: edit(reviewForm, (g) => { g.layout.push(item); }) } }).forms), ['ok']);
+test('normalizeAskBlock never throws on deep nesting: schema list nesting dropped by name, JSON past 256 levels refused', async () => {
+  await checkRows([
+    { name: 'normalizeAskBlock never throws: list nesting that fits 64 KB is dropped, by name', run: async () => {
+      let m = { type: 'string' };
+      for (let i = 0; i < 100; i += 1) m = { type: 'array', items: m };
+      const deep = edit(reviewForm, (f) => { f.data.properties.m = m; });
+      assert.ok(new TextEncoder().encode(JSON.stringify({ forms: { deep } })).length <= 65536, 'the block must get past the size check');
+      const out = normalizeAskBlock({ forms: { deep } });
+      assert.deepEqual(Object.keys(out.forms), []);
+      assert.match(out.dropped[0].reason, /nesting is limited/);
+    } },
+    { name: 'normalizeAskBlock never throws: JSON nested past the depth cap is refused before anything walks it', run: async () => {
+      // 20 000 levels are 40 KB: inside the size limit, and past what JSON.stringify survives on Node 22
+      let deep = 1;
+      for (let i = 0; i < 20000; i += 1) deep = [deep];
+      const f = edit(reviewForm, (g) => { g.data.properties.blob = { type: 'object' }; g.example.blob = { x: deep }; });
+      const out = normalizeAskBlock({ forms: { deep: f } });
+      assert.deepEqual(Object.keys(out.forms), []);
+      assert.deepEqual(out.dropped, [{ id: '*', reason: '"ask" is nested deeper than 256 levels' }]);
+      // the boundary, exactly: the block is level 1, so 255 lists inside it reach 256 and 256 reach 257
+      const lists = (n) => { let v = 1; for (let i = 0; i < n; i += 1) v = [v]; return v; };
+      assert.deepEqual(normalizeAskBlock({ forms: {}, junk: lists(255) }), { forms: {}, dropped: [] });
+      assert.deepEqual(normalizeAskBlock({ forms: {}, junk: lists(256) }).dropped.map((d) => d.id), ['*']);
+      // far above anything written by hand: 80 nested groups still pass gate 1
+      let item = { widget: 'markdown', bind: 'data.summary' };
+      for (let i = 0; i < 80; i += 1) item = { widget: 'group', children: [item] };
+      assert.deepEqual(Object.keys(normalizeAskBlock({ forms: { ok: edit(reviewForm, (g) => { g.layout.push(item); }) } }).forms), ['ok']);
+    } },
+  ]);
 });

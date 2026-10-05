@@ -17,6 +17,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { cardAlertOf } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -151,35 +152,33 @@ test('the run page Stop pill opens #stop-modal with the run identity and POSTs n
   assert.equal(stopPosts(ctx).length, 0, 'opening the modal must not stop anything');
 });
 
-test('a run with no feature branch hides the branch line', async () => {
-  const ctx = await boot();
-  ctx.wsBox.ws.dispatch('open', {});
-  ctx.dispatch({
-    type: 'hello',
-    runs: [{ runId: RUN_ID, title: 'No branch yet', projectDir: '/tmp/p', status: 'running',
-      startedAt: '2026-01-01T00:00:00Z', kind: 'run' }],
-  });
-  ctx.showRunning();
-
-  await openStop(ctx);
-
-  const modal = ctx.window.document.getElementById('stop-modal');
-  assert.equal(modal.classList.contains('hidden'), false, 'the modal is open');
-  assert.equal(modal.querySelector('.stop-ident-title').textContent, 'No branch yet');
-  assert.equal(modal.querySelector('.stop-ident-branch').hidden, true, 'no branch -> line hidden');
-});
-
-test('"Keep running" closes the modal without POSTing /api/stop', async () => {
+// One boot: each row opens the modal from the run page again.
+test('"Keep running" and a backdrop click close the modal without POSTing /api/stop; a click inside the card does not close it', async () => {
   const ctx = await boot();
   seed(ctx);
-  await openStop(ctx);
+  await checkRows([
+    { name: '"Keep running" closes the modal without POSTing /api/stop', run: async () => {
+      await openStop(ctx);
 
-  const modal = ctx.window.document.getElementById('stop-modal');
-  click(ctx.window, modal.querySelector('.stop-cancel'));
+      const modal = ctx.window.document.getElementById('stop-modal');
+      click(ctx.window, modal.querySelector('.stop-cancel'));
 
-  assert.ok(modal.classList.contains('hidden'), 'Keep running closes it');
-  assert.equal(modal.dataset.runId, undefined, 'the runId stamp is cleared on close');
-  assert.equal(stopPosts(ctx).length, 0, 'cancel never stops the run');
+      assert.ok(modal.classList.contains('hidden'), 'Keep running closes it');
+      assert.equal(modal.dataset.runId, undefined, 'the runId stamp is cleared on close');
+      assert.equal(stopPosts(ctx).length, 0, 'cancel never stops the run');
+    } },
+    { name: 'backdrop click closes; a click inside the card does not', run: async () => {
+      await openStop(ctx);
+
+      const modal = ctx.window.document.getElementById('stop-modal');
+      click(ctx.window, modal.querySelector('.stop-ident'));       // inside the dialog card
+      assert.equal(modal.classList.contains('hidden'), false, 'clicks inside the card do not close');
+
+      modal.dispatchEvent(new ctx.window.Event('click', { bubbles: true }));   // the overlay itself
+      assert.ok(modal.classList.contains('hidden'), 'backdrop click closes');
+      assert.equal(stopPosts(ctx).length, 0);
+    } },
+  ]);
 });
 
 test('"Stop pipeline" POSTs /api/stop {runId} and closes the modal', async () => {
@@ -266,42 +265,11 @@ test('cancel, Escape and backdrop are inert while the stop POST is in flight', a
   assert.equal(stopPosts(ctx).length, 1, 'exactly one POST /api/stop');
 });
 
-test('backdrop click closes; a click inside the card does not', async () => {
-  const ctx = await boot();
-  seed(ctx);
-  await openStop(ctx);
-
-  const modal = ctx.window.document.getElementById('stop-modal');
-  click(ctx.window, modal.querySelector('.stop-ident'));       // inside the dialog card
-  assert.equal(modal.classList.contains('hidden'), false, 'clicks inside the card do not close');
-
-  modal.dispatchEvent(new ctx.window.Event('click', { bubbles: true }));   // the overlay itself
-  assert.ok(modal.classList.contains('hidden'), 'backdrop click closes');
-  assert.equal(stopPosts(ctx).length, 0);
-});
-
 // The Running detail screen's Escape handler is CAPTURE-phase (Task 5, modelled on
 // History's at app.js:10734-10744), and openStopModal's own Escape listener is
 // bubble-phase. Capture therefore runs FIRST: without an explicit `#stop-modal`
 // guard in that handler, one Escape would close the modal AND navigate the detail
-// screen back to the list. These two cases lock the guard down.
-test('the detail header Stop pill opens the same modal, stamped with the same runId', async () => {
-  const ctx = await boot();
-  seed(ctx);
-  openDetail(ctx);
-  await new Promise((r) => setTimeout(r, 0));
-
-  const detail = ctx.window.document.getElementById('run-detail');
-  const rdStop = detail.querySelector('.rd-stop');
-  assert.ok(rdStop, '.rd-stop present on the detail header');
-  click(ctx.window, rdStop);
-
-  const modal = ctx.window.document.getElementById('stop-modal');
-  assert.equal(modal.classList.contains('hidden'), false, '.rd-stop opens the modal');
-  assert.equal(modal.dataset.runId, RUN_ID, 'the detail opener stamps the same runId');
-  assert.equal(stopPosts(ctx).length, 0);
-});
-
+// screen back to the list. The next case locks the guard down.
 test('Escape closes the modal and does NOT also navigate the detail back', async () => {
   const ctx = await boot();
   seed(ctx);
@@ -325,49 +293,53 @@ test('Escape closes the modal and does NOT also navigate the detail back', async
     'once the modal is gone Escape navigates back to the list');
 });
 
-test('leaving the detail while the modal is open tears the overlay down', async () => {
-  const ctx = await boot();
-  seed(ctx);
-  openDetail(ctx);
-  await new Promise((r) => setTimeout(r, 0));
-  click(ctx.window, ctx.window.document.querySelector('#run-detail .rd-stop'));
-
-  const modal = ctx.window.document.getElementById('stop-modal');
-  assert.equal(modal.classList.contains('hidden'), false);
-
-  // Leave through another view: side by side a bare #runs would keep this run open (rule 1).
-  ctx.window.location.hash = 'new';
-  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
-  await new Promise((r) => setTimeout(r, 0));
-
-  assert.ok(modal.classList.contains('hidden'),
-    'closeRunDetail tears the top-level overlay down instead of stranding it over the next view');
-});
-
 // Leaving Runs entirely. closeRunDetail's teardown sits BELOW its `detail-open`
 // early return, and the same early return is on the leave-guard path, so leaving
 // the view used to strand a `position:fixed;inset:0` overlay and a live document
 // keydown listener over the next view. The modal now only opens from the run page.
-test('leaving Runs tears down a modal opened from the run page', async () => {
-  const ctx = await boot();
-  seed(ctx);
-  await openStop(ctx);
+// Each row boots its own page.
+test('leaving the run page or the Runs view while the modal is open tears the overlay down', async () => {
+  await checkRows([
+    { name: 'leaving the detail while the modal is open tears the overlay down', run: async () => {
+      const ctx = await boot();
+      seed(ctx);
+      openDetail(ctx);
+      await new Promise((r) => setTimeout(r, 0));
+      click(ctx.window, ctx.window.document.querySelector('#run-detail .rd-stop'));
 
-  const modal = ctx.window.document.getElementById('stop-modal');
-  assert.equal(modal.classList.contains('hidden'), false, 'open, over the run page');
-  assert.ok(ctx.window.document.getElementById('run-shell').classList.contains('detail-open'));
+      const modal = ctx.window.document.getElementById('stop-modal');
+      assert.equal(modal.classList.contains('hidden'), false);
 
-  ctx.window.location.hash = 'new';
-  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
-  await new Promise((r) => setTimeout(r, 0));
+      // Leave through another view: side by side a bare #runs would keep this run open (rule 1).
+      ctx.window.location.hash = 'new';
+      ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+      await new Promise((r) => setTimeout(r, 0));
 
-  assert.equal(ctx.window.document.getElementById('run-shell').classList.contains('detail-open'), false,
-    'leaving the view closed the detail');
-  assert.ok(modal.classList.contains('hidden'), 'the overlay does not float over the next view');
-  // Its document keydown listener went with it: Escape now belongs to the next view.
-  esc(ctx.window);
-  assert.ok(modal.classList.contains('hidden'), 'and stays down');
-  assert.equal(ctx.window.location.hash, '#new', 'Escape did not route anywhere through the dead modal');
+      assert.ok(modal.classList.contains('hidden'),
+        'closeRunDetail tears the top-level overlay down instead of stranding it over the next view');
+    } },
+    { name: 'leaving Runs tears down a modal opened from the run page', run: async () => {
+      const ctx = await boot();
+      seed(ctx);
+      await openStop(ctx);
+
+      const modal = ctx.window.document.getElementById('stop-modal');
+      assert.equal(modal.classList.contains('hidden'), false, 'open, over the run page');
+      assert.ok(ctx.window.document.getElementById('run-shell').classList.contains('detail-open'));
+
+      ctx.window.location.hash = 'new';
+      ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+      await new Promise((r) => setTimeout(r, 0));
+
+      assert.equal(ctx.window.document.getElementById('run-shell').classList.contains('detail-open'), false,
+        'leaving the view closed the detail');
+      assert.ok(modal.classList.contains('hidden'), 'the overlay does not float over the next view');
+      // Its document keydown listener went with it: Escape now belongs to the next view.
+      esc(ctx.window);
+      assert.ok(modal.classList.contains('hidden'), 'and stays down');
+      assert.equal(ctx.window.location.hash, '#new', 'Escape did not route anywhere through the dead modal');
+    } },
+  ]);
 });
 
 // A paused run: a seed of its own (status paused, a pipeline id) — the run page still offers Stop.

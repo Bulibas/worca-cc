@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // The graph engine's ledger row is keyed by executionId: attr.stepKey IS the
 // executionId (orchestrator.mjs `_execCtx`), and `_execStep(ctx, mark)` is the
@@ -26,26 +27,26 @@ function withSpawn(status) {
   return orch;
 }
 
-test("a node's 'done' marker force-closes its still-running subs to finished", () => {
-  const orch = withSpawn();
-  orch._execStep(NODE, 'done');
-  assert.equal(orch.state.subAgents.find((s) => s.id === 'toolu_A').status, 'finished');
-});
-
-test("when the run is stopped, the backstop closes them as 'stopped'", () => {
-  const orch = withSpawn('stopped');
-  orch._execStep(NODE, 'done');
-  assert.equal(orch.state.subAgents.find((s) => s.id === 'toolu_A').status, 'stopped');
-});
-
-test('the backstop emits a finish delta for each forced sub-agent', () => {
+test("a node's 'done' marker force-closes its still-running subs to finished (stopped when the run is stopped) and emits a finish delta for each", async () => {
   const orch = withSpawn();
   const evts = [];
   orch.on('subagent', (m) => evts.push(m));
   orch._execStep(NODE, 'done');
-  const fin = evts.find((m) => m.transition === 'finish' && m.id === 'toolu_A');
-  assert.ok(fin, 'a finish delta fires for the forced sub-agent');
-  assert.equal(fin.status, 'finished');
+  await checkRows([
+    { name: "a node's 'done' marker force-closes its still-running subs to finished", run: () => {
+      assert.equal(orch.state.subAgents.find((s) => s.id === 'toolu_A').status, 'finished');
+    } },
+    { name: 'the backstop emits a finish delta for each forced sub-agent', run: () => {
+      const fin = evts.find((m) => m.transition === 'finish' && m.id === 'toolu_A');
+      assert.ok(fin, 'a finish delta fires for the forced sub-agent');
+      assert.equal(fin.status, 'finished');
+    } },
+    { name: "when the run is stopped, the backstop closes them as 'stopped'", run: () => {
+      const stopped = withSpawn('stopped');
+      stopped._execStep(NODE, 'done');
+      assert.equal(stopped.state.subAgents.find((s) => s.id === 'toolu_A').status, 'stopped');
+    } },
+  ]);
 });
 
 test('the backstop only touches THIS step’s subs and never re-closes a terminal one', () => {

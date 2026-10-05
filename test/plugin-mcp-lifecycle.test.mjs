@@ -95,6 +95,21 @@ test('disable, any locked write, re-enable: every membership, value and secret (
   assert.deepEqual(plain(await readMcpStore()), before);
 });
 
+test('applying a plugin update re-tests that plugin\'s memberships', async () => {
+  const KEY = 'billing|plugin:acme-tools/jira';   // the membership with its token filled (test 2)
+  assert.equal((await readMcpStore()).tests[KEY]?.at, TEST.at);
+  const git = (...a) => run('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...a]);
+  writeFileSync(join(repo, 'CHANGELOG.md'), 'c2\n'); await git('add', '-A'); await git('commit', '-qm', 'c2');
+  const r = await post('/api/plugins/acme-tools/update', { confirm: true });
+  assert.equal(r.status, 200, await r.text());
+  for (const t0 = Date.now(); ;) {
+    const t = (await readMcpStore()).tests[KEY];
+    if (t && t.at !== TEST.at) break;
+    if (Date.now() - t0 > 15000) assert.fail(`no re-test landed: ${JSON.stringify(t)}`);
+    await new Promise((res) => setTimeout(res, 25));
+  }
+});
+
 test('uninstall removes the plugin\'s memberships, Team state, secrets and tests; bases stay reserved', async () => {
   const r = await fetch(`${base}/api/plugins/acme-tools`, { method: 'DELETE' });
   assert.equal(r.status, 200, await r.text());

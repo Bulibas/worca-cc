@@ -6,12 +6,11 @@
 // No run is started, so no cwd sandbox is needed. WORCA_HOME is a temp dir.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { rm } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { WebSocket } from 'ws';
 
+import { templateRepo } from './helpers/git-dir.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { sampleMap, DISPLAYS } from './helpers/wsmap-stored.mjs';
 import { saveWorkspaceScanResult } from '../src/core/workspaces.mjs';
@@ -38,13 +37,9 @@ after(async () => {
   await Promise.all(created.map((d) => rm(d, { recursive: true, force: true, maxRetries: 3 })));
 });
 
-async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-wsmap-'));
+function freshRepo() {
+  const dir = templateRepo('wsmap', { branch: 'main', user: true, files: { 'README.md': '# hi\n' } });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 const call = (method, p, body) => fetch(`${base}${p}`, { method, headers: JSONH, body: body === undefined ? undefined : JSON.stringify(body) });

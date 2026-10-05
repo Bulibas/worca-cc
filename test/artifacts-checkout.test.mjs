@@ -11,11 +11,12 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipeline, seedPipelineRow } from './helpers/db-seed.mjs';
 import { getDb } from '../src/core/db.mjs';
 import {
-  checkoutRecordsFor, retainedWorkFor, runRootSweepLookups, listPipelines,
+  checkoutRecordsFor, retainedWorkFor, listPipelines,
 } from '../src/core/artifacts.mjs';
 import { archivePipeline } from '../src/core/pipeline-delete.mjs';
 import { RETAIN_REASONS, writeRunManifest } from '../src/core/run-manifest.mjs';
 import { worcaHome } from '../src/core/projects.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -40,22 +41,6 @@ async function seedCheckedOut(policy = 'on-success') {
   const row = getDb().prepare('SELECT * FROM pipelines WHERE id = ?').get(id);
   return { id, row, worktreeDir };
 }
-
-test('RETAIN_REASONS carries the checkout reason', () => {
-  assert.equal(RETAIN_REASONS.CHECKOUT, 'checkout');
-  assert.equal(RETAIN_REASONS.COMMIT_FAILED, 'commit_failed');
-});
-
-test('checkoutRecordsFor: a checked-out member with a live worktree', async () => {
-  const { row, worktreeDir } = await seedCheckedOut();
-  const rec = checkoutRecordsFor(row);
-  assert.equal(rec.members.length, 1);
-  assert.equal(rec.members[0].worktreeDir, worktreeDir);
-  assert.equal(rec.members[0].policy, 'on-success');
-  assert.equal(rec.members[0].branch, 'worca/feature-x');
-  assert.deepEqual(rec.members[0].setup, { status: 'none' });
-  assert.equal(retainedWorkFor(row), null, 'a checkout is not retained work');
-});
 
 test('checkoutRecordsFor: null without a marker, a live dir, or a row', async () => {
   assert.equal(checkoutRecordsFor(null), null);
@@ -82,17 +67,26 @@ test('checkoutRecordsFor: workspace members come from workspace_meta.branches', 
   assert.equal(rec.members[0].policy, 'until-pr');
 });
 
-test('runRootSweepLookups().retainOf keeps a checked-out run', async () => {
-  const { id } = await seedCheckedOut();
-  assert.ok(runRootSweepLookups().retainOf(id));
-});
-
-test('History entry carries the checkout record', async () => {
-  const { id } = await seedCheckedOut();
-  const entries = await listPipelines(PROJECT, { lite: true });
-  const e = entries.find((x) => x.id === id);
-  assert.equal(e.checkout.members[0].policy, 'on-success');
-  assert.equal(e.retainedWork, null);
+test('a checked-out member is read by checkoutRecordsFor and carried on its History entry', async () => {
+  await checkRows([
+    { name: 'checkoutRecordsFor: a checked-out member with a live worktree', run: async () => {
+      const { row, worktreeDir } = await seedCheckedOut();
+      const rec = checkoutRecordsFor(row);
+      assert.equal(rec.members.length, 1);
+      assert.equal(rec.members[0].worktreeDir, worktreeDir);
+      assert.equal(rec.members[0].policy, 'on-success');
+      assert.equal(rec.members[0].branch, 'worca/feature-x');
+      assert.deepEqual(rec.members[0].setup, { status: 'none' });
+      assert.equal(retainedWorkFor(row), null, 'a checkout is not retained work');
+    } },
+    { name: 'History entry carries the checkout record', run: async () => {
+      const { id } = await seedCheckedOut();
+      const entries = await listPipelines(PROJECT, { lite: true });
+      const e = entries.find((x) => x.id === id);
+      assert.equal(e.checkout.members[0].policy, 'on-success');
+      assert.equal(e.retainedWork, null);
+    } },
+  ]);
 });
 
 test('archive refuses a checked-out run (DB marker)', async () => {

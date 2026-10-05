@@ -20,7 +20,6 @@ import process from 'node:process';
 
 import { preflightNode } from '../core/preflight-node.mjs';
 import { preflightDeps } from '../core/preflight-deps.mjs';
-import { createOrchestratorFor } from '../core/engine-select.mjs';
 import { resolveRunEngine } from '../core/settings-cascade.mjs';
 import {
   addProject,
@@ -30,13 +29,11 @@ import {
 } from '../core/projects.mjs';
 import { projectKey } from '../core/store.mjs';
 import { formatExecLine, formatGateHeader, formatRunSummary, formatWorkflowProposal, formatResumeHints } from './render.mjs';
-// Ask forms (spec §8): the prompt FORMATTING lives in render.mjs too. A second import
-// statement, not a longer first one — test/cli-exec-render.test.mjs pins the line above.
-import { formatFormField, formatCoerceError, formatFormErrors, FORM_REPROMPT_MAX } from './render.mjs';
-import { promptFields, projectForm, coerceInput } from '../shared/forms/project.mjs';
-import { whenOk } from '../shared/forms/layout.mjs';
-import { validate } from '../shared/forms/schema.mjs';
-import { collectAnswer } from '../shared/forms/answer.mjs';
+// Ask forms (spec §8): the prompt FORMATTING lives in render.mjs too (a second import
+// statement, not a longer first one); the field-by-field asker lives in forms.mjs.
+import { formatFormErrors, FORM_REPROMPT_MAX } from './render.mjs';
+import { projectForm } from '../shared/forms/project.mjs';
+import { createFormAsker } from './forms.mjs';
 import { kindLabel } from '../shared/away-mode/labels.mjs';
 import { pauseExitCode, describePauseReason, promptOptions, REASON } from '../core/failure-policy.mjs';
 import { effectiveDebugSpawn } from '../core/settings.mjs';
@@ -524,112 +521,7 @@ async function askWorkflow(rl, workflow) {
   }
 }
 
-/** The answer field a P1 error path names: `notes`, `steps[1].verdict` -> `steps`. */
-function fieldOfPath(path) {
-  return String(path || '').split(/[.[]/)[0] || '';
-}
-
-/** The answer schema for ONE field, or null (a stale layout, or a display widget). */
-function fieldSchemaOf(ask, name) {
-  const props = ask && ask.answerSchema && ask.answerSchema.properties;
-  return props && Object.hasOwn(props, name) ? props[name] : null;
-}
-
-/**
- * Read ONE entry for `f` until it coerces and validates. Returns the value, or
- * `undefined` for an optional field the user left empty. Coercion is P1's
- * coerceInput (ruling X7) — the CLI only prints and decides requiredness.
- */
-async function readFormEntry(rl, f, prompt, indent = '') {
-  for (;;) {
-    const got = coerceInput(f, await question(rl, c('cyan', `${indent}${prompt}`)));
-    if (!got.ok) { out(c('red', `${indent}${formatCoerceError(f, got)}`)); continue; }
-    // coerceInput returns `undefined` for an empty entry meaning "use the default";
-    // applying it is the caller's job, and so is requiredness.
-    if (got.value === undefined) {
-      if (f.default !== undefined) return f.default;
-      if (f.required) { out(c('red', `${indent}  ${f.label || f.field} is required`)); continue; }
-      return undefined;
-    }
-    return got.value;
-  }
-}
-
-/** Prompt ONE field and write it into `values`. */
-async function askFormField(rl, ask, f, values) {
-  const { lines, prompt } = formatFormField(f);
-  for (const line of lines) out(line);
-  for (;;) {
-    const value = await readFormEntry(rl, f, prompt);
-    if (value === undefined) { delete values[f.field]; return; }
-    const schema = fieldSchemaOf(ask, f.field);
-    if (schema) {
-      const v = validate(schema, value);
-      if (!v.ok) {
-        for (const line of formatFormErrors(v.errors.map((e) => ({ ...e, path: e.path || f.field })))) out(c('red', line));
-        continue;
-      }
-    }
-    values[f.field] = value;
-    return;
-  }
-}
-
-/** A review-list: one row per bound item, each row prompting the field's itemFields. */
-async function askReviewList(rl, f, values) {
-  const { lines } = formatFormField(f);
-  for (const line of lines) out(line);
-  const rows = [];
-  for (const item of (Array.isArray(f.items) ? f.items : [])) {
-    out(`  ${item.label || item.id}`);
-    const row = { id: item.id };
-    for (const sub of (Array.isArray(f.itemFields) ? f.itemFields : [])) {
-      const { lines: subLines, prompt } = formatFormField(sub);
-      for (const line of subLines) out(`  ${line}`);
-      const value = await readFormEntry(rl, sub, prompt, '  ');
-      if (value !== undefined) row[sub.field] = value;
-    }
-    rows.push(row);
-  }
-  values[f.field] = rows;
-}
-
-/**
- * Ask ONE kind:'form' question interactively (spec §8). Prints P1's text projection
- * — display widgets as text, files as `rel (mime, size)` — then prompts field by
- * field in LAYOUT order, honouring `when` as answers accumulate (a field that
- * becomes hidden loses its value and is not required). Each entry goes through P1's
- * coerceInput + validate; the whole set through collectAnswer, which drops hidden
- * fields, strips unknown keys and treats "" as missing. Returns { values }.
- * Re-offers from the first offending field, at most FORM_REPROMPT_MAX times.
- */
-async function askForm(rl, ask) {
-  out('');
-  const projected = projectForm(ask).split('\n');
-  out(c('bold', `? ${projected[0]}`));
-  for (const line of projected.slice(1)) out(line);
-  const fields = promptFields(ask);
-  const values = {};
-  let from = 0;
-  for (let pass = 1; ; pass++) {
-    for (let i = from; i < fields.length; i++) {
-      const f = fields[i];
-      if (!whenOk(f.when, values)) { delete values[f.field]; continue; }
-      if (f.widget === 'review-list') await askReviewList(rl, f, values);
-      else await askFormField(rl, ask, f, values);
-    }
-    const collected = collectAnswer(ask, ask.answerSchema, values);
-    if (!collected.errors.length) return { values: collected.values };
-    for (const line of formatFormErrors(collected.errors)) out(c('red', line));
-    if (pass >= FORM_REPROMPT_MAX) {
-      throw new Error(`form "${ask.form}" is still invalid after ${FORM_REPROMPT_MAX} attempts`);
-    }
-    const bad = new Set(collected.errors.map((e) => fieldOfPath(e.path)));
-    const first = fields.findIndex((f) => bad.has(f.field) && whenOk(f.when, values));
-    from = first >= 0 ? first : 0;
-    for (let i = from; i < fields.length; i++) delete values[fields[i].field];
-  }
-}
+const { askForm } = createFormAsker({ out, c, question });
 
 // ── shared drive loop ────────────────────────────────────────────────────────────
 
@@ -1512,6 +1404,7 @@ async function cmdResume(argv) {
     }
   }
 
+  const { createOrchestratorFor } = await import('../core/engine-select.mjs');
   const orch = await createOrchestratorFor({
     projectDir,
     ...(workspace ? { workspace } : {}),
@@ -3405,7 +3298,7 @@ async function main() {
     waitTicketId = made.ticket.id;
   }
   const runEngine = resolveRunEngine({ explicit: flags.engine || null, projectDir }).engine;
-  const buildOrch = () => createOrchestratorFor({
+  const buildOrch = async () => (await import('../core/engine-select.mjs')).createOrchestratorFor({
     projectDir,
     prompt: flags.prompt || undefined,
     promptFile: flags.file || undefined,

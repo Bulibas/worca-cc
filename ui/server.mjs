@@ -7058,6 +7058,8 @@ async function startAutoRescan(ws) {
   return { runId };
 }
 
+let autoRescanOn = true; // test seam: _testing.setAutoRescan(false) skips the re-scan a member change starts
+
 /**
  * After a member change (the members route and Ask's workspace card): discover the added
  * members' metrics / policy branches (so the Team tab and the homes read them at once), stop an
@@ -7072,6 +7074,7 @@ async function afterMembersChanged(workspace, added = []) {
     discoverPolicy(dir, { force: true }).then(() => emitChanged('team-policy-changed', 'discovered')).catch(() => { /* retried hourly */ });
   }
   await supersedeRescans(workspace.id);
+  if (!autoRescanOn) return { skipped: 'automatic re-scans are off (test seam)' };
   try { return await startAutoRescan(workspace); }
   catch (err) { return { skipped: err && err.message ? err.message : String(err) }; }
 }
@@ -12358,4 +12361,5 @@ export const _testing = {
   broadcast, askFilesRunDir,
   validateResumeTarget, resumeTargetOf, fireResumeTicket, cancelScheduledResumes, stopPausedPipeline,
   trackHeartbeat, heartbeatTick, BOOT_ID,
+  setAutoRescan(on) { autoRescanOn = on !== false; },
 };

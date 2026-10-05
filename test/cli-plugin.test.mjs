@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { checkRows } from './helpers/rows.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { validatePluginDir } from '../src/core/plugin-manifest.mjs';
 
@@ -153,15 +154,18 @@ test('exec under WORCA_MOCK prints the canned frame result as JSON on stdout', a
   assert.ok(result.tasks.every((t) => t.id && t.title));
 });
 
-test('install --yes from a local git repo installs end to end (no prompt)', async () => {
+// One repo ships all three: tidy (node, scaffolded with a case), lintAll (shell, scaffolded
+// with a case) and tidyShell (a hand-written shell meta whose receipt line names its command).
+test('install --yes from a local git repo installs end to end; the receipt summarizes shipped scripts and their cases', async () => {
   const home = await freshDir('worca-cc-cli-plugin-');
   const repoDir = await freshDir('worca-cc-plugin-repo-');
   const init = await run(['plugin', 'init', 'local-plugin', '--dir', repoDir], { home });
   assert.equal(init.code, 0, init.stderr);
-  // A shipped script: the receipt names it with its runtime and command.
+  assert.equal((await run(['plugin', 'new-script', 'tidy', '--dir', repoDir], { home })).code, 0);
+  assert.equal((await run(['plugin', 'new-script', 'lintAll', '--runtime', 'shell', '--dir', repoDir], { home })).code, 0);
   await mkdir(join(repoDir, 'scripts'), { recursive: true });
-  await writeFile(join(repoDir, 'scripts', 'tidy.meta.json'), JSON.stringify({
-    key: 'tidy', metaVersion: 2, displayName: 'Tidy', runtime: 'shell', command: 'npm run tidy',
+  await writeFile(join(repoDir, 'scripts', 'tidyShell.meta.json'), JSON.stringify({
+    key: 'tidyShell', metaVersion: 2, displayName: 'Tidy shell', runtime: 'shell', command: 'npm run tidy',
     inputs: [], outputs: [{ id: 'log', type: 'md', when: 'always', filename: 'tidy-cycle{cycle}.md' }],
   }));
   const g = (args) => spawnSync('git', args, { cwd: repoDir });
@@ -171,14 +175,27 @@ test('install --yes from a local git repo installs end to end (no prompt)', asyn
   g(['add', '-A']);
   g(['commit', '-qm', 'plugin v1']);
   const r = await run(['plugin', 'install', 'local-plugin', '--repo', repoDir, '--yes'], { home });
-  assert.equal(r.code, 0, r.stderr + r.stdout);
-  assert.match(r.stdout, /will install local-plugin/);
-  assert.match(r.stdout, /installed:/);
-  assert.match(r.stdout, /^  script: tidy \(shell, npm run tidy\)$/m);
   const list = await run(['plugin', 'list'], { home });
-  assert.match(list.stdout, /local-plugin/);
-  assert.match(list.stdout, /1 script\b/);
-  assert.match(list.stdout, /enabled/);
+  await checkRows([
+    { name: 'install --yes from a local git repo installs end to end (no prompt)', run: () => {
+      assert.equal(r.code, 0, r.stderr + r.stdout);
+      assert.match(r.stdout, /will install local-plugin/);
+      assert.match(r.stdout, /installed:/);
+      // A shipped script: the receipt names it with its runtime and command.
+      assert.match(r.stdout, /^  script: tidyShell \(shell, npm run tidy\)$/m);
+      assert.match(list.stdout, /local-plugin/);
+      assert.match(list.stdout, /3 scripts\b/);
+      assert.match(list.stdout, /enabled/);
+    } },
+    { name: 'the install receipt summarizes shipped scripts and their cases', run: () => {
+      assert.equal(r.code, 0, r.stderr + r.stdout);
+      assert.match(r.stdout, /^ {2}script: lintAll \(shell/m);
+      assert.match(r.stdout, /^ {2}script: tidy \(node/m);
+      assert.match(r.stdout, /^ {2}3 scripts \(node 1, shell 2\) · 2 cases$/m);
+      assert.doesNotMatch(r.stdout, /python not found/, 'no python script -> no notice');
+      assert.match(list.stdout, /3 scripts/);
+    } },
+  ]);
 });
 
 test('unknown verb exits 2; bare `worca plugin` prints help at 0', async () => {
@@ -506,27 +523,6 @@ test('plugin validate: a shipped case with a project cwd, and a tests file with 
   assert.match(r.stdout, /scripts\/greeter\.tests\.json: .*scratch/);
   assert.match(r.stdout, /scripts\/orphan\.tests\.json: no orphan\.meta\.json beside it/);
   assert.doesNotMatch(r.stdout, /passed, \d+ failed/, 'a dir that does not validate never runs its cases');
-});
-
-test('the install receipt summarizes shipped scripts and their cases', async () => {
-  const home = await freshDir('worca-cc-cli-receipt-');
-  const repoDir = await freshDir('worca-cc-plugin-receipt-repo-');
-  assert.equal((await run(['plugin', 'init', 'receipt-plugin', '--dir', repoDir], { home })).code, 0);
-  assert.equal((await run(['plugin', 'new-script', 'tidy', '--dir', repoDir], { home })).code, 0);
-  assert.equal((await run(['plugin', 'new-script', 'lintAll', '--runtime', 'shell', '--dir', repoDir], { home })).code, 0);
-  const g = (args) => spawnSync('git', args, { cwd: repoDir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 'cli@test']);
-  g(['config', 'user.name', 'cli-test']);
-  g(['add', '-A']);
-  g(['commit', '-qm', 'plugin v1']);
-  const r = await run(['plugin', 'install', 'receipt-plugin', '--repo', repoDir, '--yes'], { home });
-  assert.equal(r.code, 0, r.stderr + r.stdout);
-  assert.match(r.stdout, /^ {2}script: lintAll \(shell/m);
-  assert.match(r.stdout, /^ {2}script: tidy \(node/m);
-  assert.match(r.stdout, /^ {2}2 scripts \(node 1, shell 1\) · 2 cases$/m);
-  assert.doesNotMatch(r.stdout, /python not found/, 'no python script -> no notice');
-  assert.match((await run(['plugin', 'list'], { home })).stdout, /2 scripts/);
 });
 
 test('the receipt carries "python not found" when a python script ships and the host has none — a notice, never a block', async () => {

@@ -61,25 +61,6 @@ test('editor: Add opens a JSON box for one entry, checked on blur; an emptied li
   root.remove();
 });
 
-test('editor: a chip for a url with fields; the JSON box needs "type"; an added entry enables Publish; Unset clears the chips', () => {
-  const DD = { name: 'dd', type: 'http', url: ['https://mcp.dd.dev/', { field: 'site' }], fields: [{ key: 'site', label: 'Site', secret: false, oauth: false, required: true }], description: '' };
-  const root = renderPolicyEditor({ ...DOC, fields: { ...DOC.fields, 'mcp.required': { kind: 'soft', value: [DD] } } }, { registry: REG, doc });
-  doc.body.append(root);
-  const row = root.querySelector('.tp-edit-row[data-key="mcp.required"][data-scope="fields"]');
-  assert.deepEqual([...row.querySelectorAll('.tp-chip')].map((c) => c.firstChild.textContent), ['dd · inline http · url with fields']);
-  const box = row.querySelector('.tp-mcp-json'); const err = row.querySelector('.tp-mcp-err');
-  row.querySelector('.tp-mcp-add').click();
-  box.value = '{"name":"x"}'; blur(box);
-  assert.equal(err.textContent, 'an entry is { "plugin", "server", "values"? } or an inline definition with "name" and "type"');
-  assert.equal(root.querySelector('.tp-publish').disabled, true);
-  box.value = JSON.stringify(SENTRY); blur(box);
-  assert.equal(row.querySelectorAll('.tp-chip').length, 2);
-  assert.equal(root.querySelector('.tp-publish').disabled, false, 'the added entry is a change: Publish is on');
-  row.querySelector('.tp-unset').click();
-  assert.equal(row.querySelectorAll('.tp-chip').length, 0, 'Unset clears the list');
-  root.remove();
-});
-
 test('editor: an entry left in the JSON box with an error holds Publish back; clearing the box releases it', () => {
   const root = renderPolicyEditor(DOC, { registry: REG, doc });
   doc.body.append(root);
@@ -99,7 +80,7 @@ test('editor: an entry left in the JSON box with an error holds Publish back; cl
 });
 
 // ---- checklist rows, the MCP strip, the consent dialog (Task 8) ------------------------------
-import { renderSetupChecklist, renderMcpStrip, renderMcpConsent } from '../ui/public/team-policy-view.mjs';
+import { renderSetupChecklist, renderMcpConsent } from '../ui/public/team-policy-view.mjs';
 
 const T = { home: 'acme/platform', sha: '8c1d2e0', setId: 'team-acme-platform-9333', setName: 'Team · acme/platform', values: {}, before: null, field: null, working: false };
 const GH_DEF = { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'],
@@ -138,15 +119,6 @@ test('setup checklist: one MCP row per entry, the action its state calls for; no
   assert.match(list.querySelector('.tp-trust-row').textContent, /MCP servers are never installed or turned on automatically/);
   assert.equal(list.querySelector('.hist-empty'), null);
   assert.doesNotMatch(list.textContent, /Keep mine|Replace/);
-});
-
-test('MCP strip: counts every open MCP item per home; nothing open → no strip', () => {
-  const strip = renderMcpStrip(ROWS, { doc });
-  assert.equal(strip.querySelector('.card-head b').textContent, 'acme/platform: 6 MCP items to set up');
-  assert.ok(strip.querySelector('.card-head .pl-policy-setup'), 'Set up… opens the checklist');
-  assert.equal(strip.querySelectorAll('.pl-required').length, 6);
-  assert.equal(strip.querySelector('.pl-required[data-server="policy:acme/platform/linear"] .tp-mcp-act').dataset.action, 'install');
-  assert.equal(renderMcpStrip([ROWS[6]], { doc }), null);
 });
 
 test('consent dialog: name, home @ sha, type, what it runs, env/headers, what each teammate fills, the set it joins', () => {

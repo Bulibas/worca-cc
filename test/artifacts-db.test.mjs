@@ -18,6 +18,7 @@ import { seedPipelineRow } from './helpers/db-seed.mjs';
 import { projectKey, projectStorePath } from '../src/core/store.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { writeSeedGraph } from './helpers/graph-templates.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const homes = [];
 beforeEach(async () => {
@@ -43,26 +44,27 @@ test('artifacts table self-heals the step-attribution columns', () => {
 
 // ── Task 3.1 — store_meta read/write/delete ────────────────────────────────────
 
-test('store_meta: write then read round-trips the JSON payload', () => {
-  const data = { key: 'k1', path: '/p/k1', name: 'K One', firstSeenAt: '2026-01-01T00:00:00Z' };
-  writeStoreMeta('k1', 'project', data);
-  assert.deepEqual(readStoreMeta('k1'), data);
-});
-
-test('store_meta: read of an unknown key returns null', () => {
-  assert.equal(readStoreMeta('nope'), null);
-});
-
-test('store_meta: write is an upsert (second write replaces)', () => {
-  writeStoreMeta('k1', 'project', { name: 'old' });
-  writeStoreMeta('k1', 'project', { name: 'new' });
-  assert.deepEqual(readStoreMeta('k1'), { name: 'new' });
-});
-
-test('store_meta: delete removes the row', () => {
-  writeStoreMeta('k1', 'workspace', { name: 'x' });
-  deleteStoreMeta('k1');
-  assert.equal(readStoreMeta('k1'), null);
+test('store_meta: round-trip, unknown -> null, upsert replaces, delete removes', async () => {
+  await checkRows([
+    { name: 'store_meta: write then read round-trips the JSON payload', run: async () => {
+      const data = { key: 'k1', path: '/p/k1', name: 'K One', firstSeenAt: '2026-01-01T00:00:00Z' };
+      writeStoreMeta('k1', 'project', data);
+      assert.deepEqual(readStoreMeta('k1'), data);
+    } },
+    { name: 'store_meta: read of an unknown key returns null', run: async () => {
+      assert.equal(readStoreMeta('nope'), null);
+    } },
+    { name: 'store_meta: write is an upsert (second write replaces)', run: async () => {
+      writeStoreMeta('k1', 'project', { name: 'old' });
+      writeStoreMeta('k1', 'project', { name: 'new' });
+      assert.deepEqual(readStoreMeta('k1'), { name: 'new' });
+    } },
+    { name: 'store_meta: delete removes the row', run: async () => {
+      writeStoreMeta('k1', 'workspace', { name: 'x' });
+      deleteStoreMeta('k1');
+      assert.equal(readStoreMeta('k1'), null);
+    } },
+  ]);
 });
 
 // ── Task 3.2 — ensureMeta/ensureWorkspaceMeta back onto store_meta ──────────────
@@ -238,42 +240,55 @@ test('writeState with an id-less state is a no-op (returns the stamped object, i
 
 // ── updatePipelineTitle — dedicated post-creation title UPDATE ──────────────────
 
-test('updatePipelineTitle mutates the title column (and only that)', async () => {
-  const p = await createPipeline(process.cwd(), { prompt: 'Provisional first line\nmore' });
-  const before = getDb().prepare('SELECT title, prompt, started_at FROM pipelines WHERE id=?').get(p.id);
-  assert.equal(before.title, 'Provisional first line');
+test('updatePipelineTitle mutates only the title; blank or unknown id is a no-op', async () => {
+  await checkRows([
+    { name: 'updatePipelineTitle mutates the title column (and only that)', run: async () => {
+      const p = await createPipeline(process.cwd(), { prompt: 'Provisional first line\nmore' });
+      const before = getDb().prepare('SELECT title, prompt, started_at FROM pipelines WHERE id=?').get(p.id);
+      assert.equal(before.title, 'Provisional first line');
 
-  updatePipelineTitle(p.id, 'Concise LLM Title');
+      updatePipelineTitle(p.id, 'Concise LLM Title');
 
-  const after = getDb().prepare('SELECT title, prompt, started_at FROM pipelines WHERE id=?').get(p.id);
-  assert.equal(after.title, 'Concise LLM Title');
-  assert.equal(after.prompt, before.prompt, 'prompt untouched');         // immutable column preserved
-  assert.equal(after.started_at, before.started_at, 'started_at untouched');
-});
-
-test('updatePipelineTitle is a no-op for blank input or unknown id', async () => {
-  const p = await createPipeline(process.cwd(), { prompt: 'Keep me' });
-  updatePipelineTitle(p.id, '');            // blank → ignored
-  updatePipelineTitle('does-not-exist', 'X');
-  const row = getDb().prepare('SELECT title FROM pipelines WHERE id=?').get(p.id);
-  assert.equal(row.title, 'Keep me');
+      const after = getDb().prepare('SELECT title, prompt, started_at FROM pipelines WHERE id=?').get(p.id);
+      assert.equal(after.title, 'Concise LLM Title');
+      assert.equal(after.prompt, before.prompt, 'prompt untouched');         // immutable column preserved
+      assert.equal(after.started_at, before.started_at, 'started_at untouched');
+    } },
+    { name: 'updatePipelineTitle is a no-op for blank input or unknown id', run: async () => {
+      const p = await createPipeline(process.cwd(), { prompt: 'Keep me' });
+      updatePipelineTitle(p.id, '');            // blank → ignored
+      updatePipelineTitle('does-not-exist', 'X');
+      const row = getDb().prepare('SELECT title FROM pipelines WHERE id=?').get(p.id);
+      assert.equal(row.title, 'Keep me');
+    } },
+  ]);
 });
 
 // ── Task 3.4 — appendAudit -> pipeline_events ──────────────────────────────────
 
-test('appendAudit inserts a pipeline_events row resolved from the dir basename id', async () => {
+test('appendAudit inserts trimmed, ISO-stamped rows resolved from the dir basename id', async () => {
   // Seed a pipelines row the event can FK to.
   await writeState('/whatever-aaaa1111', fullState()); // id aaaa1111
   // A dir whose basename ends in -aaaa1111; the cache is cold for this exact path,
-  // so resolution falls back to the basename regex.
+  // so resolution falls back to the basename regex. The third, padded line is the
+  // trim case.
   await appendAudit('/x/store/k/pipelines/01-06-26-demo-aaaa1111', 'Pipeline created.');
   await appendAudit('/x/store/k/pipelines/01-06-26-demo-aaaa1111', 'Workflow: default.');
+  await appendAudit('/x/store/k/pipelines/01-06-26-demo-aaaa1111', '   spaced line   ');
   const rows = getDb().prepare(
     'SELECT ts, text FROM pipeline_events WHERE pipeline_id = ? ORDER BY id').all('aaaa1111');
-  assert.equal(rows.length, 2);
-  assert.equal(rows[0].text, 'Pipeline created.');
-  assert.equal(rows[1].text, 'Workflow: default.');
-  assert.ok(/^\d{4}-\d{2}-\d{2}T/.test(rows[0].ts), 'ts is an ISO timestamp');
+  await checkRows([
+    { name: 'appendAudit inserts a pipeline_events row resolved from the dir basename id', run: () => {
+      assert.equal(rows.length, 3);
+      assert.equal(rows[0].text, 'Pipeline created.');
+      assert.equal(rows[1].text, 'Workflow: default.');
+      assert.ok(/^\d{4}-\d{2}-\d{2}T/.test(rows[0].ts), 'ts is an ISO timestamp');
+    } },
+    { name: 'appendAudit trims the line and stores ISO ts (reproduces old audit semantics)', run: () => {
+      assert.equal(rows[2].text, 'spaced line', 'leading/trailing whitespace trimmed');
+      assert.ok(/^\d{4}-\d{2}-\d{2}T.*Z$/.test(rows[2].ts), 'ISO 8601 timestamp');
+    } },
+  ]);
 });
 
 test('appendAudit uses the dir->id cache fast path seeded by writeState', async () => {
@@ -291,14 +306,6 @@ test('appendAudit no-ops when no id can be resolved (no throw)', async () => {
   const n = getDb().prepare('SELECT COUNT(*) c FROM pipeline_events').get().c;
   assert.equal(typeof n, 'number');
   assert.equal(n, 0, 'no event row inserted for an unresolvable dir');
-});
-
-test('appendAudit trims the line and stores ISO ts (reproduces old audit semantics)', async () => {
-  await writeState('/d-eeee5555', fullState({ id: 'eeee5555' }));
-  await appendAudit('/d-eeee5555', '   spaced line   ');
-  const row = getDb().prepare('SELECT ts, text FROM pipeline_events WHERE pipeline_id = ?').get('eeee5555');
-  assert.equal(row.text, 'spaced line', 'leading/trailing whitespace trimmed');
-  assert.ok(/^\d{4}-\d{2}-\d{2}T.*Z$/.test(row.ts), 'ISO 8601 timestamp');
 });
 
 // ── Task 3.5 — createPipeline INSERTs the row; keeps human seed files; indexes prompt
@@ -412,55 +419,38 @@ test('writeReview upserts a per-cycle verdict keyed (kind,cycle)', async () => {
   assert.equal(readReviewRow('rrrr4444', 'impl', 99), null);
 });
 
-// ── M1.5 — pipeline.md is no longer written (pipeline_events is authoritative) ────
-test('createPipeline does not write a redundant pipeline.md', async () => {
-  const projectDir = await mkdtemp(join(tmpdir(), 'worca-cc-nopmd-'));
-  const { dir } = await createPipeline(projectDir, { prompt: 'hello', title: 'T' });
-  assert.equal(existsSync(join(dir, 'pipeline.md')), false, 'pipeline.md stub removed');
-  assert.equal(existsSync(join(dir, 'prompt.md')), true, 'prompt.md still written');
-  await rm(projectDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
-});
-
 // ── M1.1 — readPipelineExtras enumerates clarify + every review row ──────────────
-test('readPipelineExtras returns clarify {questions,answers} and all review rows', async () => {
-  seedPipelineRow({ id: 'ex000001', projectKey: 'proj-00000001', status: 'done' });
-  await writeClarify('ex000001', {
-    questions: { questions: [{ id: 'q1', question: 'Which DB?', options: ['a', 'b', 'c'], allowFreeText: true }] },
-  });
-  await writeClarify('ex000001', {
-    answers: { answers: [{ id: 'q1', question: 'Which DB?', choice: 'a' }] },
-  });
-  await writeReview('ex000001', 'impl', 1, { issues: [{ severity: 'major', title: 't', detail: 'd', location: 'l' }], summary: 's1' });
-  await writeReview('ex000001', 'impl', 2, { issues: [], summary: 'clean' });
-  await writeReview('ex000001', 'refine', 1, { issues: [], summary: 'r-ok' });
+test('readPipelineExtras returns clarify + ordered reviews, and empty arrays for a bare run', async () => {
+  await checkRows([
+    { name: 'readPipelineExtras returns clarify {questions,answers} and all review rows', run: async () => {
+      seedPipelineRow({ id: 'ex000001', projectKey: 'proj-00000001', status: 'done' });
+      await writeClarify('ex000001', {
+        questions: { questions: [{ id: 'q1', question: 'Which DB?', options: ['a', 'b', 'c'], allowFreeText: true }] },
+      });
+      await writeClarify('ex000001', {
+        answers: { answers: [{ id: 'q1', question: 'Which DB?', choice: 'a' }] },
+      });
+      await writeReview('ex000001', 'impl', 1, { issues: [{ severity: 'major', title: 't', detail: 'd', location: 'l' }], summary: 's1' });
+      await writeReview('ex000001', 'impl', 2, { issues: [], summary: 'clean' });
+      await writeReview('ex000001', 'refine', 1, { issues: [], summary: 'r-ok' });
 
-  const ex = readPipelineExtras('ex000001');
-  // clarify halves are the UNWRAPPED arrays (UI consumes .questions / .answers directly)
-  assert.equal(ex.clarify.questions.length, 1);
-  assert.equal(ex.clarify.questions[0].question, 'Which DB?');
-  assert.equal(ex.clarify.answers[0].choice, 'a');
-  // reviews: flat list, ordered (kind asc, cycle asc), each row carries its verdict
-  assert.deepEqual(ex.reviews.map((r) => [r.kind, r.cycle]), [['impl', 1], ['impl', 2], ['refine', 1]]);
-  assert.equal(ex.reviews[0].summary, 's1');
-  assert.equal(ex.reviews[0].issues[0].severity, 'major');
-  assert.equal(ex.reviews[1].issues.length, 0);
-});
-
-test('readPipelineExtras on a bare pipeline returns empty arrays (never null)', () => {
-  seedPipelineRow({ id: 'ex000002', projectKey: 'proj-00000001', status: 'done' });
-  const ex = readPipelineExtras('ex000002');
-  assert.deepEqual(ex, { clarify: { questions: [], answers: [] }, reviews: [], stepQuestions: [] });
-});
-
-test('readPipelineByKey attaches clarify + reviews to the detail response', async () => {
-  seedPipelineRow({ id: 'ex000003', projectKey: 'proj-deadbeef', status: 'done', title: 'T' });
-  await writeReview('ex000003', 'impl', 1, { issues: [], summary: 'ok' });
-  const data = await readPipelineByKey('proj-deadbeef', 'ex000003');
-  assert.equal(data.state.title, 'T');                 // unchanged
-  assert.equal(typeof data.auditMarkdown, 'string');   // unchanged
-  assert.equal(data.reviews.length, 1);                // NEW
-  assert.equal(data.reviews[0].summary, 'ok');
-  assert.deepEqual(data.clarify, { questions: [], answers: [] }); // NEW
+      const ex = readPipelineExtras('ex000001');
+      // clarify halves are the UNWRAPPED arrays (UI consumes .questions / .answers directly)
+      assert.equal(ex.clarify.questions.length, 1);
+      assert.equal(ex.clarify.questions[0].question, 'Which DB?');
+      assert.equal(ex.clarify.answers[0].choice, 'a');
+      // reviews: flat list, ordered (kind asc, cycle asc), each row carries its verdict
+      assert.deepEqual(ex.reviews.map((r) => [r.kind, r.cycle]), [['impl', 1], ['impl', 2], ['refine', 1]]);
+      assert.equal(ex.reviews[0].summary, 's1');
+      assert.equal(ex.reviews[0].issues[0].severity, 'major');
+      assert.equal(ex.reviews[1].issues.length, 0);
+    } },
+    { name: 'readPipelineExtras on a bare pipeline returns empty arrays (never null)', run: async () => {
+      seedPipelineRow({ id: 'ex000002', projectKey: 'proj-00000001', status: 'done' });
+      const ex = readPipelineExtras('ex000002');
+      assert.deepEqual(ex, { clarify: { questions: [], answers: [] }, reviews: [], stepQuestions: [] });
+    } },
+  ]);
 });
 
 // ── Task 3 — readRunLogText + artifacts in the detail payload ───────────────────

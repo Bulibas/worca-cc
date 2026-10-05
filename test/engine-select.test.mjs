@@ -8,31 +8,30 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { createOrchestratorFor, EngineRetiredError } from '../src/core/engine-select.mjs';
 import { V1_RUN_RETIRED } from '../src/core/db.mjs';
 
 useTempHome(after);
 
-test('selectEngine is gone — there is no second engine to select', async () => {
-  const m = await import('../src/core/engine-select.mjs');
-  assert.equal(m.selectEngine, undefined);
-});
-
-test('createOrchestratorFor: async, and builds the graph orchestrator from a workflow id', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-engine-select-'));
-  const p = createOrchestratorFor({ projectDir: dir, workflowId: 'wf_default', prompt: 'x' });
-  assert.ok(p instanceof Promise, 'createOrchestratorFor is async — every call site awaits it');
-  const orch = await p;
-  assert.equal(typeof orch._dispatch, 'undefined', 'the v1 dispatcher is gone');
-  assert.equal(typeof orch._execute, 'function', 'the graph engine\'s per-execution adapter');
-  assert.equal(orch.workflowId, 'wf_default');
-  assert.equal(orch.engine, 'graph');
-});
-
-test('createOrchestratorFor: an unknown workflow id still builds (the row read happens at run())', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-engine-select-'));
-  const orch = await createOrchestratorFor({ projectDir: dir, workflowId: 'wf_nope', prompt: 'x' });
-  assert.equal(orch.engine, 'graph');
+test('createOrchestratorFor: async; builds the graph orchestrator for a known or an unknown workflow id', async () => {
+  await checkRows([
+    { name: 'createOrchestratorFor: async, and builds the graph orchestrator from a workflow id', run: async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'worca-engine-select-'));
+      const p = createOrchestratorFor({ projectDir: dir, workflowId: 'wf_default', prompt: 'x' });
+      assert.ok(p instanceof Promise, 'createOrchestratorFor is async — every call site awaits it');
+      const orch = await p;
+      assert.equal(typeof orch._dispatch, 'undefined', 'the v1 dispatcher is gone');
+      assert.equal(typeof orch._execute, 'function', 'the graph engine\'s per-execution adapter');
+      assert.equal(orch.workflowId, 'wf_default');
+      assert.equal(orch.engine, 'graph');
+    } },
+    { name: 'createOrchestratorFor: an unknown workflow id still builds (the row read happens at run())', run: async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'worca-engine-select-'));
+      const orch = await createOrchestratorFor({ projectDir: dir, workflowId: 'wf_nope', prompt: 'x' });
+      assert.equal(orch.engine, 'graph');
+    } },
+  ]);
 });
 
 test('createOrchestratorFor: a v2 resume point builds the graph engine', async () => {

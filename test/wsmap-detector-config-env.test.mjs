@@ -8,6 +8,7 @@ import { DETECTORS } from '../src/core/workspace-map/detectors/index.mjs';
 import detector, { configPairs } from '../src/core/workspace-map/detectors/config-env.mjs';
 import deployCompose from '../src/core/workspace-map/detectors/deploy-compose.mjs';
 import deployK8s from '../src/core/workspace-map/detectors/deploy-k8s.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const DOTENV = `# local dev
 export BILLING_URL=http://billing:8080/api/v1
@@ -83,44 +84,40 @@ before(async () => {
 after(() => ws.cleanup());
 const member = (k) => ws.members.find((m) => m.key === k);
 
-test('config-env (.env, CRLF): URLs → service + http, DB URL → db, bare host key → heuristic service', async () => {
+test('config-env (member web): .env URLs/db/topics/placeholders, local-dev peers, .properties alias, test-path files', async () => {
   const r = await runDetector(detector, member('web'), ws.members);
-  const env = r.facts.filter((f) => f.file === '.env');
-  assert.deepEqual(env.filter((f) => f.kind === 'service').map((f) => [f.key, f.target, f.confidence]).sort(), [['billing', 'billing:8080', 'exact'], ['cache', 'cache', 'heuristic']]);
-  assert.deepEqual(env.filter((f) => f.kind === 'http').map((f) => [f.key, f.target, f.line, f.detail]), [['/api/v1', 'billing:8080', 2, 'BILLING_URL'], ['/ledger/v1', 'LEDGER_URL', 10, 'LEDGER_URL']]);
-  assert.equal(env.find((f) => f.key === '/ledger/v1').confidence, 'heuristic', 'no usable host: the key names the peer (P1 envStems)');
-  const db = env.find((f) => f.kind === 'db');
-  // Raw detector output: the match cites the URL as written; P1's extract redacts it centrally.
-  assert.deepEqual([db.key, db.target, db.match], ['db:shop', 'db:5432', 'postgres://app:s3cret@db:5432/shop']);
-  assert.ok(!db.key.includes('s3cret') && !db.target.includes('s3cret'), 'keys and targets never carry credentials');
-  assertEvidence(member('web'), r);
-});
-
-test('config-env (.env): topic keys, SQS queue URLs; placeholders unresolved; plain values ignored', async () => {
-  const r = await runDetector(detector, member('web'), ws.members);
-  assert.deepEqual(r.facts.filter((f) => f.kind === 'topic').map((f) => [f.key, f.dir, f.confidence]), [['orders.created', 'consumes', 'heuristic'], ['invoice-jobs', 'consumes', 'exact']]);
-  assert.deepEqual(r.unresolved.map((u) => [u.raw, u.reason, u.line]), [['ORDERS_URL=${ORDERS_URL}', 'placeholder', 5]]);
-  assert.ok(!r.facts.some((f) => f.key.includes('Zq8vN3pLx2') || f.match.includes('Zq8vN3pLx2')), 'a value under a secret-named key (QUEUE_PASSWORD) is never a topic');
-  assert.deepEqual(r.facts.filter((f) => f.file === 'legacy.env').map((f) => [f.kind, f.key]), [['service', 'legacy'], ['http', '/v1']], 'a \\r\\r\\n file keeps its pairs');
-});
-
-test('config-env: two local-dev peers behind one path keep a fact each (one per file, dir, key and target host)', async () => {
-  const r = await runDetector(detector, member('web'), ws.members);
-  assert.deepEqual(r.facts.filter((f) => f.file === 'dev.env').map((f) => [f.kind, f.key, f.target, f.line]), [
-    ['http', '/api', 'BILLING_API_URL', 1], ['http', '/api', 'LEDGER_API_URL', 2], ['service', 'orders', 'orders:8080', 3], ['http', '/api', 'orders:8080', 3],
-  ], 'ORDERS_ALT_URL (orders:9090) repeats a host already cited: no second fact');
-});
-
-test('config-env (.properties): spring.application.name alias; endpoint URL consumes', async () => {
-  const r = await runDetector(detector, member('web'), ws.members);
-  assert.deepEqual(r.aliases.map((a) => [a.value, a.source]), [['web', 'spring']]);
-  assert.deepEqual(r.facts.filter((f) => f.file.endsWith('application.properties')).map((f) => [f.kind, f.key]), [['service', 'payments.acme.internal'], ['http', '/charge']]);
-});
-
-test('config-env: test-path env files still emit facts, marked test', async () => {
-  const r = await runDetector(detector, member('web'), ws.members);
-  const t = r.facts.filter((f) => f.file === 'test/.env.test');
-  assert.ok(t.length === 1 && t[0].test === true);
+  await checkRows([
+    { name: 'config-env (.env, CRLF): URLs → service + http, DB URL → db, bare host key → heuristic service', run: () => {
+      const env = r.facts.filter((f) => f.file === '.env');
+      assert.deepEqual(env.filter((f) => f.kind === 'service').map((f) => [f.key, f.target, f.confidence]).sort(), [['billing', 'billing:8080', 'exact'], ['cache', 'cache', 'heuristic']]);
+      assert.deepEqual(env.filter((f) => f.kind === 'http').map((f) => [f.key, f.target, f.line, f.detail]), [['/api/v1', 'billing:8080', 2, 'BILLING_URL'], ['/ledger/v1', 'LEDGER_URL', 10, 'LEDGER_URL']]);
+      assert.equal(env.find((f) => f.key === '/ledger/v1').confidence, 'heuristic', 'no usable host: the key names the peer (P1 envStems)');
+      const db = env.find((f) => f.kind === 'db');
+      // Raw detector output: the match cites the URL as written; P1's extract redacts it centrally.
+      assert.deepEqual([db.key, db.target, db.match], ['db:shop', 'db:5432', 'postgres://app:s3cret@db:5432/shop']);
+      assert.ok(!db.key.includes('s3cret') && !db.target.includes('s3cret'), 'keys and targets never carry credentials');
+      assertEvidence(member('web'), r);
+    } },
+    { name: 'config-env (.env): topic keys, SQS queue URLs; placeholders unresolved; plain values ignored', run: () => {
+      assert.deepEqual(r.facts.filter((f) => f.kind === 'topic').map((f) => [f.key, f.dir, f.confidence]), [['orders.created', 'consumes', 'heuristic'], ['invoice-jobs', 'consumes', 'exact']]);
+      assert.deepEqual(r.unresolved.map((u) => [u.raw, u.reason, u.line]), [['ORDERS_URL=${ORDERS_URL}', 'placeholder', 5]]);
+      assert.ok(!r.facts.some((f) => f.key.includes('Zq8vN3pLx2') || f.match.includes('Zq8vN3pLx2')), 'a value under a secret-named key (QUEUE_PASSWORD) is never a topic');
+      assert.deepEqual(r.facts.filter((f) => f.file === 'legacy.env').map((f) => [f.kind, f.key]), [['service', 'legacy'], ['http', '/v1']], 'a \\r\\r\\n file keeps its pairs');
+    } },
+    { name: 'config-env: two local-dev peers behind one path keep a fact each (one per file, dir, key and target host)', run: () => {
+      assert.deepEqual(r.facts.filter((f) => f.file === 'dev.env').map((f) => [f.kind, f.key, f.target, f.line]), [
+        ['http', '/api', 'BILLING_API_URL', 1], ['http', '/api', 'LEDGER_API_URL', 2], ['service', 'orders', 'orders:8080', 3], ['http', '/api', 'orders:8080', 3],
+      ], 'ORDERS_ALT_URL (orders:9090) repeats a host already cited: no second fact');
+    } },
+    { name: 'config-env (.properties): spring.application.name alias; endpoint URL consumes', run: () => {
+      assert.deepEqual(r.aliases.map((a) => [a.value, a.source]), [['web', 'spring']]);
+      assert.deepEqual(r.facts.filter((f) => f.file.endsWith('application.properties')).map((f) => [f.kind, f.key]), [['service', 'payments.acme.internal'], ['http', '/charge']]);
+    } },
+    { name: 'config-env: test-path env files still emit facts, marked test', run: () => {
+      const t = r.facts.filter((f) => f.file === 'test/.env.test');
+      assert.ok(t.length === 1 && t[0].test === true);
+    } },
+  ]);
 });
 
 test('config-env (Spring yml, multi-doc): alias, datasource db, Kafka default topic, Cloud Stream bindings by direction', async () => {
@@ -136,40 +133,44 @@ test('config-env (Spring yml, multi-doc): alias, datasource db, Kafka default to
   assertEvidence(member('billing'), r);
 });
 
-test('config-env (appsettings JSON with comments + trailing commas): ADO.NET connection string → db; URL → service/http', async () => {
+test('config-env (member orders): appsettings JSON, malformed YAML unresolved, compose not claimed', async () => {
   const r = await runDetector(detector, member('orders'), ws.members);
-  const json = r.facts.filter((f) => f.file === 'appsettings.Development.json');
-  assert.deepEqual(json.map((f) => [f.kind, f.key, f.line]), [['db', 'db:Orders', 4], ['service', 'catalog', 6], ['http', '/api', 6]]);
-  assert.equal(json[0].match, 'Database=Orders');
-  assert.deepEqual(r.facts.filter((f) => f.file === 'appsettings.Production.json').map((f) => f.key), ['db:OrdersProd', 'catalog', '/api'], 'a BOM-prefixed file (Visual Studio) parses');
-  assertEvidence(member('orders'), r);
+  await checkRows([
+    { name: 'config-env (appsettings JSON with comments + trailing commas): ADO.NET connection string → db; URL → service/http', run: () => {
+      const json = r.facts.filter((f) => f.file === 'appsettings.Development.json');
+      assert.deepEqual(json.map((f) => [f.kind, f.key, f.line]), [['db', 'db:Orders', 4], ['service', 'catalog', 6], ['http', '/api', 6]]);
+      assert.equal(json[0].match, 'Database=Orders');
+      assert.deepEqual(r.facts.filter((f) => f.file === 'appsettings.Production.json').map((f) => f.key), ['db:OrdersProd', 'catalog', '/api'], 'a BOM-prefixed file (Visual Studio) parses');
+      assertEvidence(member('orders'), r);
+    } },
+    { name: 'config-env: malformed config YAML → unresolved parse error; compose files are not claimed', run: () => {
+      assert.ok(r.unresolved.some((u) => u.file === 'config/broken.yaml' && u.reason.startsWith('parse error')));
+      assert.equal(detector.claims('docker-compose.yml'), false);
+      assert.equal(detector.claims('config/docker-compose.yml'), false);
+      assert.equal(detector.claims('config/docker-compose-dev.yml'), false);
+    } },
+  ]);
 });
 
-test('config-env: a credential word anywhere in a key keeps its value out of topic keys; an attribute key names no topic', async () => {
+test('config-env (member cloud): credential-word keys, specs/served config/samples skipped, lb:// routes', async () => {
   const r = await runDetector(detector, member('cloud'), ws.members);
-  assert.deepEqual(r.facts.filter((f) => f.kind === 'topic').map((f) => f.key).sort(), ['auth.logins', 'auth.logins.v2', 'auth.password-reset', 'auth.session-expired', 'user.password.reset', 'user.password.reset.v2', 'user.signups'], 'an event about a credential (password-reset) is a topic');
-  assert.ok(!r.facts.some((f) => /Zq9/.test(`${f.key} ${f.match} ${f.target ?? ''}`)), 'no value under …_HMAC, …_PASSPHRASE, …_PASSWORD_2, apikey.v2, …_SEED or …_PSK becomes a key');
-  assert.deepEqual(r.facts.filter((f) => f.file === '.env').map((f) => [f.kind, f.key, f.confidence]).sort(), [['service', 'rabbitmq', 'heuristic'], ['topic', 'auth.logins', 'heuristic'], ['topic', 'auth.logins.v2', 'heuristic'], ['topic', 'auth.password-reset', 'heuristic'], ['topic', 'auth.session-expired', 'heuristic'], ['topic', 'user.password.reset', 'heuristic'], ['topic', 'user.password.reset.v2', 'heuristic'], ['topic', 'user.signups', 'heuristic']], 'QUEUE_HOST names a host');
-});
-
-test('config-env: specs, served config and samples are not read; a nested module names the member only multi-word; lb:// routes; an escaped value cites its key', async () => {
-  const r = await runDetector(detector, member('cloud'), ws.members);
-  assert.deepEqual(r.aliases.map((a) => a.value), ['customers-service'], 'gateway/…: a nested module\'s single-word name would claim every gateway.* host');
-  assert.deepEqual(r.facts.filter((f) => f.kind === 'service').map((f) => [f.key, f.file]).sort(), [['billing-api', 'appsettings.json'], ['customers-service', 'gateway/src/main/resources/application.yml'], ['rabbitmq', '.env']]);
-  assert.equal(r.facts.find((f) => f.key === 'billing-api').match, 'Billing', 'a JSON-escaped value is not on its line: the key as written is cited');
-  assert.equal(detector.claims('docs/.env.example'), false);
-  assert.equal(detector.claims('config-server/src/main/resources/shared/application.yml'), false);
-  assert.equal(detector.claims('svc/src/main/resources/config/application.yml'), true);
-  assert.ok(!r.facts.some((f) => f.file === 'config/openapi.yaml' || f.file === 'src/main/resources/application.yml'), 'a spec under config/ and `prefer-ip-address: true` give nothing');
-  assertEvidence(member('cloud'), r);
-});
-
-test('config-env: malformed config YAML → unresolved parse error; compose files are not claimed', async () => {
-  const r = await runDetector(detector, member('orders'), ws.members);
-  assert.ok(r.unresolved.some((u) => u.file === 'config/broken.yaml' && u.reason.startsWith('parse error')));
-  assert.equal(detector.claims('docker-compose.yml'), false);
-  assert.equal(detector.claims('config/docker-compose.yml'), false);
-  assert.equal(detector.claims('config/docker-compose-dev.yml'), false);
+  await checkRows([
+    { name: 'config-env: a credential word anywhere in a key keeps its value out of topic keys; an attribute key names no topic', run: () => {
+      assert.deepEqual(r.facts.filter((f) => f.kind === 'topic').map((f) => f.key).sort(), ['auth.logins', 'auth.logins.v2', 'auth.password-reset', 'auth.session-expired', 'user.password.reset', 'user.password.reset.v2', 'user.signups'], 'an event about a credential (password-reset) is a topic');
+      assert.ok(!r.facts.some((f) => /Zq9/.test(`${f.key} ${f.match} ${f.target ?? ''}`)), 'no value under …_HMAC, …_PASSPHRASE, …_PASSWORD_2, apikey.v2, …_SEED or …_PSK becomes a key');
+      assert.deepEqual(r.facts.filter((f) => f.file === '.env').map((f) => [f.kind, f.key, f.confidence]).sort(), [['service', 'rabbitmq', 'heuristic'], ['topic', 'auth.logins', 'heuristic'], ['topic', 'auth.logins.v2', 'heuristic'], ['topic', 'auth.password-reset', 'heuristic'], ['topic', 'auth.session-expired', 'heuristic'], ['topic', 'user.password.reset', 'heuristic'], ['topic', 'user.password.reset.v2', 'heuristic'], ['topic', 'user.signups', 'heuristic']], 'QUEUE_HOST names a host');
+    } },
+    { name: 'config-env: specs, served config and samples are not read; a nested module names the member only multi-word; lb:// routes; an escaped value cites its key', run: () => {
+      assert.deepEqual(r.aliases.map((a) => a.value), ['customers-service'], 'gateway/…: a nested module\'s single-word name would claim every gateway.* host');
+      assert.deepEqual(r.facts.filter((f) => f.kind === 'service').map((f) => [f.key, f.file]).sort(), [['billing-api', 'appsettings.json'], ['customers-service', 'gateway/src/main/resources/application.yml'], ['rabbitmq', '.env']]);
+      assert.equal(r.facts.find((f) => f.key === 'billing-api').match, 'Billing', 'a JSON-escaped value is not on its line: the key as written is cited');
+      assert.equal(detector.claims('docs/.env.example'), false);
+      assert.equal(detector.claims('config-server/src/main/resources/shared/application.yml'), false);
+      assert.equal(detector.claims('svc/src/main/resources/config/application.yml'), true);
+      assert.ok(!r.facts.some((f) => f.file === 'config/openapi.yaml' || f.file === 'src/main/resources/application.yml'), 'a spec under config/ and `prefer-ip-address: true` give nothing');
+      assertEvidence(member('cloud'), r);
+    } },
+  ]);
 });
 
 test('config-env: a counter or `pw` glued to a credential word keeps the value out of topic keys; an event word after it names a topic; Kafka brokers are services', async () => {
