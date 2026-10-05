@@ -59,7 +59,7 @@ const NORMAL_DENY = [
 // denied: agents' worktrees live in <home>/runs/<id>/ and artifacts in <home>/store/.
 const WORCA_STATE_PROTECTED = [
   '//**/worca-cc.db*', '//**/worca.db*',
-  '//**/.worca-cc/**/secrets.json',
+  '//**/.worca-cc/plugins/*/data/secrets.json',  // exact path: a broader secrets.json glob would also match a project's own file inside <home>/runs/<id>/
   '//**/.worca-cc/settings.json',
   '//**/.worca-cc/mcp/**',
 ];

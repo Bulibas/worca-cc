@@ -110,7 +110,7 @@ test('preset table snapshot — changing a preset is a deliberate, release-noted
     envAllowlist: [],
     protectedPaths: [
       '.env*', '*.pem', '*.key', 'id_rsa', 'id_ed25519', '*.p12', '*.pfx', '//run/secrets/**',
-      '//**/worca-cc.db*', '//**/worca.db*', '//**/.worca-cc/**/secrets.json',
+      '//**/worca-cc.db*', '//**/worca.db*', '//**/.worca-cc/plugins/*/data/secrets.json',
       '//**/.worca-cc/settings.json', '//**/.worca-cc/mcp/**',
     ],
     deny: [
@@ -129,7 +129,7 @@ test('preset table snapshot — changing a preset is a deliberate, release-noted
     envAllowlist: [],
     protectedPaths: [
       '.env*', '*.pem', '*.key', 'id_rsa', 'id_ed25519', '*.p12', '*.pfx', '//run/secrets/**',
-      '//**/worca-cc.db*', '//**/worca.db*', '//**/.worca-cc/**/secrets.json',
+      '//**/worca-cc.db*', '//**/worca.db*', '//**/.worca-cc/plugins/*/data/secrets.json',
       '//**/.worca-cc/settings.json', '//**/.worca-cc/mcp/**',
       '.npmrc', '.netrc', '*.tfstate*', '*.keystore', '*.jks',
       '**/secrets/**', '**/.git/config', '~/.git-credentials',
@@ -169,7 +169,8 @@ test('worca state: DB/secrets/MCP are Read+Edit denied; plugins etc. are Edit-on
   for (const r of ['Read(//**/worca-cc.db*)', 'Edit(//**/.worca-cc/mcp/**)', 'Edit(//**/.worca-cc/plugins/**)']) {
     assert.ok(rules.includes(r), `${r} present`);
   }
-  assert.ok(!rules.some((r) => r.startsWith('Read(') && r.includes('.worca-cc/plugins')), 'plugins stay readable');
+  const pluginReads = rules.filter((r) => r.startsWith('Read(') && r.includes('.worca-cc/plugins'));
+  assert.deepEqual(pluginReads, ['Read(//**/.worca-cc/plugins/*/data/secrets.json)'], 'plugins stay readable except their secrets');
 });
 
 test('worca state: runs/store/memory and ~/.claude/** are deliberately not denied', () => {
@@ -180,6 +181,16 @@ test('worca state: runs/store/memory and ~/.claude/** are deliberately not denie
       assert.notEqual(r, '~/.claude/**');
       assert.notEqual(r, 'Read(~/.claude/**)');
     }
+  }
+});
+
+test('worca state: plugin secrets are protected by exact path, not a blanket secrets.json match', () => {
+  // run worktrees live under <home>/runs/<id>/, so a `.worca-cc/**/secrets.json`
+  // glob would also deny a project's own secrets.json file.
+  for (const level of ['normal', 'secure']) {
+    const paths = GUARDRAIL_PRESETS[level].protectedPaths;
+    assert.ok(paths.includes('//**/.worca-cc/plugins/*/data/secrets.json'), `${level}: plugin secrets path`);
+    assert.ok(!paths.includes('//**/.worca-cc/**/secrets.json'), `${level}: no blanket secrets.json glob`);
   }
 });
 
