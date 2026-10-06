@@ -51,11 +51,20 @@ test('refused: alg none / HS256, unknown kid, junk, no email or sub', async () =
   assert.equal(await verify('not.a.jwt'), null);
   assert.equal(await verify(undefined), null);
   assert.equal(await verify(signIssuerJwt(key, { email: undefined, sub: undefined })), null);
+  assert.equal(await verify(signIssuerJwt(key, { email: undefined })), null, 'no email: would be attributed as local');
+  assert.equal(await verify(signIssuerJwt(key, { sub: undefined })), null);
 });
 
 test('a key of the wrong type for the alg is refused (RS256 header on an EC key)', async () => {
   const { verify } = make();
   assert.equal(await verify(signIssuerJwt(key, {}, { alg: 'RS256' })), null);
+});
+
+test('an ES256 token signed with a P-384 key is refused', async () => {
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-384' });
+  const p384 = { kid: 'es-384', privateKey, jwk: { ...publicKey.export({ format: 'jwk' }), kid: 'es-384', use: 'sig' } };
+  const { verify } = make({ keys: [p384] });
+  assert.equal(await verify(signIssuerJwt(p384)), null);
 });
 
 test('RS256 issuers work too', async () => {

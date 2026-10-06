@@ -12441,6 +12441,7 @@ if (isMain) {
   const shutdown = (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    console.log(`[worca-ui] stopping (${signal})`);
     // B2: pause the active runs first (bounded), so they come back paused with a resume point.
     drainServer({ reason: signal })
       .then(() => Promise.allSettled([channelHost.stop(), actions.stopAll(), terminals.closeAll()]))

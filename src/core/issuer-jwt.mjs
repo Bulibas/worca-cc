@@ -13,7 +13,7 @@ const REFETCH_MIN_MS = 30_000;
 const CLOCK_SKEW_S = 30;
 
 const ALGS = {
-  ES256: { hash: 'SHA256', kty: 'EC', dsaEncoding: 'ieee-p1363' },
+  ES256: { hash: 'SHA256', kty: 'EC', crv: 'P-256', dsaEncoding: 'ieee-p1363' },
   RS256: { hash: 'RSA-SHA256', kty: 'RSA' },
 };
 
@@ -48,7 +48,7 @@ export function createIssuerVerifier({ issuer, jwksUrl, audience, fetchImpl = fe
     for (const k of Array.isArray(body?.keys) ? body.keys : []) {
       if (typeof k?.kid !== 'string' || (k.kty !== 'EC' && k.kty !== 'RSA')) continue;
       if (k.use && k.use !== 'sig') continue;
-      try { next.set(k.kid, { kty: k.kty, key: createPublicKey({ key: k, format: 'jwk' }) }); } catch { /* skip a malformed key */ }
+      try { next.set(k.kid, { kty: k.kty, crv: k.crv ?? null, key: createPublicKey({ key: k, format: 'jwk' }) }); } catch { /* skip a malformed key */ }
     }
     if (!next.size) throw new Error('identity issuer keys: no usable keys');
     keys = next;
@@ -80,7 +80,7 @@ export function createIssuerVerifier({ issuer, jwksUrl, audience, fetchImpl = fe
     await loadKeys(false);
     if (!keys.has(header.kid)) await loadKeys(true);
     const entry = keys.get(header.kid);
-    if (!entry || entry.kty !== alg.kty) return null;
+    if (!entry || entry.kty !== alg.kty || (alg.crv && entry.crv !== alg.crv)) return null;
 
     let ok = false;
     try {
@@ -97,9 +97,11 @@ export function createIssuerVerifier({ issuer, jwksUrl, audience, fetchImpl = fe
     if (normalizeIssuer(payload.iss) !== iss || !tokenAuds.some((a) => auds.includes(a))) return null;
     if (typeof payload.exp !== 'number' || payload.exp < t - CLOCK_SKEW_S) return null;
     if (typeof payload.nbf === 'number' && payload.nbf > t + CLOCK_SKEW_S) return null;
+    // Both required: worca attributes by email (identity.mjs), and a verified identity without one
+    // would fall back to "local".
     const email = str(payload.email);
     const sub = str(payload.sub, 128);
-    if (!email && !sub) return null;
+    if (!email || !email.includes('@') || !sub) return null;
     return {
       email,
       sub,
