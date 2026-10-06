@@ -15,10 +15,11 @@ function fakeXterm() {
   class Terminal {
     constructor(o) { this.options = { ...o }; this.cols = 80; this.rows = 24; made.options = this.options; }
     loadAddon() {} open(el) { made.openedIn = el; } focus() { made.focus = (made.focus || 0) + 1; } dispose() {}
-    write(d) { writes.push(d); } reset() { writes.length = 0; }
+    write(d, cb) { writes.push(d); made.log?.push(`write:${d}`); cb?.(); } reset() { writes.length = 0; }
+    resize(c, r) { this.cols = c; this.rows = r; made.log?.push(`resize:${c}x${r}`); }
     onData(cb) { onKeys = cb; return { dispose() {} }; }
   }
-  class FitAddon { fit() {} }
+  class FitAddon { fit() { made.log?.push('fit'); } }
   return { load: async () => ({ Terminal, FitAddon }), writes, made, type: (d) => onKeys(d) };
 }
 
@@ -730,4 +731,17 @@ test('moving to another page after the pane followed Ask: that page\'s own shell
   await tick(12);
   assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-p');
   assert.deepEqual(tabTexts(doc), ['app', 'Ask · Fix tests · demo · main', 'New terminal']);
+});
+
+test('a replay is drawn at the width the shell wrote it for, then fitted to the pane (xterm reflows it)', async () => {
+  const { pane, xt } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
+  await pane.open();
+  await tick();
+  xt.made.log = [];
+  // zsh wrapped a long command at its PTY's 100 columns (` \r\e[K`): drawn at another width it erases the line start.
+  pane.onFrame({ type: 'term-replay', sessionId: 't-1', data: 'AB', seq: 2, snapshot: { ...SNAP, cols: 100, rows: 30 } });
+  assert.deepEqual(xt.made.log, ['resize:100x30', 'write:AB', 'fit']);
+  xt.made.log = [];
+  pane.onFrame({ type: 'term-replay', sessionId: 't-1', data: 'CD', seq: 3 });             // no size known: as before
+  assert.deepEqual(xt.made.log, ['write:CD']);
 });

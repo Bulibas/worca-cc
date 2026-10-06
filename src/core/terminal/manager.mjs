@@ -97,7 +97,7 @@ export class TerminalManager extends EventEmitter {
     const s = {
       snap: { id, scope, label, runId, member, projectKey, branch, cwd, shell: shell.file, shellKind: shell.kind, mode, integration: false,
         status: 'running', exitCode: null, pid: proc.pid ?? null, createdBy: by, createdAt: iso(at), endedAt: null, closedBy: null,
-        runLive: !!runLive, folder: 'ok' },
+        runLive: !!runLive, folder: 'ok', ...size },        // cols/rows: the PTY's size, so a replay is drawn at the width it was written for
       proc, parser: new MarkerParser({ nonce }), chunks: [], chunkChars: 0, seq: 0, pendingOut: '', flushTimer: null,
       block: null, blockSeq: 0, lastInputBy: by, cwdNow: cwd, ino, stopTimer: null, closing: null, exitWaiters: [],
       atPrompt: false, pendingRun: null, readyWaiters: [], startWaiters: [],   // runCommand (#574)
@@ -181,7 +181,10 @@ export class TerminalManager extends EventEmitter {
 
   resize(id, cols, rows) {
     const s = this.sessions.get(id);
-    if (s && s.snap.status === 'running') s.proc.resize(clamp(cols, 2, 500, 100), clamp(rows, 1, 300, 30));
+    if (!s || s.snap.status !== 'running') return;
+    s.snap.cols = clamp(cols, 2, 500, 100);
+    s.snap.rows = clamp(rows, 1, 300, 30);
+    s.proc.resize(s.snap.cols, s.snap.rows);
   }
 
   /** Stop the running command (D4): Ctrl+C / SIGINT, then SIGKILL its processes if it is still running 3 s later. */

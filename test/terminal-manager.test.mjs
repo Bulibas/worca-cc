@@ -191,3 +191,14 @@ test('runCommand refuses a shell without block marks', async () => {
   const s = await m.open({ cwd: work, scope: 'project', by: 'ask:x', baseEnv });
   await assert.rejects(m.runCommand(s.id, 'ls', { by: 'ask:x' }), { code: 'NO_BLOCKS' });
 });
+
+test('a session knows its PTY size: open sets it, resize changes it (the pane replays output at that width)', async () => {
+  const m = new TerminalManager({ ptyInfo: () => ({ pty: null }), shell: () => ({ file: '/bin/sh', kind: 'other', platform: process.platform }),
+    spawnImpl: () => ({ pid: null, mode: 'pipes', write() {}, resize() {}, signal() {}, onData() {}, onExit() {} }) });
+  const s = await m.open({ cwd: work, scope: 'project', by: 'ask:x', baseEnv });
+  assert.deepEqual([s.cols, s.rows], [100, 30]);
+  m.resize(s.id, 142, 40);
+  assert.deepEqual([m.get(s.id).cols, m.get(s.id).rows], [142, 40]);
+  m.resize(s.id, 9999, 0);                                  // clamped like the PTY
+  assert.deepEqual([m.get(s.id).cols, m.get(s.id).rows], [500, 1]);
+});

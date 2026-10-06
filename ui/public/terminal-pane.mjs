@@ -432,8 +432,17 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
     }
     if (msg.sessionId !== st.current) return;
     if (msg.type === 'term-replay') {
-      if (st.term) { st.term.reset(); st.term.write(msg.data || ''); }
       st.lastSeq = msg.seq || 0;
+      if (!st.term) return;
+      st.term.reset();
+      // The shell wrote this output for its PTY's width: zsh wraps a long line with ` \r\e[K`, which on a wider
+      // screen erases the line's start. Draw it at that width, then fit to the pane: xterm reflows wrapped lines
+      // and the fit sends the pane's size to the shell.
+      const { cols, rows } = msg.snapshot || {};
+      if (cols > 0 && rows > 0 && (cols !== st.term.cols || rows !== st.term.rows)) {
+        try { st.term.resize(cols, rows); } catch { /* not drawn */ }
+        st.term.write(msg.data || '', () => fitNow());
+      } else st.term.write(msg.data || '');
       return;
     }
     if (msg.type === 'term-data') {
