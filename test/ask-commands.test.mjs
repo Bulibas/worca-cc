@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { createAskCommands, terminalEventPrompt } from '../src/core/ask/commands.mjs';
+import { createAskCommands, terminalEventPrompt, plainOutput } from '../src/core/ask/commands.mjs';
 
 function fakeTerminals() {
   const t = new EventEmitter();
@@ -332,4 +332,22 @@ test('stop: Ask never stops the user\'s own command, even in Ask\'s tab', async 
   const b = await svc.run('ask_0000aaaa', { command: 'sleep 9' });          // its own command: it may stop that
   assert.deepEqual(svc.stop('ask_0000aaaa', { blockId: b.blockId }), { ok: true, stopping: true });
   assert.deepEqual(terminals.stopped, [{ id: b.sessionId, by: 'ask:ask_0000aaaa' }]);
+});
+
+test('plainOutput: carriage returns and erase-line act like a terminal (a spinner, zsh\'s partial-line mark), then ANSI goes', () => {
+  const raw = '  1 failing\r\n\\\x1b[1G\x1b[0K\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m' + ' '.repeat(99) + '\r \r';
+  assert.equal(plainOutput(raw), '  1 failing\n');
+  assert.equal(plainOutput('10%\r50%\r100%\ndone\n'), '100%\ndone\n');
+  assert.equal(plainOutput('abcdef\rXY\n'), 'XYcdef\n', 'a CR overwrites, it does not erase');
+  assert.equal(plainOutput('abc\x1b[Kdef\x1b[2Kx\n'), '      x\n', 'erase in line: to the end, then the whole line (the cursor stays)');
+  assert.equal(plainOutput('\x1b[31mred\x1b[0m plain'), 'red plain');
+  assert.equal(plainOutput('a\r\nb'), 'a\nb');
+});
+
+test('the card tail and read_output use plainOutput', async () => {
+  const { svc, terminals } = make();
+  const a = await svc.run('ask_0000aaaa', { command: 'npm test' });
+  terminals.finish(a.sessionId, 1, '  1 failing\r\n\\\x1b[1G\x1b[0K%' + ' '.repeat(20) + '\r \r');
+  assert.equal(svc.view(a.blockId).tail, '  1 failing\n');
+  assert.equal((await svc.read('ask_0000aaaa', { blockId: a.blockId })).text, '  1 failing\n');
 });

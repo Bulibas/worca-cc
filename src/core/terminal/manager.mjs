@@ -58,12 +58,20 @@ export class TerminalManager extends EventEmitter {
   busyRunIds() { return new Set(this.live().map((s) => s.snap.runId).filter(Boolean)); }
   busyDirs() { return new Set(this.live().map((s) => s.snap.cwd)); }
 
-  /** Everything still buffered, for a page that (re)attaches: { data, seq } (seq = the last chunk's). */
+  /** Everything still buffered, for a page that (re)attaches: { data, seq, segments } (seq = the last chunk's).
+   *  `segments` splits it by the PTY size it was written at: a shell wraps for its width (zsh's long-line and
+   *  partial-line marks), so the pane draws each part at that width before fitting the screen to itself. */
   replay(id) {
     const s = this.sessions.get(id);
     if (!s) return null;
     this._flush(s);
-    return { data: s.chunks.map((c) => c.data).join(''), seq: s.seq };
+    const segments = [];
+    for (const c of s.chunks) {
+      const last = segments.at(-1);
+      if (last && last.cols === c.cols && last.rows === c.rows) last.data += c.data;
+      else segments.push({ cols: c.cols, rows: c.rows, data: c.data });
+    }
+    return { data: s.chunks.map((c) => c.data).join(''), seq: s.seq, segments };
   }
 
   async open({ cwd, scope, label = null, runId = null, member = null, projectKey = null, branch = null, workspace = false,
@@ -182,6 +190,7 @@ export class TerminalManager extends EventEmitter {
   resize(id, cols, rows) {
     const s = this.sessions.get(id);
     if (!s || s.snap.status !== 'running') return;
+    this._flush(s);                                  // output so far was written at the old size (replay segments)
     s.snap.cols = clamp(cols, 2, 500, 100);
     s.snap.rows = clamp(rows, 1, 300, 30);
     s.proc.resize(s.snap.cols, s.snap.rows);
@@ -264,7 +273,7 @@ export class TerminalManager extends EventEmitter {
     const data = s.pendingOut;
     s.pendingOut = '';
     s.seq += 1;
-    s.chunks.push({ seq: s.seq, data });
+    s.chunks.push({ seq: s.seq, data, cols: s.snap.cols, rows: s.snap.rows });
     s.chunkChars += data.length;
     // Keep exactly the last REPLAY_CHARS: drop whole chunks, then trim the oldest one kept. Dropping only
     // whole chunks would leave a reload with almost nothing after one large chunk.

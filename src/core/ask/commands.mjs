@@ -10,7 +10,6 @@
 // them (takePersonCommands), and their typing keeps the session from closing as idle.
 import { checkAskCommand, askCommandEnv } from './command-policy.mjs';
 import { ASK_LIMITS } from './limits.mjs';
-import { stripAnsi } from '../terminal/markers.mjs';
 import { sameDir, insideDir } from '../terminal/same-dir.mjs';
 import { redactAskText } from './redact.mjs';
 
@@ -40,9 +39,41 @@ export function terminalNoticeText(b) {
   return `${b.status === 'stopped' ? 'Command stopped' : 'Command finished'}${code} — ${clip(b.command, 80)}`;
 }
 
+// One token of terminal output: an OSC, a CSI (params, final byte), another escape, a CR, or one character.
+const TERM_TOKEN_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[([0-9;?]*)[ -/]*([@-~])|\x1b[@-Z\\-_]|\r|[\s\S]/gu;
+
+/**
+ * A block's output as the text a terminal would show, without ANSI: per line, a carriage return moves back and
+ * overwrites, erase-in-line (CSI K) and cursor-to-column (CSI G) apply, trailing blanks go. Without this a
+ * spinner (`\` then CSI 1G, CSI 0K) and zsh's partial-line mark (`%`, padding, CR) show up in the card.
+ */
+export function plainOutput(s) {
+  return String(s ?? '').replace(/\r\n/g, '\n').split('\n').map((line) => {
+    if (!/[\r\x1b]/.test(line)) return line;
+    let buf = [];
+    let col = 0;
+    for (const m of line.matchAll(TERM_TOKEN_RE)) {
+      const t = m[0];
+      if (t === '\r') { col = 0; continue; }
+      if (m[2] === 'K') {
+        if (m[1] === '2') buf = buf.map(() => ' ');
+        else if (m[1] === '1') for (let i = 0; i <= col && i < buf.length; i += 1) buf[i] = ' ';
+        else buf.length = Math.min(buf.length, col);
+        continue;
+      }
+      if (m[2] === 'G') { col = Math.max(0, (Number(m[1]) || 1) - 1); continue; }
+      if (t[0] === '\x1b') continue;
+      while (buf.length < col) buf.push(' ');
+      buf[col] = t;
+      col += 1;
+    }
+    return buf.join('').trimEnd();
+  }).join('\n');
+}
+
 /** Card-facing view of a block: state + redacted, ANSI-free tail. */
 export function commandView(rec, out, { tailChars = ASK_LIMITS.commandCardTailChars } = {}) {
-  const text = redactAskText(stripAnsi(String(out ?? '')));
+  const text = redactAskText(plainOutput(out));
   return { blockId: blockIdOf(rec.sessionId, rec.seq), sessionId: rec.sessionId, seq: rec.seq, command: redactAskText(rec.command),
     status: rec.status, exitCode: rec.exitCode ?? null, startedAt: rec.startedAt ?? null, endedAt: rec.endedAt ?? null,
     durationMs: rec.durationMs ?? null, stoppedBy: rec.stoppedBy ?? null, runBy: rec.runBy ?? null,
@@ -260,7 +291,7 @@ export function createAskCommands({ terminals, store, resolveTarget, onFinish, o
       const ref = refOf(blockId, 'read_output');
       const st = blockState(ref);
       if (!st) throw codeError('NOT_FOUND', 'read_output: no such block');
-      const text = stripAnsi(String(st.out));
+      const text = plainOutput(st.out);
       const start = Math.max(0, Math.min(Number(offset) || 0, text.length));
       const page = text.slice(start, start + Math.max(1, Math.min(maxChars, limits.commandOutputPageChars)));
       if (st.rec.status !== 'running') markSeen(blockIdOf(ref.sessionId, ref.seq));
@@ -276,7 +307,7 @@ export function createAskCommands({ terminals, store, resolveTarget, onFinish, o
       for (;;) {
         const st = blockState(ref);
         if (!st) throw codeError('NOT_FOUND', 'wait_for: no such block');
-        const text = stripAnsi(String(st.out));
+        const text = plainOutput(st.out);
         const tail = text.slice(-2000);
         if (st.rec.status !== 'running') {
           markSeen(id);

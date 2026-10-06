@@ -308,6 +308,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
   /** Forgets the attached session: the screen and any half-typed line. */
   function resetCurrent() {
     st.current = null;
+    st.replaying = null;
     st.lastSeq = 0;
     st.line = null;
     try { st.term?.reset(); } catch { /* not drawn yet */ }
@@ -435,20 +436,40 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
       st.lastSeq = msg.seq || 0;
       if (!st.term) return;
       st.term.reset();
-      // The shell wrote this output for its PTY's width: zsh wraps a long line with ` \r\e[K`, which on a wider
-      // screen erases the line's start. Draw it at that width, then fit to the pane: xterm reflows wrapped lines
-      // and the fit sends the pane's size to the shell.
+      // The shell wrote this output for its PTY's width: zsh wraps a long line with ` \r\e[K` (on a wider screen that
+      // erases the line's start) and pads its partial-line mark to the width. Draw each part at the width it was
+      // written at (the server's segments; else the PTY's size now), then fit to the pane: xterm reflows wrapped
+      // lines and the fit sends the pane's size to the shell.
       const { cols, rows } = msg.snapshot || {};
-      if (cols > 0 && rows > 0 && (cols !== st.term.cols || rows !== st.term.rows)) {
-        try { st.term.resize(cols, rows); } catch { /* not drawn */ }
-        st.term.write(msg.data || '', () => fitNow());
-      } else st.term.write(msg.data || '');
+      const parts = Array.isArray(msg.segments) && msg.segments.length ? msg.segments : [{ cols, rows, data: msg.data || '' }];
+      // xterm parses writes later but resizes at once: each resize waits for the previous part's write, and live
+      // frames that arrive meanwhile wait for the whole replay.
+      const term = st.term;
+      const queue = [];
+      st.replaying = queue;
+      let resized = false;
+      const step = (i) => {
+        if (st.replaying !== queue || st.term !== term) return;          // a newer replay or attach took over
+        if (i >= parts.length) {
+          st.replaying = null;
+          for (const d of queue) term.write(d);
+          if (resized) fitNow();
+          return;
+        }
+        const p = parts[i];
+        if (p.cols > 0 && p.rows > 0 && (p.cols !== term.cols || p.rows !== term.rows)) {
+          try { term.resize(p.cols, p.rows); resized = true; } catch { /* not drawn */ }
+        }
+        term.write(String(p.data ?? ''), () => step(i + 1));
+      };
+      step(0);
       return;
     }
     if (msg.type === 'term-data') {
       if (msg.seq <= st.lastSeq) return;
       st.lastSeq = msg.seq;
-      if (st.term) st.term.write(msg.data);
+      if (st.replaying) st.replaying.push(msg.data);
+      else if (st.term) st.term.write(msg.data);
     }
   }
   function onHello(msg) {

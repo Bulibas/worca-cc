@@ -202,3 +202,18 @@ test('a session knows its PTY size: open sets it, resize changes it (the pane re
   m.resize(s.id, 9999, 0);                                  // clamped like the PTY
   assert.deepEqual([m.get(s.id).cols, m.get(s.id).rows], [500, 1]);
 });
+
+test('replay segments: output keeps the PTY width it was written at, across resizes', async () => {
+  let onData = null;
+  const m = new TerminalManager({ ptyInfo: () => ({ pty: null }), shell: () => ({ file: '/bin/sh', kind: 'other', platform: process.platform }),
+    spawnImpl: () => ({ pid: null, mode: 'pipes', write() {}, resize() {}, signal() {}, onData(cb) { onData = cb; }, onExit() {} }) });
+  const s = await m.open({ cwd: work, scope: 'project', by: 'ask:x', baseEnv });
+  onData('a1'); onData('a2');
+  m.resize(s.id, 140, 40);                                  // pending output is flushed at the old width first
+  onData('b1');
+  m.resize(s.id, 140, 40);
+  onData('b2');
+  const r = m.replay(s.id);
+  assert.equal(r.data, 'a1a2b1b2');
+  assert.deepEqual(r.segments, [{ cols: 100, rows: 30, data: 'a1a2' }, { cols: 140, rows: 40, data: 'b1b2' }]);
+});

@@ -15,7 +15,7 @@ function fakeXterm() {
   class Terminal {
     constructor(o) { this.options = { ...o }; this.cols = 80; this.rows = 24; made.options = this.options; }
     loadAddon() {} open(el) { made.openedIn = el; } focus() { made.focus = (made.focus || 0) + 1; } dispose() {}
-    write(d, cb) { writes.push(d); made.log?.push(`write:${d}`); cb?.(); } reset() { writes.length = 0; }
+    write(d, cb) { writes.push(d); made.log?.push(`write:${d}`); if (cb) { if (made.held) made.held.push(cb); else cb(); } } reset() { writes.length = 0; }
     resize(c, r) { this.cols = c; this.rows = r; made.log?.push(`resize:${c}x${r}`); }
     onData(cb) { onKeys = cb; return { dispose() {} }; }
   }
@@ -744,4 +744,26 @@ test('a replay is drawn at the width the shell wrote it for, then fitted to the 
   xt.made.log = [];
   pane.onFrame({ type: 'term-replay', sessionId: 't-1', data: 'CD', seq: 3 });             // no size known: as before
   assert.deepEqual(xt.made.log, ['write:CD']);
+});
+
+test('replay segments: each part is drawn at its own width, then the screen fits the pane', async () => {
+  const { pane, xt } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
+  await pane.open();
+  await tick();
+  xt.made.log = [];
+  pane.onFrame({ type: 'term-replay', sessionId: 't-1', data: 'AB', seq: 2, snapshot: { ...SNAP, cols: 140, rows: 40 },
+    segments: [{ cols: 100, rows: 30, data: 'A' }, { cols: 140, rows: 40, data: 'B' }] });
+  assert.deepEqual(xt.made.log, ['resize:100x30', 'write:A', 'resize:140x40', 'write:B', 'fit']);
+});
+
+test('replay segments: live data that arrives while the replay is still being drawn waits for it', async () => {
+  const { pane, xt } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
+  await pane.open();
+  await tick();
+  xt.made.held = [];                                         // xterm has not parsed the writes yet: callbacks wait
+  pane.onFrame({ type: 'term-replay', sessionId: 't-1', data: 'AB', seq: 2, segments: [{ cols: 100, rows: 30, data: 'A' }, { cols: 140, rows: 40, data: 'B' }] });
+  pane.onFrame({ type: 'term-data', sessionId: 't-1', data: 'C', seq: 3 });
+  assert.equal(xt.writes.join(''), 'A', 'the second part waits for the first one\'s parse; the live chunk waits too');
+  while (xt.made.held.length) xt.made.held.shift()();
+  assert.equal(xt.writes.join(''), 'ABC');
 });

@@ -5628,7 +5628,7 @@ app.get('/api/ask/threads/:id/commands/:blockId', (req, res) => {
 // term-replay once its send buffer drains, so a `yes` in a terminal never grows this server's memory.
 function terminalReplayFrame(sessionId) {
   const r = terminals.replay(sessionId);
-  return r ? { type: 'term-replay', sessionId, data: r.data, seq: r.seq, snapshot: terminals.get(sessionId) } : null;
+  return r ? { type: 'term-replay', sessionId, data: r.data, seq: r.seq, segments: r.segments, snapshot: terminals.get(sessionId) } : null;
 }
 const terminalFanout = createTerminalFanout({ sockets, replayFrame: terminalReplayFrame });
 terminals.on('data', (f) => terminalFanout.toAttached(f.sessionId, { type: 'term-data', ...f }));
