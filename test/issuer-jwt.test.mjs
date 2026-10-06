@@ -1,0 +1,95 @@
+// test/issuer-jwt.test.mjs
+// createIssuerVerifier (W1): ES256 tokens from a configured issuer, checked against its JWKS with
+// the instance host as audience. Mirrors test/cf-access.test.mjs for the Access verifier.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { generateKeyPairSync, sign } from 'node:crypto';
+import { createIssuerVerifier, normalizeIssuer } from '../src/core/issuer-jwt.mjs';
+import { ISSUER, JWKS_URL, INSTANCE_HOST, makeIssuerKey, signIssuerJwt, jwksFetch } from './helpers/issuer-jwt.mjs';
+
+const key = makeIssuerKey();
+const make = (keysRef = { keys: [key] }, opts = {}) => {
+  const fetchImpl = jwksFetch(keysRef);
+  return { fetchImpl, verify: createIssuerVerifier({ issuer: ISSUER, jwksUrl: JWKS_URL, audience: INSTANCE_HOST, fetchImpl, ...opts }) };
+};
+
+test('normalizeIssuer drops a trailing slash and whitespace', () => {
+  assert.equal(normalizeIssuer(' https://app.example.dev/ '), 'https://app.example.dev');
+  assert.equal(normalizeIssuer(''), '');
+});
+
+test('a valid token yields the identity with the platform claims (W4)', async () => {
+  const { verify } = make();
+  const who = await verify(signIssuerJwt(key));
+  assert.equal(who.email, 'ada@example.com');
+  assert.equal(who.sub, 'usr_ada');
+  assert.equal(who.name, 'Ada');
+  assert.equal(who.org, 'org_1');
+  assert.equal(who.inst, 'inst_1');
+  assert.deepEqual(who.teams, ['team_mobile']);
+  assert.equal(typeof who.exp, 'number');
+});
+
+test('refused: another instance\'s audience, another issuer, expired, not yet valid, tampered', async () => {
+  const { verify } = make();
+  const now = Math.floor(Date.now() / 1000);
+  assert.equal(await verify(signIssuerJwt(key, { aud: 'other.example.run' })), null);
+  assert.equal(await verify(signIssuerJwt(key, { iss: 'https://evil.example' })), null);
+  assert.equal(await verify(signIssuerJwt(key, { exp: now - 120 })), null);
+  assert.equal(await verify(signIssuerJwt(key, { nbf: now + 600 })), null);
+  const [h, p] = signIssuerJwt(key).split('.');
+  assert.equal(await verify(`${h}.${p}.AAAA`), null);
+  const evilP = Buffer.from(JSON.stringify({ iss: ISSUER, aud: INSTANCE_HOST, email: 'eve@example.com', exp: now + 300 })).toString('base64url');
+  assert.equal(await verify(`${h}.${evilP}.${signIssuerJwt(key).split('.')[2]}`), null);
+});
+
+test('refused: alg none / HS256, unknown kid, junk, no email or sub', async () => {
+  const { verify } = make();
+  assert.equal(await verify(signIssuerJwt(key, {}, { alg: 'none' })), null);
+  assert.equal(await verify(signIssuerJwt(key, {}, { alg: 'HS256' })), null);
+  assert.equal(await verify(signIssuerJwt(key, {}, { kid: 'nope' })), null);
+  assert.equal(await verify('not.a.jwt'), null);
+  assert.equal(await verify(undefined), null);
+  assert.equal(await verify(signIssuerJwt(key, { email: undefined, sub: undefined })), null);
+});
+
+test('a key of the wrong type for the alg is refused (RS256 header on an EC key)', async () => {
+  const { verify } = make();
+  assert.equal(await verify(signIssuerJwt(key, {}, { alg: 'RS256' })), null);
+});
+
+test('RS256 issuers work too', async () => {
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const rsa = { kid: 'rs-1', jwk: { ...publicKey.export({ format: 'jwk' }), kid: 'rs-1', alg: 'RS256', use: 'sig' } };
+  const { verify } = make({ keys: [rsa] });
+  const b = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const h = b({ alg: 'RS256', kid: 'rs-1' });
+  const p = b({ iss: ISSUER, aud: INSTANCE_HOST, sub: 'u', email: 'r@example.com', exp: Math.floor(Date.now() / 1000) + 60 });
+  const sig = sign('RSA-SHA256', Buffer.from(`${h}.${p}`), privateKey).toString('base64url');
+  assert.equal((await verify(`${h}.${p}.${sig}`)).email, 'r@example.com');
+});
+
+test('keys are cached; an unknown kid refetches at most once per 30 s (rotation); keys down -> rejects', async () => {
+  const keysRef = { keys: [key] };
+  let t = Date.now();
+  const { verify, fetchImpl } = make(keysRef, { now: () => t });
+  await verify(signIssuerJwt(key));
+  await verify(signIssuerJwt(key));
+  assert.equal(fetchImpl.calls, 1);
+  const next = makeIssuerKey('es-2');
+  keysRef.keys = [key, next];
+  assert.equal(await verify(signIssuerJwt(next)), null, 'inside the 30 s floor: no refetch');
+  t += 31_000;
+  assert.equal((await verify(signIssuerJwt(next))).email, 'ada@example.com');
+  assert.equal(fetchImpl.calls, 2);
+
+  const down = make({ keys: [key], down: true });
+  await assert.rejects(down.verify(signIssuerJwt(key)));
+});
+
+test('audience matching is case-insensitive and accepts a list', async () => {
+  const fetchImpl = jwksFetch({ keys: [key] });
+  const verify = createIssuerVerifier({ issuer: `${ISSUER}/`, jwksUrl: JWKS_URL, audience: ['A.example.run', INSTANCE_HOST.toUpperCase()], fetchImpl });
+  assert.ok(await verify(signIssuerJwt(key)));
+  assert.ok(await verify(signIssuerJwt(key, { aud: ['x', 'a.example.run'] })));
+});

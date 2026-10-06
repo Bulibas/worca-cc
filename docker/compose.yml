@@ -16,6 +16,9 @@ services:
   worca:
     image: ghcr.io/sinishadjukic/worca:${WORCA_TAG:-latest}
     init: true
+    # A stop pauses active runs before the server exits (WORCA_DRAIN_TIMEOUT_MS, 20 s by default);
+    # Docker's own default of 10 s would SIGKILL it halfway.
+    stop_grace_period: 30s
     user: "${WORCA_UID:-1000}:${WORCA_GID:-1000}"
     ports:
       # Loopback only. The server's Host/Origin guard accepts localhost, and

@@ -142,5 +142,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 # -s: also work as a subreaper when the runtime puts its own init at PID 1
 # (compose `init: true`, `docker run --init`) instead of warning about it.
+# No -g: tini signals only `worca ui` (the entrypoint execs it), which forwards the stop to the
+# server; the server pauses its runs (drain) and stops their agents itself. Signalling the whole
+# group would kill the agents first and turn a clean pause into a failed step.
 ENTRYPOINT ["tini", "-s", "--", "worca-entrypoint"]
 CMD ["worca", "ui"]

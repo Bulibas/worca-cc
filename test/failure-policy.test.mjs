@@ -175,7 +175,14 @@ test('markTerminal stamps an error in place (identity kept) and isTerminal reads
 test('consequences: a manual pause is silent; every reasoned pause reports needs-human', () => {
   assert.equal(pauseConsequences(null).reportsToSource, false);
   assert.equal(pauseConsequences('').reportsToSource, false);
-  for (const r of REASON_CODES) assert.equal(pauseConsequences(r).reportsToSource, true, r);
+  for (const r of REASON_CODES) if (r !== REASON.DRAIN) assert.equal(pauseConsequences(r).reportsToSource, true, r);
+});
+
+test('consequences: a drain (the server stopping) is silent like a manual pause: the run continues on the next start', () => {
+  const c = pauseConsequences(REASON.DRAIN);
+  assert.equal(c.reportsToSource, false);
+  assert.equal(c.stagesResults, false);
+  assert.equal(c.severity, 'info');
 });
 
 test('consequences: only an error-pause stages the diff artifact and reads as an error', () => {

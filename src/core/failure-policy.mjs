@@ -45,6 +45,8 @@ export const REASON = Object.freeze({
   COST_PIPELINE_POLICY: 'cost_pipeline_policy',
   COST_TOTAL_POLICY: 'cost_total_policy',
   NIGHT_GUARDRAIL: 'night_guardrail', // night mode hit its per-run decision limit or the night spend cap
+  DRAIN: 'drain',                 // the server was stopping (SIGTERM, POST /api/drain): resumable as is, and
+                                  // the one reason WORCA_AUTO_RESUME picks up again on the next start
 });
 export const REASON_CODES = Object.freeze(Object.values(REASON));
 
@@ -195,6 +197,9 @@ const CONSEQUENCES = Object.freeze({
   [REASON.COST_TOTAL_POLICY]:    { reportsToSource: true, stagesResults: false, severity: 'warning', notifyPref: 'paused', exitInteractive: 0, label: 'team total cap reached' },
   [REASON.ERROR]:        { reportsToSource: true,  stagesResults: true,  severity: 'error',   notifyPref: 'error',  exitInteractive: 1, label: 'a step failed' },
   [REASON.NIGHT_GUARDRAIL]: { reportsToSource: true, stagesResults: false, severity: 'warning', notifyPref: 'paused', exitInteractive: 0, label: 'Away mode limit reached' },
+  // A drain is the server going away (suspend, upgrade, redeploy), not a problem with the run: the
+  // task source keeps it claimed, since the run continues on the next start (auto-resume) or a click.
+  [REASON.DRAIN]:        { reportsToSource: false, stagesResults: false, severity: 'info',    notifyPref: 'paused', exitInteractive: 0, label: 'worca was restarting' },
 });
 
 /** The consequences row for a pause reason (unknown/legacy free-text reasons read

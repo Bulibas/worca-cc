@@ -5,6 +5,7 @@
 // print them all and exit 78 once.
 import { readFileSync } from 'node:fs';
 import { normalizeTeamDomain } from '../core/cf-access.mjs';
+import { normalizeIssuer } from '../core/issuer-jwt.mjs';
 
 export const MODES = Object.freeze(['single', 'multi']);
 const HEADER_NAME_RE = /^[A-Za-z0-9-]{1,64}$/;
@@ -134,17 +135,30 @@ export function readBrokerConfig(env = process.env, { readFile = readFileSync } 
   const teamDomain = normalizeTeamDomain(env.WORCA_CF_ACCESS_TEAM_DOMAIN);
   const aud = String(env.WORCA_CF_ACCESS_AUD || '').trim();
   const identityHeader = String(env.WORCA_IDENTITY_HEADER || '').trim();
+  const issuer = normalizeIssuer(env.WORCA_IDENTITY_ISSUER);
   let identity = null;
-  if (teamDomain || aud) {
+  if ((teamDomain || aud) && issuer) {
+    errors.push('both WORCA_CF_ACCESS_* and WORCA_IDENTITY_ISSUER are set: configure one identity check for the key page, not two');
+  } else if (teamDomain || aud) {
     if (!teamDomain || !aud) errors.push('set both WORCA_CF_ACCESS_TEAM_DOMAIN and WORCA_CF_ACCESS_AUD (the AUD of the key page\'s own Access application)');
     else identity = { kind: 'access', teamDomain, aud };
+  } else if (issuer) {
+    // A gate with its own issuer (W1): a JWT in X-Worca-Identity for the key page's host.
+    const jwksUrl = String(env.WORCA_IDENTITY_JWKS_URL || '').trim() || `${issuer}/.well-known/jwks.json`;
+    const audience = String(env.WORCA_IDENTITY_AUDIENCE || '').split(',').map((a) => a.trim().toLowerCase()).filter(Boolean);
+    if (!audience.length && publicUrl) audience.push(new URL(publicUrl).hostname);
+    const secure = (v) => { try { const u = new URL(v); return u.protocol === 'https:' || (u.protocol === 'http:' && isLoopbackHost(u.hostname)); } catch { return false; } };
+    if (!secure(issuer)) errors.push('WORCA_IDENTITY_ISSUER must be an https URL (http only for localhost)');
+    else if (!secure(jwksUrl)) errors.push('WORCA_IDENTITY_JWKS_URL must be an https URL (http only for localhost)');
+    else if (!audience.length) errors.push('WORCA_IDENTITY_ISSUER needs an audience: set WORCA_IDENTITY_AUDIENCE or WORCA_BROKER_PUBLIC_URL');
+    else identity = { kind: 'issuer', issuer, jwksUrl, audience };
   } else if (identityHeader) {
     if (!HEADER_NAME_RE.test(identityHeader)) errors.push('WORCA_IDENTITY_HEADER is not a valid header name');
     else identity = { kind: 'header', header: identityHeader.toLowerCase() };
   }
   if (mode === 'multi') {
     if (!publicUrl) errors.push('WORCA_BROKER_PUBLIC_URL is required in multi mode: the address of the key page');
-    if (!identity) errors.push('multi mode needs an identity check for the key page: WORCA_CF_ACCESS_TEAM_DOMAIN + WORCA_CF_ACCESS_AUD, or WORCA_IDENTITY_HEADER');
+    if (!identity && !errors.some((e) => /WORCA_IDENTITY_|WORCA_CF_ACCESS_/.test(e))) errors.push('multi mode needs an identity check for the key page: WORCA_CF_ACCESS_TEAM_DOMAIN + WORCA_CF_ACCESS_AUD, WORCA_IDENTITY_ISSUER, or WORCA_IDENTITY_HEADER');
   }
 
   const defaultDailyUsd = parseUsd(env.WORCA_BROKER_DEFAULT_DAILY_USD);

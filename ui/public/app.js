@@ -581,9 +581,12 @@ function connectWS() {
     handleServerMessage(msg);
   });
 
-  ws.addEventListener('close', () => {
+  ws.addEventListener('close', (e) => {
     state.wsReady = false;
     if (terminalPane) terminalPane.onConnection(false);   // its keys are not sent until the next hello
+    // 4001: the server closed it because the sign-in token it opened with expired (W7). Reconnect
+    // straight away: the gate in front checks the session again on the new upgrade.
+    if (e?.code === 4001) { scheduleReconnect(50); return; }
     sessionGuard.check(); // behind an identity proxy, a dropped socket may be an expired sign-in
     scheduleReconnect();
   });
@@ -598,12 +601,12 @@ function connectWS() {
 }
 
 let reconnectTimer = null;
-function scheduleReconnect() {
+function scheduleReconnect(delayMs = 1500) {
   if (reconnectTimer) return;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connectWS();
-  }, 1500);
+  }, delayMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -15968,7 +15971,7 @@ async function copilotSignInFlow() {
     const poll = async () => {
       if (!mvState.signIn || mvState.signIn.deviceCode !== flow.deviceCode) return;
       try {
-        const r = await fetch(`/api/providers/copilot/login/${encodeURIComponent(flow.deviceCode)}`);
+        const r = await fetch(`/api/providers/copilot/login/${encodeURIComponent(flow.deviceCode)}`, { method: 'POST' });
         const j = await safeJson(r);
         if (!mvState.signIn || mvState.signIn.deviceCode !== flow.deviceCode) return;
         if (j.ok) {
@@ -23901,6 +23904,7 @@ function rdStateCopy(r, stepName) {
   if (r.pauseReason === 'cost_pipeline_policy') return 'Paused — team cost cap reached.';
   if (r.pauseReason === 'cost_total_policy') return 'Paused — team total cap reached.';
   if (r.pauseReason === 'night_guardrail') return r.pauseDetail || 'Paused: Away mode limit reached.';
+  if (r.pauseReason === 'drain') return 'Paused while worca was stopping. Resume continues from here — the worktree and progress are kept.';
   if (r.pauseReason === 'error') {
     const why = r.pauseDetail ? `: ${r.pauseDetail}` : '';
     return `Paused after an error${why}. Fix the cause, then Resume — the worktree and progress are kept.`;
@@ -25076,6 +25080,7 @@ function statusPill(r) {
     if (r.pauseReason === 'cost_pipeline_policy') return { family: 'amber', text: 'Paused · team cap' };
     if (r.pauseReason === 'cost_total_policy') return { family: 'amber', text: 'Paused · team total' };
     if (r.pauseReason === 'night_guardrail') return { family: 'amber', text: 'Paused · Away mode limit' };
+    if (r.pauseReason === 'drain') return { family: 'amber', text: 'Paused · restart' };
     // An error pause is parked and resumable (never dead), so it stays in the amber family.
     if (r.pauseReason === 'error') return { family: 'amber', text: 'Paused · error' };
     if (r.pauseReason === 'recoverable') return { family: 'amber', text: 'Paused · recoverable' };
@@ -29844,9 +29849,14 @@ function paintRdAwayPill(screen, r) {
     else if (!_awayLoading['']) _awayLoading[''] = fetchAwayMode().then((d) => { if (d && !state.awayMode) state.awayMode = d; });   // once; the 1 s tick repaints
     return;
   }
-  const d = describeRun({ config: d0.config, toggle: d0.toggle, hereSince: d0.hereSince ?? null, now: Date.now(),
+  // Per-person Away mode (B4): a run follows its owner's switch. Someone else's run shows theirs, read-only.
+  const owner = d0.perPerson && r.night && r.night.owner;
+  const other = owner && owner !== String(d0.perPerson).toLowerCase();
+  const toggle = other ? (r.night.ownerToggle ?? d0.instanceToggle ?? d0.toggle) : d0.toggle;
+  const hereSince = other ? (r.night.ownerToggle ? r.night.ownerHereSince : d0.instanceHereSince) ?? null : d0.hereSince ?? null;
+  const d = describeRun({ config: d0.config, toggle, hereSince, now: Date.now(),
     run: { ...(r.night || {}), waiting: r.pendingQuestion != null, done: RD_TERMINAL.includes(r.status) } });
-  pill.textContent = d.pill; pill.title = d.reason; pill.dataset.state = d.state;
+  pill.textContent = d.pill; pill.title = other ? `Follows ${owner}'s Away mode. ${d.reason}` : d.reason; pill.dataset.state = d.state;
 }
 /** settings-changed: refresh the user-level body and every cached project body, keeping the old ones until the new land. */
 let _awayRefreshSeq = 0;

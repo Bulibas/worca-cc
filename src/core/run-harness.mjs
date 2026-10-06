@@ -116,7 +116,7 @@ import { runNightAnalysis, readMemoryText } from './night/analysis.mjs';
 import { resolveDeciderPair } from './night/decider-model.mjs';
 import { writeNightDecision, countNightDecisions, nightCounts, nightGateCycles, nightSpendSinceUsd } from './night/store.mjs';
 import { NIGHT_ACTOR, NIGHT_TOGGLES, nightNeverDecides } from './night/config.mjs';
-import { nightModeToggle, nightModeHereSince } from './settings.mjs';
+import { nightModeToggleFor, nightModeHereSinceFor, personAwayStatus, awayPerPerson, awayPersonKey } from './settings.mjs';
 import { MCP_TOOL_NAME_400_RE, MCP_TOOL_NAME_TOO_LONG } from '../shared/mcp-tool-name.mjs';
 
 // worca-cc repo root; holds skills/. fileURLToPath, never URL.pathname: the
@@ -950,6 +950,9 @@ export class RunHarness extends EventEmitter {
       decisions: new Map(),                // question id -> decision record (for the answer writers)
       count: 0, flagged: 0,
       answers: 0, checks: 0,               // what the answers list shows: one per answered question
+      // B4 (WORCA_AWAY_PER_PERSON): who last resumed the run, when that is not its starter. Saved in
+      // the resume point so the owner survives a pause and a restart.
+      owner: typeof savedNight?.owner === 'string' ? savedNight.owner : null,
     };
     this._nightClock = this.opts.nightClock || { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) };
     this.state.night = this._nightSnapshot();
@@ -1057,6 +1060,22 @@ export class RunHarness extends EventEmitter {
       pq.reject(pauseErr());
     }
     return true;
+  }
+
+  /**
+   * Pause because the server is stopping (B2: SIGTERM, POST /api/drain): pause() with the
+   * distinct reason 'drain', so the resume point says why and WORCA_AUTO_RESUME can pick the run
+   * up on the next start. Who last started or resumed the run stays on state.lastAction. Returns
+   * false unless the run is currently 'running' (a run already pausing keeps its own reason).
+   */
+  pauseForDrain() {
+    if (this.state.status !== 'running') return false;
+    const la = this.state.lastAction;
+    this._drainResumeAs = la && la.kind === 'resume' && typeof la.by === 'string' && la.by ? la.by : null;
+    this._setPauseReason(REASON.DRAIN, 'Paused while worca was stopping');
+    this._log('orchestrator', 'info', 'worca is stopping — pausing the run; resume continues from here');
+    if (this.pipeline?.dir) appendAudit(this.pipeline.dir, 'Pipeline **paused**: worca was stopping.').catch(() => {});
+    return this.pause();
   }
 
   /** Who stopped / paused / resumed the run (identity.mjs actor): { kind, by, at } on the
@@ -1573,6 +1592,8 @@ export class RunHarness extends EventEmitter {
   resume() {
     const who = currentBillTo();
     const starter = this.resumeOpts?.row?.started_by ?? this.opts.startedBy ?? null;
+    // B4: the person who resumed it owns it for Away mode from now on (only with per-person Away).
+    if (this._night && awayPerPerson() && awayPersonKey(who)) this._night.owner = who;
     // Pays: whoever resumed. Runs as: the starter's agent user, whose HOME holds the sessions.
     return withBillTo(who && who !== 'local' ? who : (starter || who), () => this._resume(), { owner: starter || who });
   }
@@ -4032,7 +4053,8 @@ export class RunHarness extends EventEmitter {
   }
 
   _nightStateNow(config) {
-    return nightState({ config, toggle: nightModeToggle(), hereSince: nightModeHereSince(), optIn: this._night.optIn, override: this._night.override, now: this._nightClock.now() });
+    const owner = this.awayOwner();
+    return nightState({ config, toggle: nightModeToggleFor(owner), hereSince: nightModeHereSinceFor(owner), optIn: this._night.optIn, override: this._night.override, now: this._nightClock.now() });
   }
 
   /** True when night mode may currently decide (used by the team soft-cap override). */
@@ -4293,7 +4315,22 @@ export class RunHarness extends EventEmitter {
   _nightSnapshot() {
     const n = this._night;
     const open = n.q && this.pendingQuestion?.id === n.q.id && n.decidable !== false && n.openedAt != null;
-    return { optIn: n.optIn, override: n.override, decisions: n.count, flagged: n.flagged, answers: n.answers, checks: n.checks, openedAt: open ? new Date(n.openedAt).toISOString() : null };
+    const snap = { optIn: n.optIn, override: n.override, decisions: n.count, flagged: n.flagged, answers: n.answers, checks: n.checks, openedAt: open ? new Date(n.openedAt).toISOString() : null };
+    // B4: whose "I'm here / I'm away" this run follows, and that person's switch (read-only for others).
+    if (awayPerPerson()) {
+      const owner = this.awayOwner();
+      const own = personAwayStatus(owner);
+      snap.owner = awayPersonKey(owner);
+      snap.ownerToggle = own ? own.toggle : null;   // null = the owner follows the instance default
+      snap.ownerHereSince = own?.hereSince ?? null;
+    }
+    return snap;
+  }
+
+  /** B4: the person whose Away mode this run follows: who last resumed it, else who started it
+   *  (a scheduled run's starter is the schedule's creator). Null = nobody in particular. */
+  awayOwner() {
+    return this._night?.owner || this.resumeOpts?.row?.started_by || this.opts.startedBy || null;
   }
 
   /** Run-view switch. @param {'auto'|'on'|'off'} mode */
@@ -4320,7 +4357,11 @@ export class RunHarness extends EventEmitter {
   }
 
   /** Settings / project prefs changed: re-evaluate the open question. */
-  nightConfigChanged() { this._nightArm(); }
+  nightConfigChanged() {
+    // B4: an owner's switch changed: republish it for the run page's read-only line.
+    if (this._night && awayPerPerson()) { try { this.state.night = this._nightSnapshot(); } catch { /* never break re-arming */ } }
+    this._nightArm();
+  }
 
   /** Plan/task artifacts of this run for the nightDecider to read. Never throws. */
   /** What the Away mode review reads: the run's task.md and its NEWEST plan. Plans live in the
@@ -6139,6 +6180,10 @@ export class RunHarness extends EventEmitter {
       // Who paused it survives a restart (rowToState reads it back).
       if (this.state.lastAction && this.state.lastAction.kind === 'pause') rp.lastAction = { ...this.state.lastAction };
       else delete rp.lastAction;
+      // B3: a drained run is resumed on the next start as whoever last resumed it (else its
+      // starter, pipelines.started_by), so the billing and attribution stay theirs.
+      if (this.pauseReason === REASON.DRAIN && this._drainResumeAs) rp.resumeAs = this._drainResumeAs;
+      else delete rp.resumeAs;
       // The token this pause is written with (_persist stamps it into the saved point as `pausedBy`).
       this._pauseToken ||= randomUUID();
     }
