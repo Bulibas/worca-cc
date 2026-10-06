@@ -339,3 +339,19 @@ enforces the set's latest definition.
   - **Log:** every call, refused ones included, is one JSON line in
     `~/.worca-cc/logs/ask-web.jsonl` (redacted, clipped URLs; never page text,
     queries or keys; rotated at 5 MB). The chat is denied `Read` on `logs/`.
+  **Agent mode (on by default, per chat).** The Agent switch in the Ask composer
+  lets the assistant run shell commands in Worca terminals (`run_command`,
+  `read_output`, `wait_for`, `stop_command`, `list_blocks`): tests, builds, git
+  status, and file changes through commands when you ask for them. The shell runs
+  as the Worca server's user, like a person's terminal and Actions. It starts from
+  a cleaned environment (PATH, HOME, locale, proxy and CA variables and
+  `SSH_AUTH_SOCK`; no model, GitHub or server tokens, and none of your shell rc
+  files), and every command passes a check first: Worca's own files and API,
+  credential paths, force pushes, `rm -r` outside the folder, `sudo` and similar
+  are refused. Ask's terminals are shared with you: a shell you (or Ask) moved
+  with `cd` is kept only while it stays inside the project folder or the run's
+  checkout, and the check runs against the folder the shell is really in; a shell
+  outside it is never used. That check is a rail against mistakes, not a sandbox: an
+  obfuscated command can get around it. `Edit` and `Write` stay denied for the
+  chat itself. With agent isolation on, agent mode is off: a server-user shell
+  would undo the isolation. See [Terminal](terminal.md#ask-worca-agent-mode).

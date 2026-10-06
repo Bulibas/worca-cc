@@ -2,7 +2,8 @@
 # ZDOTDIR goes back to yours first, so a zsh started inside this one loads only your own files.
 ZDOTDIR=${WORCA_USER_ZDOTDIR:-$HOME}
 unset WORCA_USER_ZDOTDIR
-[[ -f $ZDOTDIR/.zshrc ]] && source $ZDOTDIR/.zshrc
+[[ -z ${WORCA_TERMINAL_NORC-} && -f $ZDOTDIR/.zshrc ]] && source $ZDOTDIR/.zshrc   # Ask's shells (#574) skip it
+unset WORCA_TERMINAL_NORC
 
 __worca_b64() { builtin printf '%s' "$1" | base64 | tr -d '\n'; }
 __worca_preexec() { builtin printf '\033]133;C;%s;%s\007' "$__worca_nonce" "$(__worca_b64 "$1")"; }

@@ -87,3 +87,18 @@ test('a project-scope session (the project\'s own folder) is stored like any oth
   assert.equal(s.runId, null);
   assert.equal(s.cwd, '/home/me/app');
 });
+
+test('listRecentBlocks (Ask list_blocks, #574): by project, by run, or all; newest first; never the output', () => {
+  store.insertSession(session('t-lr-a', { runId: 'r-lr', projectKey: 'lr-a' }));
+  store.insertSession(session('t-lr-b', { scope: 'project', runId: null, member: null, projectKey: 'lr-b' }));
+  store.startBlock({ sessionId: 't-lr-a', seq: 1, command: 'a1', runId: 'r-lr', now: T0 + 9_000_000 });
+  store.startBlock({ sessionId: 't-lr-b', seq: 1, command: 'b1', now: T0 + 9_000_001 });
+  store.finishBlock({ sessionId: 't-lr-b', seq: 1, status: 'done', exitCode: 0, output: 'secret-ish', now: T0 + 9_000_002 });
+  store.startBlock({ sessionId: 't-lr-a', seq: 2, command: 'a2', runId: 'r-lr', now: T0 + 9_000_003 });
+  assert.deepEqual(store.listRecentBlocks({ projectKey: 'lr-a' }).map((b) => b.command), ['a2', 'a1']);
+  assert.deepEqual(store.listRecentBlocks({ projectKey: 'lr-b' }).map((b) => b.command), ['b1']);
+  assert.deepEqual(store.listRecentBlocks({ runId: 'r-lr' }).map((b) => b.command), ['a2', 'a1']);
+  const all = store.listRecentBlocks({ limit: 3 });
+  assert.deepEqual(all.map((b) => b.command), ['a2', 'b1', 'a1']);
+  assert.ok(all.every((b) => !('output' in b) || b.output === undefined));
+});
