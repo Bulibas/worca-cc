@@ -12369,6 +12369,19 @@ async function collectPlatformHeartbeat({ now = Date.now() } = {}) {
   });
 }
 
+// The shutdown steps after the drain (chat channels, actions, terminals), each bounded: one that
+// never settles is named in the log and left behind instead of holding the exit.
+const SHUTDOWN_STEPS_MS = 8_000;
+async function settleShutdownSteps(steps, { timeoutMs = SHUTDOWN_STEPS_MS, log = console.warn } = {}) {
+  const pending = new Set(Object.keys(steps));
+  const run = Object.entries(steps).map(([name, fn]) => Promise.resolve().then(fn).catch(() => {}).finally(() => pending.delete(name)));
+  let timer;
+  await Promise.race([Promise.allSettled(run), new Promise((r) => { timer = setTimeout(r, timeoutMs); })]);
+  clearTimeout(timer);
+  if (pending.size) log(`[worca-ui] shutdown: ${[...pending].join(', ')} did not stop within ${Math.round(timeoutMs / 1000)} s; exiting anyway`);
+  return [...pending];
+}
+
 // Only bind a port when run directly (`node ui/server.mjs`). When imported by a
 // test, skip listening so the test can mount `app` on its own ephemeral port.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
@@ -12442,10 +12455,16 @@ if (isMain) {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[worca-ui] stopping (${signal})`);
+    // Whatever happens below, the process ends: a step that never settles must not keep the
+    // container alive past the platform's grace period (Railway does not always kill it).
+    const hardExit = setTimeout(() => {
+      console.error('[worca-ui] shutdown did not finish in time; exiting anyway');
+      process.exit(exitCodeFor(signal));
+    }, drainTimeoutMs() + SHUTDOWN_STEPS_MS + 5_000);
     // B2: pause the active runs first (bounded), so they come back paused with a resume point.
     drainServer({ reason: signal })
-      .then(() => Promise.allSettled([channelHost.stop(), actions.stopAll(), terminals.closeAll()]))
-      .finally(() => process.exit(exitCodeFor(signal)));
+      .then(() => settleShutdownSteps({ chat: () => channelHost.stop(), actions: () => actions.stopAll(), terminals: () => terminals.closeAll() }))
+      .finally(() => { clearTimeout(hardExit); process.exit(exitCodeFor(signal)); });
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -12525,7 +12544,7 @@ export const _testing = {
   uiControl, bearerMatches,
   broadcast, askFilesRunDir,
   validateResumeTarget, resumeTargetOf, fireResumeTicket, cancelScheduledResumes, stopPausedPipeline,
-  trackHeartbeat, heartbeatTick, BOOT_ID, drainServer, autoResumeOnBoot, DRAIN, collectPlatformHeartbeat, closeAtTokenExpiry,
+  trackHeartbeat, heartbeatTick, BOOT_ID, drainServer, autoResumeOnBoot, DRAIN, collectPlatformHeartbeat, closeAtTokenExpiry, settleShutdownSteps,
   askCommandBridge, askCommands, askCommandsEnabled, drainAskDeferred, terminals,
   setAutoRescan(on) { autoRescanOn = on !== false; },
 };
