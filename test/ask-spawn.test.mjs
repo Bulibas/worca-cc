@@ -388,3 +388,25 @@ test('§5.5.1 a stdio copy adds the keep-list names present in worca\'s env to e
   delete httpOnly.servers['postgres-ro_billing'];
   assert.deepEqual(buildAskSpawnOptions({ ...base(), registry: httpOnly }).envAllowlist, ['SSH_AUTH_SOCK'], 'no stdio copy ⇒ no keep-list names');
 });
+
+test('buildMcpConfig: the command bridge URL rides env only when given; never a token', () => {
+  const doc = buildMcpConfig({ homeBase: '/h', threadId: 'ask_0000aaaa', serverPath: '/s.mjs', env: {}, commands: { url: 'http://127.0.0.1:4317/api/ask/commands', token: 'SECRET' } });
+  const env = doc.mcpServers.worca.env;
+  assert.equal(JSON.parse(env.WORCA_ASK_COMMANDS).url, 'http://127.0.0.1:4317/api/ask/commands');
+  assert.doesNotMatch(JSON.stringify(doc), /SECRET/);
+});
+
+test('buildAskSpawnOptions: the command token rides spawnEnv; the sub-agent note forbids run_command', () => {
+  const o = buildAskSpawnOptions({ thread: { id: 'ask_0000aaaa' }, turn: {}, limits: {}, mcpConfigPath: '/m.json', scratchDir: '/t', commands: { url: 'u', token: 'tok' } });
+  assert.equal(o.spawnEnv.ASK_COMMAND_TOKEN, 'tok');
+  assert.match(o.appendSubagentSystemPrompt, /never call run_command or stop_command/i);
+  assert.deepEqual(o.permissionRules.deny, [...ASK_DENY_RULES]);          // Edit/Write/Bash still denied
+});
+
+test('without commands the sub-agent note and the mcp env are unchanged (#574)', () => {
+  assert.equal(sandboxNote({ commands: false }), SANDBOX_NOTE);
+  const doc = buildMcpConfig({ homeBase: '/h', threadId: 'ask_0000aaaa', serverPath: '/s.mjs', env: {} });
+  assert.equal(doc.mcpServers.worca.env.WORCA_ASK_COMMANDS, undefined);
+  const o = buildAskSpawnOptions({ thread: { id: 'ask_0000aaaa' }, turn: {}, limits: {}, mcpConfigPath: '/m.json', scratchDir: '/t' });
+  assert.equal(o.spawnEnv, undefined);
+});

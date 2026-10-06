@@ -120,8 +120,10 @@ function networkSentence(web, copies) {
 }
 
 /** The sub-agent note for one turn. Without copies it is byte-identical to the two notes below (prompt caching). */
-export function sandboxNote({ web = false, copies = [] } = {}) {
-  return (copies.length ? NOTE_HEAD_MCP : NOTE_HEAD) + networkSentence(web === true, copies) + NOTE_TAIL;
+// Agent mode (#574): sub-agents may read blocks, never run or stop a command.
+const COMMANDS_NOTE = 'You may use read_output, wait_for and list_blocks on terminal blocks, but never call run_command or stop_command yourself: running commands belongs to the assistant\'s own turn. ';
+export function sandboxNote({ web = false, copies = [], commands = false } = {}) {
+  return (copies.length ? NOTE_HEAD_MCP : NOTE_HEAD) + networkSentence(web === true, copies) + (commands ? COMMANDS_NOTE : '') + NOTE_TAIL;
 }
 export const SANDBOX_NOTE = sandboxNote();
 /** The sub-agent note when web access is on for the turn: the network sentence names the web tools. */
@@ -142,9 +144,10 @@ export function buildMockMarkers(card) {
  * @param {string|null} [o.memoryDir]  refreshAskMemoryMount's base for this turn's scope set; null ⇒ no memory (empty store)
  * @param {{enabled:boolean, allowedDomains:string[], search:object|null}|null} [o.web]  askWebAccess() for this turn
  * @param {object|null} [o.registry]  resolveRegistry()'s result for this turn (MCP registry §9.2); no copies ⇒ ignored
+ * @param {{url:string, token:string}|null} [o.commands]  agent mode's command bridge for this turn (#574); null ⇒ no command tools
  * @returns {object} runClaude options
  */
-export function buildAskSpawnOptions({ thread = {}, turn = {}, limits = {}, mcpConfigPath, scratchDir, memoryDir = null, web = null, relayed = false, registry = null } = {}) {
+export function buildAskSpawnOptions({ thread = {}, turn = {}, limits = {}, mcpConfigPath, scratchDir, memoryDir = null, web = null, relayed = false, registry = null, commands = null } = {}) {
   if (!scratchDir) throw new Error('buildAskSpawnOptions: scratchDir is required');
   if (!mcpConfigPath) throw new Error('buildAskSpawnOptions: mcpConfigPath is required');
   const systemPrompt = String(turn.systemPrompt ?? '') + (turn.mock ? buildMockMarkers(turn.mock.card) : '');
@@ -179,13 +182,16 @@ export function buildAskSpawnOptions({ thread = {}, turn = {}, limits = {}, mcpC
     includePartialMessages: true,
     maxTurns: limits.maxTurns,
     maxBudgetUsd: limits.maxBudgetUsd ?? null,
-    appendSubagentSystemPrompt: sandboxNote({ web: !!web && web.enabled === true, copies: reg ? reg.copies.map((c) => c.name) : [] }),
+    appendSubagentSystemPrompt: sandboxNote({ web: !!web && web.enabled === true, copies: reg ? reg.copies.map((c) => c.name) : [], commands: !!commands }),
     addDirs: memoryDir ? [memoryDir] : undefined,
     signal: turn.signal,
     onEvent: turn.onEvent,
     // The copies' secrets + MCP_TIMEOUT (spawnEnv survives the scrub; never envAllowlist, which only copies names
     // present in worca's own env), their values for the redactor, and over-long tool names withheld (§5.6).
-    ...(reg ? { spawnEnv: { ...reg.env }, redactValues: [...reg.secretValues], disallowedTools: [...reg.disallowedTools] } : {}),
+    // Agent mode (#574): the command bridge token. Never on disk (the mcp json is model-readable): spawnEnv
+    // survives the scrub, and Claude Code hands its env to the stdio MCP child (command-deps.mjs reads it).
+    ...((reg || commands?.token) ? { spawnEnv: { ...(reg ? reg.env : {}), ...(commands?.token ? { ASK_COMMAND_TOKEN: commands.token } : {}) } } : {}),
+    ...(reg ? { redactValues: [...reg.secretValues], disallowedTools: [...reg.disallowedTools] } : {}),
   };
 }
 
@@ -218,7 +224,7 @@ export function webMcpEnv(web) {
  * (path.resolve(process.env.WORCA_HOME) or dirname(worcaHome())) — never
  * worcaHome() itself. The argv twins make the child independent of env forwarding.
  */
-export function buildMcpConfig({ homeBase, threadId, execPath = process.execPath, serverPath, env = process.env, reader = null, relay = null, web = null, extraServers = null }) {
+export function buildMcpConfig({ homeBase, threadId, execPath = process.execPath, serverPath, env = process.env, reader = null, relay = null, web = null, extraServers = null, commands = null }) {
   if (!serverPath) throw new Error('buildMcpConfig: serverPath is required');
   if (typeof homeBase !== 'string' || !homeBase.trim()) throw new Error('buildMcpConfig: homeBase is required');
   const base = resolvePath(homeBase);
@@ -247,6 +253,8 @@ export function buildMcpConfig({ homeBase, threadId, execPath = process.execPath
     args: ['--disable-warning=ExperimentalWarning', serverPath, '--home', base, '--thread', thread],
     // WORCA_ASK_READER: the shared sign-in behind this turn (identity.mjs), so the child's
     // notification reads/marks are per person; absent on local/operator deployments.
-    env: { WORCA_HOME: base, WORCA_ASK_THREAD_ID: thread, ...forwarded, ...(typeof reader === 'string' && reader ? { WORCA_ASK_READER: reader } : {}), ...webMcpEnv(web) },
+    env: { WORCA_HOME: base, WORCA_ASK_THREAD_ID: thread, ...forwarded, ...(typeof reader === 'string' && reader ? { WORCA_ASK_READER: reader } : {}), ...webMcpEnv(web),
+      // Agent mode (#574): the bridge URL only; its token rides spawnEnv (buildAskSpawnOptions), never this file.
+      ...(commands && commands.url ? { WORCA_ASK_COMMANDS: JSON.stringify({ url: commands.url }) } : {}) },
   });
 }

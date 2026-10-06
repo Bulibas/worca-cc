@@ -30448,6 +30448,8 @@ askPanel = createAskPanel({
   doc: document,
   win: window,
   fetch: (...args) => fetch(...args),
+  // Shared terminal (#574): a command Ask starts in the open chat, or a click on its card, shows its tab in the pane below.
+  showTerminal: (sessionId, opts) => terminalPane?.showSession(sessionId, opts),
   sendWs: (obj) => {
     const ws = state.ws;
     if (ws && state.wsReady) {

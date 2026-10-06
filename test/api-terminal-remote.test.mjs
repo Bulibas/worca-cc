@@ -142,3 +142,19 @@ test('Stop and Close skip the hosted gate: a person can end a terminal after WOR
   assert.equal((await remote('POST', `/api/terminal/sessions/${id}/stop`, {})).status, 200);
   assert.equal((await remote('DELETE', `/api/terminal/sessions/${id}`)).status, 200);
 });
+
+test('Ask agent mode (#574) follows the hosted gate: no bridge, the status says off, the bridge route refuses', async () => {
+  const { _testing } = await import('../ui/server.mjs');
+  assert.equal(_testing.askCommandsEnabled(), false);
+  assert.equal(_testing.askCommandBridge({ threadId: 'ask_00000000' }), null);
+  assert.equal((await remote('GET', '/api/ask/commands/status')).body.enabled, false);
+  assert.equal((await local('GET', '/api/ask/commands/status')).body.enabled, false);
+  process.env.WORCA_TERMINAL_REMOTE = '1';
+  try {
+    assert.equal(_testing.askCommandsEnabled(), true);
+    assert.equal((await remote('GET', '/api/ask/commands/status')).body.enabled, true);
+    const b = _testing.askCommandBridge({ threadId: 'ask_00000000' });
+    assert.ok(b && b.token);
+    b.dispose();
+  } finally { delete process.env.WORCA_TERMINAL_REMOTE; }
+});

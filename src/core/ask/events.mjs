@@ -272,6 +272,7 @@ export function createTurnReducer({
   onWebProposal = null,          // propose_web_access RESULT (web card; same split)
   onScheduleMutation = null,     // a direct schedule write succeeded in the MCP child
   onTrackRun = null,
+  onRunCommand = null,           // run_command RESULT (#574): the command card
   onAwaySwitch = null,           // set_away_now / set_run_away_mode RESULT (the parent applies the switch)
   onAwayProposal = null,         // propose_away_mode_change RESULT (Away mode card; the parent re-validates the input)
   onCommentMutation = null,
@@ -700,6 +701,13 @@ export function createTurnReducer({
         // The parent owns the runs Map, the link rows and the followers: it re-resolves the id itself (D4).
         try {
           const ret = onTrackRun({ toolUseId: b.id, input: fullInputs.get(b.id) ?? {}, text, isError: !!c.is_error });
+          if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
+        } catch { reducerErrors += 1; }
+      }
+      if (b.name === 'mcp__worca__run_command' && typeof onRunCommand === 'function') {
+        // Agent mode (#574): the result names the block; the card's live state comes from ask-command frames.
+        try {
+          const ret = onRunCommand({ toolUseId: b.id, text, isError: !!c.is_error });
           if (ret && typeof ret.then === 'function') pendingHooks.push(ret.then(() => {}, () => { reducerErrors += 1; }));
         } catch { reducerErrors += 1; }
       }
