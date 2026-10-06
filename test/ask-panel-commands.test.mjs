@@ -2,7 +2,7 @@
 // GET …/commands/:blockId, live ask-command frames, Stop) and the composer's Agent switch.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makePanel } from './helpers/ask-panel-harness.mjs';
+import { makePanel, pointerdown } from './helpers/ask-panel-harness.mjs';
 
 const TID = 'ask_00000001', MID = 'askm_00000001', BID = 't-0000000001:1';
 const CMD = { kind: 'card', id: 'card_00000001', state: 'command',
@@ -141,4 +141,19 @@ test('shared terminal: a new command in the open chat shows its tab (auto, once 
   ctx.doc.querySelector('.ask-card.ask-cmd .ask-cmd-folder').click();
   assert.deepEqual(shows.at(-1), ['t-0000000001', { auto: false }]);
   ctx.panel.destroy();
+});
+
+test('shared terminal: clicking or typing in the terminal pane keeps the Ask sheet open', async () => {
+  const { panel, doc, window } = makePanel();
+  panel.open();
+  const pane = doc.createElement('aside');
+  pane.className = 'term-pane';
+  const host = doc.createElement('div');
+  pane.appendChild(host);
+  doc.body.appendChild(pane);
+  pointerdown(window, host);
+  assert.equal(panel.isOpen(), true);
+  pointerdown(window, doc.body);                             // elsewhere still closes it
+  assert.equal(panel.isOpen(), false);
+  panel.destroy();
 });

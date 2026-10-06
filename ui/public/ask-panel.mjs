@@ -1450,7 +1450,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     }
     // `.hd-cmt-card` joins the allowlist: its "Ask Worca" button appends to the
     // composer, and pointerdown lands BEFORE the click that would open the sheet.
-    if (t.closest('.viewer-modal, #confirm-modal, .info-bubble, .mention-popup, .hd-cmt-card')) return;
+    // `.term-pane` too: Ask's terminal is shared, so the user clicks and types there while the chat stays open.
+    if (t.closest('.viewer-modal, #confirm-modal, .info-bubble, .mention-popup, .hd-cmt-card, .term-pane')) return;
     closeSheet();
   }
 
