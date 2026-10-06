@@ -39,8 +39,9 @@ test('threads: create/get/update/setThreadTitle; listThreads newest-first with r
       const t = createThread({ model: 'claude-opus-5-5', effort: 'high' });
       assert.match(t.id, /^ask_[0-9a-f]{8}$/);
       assert.deepEqual(Object.keys(t).sort(),
-        ['context', 'contexts', 'createdAt', 'createdBy', 'effort', 'id', 'mcpOff', 'model', 'sessionId', 'title', 'totals', 'updatedAt']);
+        ['agentMode', 'context', 'contexts', 'createdAt', 'createdBy', 'effort', 'id', 'mcpOff', 'model', 'sessionId', 'title', 'totals', 'updatedAt']);
       assert.equal(t.mcpOff, null, 'no MCP picker choices yet (v45)');
+      assert.equal(t.agentMode, true, 'agent mode is on by default (v51, #574)');
       assert.equal(t.createdBy, null, 'ownerless unless created with an owner');
       assert.equal(t.title, null);
       assert.equal(t.sessionId, null);
@@ -527,4 +528,13 @@ test('addThreadContexts accumulates; updateThread/scope writes never touch conte
   assert.deepEqual(listThreads().find((x) => x.id === t.id).contexts, [p, s], 'the list carries them too');
   assert.equal(addThreadContexts('ask_ffffffff', [p]), null);
   assert.deepEqual(addThreadContexts(t.id, []), [p, s], 'an empty turn is a no-op');
+});
+
+test('agentMode (#574): on by default; a patch stores false and true (0/1, never a raw boolean)', () => {
+  const t = createThread();
+  assert.equal(t.agentMode, true);
+  assert.equal(updateThread(t.id, { agentMode: false }).agentMode, false);
+  assert.equal(getDb().prepare('SELECT agent_mode FROM ask_threads WHERE id = ?').get(t.id).agent_mode, 0);
+  assert.equal(updateThread(t.id, { agentMode: true }).agentMode, true);
+  assert.equal(updateThread(t.id, { title: 'x' }).agentMode, true, 'other patches leave it alone');
 });

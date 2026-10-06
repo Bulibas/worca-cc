@@ -290,8 +290,8 @@ test('an event turn that cannot start (queued behind a spent cost window, or fai
         assert.deepEqual(body.turn, { deferred: true });
         release();
         await waitFor(() => frames(w.msgs, t.id, 'ask-done').length >= 1, 15_000);   // the slow turn ends → settleJob → drainAskDeferred → 403 at START
-        const notice = await waitFor(() => frames(w.msgs, t.id, 'ask-message').find((f) => f.message.role === 'system' && /could not reply to the workflow card/.test(f.message.text)));
-        assert.equal(notice.message.text, 'Ask Worca could not reply to the workflow card: total cost limit reached');
+        const notice = await waitFor(() => frames(w.msgs, t.id, 'ask-message').find((f) => f.message.role === 'system' && /could not reply to an event/.test(f.message.text)));
+        assert.equal(notice.message.text, 'Ask Worca could not reply to an event: total cost limit reached');
         assert.equal(notice.message.blocks[0].kind, 'notice');
         const snap = await snapshot(t.id);
         assert.equal(snap.messages.filter((m) => m.status === 'streaming').length, 0, 'no assistant row was opened');
@@ -318,8 +318,8 @@ test('an event turn that cannot start (queued behind a spent cost window, or fai
         assert.equal(body.block.state, 'declined', 'the flip stands');
         assert.equal(body.turn.status, 403);
         assert.equal(body.turn.error, 'total cost limit reached', 'the API client still gets the machine-readable error');
-        const notice = await waitFor(() => frames(w.msgs, thread.id, 'ask-message').find((f) => f.message.role === 'system' && /could not reply to the workflow card/.test(f.message.text)));
-        assert.equal(notice.message.text, 'Ask Worca could not reply to the workflow card: total cost limit reached');
+        const notice = await waitFor(() => frames(w.msgs, thread.id, 'ask-message').find((f) => f.message.role === 'system' && /could not reply to an event/.test(f.message.text)));
+        assert.equal(notice.message.text, 'Ask Worca could not reply to an event: total cost limit reached');
         assert.equal(notice.message.blocks[0].kind, 'notice');
         assert.equal(frames(w.msgs, thread.id, 'ask-start').length, 0, 'no turn ever started');
       } finally {
