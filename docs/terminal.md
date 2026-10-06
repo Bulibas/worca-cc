@@ -21,7 +21,8 @@ any page. On a run or a project page it shows a live shell right away: it reatta
 | Any other page | no new terminal: the pane shows the most recent one that is still running. |
 
 The header holds the title and **×**, which hides the pane: the shell keeps running, and opening the
-pane again on the same page reattaches it. Below it is a tab for each open terminal of the page, then a
+pane again on the same page reattaches it. Below it is a tab for each open terminal of the page (and each
+of Ask Worca's, on every page: see [below](#ask-worca-agent-mode)), then a
 small **+** tab that starts another shell in the same folder (a second shell of a folder is numbered,
 like `demo · main 2`). Click a tab to switch; `exit` in a shell closes it. Below it is the terminal's folder, with a warning or the member select when they apply. Worca starts a shell for a page at
 most once each time you open the pane. When the shell ends (you typed `exit`, or it died) or Worca
@@ -135,10 +136,27 @@ changes through commands when you ask for them. It runs in a run's folder, a pro
 chat's pinned project. Turn the switch off and the next turn has no command tools; a command that is
 already running keeps running and still reports.
 
-- **Shared tabs.** Ask opens its own terminals, labeled `Ask · <chat title> · <folder>`. They are ordinary
-  tabs in this pane, with the same live output, and you can type in them. Ask never types into a terminal
-  you opened. An Ask terminal closes after 10 idle minutes and when the chat is deleted. Each command
-  starts in the target folder: a `cd` in one command does not carry over to the next.
+- **A shared terminal.** Ask opens its own terminals, labeled `Ask · <chat title> · <folder>`, at most 3
+  per chat. Their tabs show in this pane on every page, next to the page's own terminal, with the same
+  live output, and you can type in them. Ask never types into a terminal you opened.
+  - **The pane follows Ask.** When Ask starts a command in the chat you have open, the pane shows that
+    tab: the first command of a chat opens a closed pane (close it, and that chat's later commands leave
+    it closed); an open pane switches to the tab unless you are typing in another one. It never takes
+    the keyboard. Click the folder on a command card to show its tab and type there. Moving to another
+    page brings back that page's own terminal; Ask's tab stays a tab.
+  - **Your commands in Ask's tab.** They never wake the chat. Your next message carries a line in its
+    context listing what you ran there since then (command, exit code, block id, redacted like other
+    command text, the newest 3), so "I ran the migration, continue" works, and Ask can read the output.
+  - **The shell is kept.** A `cd`, `export` or activated virtualenv (yours or Ask's) carries over to
+    Ask's next command, as long as the shell is still inside the target folder (the project's folder, or
+    the run's checkout). Each command is checked against the folder the shell is really in. A shell that
+    left the folder is never used: Ask opens a fresh one in the folder and leaves yours alone. If you are
+    running something in Ask's tab, Ask uses another of its terminals.
+  - **When all 3 are yours.** If every Ask terminal of the chat is busy with your commands, or you moved
+    them out of the folder, Ask's command is refused with a message saying so; free one or `cd` back.
+    Ask reuses one of its terminals for another folder only if you have not typed there for 10 minutes.
+  - **Idle close.** An Ask terminal closes after 10 idle minutes (your typing and commands there count
+    as activity) and when the chat is deleted.
 - **In the chat.** Each command shows as a card with its live output and a **Stop** button. When a command
   ends, the chat wakes with `[worca event] terminal block <id> exited <code>`, unless Ask already saw the
   end while it waited. Ask can also list and read the commands you ran here (`list_blocks`), so "why did

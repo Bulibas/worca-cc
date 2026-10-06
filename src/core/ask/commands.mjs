@@ -4,10 +4,14 @@
 // ASK_LIMITS.commandsPerThread per chat, opened through the TerminalManager so every command is a
 // recorded block (source 'ask', run_by 'ask:<threadId>') that shows live in the pane. A block's end
 // wakes the chat (onFinish → the event turn) unless the model already saw it.
+// The sessions are shared with the user: they can type in Ask's tab. A shell the user (or Ask) cd-ed elsewhere
+// inside the target folder is kept, and every command is checked against the folder the shell is really in;
+// a shell outside it is never used. The user's commands there never wake the chat: the next user turn lists
+// them (takePersonCommands), and their typing keeps the session from closing as idle.
 import { checkAskCommand, askCommandEnv } from './command-policy.mjs';
 import { ASK_LIMITS } from './limits.mjs';
 import { stripAnsi } from '../terminal/markers.mjs';
-import { sameDir } from '../terminal/same-dir.mjs';
+import { sameDir, insideDir } from '../terminal/same-dir.mjs';
 import { redactAskText } from './redact.mjs';
 
 const BLOCK_ID_RE = /^(t-[0-9a-f]{10}):(\d{1,9})$/;
@@ -69,7 +73,11 @@ export function createAskCommands({ terminals, store, resolveTarget, onFinish, o
   const idleTimers = new Map();// sessionId → timer
   const lastPush = new Map();  // blockId → ms (tail frames, throttled)
   const trailing = new Map();  // blockId → timer (the last frame of a burst)
+  const roots = new Map();     // sessionId → the target folder it opened in (the boundary its shell must stay in)
+  const touched = new Map();   // sessionId → ms of the user's last keystroke or command there
+  const personRuns = new Map();// threadId → [{sessionId, seq}] the user's commands since the last takePersonCommands
   const SEEN_KEEP = 500;
+  const PERSON_KEEP = 20;
 
   const threadOfRunBy = (runBy) => (typeof runBy === 'string' && runBy.startsWith('ask:') && runBy !== 'ask:cap' ? runBy.slice(4) : null);
   const runningCount = (threadId) => [...active.values()].filter((a) => a.threadId === threadId).length;
@@ -77,8 +85,23 @@ export function createAskCommands({ terminals, store, resolveTarget, onFinish, o
   const homeNow = () => (typeof home === 'function' ? home() : home);
   const markSeen = (id) => { seenEnd.add(id); if (seenEnd.size > SEEN_KEEP) seenEnd.delete(seenEnd.values().next().value); };
 
+  // The user in an Ask session: their activity resets its idle close, and their commands wait for the next user turn.
+  const personActive = (sessionId) => { touched.set(sessionId, Date.now()); scheduleIdleClose(sessionId); };
+  terminals.on('input', ({ sessionId }) => { if (owner.has(sessionId)) personActive(sessionId); });
+
   terminals.on('block', (rec) => {
-    if (rec.source !== 'ask') return;
+    if (rec.source !== 'ask') {
+      const threadId = owner.get(rec.sessionId);
+      if (!threadId) return;
+      if (rec.status === 'running') {
+        const list = personRuns.get(threadId) || [];
+        list.push({ sessionId: rec.sessionId, seq: rec.seq });
+        if (list.length > PERSON_KEEP) list.shift();
+        personRuns.set(threadId, list);
+      }
+      personActive(rec.sessionId);
+      return;
+    }
     const threadId = threadOfRunBy(rec.runBy);
     if (!threadId) return;
     const id = blockIdOf(rec.sessionId, rec.seq);
@@ -116,7 +139,7 @@ export function createAskCommands({ terminals, store, resolveTarget, onFinish, o
   terminals.on('data', ({ sessionId }) => {
     const threadId = owner.get(sessionId);
     const lb = threadId ? terminals.liveBlock(sessionId) : null;
-    if (!lb) return;
+    if (!lb || lb.source !== 'ask') return;                 // the user's own command in Ask's tab has no card
     const id = blockIdOf(sessionId, lb.seq);
     if (Date.now() - (lastPush.get(id) || 0) >= 500) { pushLive(sessionId, threadId); return; }
     if (!trailing.has(id)) trailing.set(id, setTimer(() => { trailing.delete(id); pushLive(sessionId, threadId); }, 500));
@@ -130,28 +153,49 @@ export function createAskCommands({ terminals, store, resolveTarget, onFinish, o
     }, limits.commandSessionIdleMs));
   }
 
+  const forget = (sid) => { owner.delete(sid); roots.delete(sid); touched.delete(sid); clearTimer(idleTimers.get(sid)); idleTimers.delete(sid); };
+
   async function drop(threadId, sid, reason) {
-    pools.get(threadId)?.delete(sid); owner.delete(sid);
-    clearTimer(idleTimers.get(sid)); idleTimers.delete(sid);
+    pools.get(threadId)?.delete(sid); forget(sid);
     await terminals.close(sid, askActor(threadId), reason).catch(() => {});
   }
 
-  async function sessionFor(threadId, target) {
+  function poolOf(threadId) {
     const pool = pools.get(threadId) || new Set();
     pools.set(threadId, pool);
-    for (const sid of [...pool]) if (!terminals.get(sid) || terminals.get(sid).status !== 'running') { pool.delete(sid); owner.delete(sid); }
-    // Reuse only a free session whose shell is STILL in the target folder: a `cd` in an earlier line persists.
-    for (const sid of pool) if (terminals.free(sid) && sameDir(terminals.cwdOf(sid), target.cwd)) return sid;
-    if (pool.size >= limits.commandsPerThread) {                       // all slots used, some free elsewhere: recycle one
-      const freeSid = [...pool].find((sid) => terminals.free(sid));
-      if (freeSid) await drop(threadId, freeSid, 'Ask: another folder');
+    for (const sid of [...pool]) if (!terminals.get(sid) || terminals.get(sid).status !== 'running') { pool.delete(sid); forget(sid); }
+    return pool;
+  }
+
+  /** A free session of this target whose shell is still inside the target folder, with the folder it is in now
+   *  (read once: the command check and runCommand's guard must agree on it). The tab the user used last first:
+   *  "continue" after they cd-ed or activated a venv there means there. */
+  function pick(threadId, target) {
+    const fits = [];
+    for (const sid of poolOf(threadId)) {
+      if (!terminals.free(sid) || !sameDir(roots.get(sid), target.cwd)) continue;
+      const cwd = terminals.cwdOf(sid);
+      if (insideDir(cwd, target.cwd)) fits.push({ sid, cwd });
+    }
+    return fits.sort((a, z) => (touched.get(z.sid) || 0) - (touched.get(a.sid) || 0))[0] || null;
+  }
+
+  async function openFor(threadId, target) {
+    const pool = poolOf(threadId);
+    if (pool.size >= limits.commandsPerThread) {
+      // Recycle a free slot the user has not touched lately (Ask's own shell for another folder); never one they work in.
+      const quiet = [...pool].find((sid) => terminals.free(sid) && Date.now() - (touched.get(sid) || 0) >= limits.commandSessionIdleMs);
+      if (!quiet) {
+        throw codeError('NO_SLOT', `All ${limits.commandsPerThread} of this chat's terminals are in use: the user is running something in them or moved them out of ${target.label}. Ask the user to free one (or cd back into the folder), then try again.`);
+      }
+      await drop(threadId, quiet, 'Ask: another folder');
     }
     const title = clip(threadTitle(threadId) || 'chat', 40);
     const s = await terminals.open({ cwd: target.cwd, scope: target.scope, label: `Ask · ${title} · ${target.label}`,
       runId: target.runId ?? null, member: target.member ?? null, projectKey: target.projectKey ?? null, branch: target.branch ?? null,
       workspace: !!target.workspace, runLive: !!target.runLive, actionSnaps: target.actionSnaps || [],
       by: askActor(threadId), agent: true, baseEnv: askCommandEnv(baseEnv) });
-    pool.add(s.id); owner.set(s.id, threadId);
+    pool.add(s.id); owner.set(s.id, threadId); roots.set(s.id, target.cwd);
     try { onOpen(threadId, target); } catch { /* audit only */ }
     return s.id;
   }
@@ -178,27 +222,38 @@ export function createAskCommands({ terminals, store, resolveTarget, onFinish, o
         throw codeError('TOO_MANY', `${limits.commandsPerThread} commands are already running in this chat — wait for one (wait_for) or stop one (stop_command).`);
       }
       const target = await resolveTarget(threadId, input);
-      const why = checkAskCommand(input.command, { cwd: target.cwd, home: homeNow(), userHome, hostPid, serverPort: portNow() });
-      if (why) throw codeError('BLOCKED', why);
       const line = String(input.command).trim();
-      const type = (sid) => terminals.runCommand(sid, line, { by: askActor(threadId), source: 'ask', cwd: target.cwd });
-      let sid = await sessionFor(threadId, target);
-      clearTimer(idleTimers.get(sid)); idleTimers.delete(sid);
-      let seq;
-      try {
-        try { ({ seq } = await type(sid)); }
+      // One more pick when the shell changed under the first one: a `cd` whose W mark landed after the pick (MOVED), or
+      // the user starting a command in that tab (BUSY).
+      for (let attempt = 0; ; attempt += 1) {
+        const picked = pick(threadId, target);
+        const cwd = picked ? picked.cwd : target.cwd;            // a fresh shell starts in the target folder
+        const why = checkAskCommand(input.command, { cwd, home: homeNow(), userHome, hostPid, serverPort: portNow() });
+        if (why) throw codeError('BLOCKED', why);
+        const sid = picked ? picked.sid : await openFor(threadId, target);
+        clearTimer(idleTimers.get(sid)); idleTimers.delete(sid);
+        let seq;
+        try { ({ seq } = await terminals.runCommand(sid, line, { by: askActor(threadId), source: 'ask', cwd })); }
         catch (e) {
-          if (e?.code !== 'MOVED') throw e;
-          // The W mark landed after the pick (a `cd` in the previous line): this shell is elsewhere. Close it and
-          // run in a fresh one, once.
-          await drop(threadId, sid, 'Ask: shell left the folder');
-          sid = await sessionFor(threadId, target);
-          ({ seq } = await type(sid));
+          if (owner.has(sid)) scheduleIdleClose(sid);            // NOT_STARTED / BUSY: still closes when idle
+          if (attempt === 0 && (e?.code === 'MOVED' || e?.code === 'BUSY')) continue;
+          throw e;
         }
-      } catch (e) { if (owner.has(sid)) scheduleIdleClose(sid); throw e; }   // NOT_STARTED / BUSY: still closes when idle
-      const blockId = blockIdOf(sid, seq);       // the slot + cap timer were taken by the block 'running' handler
-      return { ok: true, blockId, sessionId: sid, seq, command: String(input.command).trim(), cwd: target.cwd,
-        folder: target.label, warning: target.warning || null };
+        const blockId = blockIdOf(sid, seq);       // the slot + cap timer were taken by the block 'running' handler
+        return { ok: true, blockId, sessionId: sid, seq, command: line, cwd, folder: target.label, warning: target.warning || null };
+      }
+    },
+
+    /** The user's commands in this chat's Ask sessions since the last call (the next user turn's context line):
+     *  the current state of each, command redacted. Clears the list. */
+    takePersonCommands(threadId) {
+      const refs = personRuns.get(threadId) || [];
+      personRuns.delete(threadId);
+      return refs.map((ref) => {
+        const st = blockState(ref);
+        return st && { blockId: blockIdOf(ref.sessionId, ref.seq), command: redactAskText(st.rec.command), status: st.rec.status,
+          exitCode: st.rec.exitCode ?? null };
+      }).filter(Boolean);
     },
 
     async read(threadId, { blockId, offset = 0, maxChars = limits.commandOutputPageChars } = {}) {
@@ -237,7 +292,7 @@ export function createAskCommands({ terminals, store, resolveTarget, onFinish, o
       const ref = refOf(blockId, 'stop_command');
       const lb = terminals.liveBlock(ref.sessionId);
       if (!lb || lb.seq !== ref.seq) return { ok: true, alreadyEnded: true };
-      if (owner.get(ref.sessionId) !== threadId) throw codeError('NOT_OWNER', 'stop_command: Ask stops only its own commands; ask the user to stop this one.');
+      if (owner.get(ref.sessionId) !== threadId || lb.source !== 'ask') throw codeError('NOT_OWNER', 'stop_command: Ask stops only its own commands; ask the user to stop this one.');
       terminals.interrupt(ref.sessionId, askActor(threadId));
       return { ok: true, stopping: true };
     },
@@ -259,8 +314,9 @@ export function createAskCommands({ terminals, store, resolveTarget, onFinish, o
     async closeThread(threadId) {
       const pool = pools.get(threadId);
       pools.delete(threadId);
+      personRuns.delete(threadId);
       for (const [id, a] of active) if (a.threadId === threadId) { clearTimer(a.capTimer); active.delete(id); }
-      await Promise.allSettled([...(pool || [])].map((sid) => { owner.delete(sid); clearTimer(idleTimers.get(sid)); idleTimers.delete(sid); return terminals.close(sid, askActor(threadId), 'Ask: chat deleted'); }));
+      await Promise.allSettled([...(pool || [])].map((sid) => { forget(sid); return terminals.close(sid, askActor(threadId), 'Ask: chat deleted'); }));
     },
 
     /** Server shutdown / tests: drop every timer. */

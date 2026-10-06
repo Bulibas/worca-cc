@@ -18,7 +18,7 @@ export function pillOf(v) {
   return { text: `exit ${v.exitCode}`, family: v.exitCode === 0 ? 'green' : 'red' };
 }
 
-export function createCommandCard({ doc, card, onStop }) {
+export function createCommandCard({ doc, card, onStop, onShow = () => {} }) {
   const el = h(doc, 'div', 'ask-card ask-cmd');
   el.dataset.blockId = card.blockId;
   const head = h(doc, 'div', 'ask-cmd-head');
@@ -27,7 +27,12 @@ export function createCommandCard({ doc, card, onStop }) {
   stop.type = 'button';
   stop.setAttribute('aria-label', 'Stop this command');
   stop.addEventListener('click', () => { stop.disabled = true; onStop(card.sessionId); });
-  head.append(h(doc, 'span', 'ask-cmd-kicker', 'Command'), pill, h(doc, 'span', 'ask-cmd-folder', card.folder || ''), h(doc, 'span', 'ask-rc-spacer'), stop);
+  // The folder names the terminal the command runs in: a click shows that tab in the terminal pane.
+  const folder = h(doc, 'button', 'ask-cmd-folder', card.folder || '');
+  folder.type = 'button';
+  folder.title = 'Show in the terminal';
+  folder.addEventListener('click', () => onShow(card.sessionId));
+  head.append(h(doc, 'span', 'ask-cmd-kicker', 'Command'), pill, folder, h(doc, 'span', 'ask-rc-spacer'), stop);
   const line = h(doc, 'div', 'ask-cmd-line', `$ ${card.command}`);
   const warning = h(doc, 'div', 'ask-cmd-warning', card.warning || '');
   warning.hidden = !card.warning;

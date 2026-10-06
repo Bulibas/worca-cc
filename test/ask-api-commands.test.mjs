@@ -167,3 +167,33 @@ test('an end no tool showed starts one event turn; an end a wait_for returned is
     assert.ok(!msgs.some((m) => m.role === 'system' && /could not reply/.test(m.text)), 'and no failure notice');
   } finally { b.dispose(); }
 });
+
+test('shared terminal: the user\'s command in Ask\'s tab never wakes the chat; the next user turn takes it for its context line', { skip: !BASH }, async () => {
+  await idle();
+  const t = await newThread();
+  const b = mod._testing.askCommandBridge({ threadId: t.id });
+  const svc = mod._testing.askCommands;
+  const realTake = svc.takePersonCommands;
+  const taken = [];
+  svc.takePersonCommands = (id) => { const r = realTake(id); taken.push({ id, r }); return r; };
+  try {
+    const run = await bridge(b.token, 'run', { command: 'echo mine-574', projectKey: key });
+    const { sessionId } = run.body.result;
+    await waitFor(async () => (await userRows(t.id)).some((m) => /^\[worca event\] terminal block /.test(m.text)));
+    await idle();
+    assert.equal(taken.length, 0, 'an event turn takes nothing');
+    const before = (await userRows(t.id)).length;
+    mod._testing.terminals.write(sessionId, 'echo theirs-574\n', 'local');
+    await waitFor(() => getJson(`/api/terminal/audit?sessionId=${sessionId}`).then((r) => r.audit.some((a) => a.detail === 'echo theirs-574')));
+    await new Promise((r) => setTimeout(r, 300));
+    await idle();
+    assert.equal((await userRows(t.id)).length, before, 'the person command started no turn');
+    const r = await fetch(`${base}/api/ask/threads/${t.id}/messages`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'continue', model: 'claude-opus-5-5', effort: 'high' }) });
+    assert.ok(r.status < 300, String(r.status)); await r.json();
+    await idle();
+    const mine = taken.filter((x) => x.id === t.id);
+    assert.equal(mine.length, 1);
+    assert.deepEqual(mine[0].r.map((x) => x.command), ['echo theirs-574']);
+  } finally { svc.takePersonCommands = realTake; b.dispose(); }
+});

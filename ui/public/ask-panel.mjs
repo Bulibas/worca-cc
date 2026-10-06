@@ -251,7 +251,7 @@ const PILL_MORPH_IN_MS = 520;
 const PILL_MORPH_OUT_MS = 800;
 const PILL_SETTLE_FALLBACK_MS = PILL_MORPH_OUT_MS + 150;
 
-export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null, createVoice = null, voiceLongPressMs = 500 }) {
+export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, showTerminal = () => {}, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null, createVoice = null, voiceLongPressMs = 500 }) {
   const homePick = browserPick();         // hoisted declaration (defined below)
   const st = {
     open: false,
@@ -285,6 +285,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     agent: { on: true, saving: Promise.resolve(), available: false },
     commands: new Map(),      // blockId → command card handle (ask-command-card.mjs)
     commandFrames: new Map(), // blockId → the last ask-command view that arrived before its card was built
+    commandsShown: new Set(), // blockIds whose start already showed their terminal tab (shared terminal)
     pinned: true,
     prevFocus: null,
     size: readStoredSize(),   // {w,h} the user's persisted sheet size (hoisted reader); null = stylesheet default
@@ -4369,7 +4370,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const blockId = String(card.blockId || '');
     const handle = createCommandCard({ doc, card, onStop: (sid) => {
       fetch(`/api/terminal/sessions/${encodeURIComponent(sid)}/stop`, { method: 'POST' }).catch(() => { /* the next frame says what happened */ });
-    } });
+    }, onShow: (sid) => showTerminal(sid, { auto: false }) });
     st.commands.set(blockId, handle);
     const early = st.commandFrames.get(blockId);
     if (early) { st.commandFrames.delete(blockId); handle.update(early); }
@@ -5034,7 +5035,16 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       return;
     }
     if (frame.type === 'ask-command') {                         // #574: a command card's live state, this chat only
-      if (frame.threadId === st.threadId) applyCommandFrame(frame.command);
+      if (frame.threadId !== st.threadId) return;
+      applyCommandFrame(frame.command);
+      // Shared terminal: a command starting in the chat the user is looking at shows its tab in the terminal pane
+      // (the pane decides whether to open or switch); once per block.
+      const c = frame.command;
+      if (st.open && c && c.status === 'running' && typeof c.sessionId === 'string' && !st.commandsShown.has(c.blockId)) {
+        st.commandsShown.add(c.blockId);
+        if (st.commandsShown.size > 200) st.commandsShown.delete(st.commandsShown.values().next().value);
+        showTerminal(c.sessionId, { auto: true });
+      }
       return;
     }
     if (THREADS_REFRESH_FRAMES.has(frame.type)) scheduleThreadsRefresh();

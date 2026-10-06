@@ -167,7 +167,22 @@ test('a cd persists in the shell: cwdOf follows it, and runCommand with the open
   await waitFor(() => mgr.free(s.id) && /sub-574$/.test(mgr.cwdOf(s.id) || ''));
   await assert.rejects(mgr.runCommand(s.id, 'ls', { by: 'ask:x', cwd: work }), { code: 'MOVED' });
   assert.equal(mgr.free(s.id), true);                         // nothing was typed
+  // The caller checked the command against the folder the shell is really in: told that folder, it runs there.
+  const { seq } = await mgr.runCommand(s.id, 'pwd', { by: 'ask:x', cwd: mgr.cwdOf(s.id) });
+  const done = await waitFor(() => blocks.find((b) => b.sessionId === s.id && b.seq === seq && b.status === 'done'));
+  assert.equal(done.cwd && /sub-574$/.test(done.cwd), true);
   await mgr.close(s.id, 'test');
+});
+
+test('write emits input (who typed in which session): Ask keeps a tab the user types in open', async () => {
+  const m = new TerminalManager({ ptyInfo: () => ({ pty: null }), shell: () => ({ file: '/bin/sh', kind: 'other', platform: process.platform }),
+    spawnImpl: () => ({ pid: null, mode: 'pipes', write() {}, resize() {}, signal() {}, onData() {}, onExit() {} }) });
+  const s = await m.open({ cwd: work, scope: 'project', by: 'ask:x', baseEnv });
+  const seen = [];
+  m.on('input', (e) => seen.push(e));
+  m.write(s.id, 'ls', 'ada');
+  m.write('t-nope', 'ls', 'ada');
+  assert.deepEqual(seen, [{ sessionId: s.id, by: 'ada' }]);
 });
 
 test('runCommand refuses a shell without block marks', async () => {

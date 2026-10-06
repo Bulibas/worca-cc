@@ -348,7 +348,10 @@ enforces the set's latest definition.
   `SSH_AUTH_SOCK`; no model, GitHub or server tokens, and none of your shell rc
   files), and every command passes a check first: Worca's own files and API,
   credential paths, force pushes, `rm -r` outside the folder, `sudo` and similar
-  are refused. That check is a rail against mistakes, not a sandbox: an
+  are refused. Ask's terminals are shared with you: a shell you (or Ask) moved
+  with `cd` is kept only while it stays inside the project folder or the run's
+  checkout, and the check runs against the folder the shell is really in; a shell
+  outside it is never used. That check is a rail against mistakes, not a sandbox: an
   obfuscated command can get around it. `Edit` and `Write` stay denied for the
   chat itself. With agent isolation on, agent mode is off: a server-user shell
   would undo the isolation. See [Terminal](terminal.md#ask-worca-agent-mode).

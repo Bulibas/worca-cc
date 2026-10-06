@@ -120,13 +120,15 @@ export class TerminalManager extends EventEmitter {
     return snapshot(s);
   }
 
-  /** Keystrokes from a person. A line end makes them the author of the command it submits. */
+  /** Keystrokes from a person. A line end makes them the author of the command it submits. Emits 'input' (Ask keeps
+   *  a session the user types in from closing as idle). */
   write(id, data, by = 'local') {
     const s = this.sessions.get(id);
     if (!s || s.snap.status !== 'running' || typeof data !== 'string') return false;
     const text = data.slice(0, MAX_INPUT);
     if (/[\r\n]/.test(text)) s.lastInputBy = by;
     s.proc.write(text);
+    this.emit('input', { sessionId: id, by });
     return true;
   }
 
@@ -165,8 +167,8 @@ export class TerminalManager extends EventEmitter {
     if (!s.atPrompt) await this._waitFor(s.readyWaiters, readyMs, 'NO_BLOCKS', 'The shell did not reach its prompt.');
     if (s.block || s.pendingRun) throw codeError('BUSY', 'A command is already running in this terminal.');
     // The W mark (cwd) is printed in the same printf as the A mark, before it: at the prompt, cwdNow is current.
-    // A shell that a previous line `cd`-ed elsewhere must not run the next command there (the caller's command
-    // check reasoned about `cwd`).
+    // `cwd` is the folder the caller's command check reasoned about (for Ask, the shell's own folder at its pick):
+    // a shell that moved since (a `cd` whose W mark landed late) must not run the command anywhere else.
     if (cwd && !sameDir(s.cwdNow, cwd)) throw codeError('MOVED', 'The shell is in another folder.');
     s.pendingRun = { by, source };
     const started = this._waitFor(s.startWaiters, ackMs, 'NOT_STARTED', 'The shell did not start the command.')

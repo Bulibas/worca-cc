@@ -16,7 +16,7 @@ function fakeTerminals() {
     async runCommand(id, command, opts) {
       const s = sessions.get(id);
       if (opts.cwd && (s.cwdNow ?? s.cwd) !== opts.cwd) throw Object.assign(new Error('moved'), { code: 'MOVED' });
-      s.seq += 1; s.live = { seq: s.seq, command, out: '' };
+      s.seq += 1; s.live = { seq: s.seq, command, out: '', source: 'ask', runBy: opts.by };
       t.typed.push({ id, command, ...opts });
       const rec = { sessionId: id, seq: s.seq, command, status: 'running', source: 'ask', runBy: opts.by };
       blocks.set(`${id}:${s.seq}`, rec); t.emit('block', rec);
@@ -25,6 +25,12 @@ function fakeTerminals() {
     liveBlock: (id) => { const s = sessions.get(id); return s && s.live ? { sessionId: id, ...s.live, bytes: s.live.out.length, truncated: false } : null; },
     interrupt(id, by) { t.stopped.push({ id, by }); return { blockSeq: sessions.get(id)?.live?.seq ?? null }; },
     async close(id, by, reason) { t.closed.push({ id, by, reason }); sessions.get(id).status = 'closed'; return true; },
+    person(id, command) {                                  // test driver: the user runs a command in that tab
+      const s = sessions.get(id); s.seq += 1; s.live = { seq: s.seq, command, out: '', source: 'person', runBy: 'local' };
+      const rec = { sessionId: id, seq: s.seq, command, status: 'running', source: 'person', runBy: 'local' };
+      blocks.set(`${id}:${s.seq}`, rec); t.emit('block', rec);
+    },
+    input(id) { t.emit('input', { sessionId: id, by: 'local' }); },   // test driver: the user types in that tab
     finish(id, exitCode, out = '') {                       // test driver: the block ends (event without output, as the manager)
       const s = sessions.get(id); const rec = { ...blocks.get(`${id}:${s.live.seq}`), status: 'done', exitCode };
       blocks.set(`${id}:${s.live.seq}`, { ...rec, output: out }); s.live = null; t.emit('block', rec);
@@ -77,27 +83,135 @@ test('run: at most 3 at once per chat; a finished one frees a slot and its idle 
   assert.equal(terminals.opened.length, 3);
 });
 
-test('a shell that an earlier line cd-ed elsewhere is not reused; runCommand is told the target folder', async () => {
+test('a shell cd-ed within the project is kept: the check and runCommand use its real folder', async () => {
   const { svc, terminals } = make();
-  const a = await svc.run('ask_0000aaaa', { command: 'cd packages/x && npm test' });
-  terminals.get(a.sessionId).cwdNow = '/w/p/packages/x';           // the W mark after the line
+  const a = await svc.run('ask_0000aaaa', { command: 'cd packages/x' });
+  terminals.get(a.sessionId).cwdNow = '/w/p/packages/x';           // the W mark after the line (or the user's own cd)
   terminals.finish(a.sessionId, 0);
   const b = await svc.run('ask_0000aaaa', { command: 'npm test' });
-  assert.notEqual(b.sessionId, a.sessionId);                      // the pick skipped the moved shell
-  assert.equal(terminals.typed.at(-1).cwd, '/w/p');               // runCommand is told the folder it must be in
+  assert.equal(b.sessionId, a.sessionId);                         // the user's cd, exports, venv survive
+  assert.equal(b.cwd, '/w/p/packages/x');
+  assert.equal(terminals.typed.at(-1).cwd, '/w/p/packages/x');    // runCommand guards the folder the check reasoned about
+  terminals.finish(b.sessionId, 0);
+  // Fine from the project folder, outside the session folder from packages/x: the real folder decides.
+  await assert.rejects(svc.run('ask_0000aaaa', { command: 'rm -rf /w/p/build' }), /outside the session folder/);
+  assert.equal(terminals.opened.length, 1);
 });
 
-test('a move the pick could not see yet (MOVED from runCommand): that shell closes, one fresh session runs it', async () => {
+test('a shell cd-ed outside the project is left alone: a fresh one opens in the project folder', async () => {
+  const { svc, terminals } = make();
+  const a = await svc.run('ask_0000aaaa', { command: 'cd /tmp' });
+  terminals.get(a.sessionId).cwdNow = '/tmp';
+  terminals.finish(a.sessionId, 0);
+  for (const cwd of ['/w/pother', '/w']) {                        // a sibling with the same prefix is outside too
+    terminals.get(a.sessionId).cwdNow = cwd;
+    const b = await svc.run('ask_0000aaaa', { command: 'ls' });
+    assert.notEqual(b.sessionId, a.sessionId);
+    assert.equal(b.cwd, '/w/p');
+    terminals.finish(b.sessionId, 0);
+    terminals.get(b.sessionId).cwdNow = '/elsewhere';
+  }
+  assert.ok(!terminals.closed.some((x) => x.id === a.sessionId)); // never closed under the user
+});
+
+test('a move the pick could not see yet (MOVED): the pick runs again with the new folder; the shell stays open', async () => {
   const { svc, terminals } = make();
   const a = await svc.run('ask_0000aaaa', { command: 'cd sub' });
   terminals.finish(a.sessionId, 0);
   terminals.get(a.sessionId).cwdNow = '/w/p/sub';                 // the shell moved…
   const realCwdOf = terminals.cwdOf;
-  terminals.cwdOf = (id) => (id === a.sessionId ? '/w/p' : realCwdOf(id));   // …but the pick still sees the old W mark
+  let stale = true;
+  terminals.cwdOf = (id) => (id === a.sessionId && stale ? (stale = false, '/w/p') : realCwdOf(id));   // …the first pick saw the old W mark
   const b = await svc.run('ask_0000aaaa', { command: 'ls' });
+  assert.equal(b.sessionId, a.sessionId);
+  assert.equal(b.cwd, '/w/p/sub');
+  assert.equal(terminals.typed.at(-1).cwd, '/w/p/sub');
+  assert.deepEqual(terminals.closed, []);
+});
+
+test('the user mid-command in Ask\'s tab: Ask runs in another slot, never fails BUSY', async () => {
+  const { svc, terminals } = make();
+  const a = await svc.run('ask_0000aaaa', { command: 'ls' });
+  terminals.finish(a.sessionId, 0);
+  terminals.person(a.sessionId, 'npm run dev');                    // the user starts a server in that tab
+  const b = await svc.run('ask_0000aaaa', { command: 'git status' });
   assert.notEqual(b.sessionId, a.sessionId);
-  assert.ok(terminals.closed.some((x) => x.id === a.sessionId && x.reason === 'Ask: shell left the folder'));
-  assert.equal(terminals.typed.at(-1).command, 'ls');
+  assert.equal(terminals.opened.length, 2);
+  // A person command that starts between the pick and the typing (BUSY from runCommand): one more pick.
+  terminals.finish(b.sessionId, 0);
+  const realRun = terminals.runCommand.bind(terminals);
+  let raced = false;
+  terminals.runCommand = async (id, command, opts) => {
+    if (!raced) { raced = true; terminals.person(id, 'vim'); throw Object.assign(new Error('busy'), { code: 'BUSY' }); }
+    return realRun(id, command, opts);
+  };
+  const c = await svc.run('ask_0000aaaa', { command: 'git log' });
+  assert.ok(![a.sessionId, b.sessionId].includes(c.sessionId));
+});
+
+test('all slots taken by the user (busy, or moved out of the project): a clear refusal, nothing closed', async () => {
+  const { svc, terminals } = make();
+  const ids = [];
+  for (let i = 0; i < 3; i += 1) { const r = await svc.run('ask_0000aaaa', { command: 'ls' }); ids.push(r.sessionId); }
+  for (const id of ids) terminals.finish(id, 0);
+  terminals.person(ids[0], 'npm run dev');
+  terminals.input(ids[1]); terminals.get(ids[1]).cwdNow = '/tmp';  // the user works in this tab, outside the project
+  terminals.input(ids[2]); terminals.get(ids[2]).cwdNow = '/etc';
+  await assert.rejects(svc.run('ask_0000aaaa', { command: 'git status' }), (e) => e.code === 'NO_SLOT' && /in use/.test(e.message));
+  assert.deepEqual(terminals.closed, []);
+  assert.equal(terminals.opened.length, 3);
+});
+
+test('a slot the user never touched is recycled for another folder', async () => {
+  const { svc, terminals } = make();
+  const ids = [];
+  for (let i = 0; i < 3; i += 1) { const r = await svc.run('ask_0000aaaa', { command: 'ls' }); ids.push(r.sessionId); }
+  for (const id of ids) terminals.finish(id, 0);
+  for (const id of ids) terminals.get(id).cwdNow = '/w/q';         // e.g. Ask's own cd in each
+  terminals.input(ids[0]); terminals.input(ids[2]);
+  const r = await svc.run('ask_0000aaaa', { command: 'ls' });
+  assert.deepEqual(terminals.closed.map((c) => c.id), [ids[1]]);
+  assert.equal(r.cwd, '/w/p');
+});
+
+test('person input and commands in an Ask session reset its idle close', async () => {
+  const timers = [];
+  const { svc, terminals } = make({ setTimer: (fn, ms) => { const t = { fn, ms, live: true }; timers.push(t); return t; },
+    clearTimer: (t) => { if (t) t.live = false; } });
+  const idle = () => timers.filter((t) => t.ms === 10 * 60_000 && t.live);
+  const a = await svc.run('ask_0000aaaa', { command: 'ls' });
+  terminals.finish(a.sessionId, 0);
+  const first = idle()[0];
+  terminals.input(a.sessionId);
+  assert.equal(first.live, false);
+  assert.equal(idle().length, 1);
+  terminals.person(a.sessionId, 'make');
+  terminals.finish(a.sessionId, 0);
+  assert.equal(idle().length, 1);
+  assert.notEqual(idle()[0], first);
+  terminals.input('t-someone-else');                               // a person's own terminal: not Ask's business
+  assert.equal(idle().length, 1);
+});
+
+test('takePersonCommands: the user\'s commands in this chat\'s sessions since the last take, redacted, then cleared', async () => {
+  const { svc, terminals, finished } = make();
+  const secret = 'gho_abcdefghijklmnopqrstuvwxyz0123456789';
+  const a = await svc.run('ask_0000aaaa', { command: 'ls' });
+  terminals.finish(a.sessionId, 0);
+  terminals.person(a.sessionId, `export GH_TOKEN=${secret}`);
+  terminals.finish(a.sessionId, 0);
+  terminals.person(a.sessionId, 'npm test');
+  terminals.finish(a.sessionId, 1);
+  terminals.person(a.sessionId, 'npm run dev');                    // still running
+  terminals.emit('block', { sessionId: 't-0000000099', seq: 1, status: 'running', source: 'person', command: 'whoami' });   // not Ask's
+  assert.equal(finished.length, 1);                                // person commands never wake the chat
+  const got = svc.takePersonCommands('ask_0000aaaa');
+  assert.deepEqual(got.map((b) => [b.blockId, b.status, b.exitCode]),
+    [[`${a.sessionId}:2`, 'done', 0], [`${a.sessionId}:3`, 'done', 1], [`${a.sessionId}:4`, 'running', null]]);
+  assert.ok(!JSON.stringify(got).includes(secret));
+  assert.equal(got[1].command, 'npm test');
+  assert.deepEqual(svc.takePersonCommands('ask_0000aaaa'), []);
+  assert.deepEqual(svc.takePersonCommands('ask_0000bbbb'), []);
 });
 
 test('finish: onFinish fires once per Ask block; seen() records an end a tool returned', async () => {
@@ -206,4 +320,16 @@ test('home may be a function, read when a command is checked (the server learns 
   assert.equal(ok.ok, true);
   h = '/srv/worca';                                          // e.g. the Docker image's WORCA_HOME, no .worca-cc in it
   await assert.rejects(svc.run('ask_0000aaaa', { command: 'ls /srv/worca/logs' }), /protected/);
+});
+
+test('stop: Ask never stops the user\'s own command, even in Ask\'s tab', async () => {
+  const { svc, terminals } = make();
+  const a = await svc.run('ask_0000aaaa', { command: 'ls' });
+  terminals.finish(a.sessionId, 0);
+  terminals.person(a.sessionId, 'npm run dev');
+  assert.throws(() => svc.stop('ask_0000aaaa', { blockId: `${a.sessionId}:2` }), (e) => e.code === 'NOT_OWNER');
+  assert.deepEqual(terminals.stopped, []);
+  const b = await svc.run('ask_0000aaaa', { command: 'sleep 9' });          // its own command: it may stop that
+  assert.deepEqual(svc.stop('ask_0000aaaa', { blockId: b.blockId }), { ok: true, stopping: true });
+  assert.deepEqual(terminals.stopped, [{ id: b.sessionId, by: 'ask:ask_0000aaaa' }]);
 });

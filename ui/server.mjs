@@ -9710,6 +9710,9 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // Agent mode (#574): this chat's switch, where agent mode exists at all; a message's own value wins.
     const agentOn = askCommandsEnabled() && (agentMode !== undefined ? agentMode : thread.agentMode) !== false;
     const systemPrompt = await askSystemPromptFor(catalog, { web, mcp: await askMcpPromptInput(mcp), commands: agentOn });
+    // Shared terminal: what the user ran in this chat's Ask tabs since its last user turn (their commands never wake
+    // the chat; an event turn leaves them for the next user turn).
+    if (!synthetic && askCommandsEnabled()) headerCtx.personCommands = askCommands.takePersonCommands(id);
     const header = askBuildContextHeader(headerCtx);
     const prompt = askBuildTurnPrompt(header, text, inline);
     const prior = askListMessages(id).filter((m) => m.seq < userMsg.seq);
@@ -12297,5 +12300,5 @@ export const _testing = {
   broadcast, askFilesRunDir,
   validateResumeTarget, resumeTargetOf, fireResumeTicket, cancelScheduledResumes, stopPausedPipeline,
   trackHeartbeat, heartbeatTick, BOOT_ID,
-  askCommandBridge, askCommands, askCommandsEnabled, drainAskDeferred,
+  askCommandBridge, askCommands, askCommandsEnabled, drainAskDeferred, terminals,
 };

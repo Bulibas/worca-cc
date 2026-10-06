@@ -13,7 +13,7 @@ const snapOf = (blocks, over = {}) => ({ thread: thread(over),
     { id: MID, threadId: TID, seq: 2, role: 'assistant', text: 'ok', blocks, status: 'done', createdAt: 't' }],
   attachments: [], runLinks: [], worktrees: [], inFlight: null });
 
-function setup({ blocks = [], enabled = true, threadOver = {}, stored = true, view = null, gate = null } = {}) {
+function setup({ blocks = [], enabled = true, threadOver = {}, stored = true, view = null, gate = null, deps = {} } = {}) {
   const state = { patches: [], bodies: [], stops: [] };
   const ctx = makePanel({ fetchHandler: (url, opts) => {
     const method = ((opts || {}).method || 'GET').toUpperCase();
@@ -27,7 +27,7 @@ function setup({ blocks = [], enabled = true, threadOver = {}, stored = true, vi
     if (url === `/api/ask/threads/${TID}` && method === 'GET') return { ok: true, status: 200, json: async () => snapOf(blocks, threadOver) };
     if (url === `/api/ask/threads/${TID}/messages` && method === 'POST') { state.bodies.push(JSON.parse(opts.body)); return { ok: true, status: 202, json: async () => ({ userMessageId: 'askm_u0000009', assistantMessageId: 'askm_00000009' }) }; }
     return { ok: true, status: 200, json: async () => ({}) };
-  } });
+  }, deps });
   if (stored) ctx.storage.setItem('worca-cc.ask.thread', TID);
   return { state, ctx };
 }
@@ -121,5 +121,24 @@ test('where agent mode cannot work the switch is not shown and no agentMode is s
   ctx.doc.querySelector('[data-ask-send]').click();
   await settle(ctx);
   assert.ok(!('agentMode' in state.bodies.at(-1)));
+  ctx.panel.destroy();
+});
+
+test('shared terminal: a new command in the open chat shows its tab (auto, once per block); the folder label shows it on click', async () => {
+  const shows = [];
+  const { ctx } = setup({ blocks: [CMD], deps: { showTerminal: (sid, o) => shows.push([sid, o]) } });
+  const live = { blockId: 't-0000000002:1', sessionId: 't-0000000002', seq: 1, status: 'running', exitCode: null, tail: '' };
+  ctx.panel.pushServerFrame({ type: 'ask-command', threadId: TID, command: live });          // the sheet is closed: nothing
+  assert.deepEqual(shows, []);
+  ctx.panel.open();
+  await settle(ctx);
+  const next = { ...live, blockId: 't-0000000002:2', seq: 2 };
+  ctx.panel.pushServerFrame({ type: 'ask-command', threadId: TID, command: next });
+  ctx.panel.pushServerFrame({ type: 'ask-command', threadId: TID, command: { ...next, tail: 'more' } });   // the same block: once
+  ctx.panel.pushServerFrame({ type: 'ask-command', threadId: TID, command: { ...live, blockId: 't-0000000002:3', seq: 3, status: 'done', exitCode: 0 } });
+  ctx.panel.pushServerFrame({ type: 'ask-command', threadId: 'ask_99999999', command: { ...live, blockId: 't-0000000009:1', sessionId: 't-0000000009' } });
+  assert.deepEqual(shows, [['t-0000000002', { auto: true }]]);
+  ctx.doc.querySelector('.ask-card.ask-cmd .ask-cmd-folder').click();
+  assert.deepEqual(shows.at(-1), ['t-0000000001', { auto: false }]);
   ctx.panel.destroy();
 });

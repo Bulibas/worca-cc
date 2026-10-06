@@ -37,3 +37,14 @@ test('the live-run warning shows when the card carries one', () => {
   const c = createCommandCard({ doc, card: { ...CARD, warning: 'This pipeline is still running…' }, onStop: () => {} });
   assert.equal(c.el.querySelector('.ask-cmd-warning').hidden, false);
 });
+
+test('the folder label shows the command\'s terminal tab (onShow with the session)', () => {
+  const doc = dom(); const shown = [];
+  const c = createCommandCard({ doc, card: CARD, onStop: () => {}, onShow: (sid) => shown.push(sid) });
+  const folder = c.el.querySelector('.ask-cmd-folder');
+  assert.equal(folder.tagName, 'BUTTON');
+  assert.equal(folder.textContent, 'demo · main');
+  assert.match(folder.title, /terminal/i);
+  folder.click();
+  assert.deepEqual(shown, ['t-0000000001']);
+});

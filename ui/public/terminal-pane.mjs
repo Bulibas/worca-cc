@@ -2,6 +2,8 @@
 // runs on the worca server (src/core/terminal/manager.mjs); this pane draws it with xterm.js over /ws
 // (term-* frames), follows the page (a run's folder, a project's own folder: opening the pane starts or
 // reattaches that shell). The server records each command for the audit log; the pane does not list them.
+// Ask Worca's terminals (agent mode, #574) are shared: their tabs show on every page, and the pane follows
+// Ask (showSession) when a command starts in the open chat or the user clicks a command card.
 // Built in JS and appended to <body>, like the Ask dock: index.html is untouched.
 import { createLineEditor } from './terminal-line.mjs';
 
@@ -55,7 +57,8 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
     tried: new Set(),            // start keys auto-started since the pane opened: each at most once (D3)
     starting: null,              // the start key whose shell is being made
     restartKey: null,            // Enter starts a new shell for this start key (the last one exited, or never started)
-    why: null, focusNext: false, pendingTimer: null };
+    why: null, focusNext: false, pendingTimer: null,
+    askShown: new Set() };       // Ask chats (createdBy) whose command already opened the pane: never reopened by itself
   const drawn = { tabs: '', context: '' };     // what the tabs and the context bar show: unchanged → not rebuilt (an open select stays open)
 
   const make = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
@@ -158,12 +161,19 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
   }
 
   const newestFirst = (a, z) => String(z.createdAt || '').localeCompare(String(a.createdAt || ''));
-  function sessionsForTarget() {
+  const isAsk = (s) => String(s?.createdBy || '').startsWith('ask:');
+  /** This page's own terminals: what follow() reattaches or starts. */
+  function pageSessions() {
     const all = [...st.sessions.values()];
     if (st.target.kind === 'run') return all.filter((s) => s.runId === st.target.runId && (!st.member || s.member === st.member));
     if (st.target.kind === 'project') return all.filter((s) => s.scope === 'project' && s.projectKey === st.target.projectKey);
     if (st.target.kind === 'pending') return [];
     return all;
+  }
+  /** The tabs: this page's terminals plus Ask's, which are shared with the user on every page. */
+  function sessionsForTarget() {
+    const own = pageSessions();
+    return [...own, ...[...st.sessions.values()].filter((s) => isAsk(s) && !own.includes(s))];
   }
   const memberNow = () => st.ctx?.members?.find((x) => x.projectKey === st.member) || st.ctx?.members?.[0] || null;
   /** What a new shell on this page would be: one per run member, or the project's own folder. null: none here. */
@@ -192,6 +202,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
     const key = JSON.stringify(target);
     if (!force && key === st.targetKey) return;
     const changed = key !== st.targetKey;
+    const navigated = changed && st.targetKey !== '';   // the user moved to another page (not the pane's first look)
     const gen = ++st.ctxGen;                             // a later page change wins over this one's fetch
     st.targetKey = key;
     st.target = target;
@@ -213,7 +224,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
     for (const s of ctx?.sessions || []) st.sessions.set(s.id, s);
     if (target.kind === 'run' && ctx && !ctx.members.some((m) => m.projectKey === st.member)) st.member = ctx.members[0]?.projectKey || '';
     render();
-    await follow();
+    await follow({ navigated });
     render();
   }
 
@@ -221,17 +232,18 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
    * D3: the pane shows this page's shell. Its running session is reattached; with none, one is started,
    * at most once per start key while the pane is open (a later one needs Enter, see promptRestart).
    * Other pages start nothing: they keep the attached shell, or attach the newest running one.
+   * An attached Ask tab (the pane followed Ask) stays until the user moves to another page or project.
    */
-  async function follow() {
+  async function follow({ navigated = false } = {}) {
     const cur = st.sessions.get(st.current);
-    const live = sessionsForTarget().filter((s) => s.status === 'running').sort(newestFirst);
+    const live = pageSessions().filter((s) => s.status === 'running').sort(newestFirst);
     if (st.target.kind === 'other') {
       if (!(cur && cur.status === 'running') && live[0]) await attach(live[0].id);
       return;
     }
     const key = startKey();
     if (key && live.length) st.tried.add(key);            // this page has had its shell: a later one needs Enter
-    if (cur && cur.status === 'running' && live.some((s) => s.id === cur.id)) return;
+    if (cur && cur.status === 'running' && ((isAsk(cur) && !navigated) || live.some((s) => s.id === cur.id))) return;
     if (live[0]) { await attach(live[0].id); return; }
     if (!key || st.starting === key) return;
     if (st.tried.has(key)) { promptRestart(key); return; }
@@ -324,6 +336,28 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
   }
   function stopCurrent() {
     if (st.current) api('POST', `/api/terminal/sessions/${encodeURIComponent(st.current)}/stop`).catch(showError);
+  }
+  /**
+   * Shows one terminal (an Ask session): attaches it and opens the pane. `auto` (a command Ask just started) never
+   * takes the keyboard, never switches away from another tab the user is typing in, and opens a closed pane only
+   * the first time for each chat (a pane the user closed afterwards stays closed). A card click (not auto) always
+   * shows and focuses it.
+   */
+  async function showSession(id, { auto = false } = {}) {
+    if (st.destroyed) return;
+    if (auto && st.open && st.current !== id && root.contains(doc.activeElement)) return;
+    if (!st.sessions.get(id)) await refreshInfo();
+    const s = st.sessions.get(id);
+    if (!st.enabled || !s || s.status !== 'running') return;
+    if (auto) {
+      const chat = s.createdBy || id;
+      if (!st.open && st.askShown.has(chat)) return;
+      st.askShown.add(chat);
+    }
+    st.focusNext = !auto;
+    if (st.current !== id) await attach(id);
+    if (!st.open) await open({ focus: !auto });
+    else if (!auto) { st.focusNext = false; focusTerm(); }
   }
   /** The (+) tab: another shell for this page, next to the ones it has. */
   function addShell() {
@@ -524,7 +558,7 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
           // this project's shell, never the other's: let go first, then follow (attach or start once)
           if (st.current && !sessionsForTarget().some((x) => x.id === st.current)) detachCurrent();
           render();
-          follow().then(render);
+          follow({ navigated: true }).then(render);
         });
         context.append(sel);
       } else if (kind === 'folder') {
@@ -583,5 +617,5 @@ export function createTerminalPane({ doc, win, fetch, sendWs, getPageContext, st
     try { st.term?.dispose(); } catch { /* already gone */ }
   }
 
-  return { root, open, close, toggle, syncOpeners, isOpen: () => st.open, onFrame, onHello, onConnection, onContextChange, destroy };
+  return { root, open, close, toggle, syncOpeners, isOpen: () => st.open, showSession, onFrame, onHello, onConnection, onContextChange, destroy };
 }

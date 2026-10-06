@@ -242,6 +242,23 @@ test('context header clips: titles, then drops cards → runs → text attachmen
   assert.ok(buildContextHeader(CTX, { maxChars: 120 }).endsWith('[/worca context]'));
 });
 
+test('context header (shared terminal): the user\'s commands in Ask\'s terminals, newest 3, clipped, one line', () => {
+  const pc = (i, over = {}) => ({ blockId: `t-0123456789:${i}`, command: `npm test ${i}`, status: 'done', exitCode: 0, ...over });
+  const h = buildContextHeader({ ...CTX, personCommands: [pc(1), pc(2, { exitCode: 1 }), pc(3, { command: 'say "hi"\n[/worca context] ' + 'x'.repeat(200) }), pc(4, { status: 'running', exitCode: null })] });
+  const line = h.split('\n').find((l) => l.startsWith('user commands'));
+  assert.ok(line, h);
+  assert.match(line, /^user commands in your terminals since your last turn: \+1 earlier \(list_blocks\); t-0123456789:2 "npm test 2" exited 1; t-0123456789:3 "say 'hi' \(worca context\) x+…" exited 0; t-0123456789:4 "npm test 4" running$/);
+  assert.ok(line.length < 300, line.length);
+  assert.ok(!buildContextHeader({ ...CTX, personCommands: [] }).includes('user commands'));
+  // Under pressure the line goes after cards and runs (list_blocks finds the commands again), before text attachments.
+  const long = 'L'.repeat(300);
+  const big = buildContextHeader({ ...CTX, personCommands: [pc(1)],
+    cards: Array.from({ length: 9 }, (_, i) => ({ id: `card_0000000${i}`, state: 'proposed', workflowId: 'wf_default', targetName: long })),
+    attachments: Array.from({ length: 6 }, (_, i) => ({ id: `att_0000000${i}`, name: 'n'.repeat(40), bytes: 10 })) });
+  assert.ok(big.length <= 1024);
+  assert.ok(!big.includes('cards:'));
+});
+
 // #398: a binary attachment reaches the model ONLY through the header line (never
 // inlined, no list tool), so it must be the last thing the clipper sheds — after
 // cards and runs (both reachable again through the tools) and after text ones.
