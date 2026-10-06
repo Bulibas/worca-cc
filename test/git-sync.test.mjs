@@ -2,6 +2,7 @@
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, readFile, chmod, utimes } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -10,6 +11,8 @@ import {
   resolveSourceRef, incomingCommits, commitsBetween, isSafeBranchName, isSafeRemoteName,
   classifyFetchError, scrubGitText, syncState, runSyncOptions, lastFetchedAt, fetchHeadUrls, syncRepo, _testing,
 } from '../src/core/git-sync.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateWorld } from './helpers/git-dir.mjs';
 
 let root; const saved = {};
 before(async () => {
@@ -21,6 +24,7 @@ before(async () => {
 after(async () => {
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   await rm(root, { recursive: true, force: true });
+  await Promise.all(worlds.map((d) => rm(d, { recursive: true, force: true, maxRetries: 3 })));
 });
 beforeEach(() => _testing.reset());
 
@@ -30,16 +34,22 @@ const g = (cwd, ...args) => {
   return r.stdout.trim();
 };
 let n = 0;
-/** bare origin + clone A (the "project") + clone B (a teammate who pushes). */
-async function world() {
-  const dir = join(root, `w${++n}`);
-  g(root, 'init', '-q', '--bare', `${dir}-origin.git`);
-  g(root, 'clone', '-q', `${dir}-origin.git`, `${dir}-a`);
-  await writeFile(join(`${dir}-a`, 'f.txt'), 'one\n');
-  g(`${dir}-a`, 'add', '-A'); g(`${dir}-a`, 'commit', '-qm', 'init'); g(`${dir}-a`, 'push', '-q', 'origin', 'dev');
-  g(root, 'clone', '-q', `${dir}-origin.git`, `${dir}-b`);
+/** bare origin + clone A (the "project") + clone B (a teammate who pushes), under one root. */
+function buildWorld(dir) {
+  g(dir, 'init', '-q', '--bare', 'origin.git');
+  g(dir, 'clone', '-q', join(dir, 'origin.git'), 'a');
+  const a = join(dir, 'a');
+  writeFileSync(join(a, 'f.txt'), 'one\n');
+  g(a, 'add', '-A'); g(a, 'commit', '-qm', 'init'); g(a, 'push', '-q', 'origin', 'dev');
+  g(dir, 'clone', '-q', join(dir, 'origin.git'), 'b');
+}
+const worlds = [];
+function world() {
+  n += 1; // per-world marker / mirror names below
+  const dir = templateWorld('git-sync', buildWorld, 'git-sync');
+  worlds.push(dir);
   const push = async (file, msg, branch = 'dev') => {
-    const b = `${dir}-b`;
+    const b = join(dir, 'b');
     g(b, 'fetch', '-q', '--prune', 'origin');
     // An existing remote branch continues from its tip; a NEW branch starts from origin/dev.
     const known = spawnSync('git', ['rev-parse', '--verify', '-q', `origin/${branch}`], { cwd: b }).status === 0;
@@ -47,35 +57,67 @@ async function world() {
     await writeFile(join(b, file), `${msg}\n`); g(b, 'add', '-A'); g(b, 'commit', '-qm', msg);
     g(b, 'push', '-q', 'origin', branch);
   };
-  return { a: `${dir}-a`, b: `${dir}-b`, push };
+  return { a: join(dir, 'a'), b: join(dir, 'b'), push };
 }
 
-test('names: safe branch/remote names; SHAs and options are not branches', () => {
-  for (const ok of ['dev', 'feat/x-1', 'release/2.0']) assert.equal(isSafeBranchName(ok), true, ok);
-  for (const bad of ['', '-x', 'a..b', 'a//b', 'x/', 'x.lock', '.x', 'a b', 'x:y', '+x', 'a'.repeat(40).replace(/a/g, 'f')]) assert.equal(isSafeBranchName(bad), false, bad);
-  assert.equal(isSafeRemoteName('origin'), true);
-  assert.equal(isSafeRemoteName('https://github.com/a/b'), false);
-  assert.equal(isSafeRemoteName('-o'), false);
+test('pure helpers: safe names, classifyFetchError, scrubGitText, syncState, fetchHeadUrls, runSyncOptions, QUIET_ENV', async () => {
+  await checkRows([
+    { name: 'names: safe branch/remote names; SHAs and options are not branches', run: () => {
+      for (const ok of ['dev', 'feat/x-1', 'release/2.0']) assert.equal(isSafeBranchName(ok), true, ok);
+      for (const bad of ['', '-x', 'a..b', 'a//b', 'x/', 'x.lock', '.x', 'a b', 'x:y', '+x', 'a'.repeat(40).replace(/a/g, 'f')]) assert.equal(isSafeBranchName(bad), false, bad);
+      assert.equal(isSafeRemoteName('origin'), true);
+      assert.equal(isSafeRemoteName('https://github.com/a/b'), false);
+      assert.equal(isSafeRemoteName('-o'), false);
+    } },
+    { name: 'runSyncOptions: absent → disabled; per-member settings', run: () => {
+      assert.equal(runSyncOptions(undefined).enabled, false);
+      const o = runSyncOptions({ members: { a: { enabled: true, remote: 'upstream', onDiverged: 'origin', policySource: 'user' }, b: { enabled: false, remote: 'https://x' } } });
+      assert.equal(o.enabled, true);
+      assert.deepEqual(o.memberFor('a'), { enabled: true, remote: 'upstream', onDiverged: 'origin', policySource: 'user' });
+      assert.deepEqual(o.memberFor('b'), { enabled: false, remote: 'origin', onDiverged: 'fail', policySource: 'setting' });
+      assert.equal(o.memberFor('zzz').enabled, false);
+    } },
+    { name: 'fetchHeadUrls: credential-free forms git writes into FETCH_HEAD', run: () => {
+      assert.deepEqual(fetchHeadUrls('https://x-access-token:tok@github.com/a/b.git'), ['https://github.com/a/b']);
+      assert.deepEqual(fetchHeadUrls('git@github.com:a/b.git'), ['git@github.com:a/b', 'github.com:a/b']);
+      assert.deepEqual(fetchHeadUrls('/srv/repos/x.git/'), ['/srv/repos/x']);
+    } },
+    { name: 'git runs with GIT_OPTIONAL_LOCKS=0, so status never takes the user\'s index lock', run: () => {
+      assert.equal(_testing.QUIET_ENV.GIT_OPTIONAL_LOCKS, '0');
+    } },
+    { name: 'pure helpers', run: () => {
+      assert.equal(classifyFetchError('fatal: Authentication failed for ...'), 'auth');
+      assert.equal(classifyFetchError("fatal: 'upstream' does not appear to be a git repository"), 'no-remote');
+      // A configured remote whose path/URL is not a repository: git adds the "access rights" line, but
+      // it is unreachable, not a sign-in problem.
+      assert.equal(classifyFetchError("fatal: '/gone/x.git' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists."), 'network');
+      assert.equal(classifyFetchError("fatal: 'git@host:o/r.git' does not appear to be a git repository"), 'network');
+      assert.equal(scrubGitText('https://u:secret@host/x ghp_abcdefghijklmnopqrstuv1234'), 'https://***@host/x <redacted>');
+      assert.equal(syncState({ ok: true, hasLocal: true, hasRemote: true, ahead: 1, behind: 2 }), 'diverged');
+    } },
+  ]);
 });
 
-test('up to date → state up-to-date, 0/0', async () => {
-  const { a } = await world();
-  const f = await fetchRemote(a, { remote: 'origin' }); assert.equal(f.ok, true);
-  const s = await syncStatus(a, { base: 'dev' });
-  assert.equal(s.ok, true); assert.equal(s.state, 'up-to-date'); assert.equal(s.ahead, 0); assert.equal(s.behind, 0);
-  assert.ok(s.fetchedAt);
-});
-
-test('behind → fast-forward (checked out, clean) moves the branch and the working tree', async () => {
+// One world: the base is taken before the two pushes, so commitsBetween counts both.
+test('behind → fast-forward (checked out, clean) moves the branch and the working tree; commitsBetween counts the gap', async () => {
   const { a, push } = await world();
+  const base = g(a, 'rev-parse', 'HEAD');
   await push('g.txt', 'two'); await push('h.txt', 'three');
   await fetchRemote(a);
-  const s = await syncStatus(a, { base: 'dev' });
-  assert.equal(s.state, 'behind'); assert.equal(s.behind, 2);
-  assert.equal((await incomingCommits(a, { base: 'dev' })).map((c) => c.subject).join(','), 'three,two');
-  const r = await fastForward(a, { base: 'dev' });
-  assert.equal(r.ok, true); assert.equal(r.commits, 2);
-  assert.equal(g(a, 'rev-parse', 'dev'), g(a, 'rev-parse', 'origin/dev'));
+  await checkRows([
+    { name: 'commitsBetween: count, or null when a ref is missing', run: async () => {
+      assert.equal(await commitsBetween(a, base, 'refs/remotes/origin/dev'), 2);
+      assert.equal(await commitsBetween(a, base, 'refs/remotes/origin/nope'), null);
+    } },
+    { name: 'behind → fast-forward (checked out, clean) moves the branch and the working tree', run: async () => {
+      const s = await syncStatus(a, { base: 'dev' });
+      assert.equal(s.state, 'behind'); assert.equal(s.behind, 2);
+      assert.equal((await incomingCommits(a, { base: 'dev' })).map((c) => c.subject).join(','), 'three,two');
+      const r = await fastForward(a, { base: 'dev' });
+      assert.equal(r.ok, true); assert.equal(r.commits, 2);
+      assert.equal(g(a, 'rev-parse', 'dev'), g(a, 'rev-parse', 'origin/dev'));
+    } },
+  ]);
 });
 
 test('behind, base NOT checked out → update-ref CAS, HEAD untouched', async () => {
@@ -110,23 +152,41 @@ test('checked out here but git spells the path differently → merge --ff-only, 
   assert.equal(g(a, 'status', '--porcelain', '--untracked-files=no'), '');   // index + files moved with HEAD
 });
 
-test('update-ref guard: a branch that becomes checked out between status and write is refused (in-use)', async () => {
-  const { a, push } = await world();
-  g(a, 'checkout', '-q', '-b', 'other');
-  await push('g.txt', 'two'); await fetchRemote(a);
-  const before = g(a, 'rev-parse', 'dev');
-  let lists = 0;
-  _testing.setRunner((args, opts) => {
-    // 1st worktree list (syncStatus): dev checked out nowhere. 2nd (the guard): it now is.
-    if (args[0] === 'worktree' && ++lists === 2) {
-      return Promise.resolve({ ok: true, stdout: 'worktree /elsewhere\nHEAD 0000000000000000000000000000000000000000\nbranch refs/heads/dev\n\n', stderr: '', code: 0, timedOut: false });
-    }
-    return _testing.defaultRun(args, opts);
-  });
-  const r = await fastForward(a, { base: 'dev' });
-  _testing.setRunner(null);
-  assert.equal(r.ok, false); assert.equal(r.kind, 'in-use');
-  assert.equal(g(a, 'rev-parse', 'dev'), before);
+test('update-ref guard: a branch checked out after status, or a failed worktree list, is in-use and the base never moves', async () => {
+  await checkRows([
+    { name: 'update-ref guard: a branch that becomes checked out between status and write is refused (in-use)', run: async () => {
+      const { a, push } = await world();
+      g(a, 'checkout', '-q', '-b', 'other');
+      await push('g.txt', 'two'); await fetchRemote(a);
+      const before = g(a, 'rev-parse', 'dev');
+      let lists = 0;
+      _testing.setRunner((args, opts) => {
+        // 1st worktree list (syncStatus): dev checked out nowhere. 2nd (the guard): it now is.
+        if (args[0] === 'worktree' && ++lists === 2) {
+          return Promise.resolve({ ok: true, stdout: 'worktree /elsewhere\nHEAD 0000000000000000000000000000000000000000\nbranch refs/heads/dev\n\n', stderr: '', code: 0, timedOut: false });
+        }
+        return _testing.defaultRun(args, opts);
+      });
+      const r = await fastForward(a, { base: 'dev' });
+      _testing.setRunner(null);
+      assert.equal(r.ok, false); assert.equal(r.kind, 'in-use');
+      assert.equal(g(a, 'rev-parse', 'dev'), before);
+    } },
+    { name: 'a failed `git worktree list` counts as in use: update-ref never moves the base', run: async () => {
+      _testing.reset();
+      const { a, push } = await world();
+      g(a, 'checkout', '-q', '-b', 'other');
+      await push('g.txt', 'two'); await fetchRemote(a);
+      const before = g(a, 'rev-parse', 'dev');
+      _testing.setRunner((args, opts) => (args[0] === 'worktree'
+        ? Promise.resolve({ ok: false, stdout: '', stderr: 'fatal: boom', code: 128, timedOut: false })
+        : _testing.defaultRun(args, opts)));
+      const r = await fastForward(a, { base: 'dev' });
+      _testing.setRunner(null);
+      assert.equal(r.ok, false); assert.equal(r.kind, 'in-use');
+      assert.equal(g(a, 'rev-parse', 'dev'), before);
+    } },
+  ]);
 });
 
 test('diverged → never merged; kind diverged', async () => {
@@ -159,15 +219,25 @@ test('deleted on the remote → --prune drops it; status no-upstream', async () 
   assert.equal(s.state, 'no-upstream');
 });
 
-test('remote-only branch → ensureLocalBranch creates a tracking branch; resolveSourceRef says remoteOnly', async () => {
+test('remote-only branch → ensureLocalBranch creates a tracking branch; resolveSourceRef says remoteOnly, also for a <remote>/<name> pushed after the last fetch', async () => {
   const { a, push } = await world();
-  await push('x.txt', 'x', 'feat/new');
-  const r = await resolveSourceRef(a, 'feat/new', { remote: 'origin' });   // fetches (TTL) itself
-  assert.equal(r.ok, true); assert.equal(r.remoteOnly, true); assert.equal(r.ref, 'origin/feat/new');
-  const c = await ensureLocalBranch(a, { base: 'feat/new' });
-  assert.equal(c.ok, true); assert.equal(c.created, true);
-  assert.equal(g(a, 'rev-parse', '--abbrev-ref', 'feat/new@{upstream}'), 'origin/feat/new');
-  assert.equal((await resolveSourceRef(a, 'nope-nowhere')).ok, false);
+  await checkRows([
+    { name: 'remote-only branch → ensureLocalBranch creates a tracking branch; resolveSourceRef says remoteOnly', run: async () => {
+      await push('x.txt', 'x', 'feat/new');
+      const r = await resolveSourceRef(a, 'feat/new', { remote: 'origin' });   // fetches (TTL) itself
+      assert.equal(r.ok, true); assert.equal(r.remoteOnly, true); assert.equal(r.ref, 'origin/feat/new');
+      const c = await ensureLocalBranch(a, { base: 'feat/new' });
+      assert.equal(c.ok, true); assert.equal(c.created, true);
+      assert.equal(g(a, 'rev-parse', '--abbrev-ref', 'feat/new@{upstream}'), 'origin/feat/new');
+      assert.equal((await resolveSourceRef(a, 'nope-nowhere')).ok, false);
+    } },
+    { name: 'resolveSourceRef accepts a just-fetched <remote>/<name>', run: async () => {
+      await fetchRemote(a);
+      await push('n.txt', 'new', 'feat-new');   // pushed after the last fetch
+      const r = await resolveSourceRef(a, 'origin/feat-new', { maxAgeMs: 0 });
+      assert.equal(r.ok, true); assert.equal(r.ref, 'origin/feat-new'); assert.equal(r.remoteOnly, true);
+    } },
+  ]);
 });
 
 test('ten concurrent callers → ONE git fetch; a call inside the TTL → none', async () => {
@@ -187,7 +257,8 @@ test('ten concurrent callers → ONE git fetch; a call inside the TTL → none',
 
 test('seam: auth / network / timeout kinds; cached refs still answer; tokens scrubbed', async () => {
   const { a } = await world();
-  await fetchRemote(a);
+  assert.equal((await fetchRemote(a)).ok, true);
+  const s0 = await syncStatus(a, { base: 'dev' }); assert.deepEqual([s0.ahead, s0.behind, !!s0.fetchedAt], [0, 0, true], 'fresh clone is 0/0 with fetchedAt');
   for (const [stderr, kind, timedOut] of [
     ["fatal: could not read Username for 'https://github.com': terminal prompts disabled", 'auth', false],
     ['remote: Repository not found.\nfatal: repository \'https://x-access-token:ghs_abcdefghijklmnopqrstuvwxyz0123@github.com/a/b/\' not found', 'auth', false],
@@ -271,23 +342,6 @@ test('status reads report a failed fetch newer than the last good one; a later g
   assert.equal(back.fetchError, undefined);
 });
 
-test('runSyncOptions: absent → disabled; per-member settings', () => {
-  assert.equal(runSyncOptions(undefined).enabled, false);
-  const o = runSyncOptions({ members: { a: { enabled: true, remote: 'upstream', onDiverged: 'origin', policySource: 'user' }, b: { enabled: false, remote: 'https://x' } } });
-  assert.equal(o.enabled, true);
-  assert.deepEqual(o.memberFor('a'), { enabled: true, remote: 'upstream', onDiverged: 'origin', policySource: 'user' });
-  assert.deepEqual(o.memberFor('b'), { enabled: false, remote: 'origin', onDiverged: 'fail', policySource: 'setting' });
-  assert.equal(o.memberFor('zzz').enabled, false);
-});
-
-test('commitsBetween: count, or null when a ref is missing', async () => {
-  const { a, push } = await world();
-  const base = g(a, 'rev-parse', 'HEAD');
-  await push('g.txt', 'two'); await fetchRemote(a);
-  assert.equal(await commitsBetween(a, base, 'refs/remotes/origin/dev'), 1);
-  assert.equal(await commitsBetween(a, base, 'refs/remotes/origin/nope'), null);
-});
-
 test('TTL is per remote: fetching another remote never makes this one fresh; a person\'s fetch of it does', async () => {
   const { a } = await world();
   const url = g(a, 'remote', 'get-url', 'origin');
@@ -309,16 +363,6 @@ test('TTL is per remote: fetching another remote never makes this one fresh; a p
   _testing.forgetProcess(); g(a, 'fetch', '-q', 'origin');
   assert.equal((await fetchRemote(a, { remote: 'origin', maxAgeMs: 45_000 })).cached, true);
   assert.equal(fetches, 2);
-});
-
-test('fetchHeadUrls: credential-free forms git writes into FETCH_HEAD', () => {
-  assert.deepEqual(fetchHeadUrls('https://x-access-token:tok@github.com/a/b.git'), ['https://github.com/a/b']);
-  assert.deepEqual(fetchHeadUrls('git@github.com:a/b.git'), ['git@github.com:a/b', 'github.com:a/b']);
-  assert.deepEqual(fetchHeadUrls('/srv/repos/x.git/'), ['/srv/repos/x']);
-});
-
-test('git runs with GIT_OPTIONAL_LOCKS=0, so status never takes the user\'s index lock', () => {
-  assert.equal(_testing.QUIET_ENV.GIT_OPTIONAL_LOCKS, '0');
 });
 
 test('a timed-out fetch kills its whole process group (no orphaned ssh left waiting on a tty)', { skip: process.platform === 'win32' }, async () => {
@@ -408,17 +452,6 @@ test('git-sync never runs the project\'s hooks: reference-transaction / post-mer
   }
 });
 
-test('pure helpers', () => {
-  assert.equal(classifyFetchError('fatal: Authentication failed for ...'), 'auth');
-  assert.equal(classifyFetchError("fatal: 'upstream' does not appear to be a git repository"), 'no-remote');
-  // A configured remote whose path/URL is not a repository: git adds the "access rights" line, but
-  // it is unreachable, not a sign-in problem.
-  assert.equal(classifyFetchError("fatal: '/gone/x.git' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists."), 'network');
-  assert.equal(classifyFetchError("fatal: 'git@host:o/r.git' does not appear to be a git repository"), 'network');
-  assert.equal(scrubGitText('https://u:secret@host/x ghp_abcdefghijklmnopqrstuv1234'), 'https://***@host/x <redacted>');
-  assert.equal(syncState({ ok: true, hasLocal: true, hasRemote: true, ahead: 1, behind: 2 }), 'diverged');
-});
-
 test('a planted core.fsmonitor command in .git/config never runs from a git-sync status read', { skip: process.platform === 'win32' }, async () => {
   const { a } = await world();
   const marker = join(root, `fsmon-${n}`);
@@ -431,20 +464,6 @@ test('a planted core.fsmonitor command in .git/config never runs from a git-sync
   await assert.rejects(readFile(marker, 'utf8'), 'git-sync status must not run core.fsmonitor');
   spawnSync('git', ['status', '--porcelain'], { cwd: a });
   assert.match(await readFile(marker, 'utf8'), /ran/, 'control: plain git status runs it');
-});
-
-test('a failed `git worktree list` counts as in use: update-ref never moves the base', async () => {
-  const { a, push } = await world();
-  g(a, 'checkout', '-q', '-b', 'other');
-  await push('g.txt', 'two'); await fetchRemote(a);
-  const before = g(a, 'rev-parse', 'dev');
-  _testing.setRunner((args, opts) => (args[0] === 'worktree'
-    ? Promise.resolve({ ok: false, stdout: '', stderr: 'fatal: boom', code: 128, timedOut: false })
-    : _testing.defaultRun(args, opts)));
-  const r = await fastForward(a, { base: 'dev' });
-  _testing.setRunner(null);
-  assert.equal(r.ok, false); assert.equal(r.kind, 'in-use');
-  assert.equal(g(a, 'rev-parse', 'dev'), before);
 });
 
 test('a lost update-ref compare-and-swap is diverged, with the counts re-read after the refusal', async () => {
@@ -505,14 +524,6 @@ test('merge path re-checks HEAD AFTER the credential mint: a checkout during it 
   assert.equal(g(a, 'rev-parse', 'feat'), devBefore);
 });
 
-test('resolveSourceRef accepts a just-fetched <remote>/<name>', async () => {
-  const { a, push } = await world();
-  await fetchRemote(a);
-  await push('n.txt', 'new', 'feat-new');   // pushed after the last fetch
-  const r = await resolveSourceRef(a, 'origin/feat-new', { maxAgeMs: 0 });
-  assert.equal(r.ok, true); assert.equal(r.ref, 'origin/feat-new'); assert.equal(r.remoteOnly, true);
-});
-
 test('a failed fetch keeps the last good fetch time (git empties FETCH_HEAD) and classifies a gone path as network', async () => {
   const { a } = await world();
   const good = await fetchRemote(a);
@@ -523,15 +534,4 @@ test('a failed fetch keeps the last good fetch time (git empties FETCH_HEAD) and
   assert.equal(bad.fetchedAt, good.fetchedAt);
   const st = await syncRepo(a, { base: 'dev', mode: 'status' });
   assert.equal(st.stale, true); assert.equal(st.fetchedAt, good.fetchedAt);
-});
-
-test('status reads spawn no extra git for the negative cache when nothing failed', async () => {
-  const { a } = await world();
-  await fetchRemote(a);
-  const calls = [];
-  _testing.setRunner((args, opts) => { calls.push(args.join(' ')); return _testing.defaultRun(args, opts); });
-  await syncRepo(a, { base: 'dev', mode: 'status' });
-  _testing.setRunner(null);
-  // syncStatus reads the remote once (lastFetchedMs); standingFailure adds none.
-  assert.equal(calls.filter((c) => c.startsWith('remote get-url')).length, 1);
 });

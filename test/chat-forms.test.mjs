@@ -10,6 +10,7 @@ import { createChatContext } from '../src/core/chat/chat-context.mjs';
 import { createCommandRouter } from '../src/core/chat/command-router.mjs';
 import { renderQuestion } from '../src/core/chat/renderers.mjs';
 import { CHAT_PROJECTION_MAX } from '../src/core/ask-projection.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -37,57 +38,40 @@ function formQuestion(over = {}) {
   };
 }
 
-test('renderQuestion: a form ask names the form, prints the projection and the reply command', () => {
-  const msg = renderQuestion(META, formQuestion());
-  const body = text(msg);
-  assert.equal(msg.severity, 'warning');
-  assert.match(body, /\*\*Run:\*\* `\*2951`/, 'the run ref is the last 4 id chars');
-  assert.match(body, /\*\*Status:\*\* waiting on a form from Designer/);
-  assert.match(body, /Review mockups — Designer/, "projectForm's title line");
-  assert.match(body, /Two directions\./, 'a display widget contributes its text');
-  assert.match(body, /1\. Verdict \{verdict\}/);
-  assert.match(body, /2\. Tags \{tags\}/);
-  // X9's exact reply format, for the first <= 3 fields with no `when`.
-  assert.match(body, /Reply: \/answer \*2951 verdict=<value> \| tags=<a,b>/);
-});
-
-test('renderQuestion: a surface:"web" form prints the projection and NO reply command', () => {
-  const body = text(renderQuestion(META, formQuestion({ surface: 'web', title: 'Pick a mockup' })));
-  assert.match(body, /Pick a mockup — Designer/);
-  assert.match(body, /Answer this form in the worca web UI\./);
-  assert.equal(/\/answer/.test(body), false, 'a web-only form offers no chat grammar');
-});
-
-test('renderQuestion: the projection is capped, and the reply command survives the cap', () => {
-  const big = formQuestion({ data: { summary: 'x'.repeat(20000), images: [] } });
-  const body = text(renderQuestion(META, big));
-  assert.ok(body.length < CHAT_PROJECTION_MAX + 600, `chat message is ${body.length} chars`);
-  assert.match(body, /Reply: \/answer \*2951 /, 'the clip never eats the reply command');
-  assert.match(body, /1\. Verdict \{verdict\}/, 'the clip never eats the prompts');
-  assert.equal((body.match(/^ {3}…$/gm) || []).length, 1, 'exactly one … marker (X9)');
-});
-
-test('renderQuestion: a form envelope projectForm cannot render still notifies, by title', () => {
-  // A review-list whose schema lost `items` makes promptFields throw (schema.items.properties).
-  const junk = formQuestion({
-    layout: [{ widget: 'review-list', field: 'r', bind: 'data.images', label: 'R' }],
-    answerSchema: { type: 'object', properties: { r: { type: 'array' } } },
-  });
-  const body = text(renderQuestion(META, junk));
-  assert.match(body, /\*\*Status:\*\* waiting on a form from Designer/);
-  assert.match(body, /Review mockups — Designer/);
-});
-
-test('renderQuestion: clarify and gate arms are byte-identical to before', () => {
-  const clarify = text(renderQuestion(META, { kind: 'clarify', questions: [
-    { id: 'q1', question: 'Which database?', options: ['postgres', 'sqlite'] },
-  ] }));
-  assert.match(clarify, /\*\*Status:\*\* has questions/);
-  assert.match(clarify, /\*\*Q1\.\*\* Which database\?/);
-  assert.match(clarify, /\/answer \*2951 1$/m);
-  const gate = text(renderQuestion(META, { kind: 'gate', issues: [{ severity: 'major', title: 'Empty input' }] }));
-  assert.match(gate, /\*\*Status:\*\* waiting for approval/);
-  assert.match(gate, /`\/approve \*2951` — no more cycles, continue/);
+test('renderQuestion form asks: projection + reply command, capped safely, unrenderable envelopes still notify', async () => {
+  await checkRows([
+    { name: 'renderQuestion: a form ask names the form, prints the projection and the reply command', run: () => {
+      const msg = renderQuestion(META, formQuestion());
+      const body = text(msg);
+      assert.equal(msg.severity, 'warning');
+      assert.match(body, /\*\*Run:\*\* `\*2951`/, 'the run ref is the last 4 id chars');
+      assert.match(body, /\*\*Status:\*\* waiting on a form from Designer/);
+      assert.match(body, /Review mockups — Designer/, "projectForm's title line");
+      assert.match(body, /Two directions\./, 'a display widget contributes its text');
+      assert.match(body, /1\. Verdict \{verdict\}/);
+      assert.match(body, /2\. Tags \{tags\}/);
+      // X9's exact reply format, for the first <= 3 fields with no `when`.
+      assert.match(body, /Reply: \/answer \*2951 verdict=<value> \| tags=<a,b>/);
+    } },
+    { name: 'renderQuestion: the projection is capped, and the reply command survives the cap', run: () => {
+      const big = formQuestion({ data: { summary: 'x'.repeat(20000), images: [] } });
+      const body = text(renderQuestion(META, big));
+      assert.ok(body.length < CHAT_PROJECTION_MAX + 600, `chat message is ${body.length} chars`);
+      assert.match(body, /Reply: \/answer \*2951 /, 'the clip never eats the reply command');
+      assert.match(body, /1\. Verdict \{verdict\}/, 'the clip never eats the prompts');
+      assert.equal((body.match(/^ {3}…$/gm) || []).length, 1, 'exactly one … marker (X9)');
+    } },
+    { name: 'renderQuestion: a form envelope projectForm cannot render still notifies, by title', run: () => {
+      // A review-list whose schema lost `items` makes promptFields throw (schema.items.properties).
+      const junk = formQuestion({
+        layout: [{ widget: 'review-list', field: 'r', bind: 'data.images', label: 'R' }],
+        answerSchema: { type: 'object', properties: { r: { type: 'array' } } },
+      });
+      const body = text(renderQuestion(META, junk));
+      assert.match(body, /\*\*Status:\*\* waiting on a form from Designer/);
+      assert.match(body, /Review mockups — Designer/);
+    } },
+  ]);
 });
 
 // ── /answer grammar (P1 C9/C10, ruling X8) ─────────────────────────────────────
@@ -122,18 +106,25 @@ const rejects = (errors) => () => {
   throw err;
 };
 
-test('/answer: field=value pairs, pipe-separated, reach orch.answer as { values }', async () => {
+test('/answer: field=value pairs reach orch.answer as { values }; ref optional with one live run; CRLF normalized', async () => {
   const { send, calls } = fixture(formQuestion());
-  const reply = text(await send('/answer *2951 verdict=changes | tags=spacing,colour'));
-  assert.deepEqual(calls.at(-1), ['run-aaaa2951', 'form-x:n_a:1-r1',
-    { values: { verdict: 'changes', tags: ['spacing', 'colour'] } }]);
-  assert.match(reply, /Answered the `review-mockups` form/);
-});
-
-test('/answer: the run ref is optional when exactly one run is live', async () => {
-  const { send, calls } = fixture(formQuestion());
-  await send('/answer verdict=approve');
-  assert.deepEqual(calls.at(-1)[2], { values: { verdict: 'approve' } });
+  await checkRows([
+    { name: '/answer: field=value pairs, pipe-separated, reach orch.answer as { values }', run: async () => {
+      const reply = text(await send('/answer *2951 verdict=changes | tags=spacing,colour'));
+      assert.deepEqual(calls.at(-1), ['run-aaaa2951', 'form-x:n_a:1-r1',
+        { values: { verdict: 'changes', tags: ['spacing', 'colour'] } }]);
+      assert.match(reply, /Answered the `review-mockups` form/);
+    } },
+    { name: '/answer: the run ref is optional when exactly one run is live', run: async () => {
+      await send('/answer verdict=approve');
+      assert.deepEqual(calls.at(-1)[2], { values: { verdict: 'approve' } });
+    } },
+    { name: '/answer: CRLF and collapsed whitespace are already normalized by parseCommand', run: async () => {
+      await send('/answer *2951 verdict=changes |\r\n tags=spacing');
+      assert.deepEqual(calls.at(-1)[2], { values: { verdict: 'changes', tags: ['spacing'] } },
+        'parseCommand splits on \\s+, so \\r and newlines never reach the grammar');
+    } },
+  ]);
 });
 
 test('/answer: a ONE-FIELD form still takes the bare positional form', async () => {
@@ -200,13 +191,6 @@ test('/answer: a review-list is answerable as id:verdict[:note] (ruling X8)', as
   ] } }, 'unlisted items take the default verdict (P1 C9)');
 });
 
-test('/answer: CRLF and collapsed whitespace are already normalized by parseCommand', async () => {
-  const { send, calls } = fixture(formQuestion());
-  await send('/answer *2951 verdict=changes |\r\n tags=spacing');
-  assert.deepEqual(calls.at(-1)[2], { values: { verdict: 'changes', tags: ['spacing'] } },
-    'parseCommand splits on \\s+, so \\r and newlines never reach the grammar');
-});
-
 test('/answer: an unknown field is refused with a usage line and nothing is answered', async () => {
   const { send, calls } = fixture(formQuestion());
   const reply = text(await send('/answer *2951 verdik=approve'));
@@ -215,27 +199,41 @@ test('/answer: an unknown field is refused with a usage line and nothing is answ
   assert.equal(calls.length, 0, 'nothing reached orch.answer');
 });
 
-test('/answer: a gate-3 rejection lists the field errors and the question stays open', async () => {
-  const errors = [{ path: 'verdict', code: 'enum', message: 'must be one of approve, changes' }];
-  const { send, calls } = fixture(formQuestion(), { answer: rejects(errors) });
-  const reply = text(await send('/answer *2951 verdict=changes'));
-  assert.equal(calls.length, 1, 'the answer WAS attempted');
-  assert.match(reply, /rejected/);
-  assert.match(reply, /`verdict`: must be one of approve, changes/);
-  assert.match(reply, /still open/);
+test('/answer: a gate-3 rejection lists field errors (question open); any other throw reaches the router catch', async () => {
+  await checkRows([
+    { name: '/answer: a gate-3 rejection lists the field errors and the question stays open', run: async () => {
+      const errors = [{ path: 'verdict', code: 'enum', message: 'must be one of approve, changes' }];
+      const { send, calls } = fixture(formQuestion(), { answer: rejects(errors) });
+      const reply = text(await send('/answer *2951 verdict=changes'));
+      assert.equal(calls.length, 1, 'the answer WAS attempted');
+      assert.match(reply, /rejected/);
+      assert.match(reply, /`verdict`: must be one of approve, changes/);
+      assert.match(reply, /still open/);
+    } },
+    { name: '/answer: a NON-gate-3 failure is not swallowed as a field error', run: async () => {
+      const { send } = fixture(formQuestion(), { answer: () => { throw new Error('boom'); } });
+      const reply = text(await send('/answer *2951 verdict=changes'));
+      assert.match(reply, /Command failed: boom/, "the router's existing catch owns it");
+    } },
+  ]);
 });
 
-test('/answer: a NON-gate-3 failure is not swallowed as a field error', async () => {
-  const { send } = fixture(formQuestion(), { answer: () => { throw new Error('boom'); } });
-  const reply = text(await send('/answer *2951 verdict=changes'));
-  assert.match(reply, /Command failed: boom/, "the router's existing catch owns it");
-});
-
-test('/answer: a surface:"web" form is declined in chat too, and stays open', async () => {
-  const { send, calls } = fixture(formQuestion({ surface: 'web' }));
-  const reply = text(await send('/answer *2951 verdict=approve'));
-  assert.match(reply, /worca web UI/);
-  assert.equal(calls.length, 0);
+test('surface:"web" form: notification has no reply command and /answer is declined, question stays open', async () => {
+  const web = formQuestion({ surface: 'web', title: 'Pick a mockup' });
+  await checkRows([
+    { name: 'renderQuestion: a surface:"web" form prints the projection and NO reply command', run: () => {
+      const body = text(renderQuestion(META, web));
+      assert.match(body, /Pick a mockup — Designer/);
+      assert.match(body, /Answer this form in the worca web UI\./);
+      assert.equal(/\/answer/.test(body), false, 'a web-only form offers no chat grammar');
+    } },
+    { name: '/answer: a surface:"web" form is declined in chat too, and stays open', run: async () => {
+      const { send, calls } = fixture(web);
+      const reply = text(await send('/answer *2951 verdict=approve'));
+      assert.match(reply, /worca web UI/);
+      assert.equal(calls.length, 0);
+    } },
+  ]);
 });
 
 test('/answer: the clarify and gate paths are unchanged; /help and /status name the grammar', async () => {

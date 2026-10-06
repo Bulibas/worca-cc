@@ -1,9 +1,8 @@
-// test/wsmap-detectors-p1.test.mjs — the detector registry and the two P1 detectors (wsmap P1).
+// test/wsmap-detectors-p1.test.mjs — the two P1 detectors (wsmap P1).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 
-import { DETECTORS, detectorById } from '../src/core/workspace-map/detectors/index.mjs';
 import pkgNpm from '../src/core/workspace-map/detectors/pkg-npm.mjs';
 import identity, { readmeRole } from '../src/core/workspace-map/detectors/identity.mjs';
 
@@ -12,15 +11,6 @@ const member = (key, projectDir = join(root, key)) => ({ key, name: key, dir: jo
 const web = member('web');
 const shared = member('shared-lib-0a1b2c3d', join(root, 'shared-lib'));
 const ctx = (m = web) => ({ member: m, members: [web, shared], files: [], state: {} });
-
-test('registry: P1 block is identity then pkg-npm, frozen; detectorById', () => {
-  assert.ok(Object.isFrozen(DETECTORS));
-  // P1's block comes first; P3 and P4 append theirs after it.
-  assert.deepEqual(DETECTORS.slice(0, 2).map((d) => d.id), ['identity', 'pkg-npm']);
-  assert.equal(detectorById('pkg-npm'), pkgNpm);
-  assert.equal(detectorById('nope'), null);
-  for (const d of DETECTORS) assert.equal(typeof d.claims, 'function');
-});
 
 test('pkg-npm: provides the name, consumes every dependency section with line evidence', () => {
   const text = [

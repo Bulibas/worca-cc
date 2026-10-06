@@ -25,18 +25,13 @@ import {
   runGitCapture,
   ASK_GIT_ENV,
 } from '../src/core/worktree.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 const created = [];
 async function freshRepo({ initialBranch = 'main' } = {}) {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-wt-'));
+  const dir = templateRepo('wt', { branch: initialBranch, user: true, files: { 'README.md': '# hi\n' } });
   created.push(dir);
-  const g = (args) => spawnSync('git', args, { cwd: dir });
-  g(['init', '-q', '-b', initialBranch]);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']);
-  g(['commit', '-qm', 'init']);
   return dir;
 }
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true }))));
@@ -51,59 +46,65 @@ test('sanitizeBranchName: kebab, strips junk, forbids leading slash', () => {
   assert.ok(sanitizeBranchName('a'.repeat(120)).length <= 80);
 });
 
-test('suggestBranchName: keyword slug from prompt, drops stopwords', async () => {
-  // "with" is filler; dropped. No LLM, fully deterministic, no cost.
-  const name = await suggestBranchName({
-    prompt: 'Add login screen with Google SSO',
-    pipelineId: 'abc12345',
-  });
-  assert.equal(name, 'worca-cc/add-login-screen-google-sso-abc12345');
+test('suggestBranchName: keyword slug (stopwords, filler verbs, title wins, word cap, all-stopword fallback, feature fallback)', async () => {
+  await checkRows([
+    { name: 'suggestBranchName: keyword slug from prompt, drops stopwords', run: async () => {
+      // "with" is filler; dropped. No LLM, fully deterministic, no cost.
+      const name = await suggestBranchName({
+        prompt: 'Add login screen with Google SSO',
+        pipelineId: 'abc12345',
+      });
+      assert.equal(name, 'worca-cc/add-login-screen-google-sso-abc12345');
+    } },
+    { name: 'suggestBranchName: keyword slug drops leading filler verbs/articles', run: async () => {
+      const name = await suggestBranchName({
+        prompt: 'Build a central machine-wide pipeline history store',
+        pipelineId: 'deadbeef',
+      });
+      // build + a dropped; first 6 significant words kept.
+      assert.equal(name, 'worca-cc/central-machine-wide-pipeline-history-store-deadbeef');
+    } },
+    { name: 'suggestBranchName: title wins over prompt when given', run: async () => {
+      const name = await suggestBranchName({
+        prompt: 'Build a central machine-wide pipeline history store',
+        title: 'Central History Store',
+        pipelineId: 'abc12345',
+      });
+      assert.equal(name, 'worca-cc/central-history-store-abc12345');
+    } },
+    { name: 'suggestBranchName: caps significant words to keep names short', run: async () => {
+      const name = await suggestBranchName({
+        prompt: 'alpha beta gamma delta epsilon zeta eta theta',
+        pipelineId: 'cafef00d',
+      });
+      assert.equal(name, 'worca-cc/alpha-beta-gamma-delta-epsilon-zeta-cafef00d');
+    } },
+    { name: 'suggestBranchName: all-stopword prompt falls back to raw slug', run: async () => {
+      const name = await suggestBranchName({
+        prompt: 'build the a',
+        pipelineId: 'abc12345',
+      });
+      // every word is a stopword -> do not emit an empty core; keep the raw slug.
+      assert.equal(name, 'worca-cc/build-the-a-abc12345');
+    } },
+    { name: 'suggestBranchName: empty prompt and no title -> feature fallback', run: async () => {
+      const name = await suggestBranchName({ prompt: '', pipelineId: 'abc12345' });
+      assert.equal(name, 'worca-cc/feature-abc12345');
+    } },
+  ]);
 });
 
-test('suggestBranchName: keyword slug drops leading filler verbs/articles', async () => {
-  const name = await suggestBranchName({
-    prompt: 'Build a central machine-wide pipeline history store',
-    pipelineId: 'deadbeef',
-  });
-  // build + a dropped; first 6 significant words kept.
-  assert.equal(name, 'worca-cc/central-machine-wide-pipeline-history-store-deadbeef');
-});
-
-test('suggestBranchName: title wins over prompt when given', async () => {
-  const name = await suggestBranchName({
-    prompt: 'Build a central machine-wide pipeline history store',
-    title: 'Central History Store',
-    pipelineId: 'abc12345',
-  });
-  assert.equal(name, 'worca-cc/central-history-store-abc12345');
-});
-
-test('suggestBranchName: caps significant words to keep names short', async () => {
-  const name = await suggestBranchName({
-    prompt: 'alpha beta gamma delta epsilon zeta eta theta',
-    pipelineId: 'cafef00d',
-  });
-  assert.equal(name, 'worca-cc/alpha-beta-gamma-delta-epsilon-zeta-cafef00d');
-});
-
-test('suggestBranchName: all-stopword prompt falls back to raw slug', async () => {
-  const name = await suggestBranchName({
-    prompt: 'build the a',
-    pipelineId: 'abc12345',
-  });
-  // every word is a stopword -> do not emit an empty core; keep the raw slug.
-  assert.equal(name, 'worca-cc/build-the-a-abc12345');
-});
-
-test('suggestBranchName: empty prompt and no title -> feature fallback', async () => {
-  const name = await suggestBranchName({ prompt: '', pipelineId: 'abc12345' });
-  assert.equal(name, 'worca-cc/feature-abc12345');
-});
-
-test('listLocalBranches returns the initial branch', async () => {
+test('listLocalBranches / currentBranch on a fresh repo', async () => {
   const repo = await freshRepo();
-  const branches = await listLocalBranches(repo);
-  assert.ok(branches.includes('main'), `expected main in ${branches.join(',')}`);
+  await checkRows([
+    { name: 'listLocalBranches returns the initial branch', run: async () => {
+      const branches = await listLocalBranches(repo);
+      assert.ok(branches.includes('main'), `expected main in ${branches.join(',')}`);
+    } },
+    { name: 'currentBranch returns the HEAD branch name', run: async () => {
+      assert.equal(await currentBranch(repo), 'main');
+    } },
+  ]);
 });
 
 test('resolveDefaultBranch picks the actual HEAD even when not "main"', async () => {
@@ -172,12 +173,6 @@ test('createWorktree rejects featureBranch equal to sourceBranch (hang guard)', 
     () => createWorktree({ projectDir: repo, pipelineId: 'same2', sourceBranch: 'Main', featureBranch: 'Main' }),
     /must differ/,
   );
-});
-
-// currentBranch sanity (separate so failure points are obvious).
-test('currentBranch returns the HEAD branch name', async () => {
-  const repo = await freshRepo();
-  assert.equal(await currentBranch(repo), 'main');
 });
 
 // ── M1: sourceBranch validation / argument-injection ──────────────────────────

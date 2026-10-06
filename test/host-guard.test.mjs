@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { evaluateKillCommand } from '../src/core/host-guard.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const HOST = 88275;
 
@@ -211,38 +212,44 @@ function runHook(stdin, env = {}) {
   });
 }
 
-test('hook CLI blocks a banned Bash command with exit 2 and a reason on stderr', async () => {
-  const { code, stderr } = await runHook(
-    JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'pkill -f node' } }),
-    { WORCA_HOST_PID: String(HOST) },
-  );
-  assert.equal(code, 2);
-  assert.match(stderr, /pkill/i);
+test('hook CLI blocks a banned pattern kill and the host-PID kill with exit 2 + a reason naming it', async () => {
+  await checkRows([
+    { name: 'hook CLI blocks a banned Bash command with exit 2 and a reason on stderr', run: async () => {
+      const { code, stderr } = await runHook(
+        JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'pkill -f node' } }),
+        { WORCA_HOST_PID: String(HOST) },
+      );
+      assert.equal(code, 2);
+      assert.match(stderr, /pkill/i);
+    } },
+    { name: 'hook CLI blocks the host PID kill with exit 2', run: async () => {
+      const { code, stderr } = await runHook(
+        JSON.stringify({ tool_name: 'Bash', tool_input: { command: `kill ${HOST}` } }),
+        { WORCA_HOST_PID: String(HOST) },
+      );
+      assert.equal(code, 2);
+      assert.match(stderr, new RegExp(String(HOST)));
+    } },
+  ]);
 });
 
-test('hook CLI blocks the host PID kill with exit 2', async () => {
-  const { code, stderr } = await runHook(
-    JSON.stringify({ tool_name: 'Bash', tool_input: { command: `kill ${HOST}` } }),
-    { WORCA_HOST_PID: String(HOST) },
-  );
-  assert.equal(code, 2);
-  assert.match(stderr, new RegExp(String(HOST)));
-});
-
-test('hook CLI allows a safe kill and other tools', async () => {
-  const ok = await runHook(
-    JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'kill 12345' } }),
-    { WORCA_HOST_PID: String(HOST) },
-  );
-  assert.equal(ok.code, 0);
-  const read = await runHook(
-    JSON.stringify({ tool_name: 'Read', tool_input: { file_path: '/tmp/x' } }),
-    { WORCA_HOST_PID: String(HOST) },
-  );
-  assert.equal(read.code, 0);
-});
-
-test('hook CLI fails open on garbage input', async () => {
-  const { code } = await runHook('not json at all', { WORCA_HOST_PID: String(HOST) });
-  assert.equal(code, 0);
+test('hook CLI allows a safe kill and other tools, and fails open on garbage input', async () => {
+  await checkRows([
+    { name: 'hook CLI allows a safe kill and other tools', run: async () => {
+      const ok = await runHook(
+        JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'kill 12345' } }),
+        { WORCA_HOST_PID: String(HOST) },
+      );
+      assert.equal(ok.code, 0);
+      const read = await runHook(
+        JSON.stringify({ tool_name: 'Read', tool_input: { file_path: '/tmp/x' } }),
+        { WORCA_HOST_PID: String(HOST) },
+      );
+      assert.equal(read.code, 0);
+    } },
+    { name: 'hook CLI fails open on garbage input', run: async () => {
+      const { code } = await runHook('not json at all', { WORCA_HOST_PID: String(HOST) });
+      assert.equal(code, 0);
+    } },
+  ]);
 });

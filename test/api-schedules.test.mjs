@@ -13,6 +13,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { gitDir } from './helpers/git-dir.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
 import { projectKey } from '../src/core/store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after); // outer isolation: /api/run finishes ASYNC in-process
 
@@ -253,12 +254,6 @@ test('recurring: repeat creates a series, previews, pauses, resumes, skips, runs
   assert.equal((await fetch(`${base}/api/schedules/${made.scheduleId}`)).status, 404);
 });
 
-test('counts and settings expose the schedule surface', async () => {
-  const counts = await get('/api/counts');
-  assert.equal(typeof counts.schedules.scheduled, 'number');
-  assert.equal(typeof counts.schedules.unread, 'number');
-});
-
 test('an external task is fetched at start: transient errors retry, permanent ones fail with the reason', async () => {
   // WORCA_MOCK fakes task sources; the shim's test hook makes getTask fail on demand.
   const { setMockSourceResponses } = await import('../src/core/plugin-shim.mjs');
@@ -334,8 +329,8 @@ test('POST /api/run with after: validations, then a 202 that names the predecess
 test('a chain of two mock runs: B starts after A finishes, on A\'s feature branch', async () => {
   const a = await (await post('/api/run', { projectDir: dir, prompt: 'Refactor the README', title: 'Refactor', mock: true, scheduledFor: inFuture(1500) })).json();
   const b = await (await post('/api/run', { projectDir: dir, prompt: 'Add tests', title: 'Tests', mock: true, after: { kind: 'ticket', id: a.runId }, sourceFromPrevious: true })).json();
-  await new Promise((r) => setTimeout(r, 1600));
-  await schedulerTick();
+  // A is due 1.5 s out: tick on a clock 2 s ahead instead of sleeping until it is due.
+  await schedulerTick({ now: Date.now() + 2000 });
   const ea = await untilSettled(a.runId);
   assert.equal(ea.status, 'done');
   const aRow = getDb().prepare('SELECT branch FROM pipelines WHERE id = ?').get(ea.pipelineId);
@@ -354,25 +349,28 @@ test('a chain of two mock runs: B starts after A finishes, on A\'s feature branc
   assert.notEqual(tb.runAt, '9999-12-31T00:00:00.000Z', 'run_at became the gate time');
 });
 
-test('Run now on an after-ticket that starts from its predecessor\'s branch needs that branch to exist', async () => {
-  const a = await (await post('/api/run', { projectDir: dir, prompt: 'A', mock: true, scheduledFor: inFuture(3600_000) })).json();
-  const b = await (await post('/api/run', { projectDir: dir, prompt: 'B', mock: true, after: { kind: 'ticket', id: a.runId }, sourceFromPrevious: true })).json();
-  const r = await post(`/api/schedules/${b.runId}/run-now`);
-  assert.equal(r.status, 409);
-  assert.match((await r.json()).error, /^Start ‘A’ first, or change its source branch$/);
-});
-
-// The 409 has TWO halves. The one above is `!p.pipelineId` (the predecessor never started);
-// this one is the `previousBranchesOf` half — a LIVE predecessor whose row has no
-// `branch.feature` yet. Without that half the ticket reaches fireTicket and fails non-transiently.
-test('Run now: a running predecessor that has not written its feature branch yet is refused too', async () => {
-  seedPipelineRow({ id: 'r0000001', title: 'Bare', status: 'running', projectKey: projectKey(dir), startedAt: new Date().toISOString(), branch: null });
-  const res = await post('/api/run', { projectDir: dir, prompt: 'C', mock: true, after: { kind: 'pipeline', id: 'r0000001' }, sourceFromPrevious: true });
-  assert.equal(res.status, 202);
-  const c = await res.json();
-  const r = await post(`/api/schedules/${c.runId}/run-now`);
-  assert.equal(r.status, 409);
-  assert.match((await r.json()).error, /^Start ‘Bare’ first, or change its source branch$/);
+test('Run now on an after-ticket needs the predecessor\'s branch: refused when it never started and when it runs without a feature branch yet', async () => {
+  await checkRows([
+    { name: 'Run now on an after-ticket that starts from its predecessor\'s branch needs that branch to exist', run: async () => {
+      const a = await (await post('/api/run', { projectDir: dir, prompt: 'A', mock: true, scheduledFor: inFuture(3600_000) })).json();
+      const b = await (await post('/api/run', { projectDir: dir, prompt: 'B', mock: true, after: { kind: 'ticket', id: a.runId }, sourceFromPrevious: true })).json();
+      const r = await post(`/api/schedules/${b.runId}/run-now`);
+      assert.equal(r.status, 409);
+      assert.match((await r.json()).error, /^Start ‘A’ first, or change its source branch$/);
+    } },
+    { name: 'Run now: a running predecessor that has not written its feature branch yet is refused too', run: async () => {
+      // The 409 has TWO halves. The one above is `!p.pipelineId` (the predecessor never started);
+      // this one is the `previousBranchesOf` half — a LIVE predecessor whose row has no
+      // `branch.feature` yet. Without that half the ticket reaches fireTicket and fails non-transiently.
+      seedPipelineRow({ id: 'r0000001', title: 'Bare', status: 'running', projectKey: projectKey(dir), startedAt: new Date().toISOString(), branch: null });
+      const res = await post('/api/run', { projectDir: dir, prompt: 'C', mock: true, after: { kind: 'pipeline', id: 'r0000001' }, sourceFromPrevious: true });
+      assert.equal(res.status, 202);
+      const c = await res.json();
+      const r = await post(`/api/schedules/${c.runId}/run-now`);
+      assert.equal(r.status, 409);
+      assert.match((await r.json()).error, /^Start ‘Bare’ first, or change its source branch$/);
+    } },
+  ]);
 });
 
 test('after-candidates, after/:id, dependents and the enriched ticket list', async () => {

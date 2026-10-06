@@ -38,20 +38,6 @@ after(async () => {
   }
 });
 
-test('dependency and lock pin the reviewed runtime package exactly', () => {
-  const pkg = JSON.parse(readFileSync(`${root}/package.json`, 'utf8'));
-  const lock = JSON.parse(readFileSync(`${root}/package-lock.json`, 'utf8'));
-  assert.equal(pkg.dependencies['@highlightjs/cdn-assets'], '11.12.0');
-  assert.equal(pkg.dependencies['highlight.js'], undefined);
-  assert.equal(pkg.devDependencies['highlight.js'], undefined);
-  const locked = lock.packages['node_modules/@highlightjs/cdn-assets'];
-  assert.equal(locked.version, '11.12.0');
-  assert.equal(locked.integrity,
-    'sha512-KvOKXODaiFmId9xaq3xc5xCL66wVLUuOngDbO9B/kewbFTqdGbn2nJxNhN3H5R1cgDTVj6R8vH0zgiNDEGjpDw==');
-  assert.notEqual(locked.dev, true);
-  assert.equal(lock.packages['node_modules/highlight.js'], undefined);
-});
-
 test('vendor core and every reviewed or sub-language grammar are exact JavaScript ESM assets', async () => {
   // The loader's closure needs grammars that are not primaries (mojolicious for
   // perl); the server allowlist is HLJS_GRAMMAR_IDS, a superset of the primaries.

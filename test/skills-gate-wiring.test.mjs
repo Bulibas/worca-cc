@@ -13,7 +13,6 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { collectRequiredSkills, validateSkills } from '../src/core/skills.mjs';
@@ -25,6 +24,7 @@ import { readPipelineForResume } from '../src/core/artifacts.mjs';
 import { getDb } from '../src/core/db.mjs';
 import { BOOKEND_EXECUTION_IDS } from '../src/shared/graph/constants.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 import { fileURLToPath } from 'node:url';
 
 /** appendAudit writes pipeline_events rows, not a file (artifacts.mjs:920). */
@@ -58,14 +58,8 @@ async function withMode(mode, fn) {
 }
 
 async function freshRepo() {
-  const dir = await tmp();
-  const g = (args) => spawnSync('git', args, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'seed.txt'), 'seed\n');
-  g(['add', '-A']);
-  g(['commit', '-qm', 'init']);
+  const dir = templateRepo('gate', { branch: 'main', user: true, files: { 'seed.txt': 'seed\n' } });
+  dirs.push(dir);
   return dir;
 }
 

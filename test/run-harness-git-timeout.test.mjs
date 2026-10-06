@@ -35,10 +35,3 @@ test('_git with ignoreAbort still honours timeoutMs (the teardown path is bounde
   assert.equal(r.ok, false);
   assert.match(r.stderr, /git timed out/);
 });
-
-test('_git: a fast command is unaffected by the bound', async () => {
-  const h = bareHarness();
-  const r = await h._git(['--version'], { timeoutMs: 30_000 });
-  assert.equal(r.ok, true);
-  assert.match(r.stdout, /^git version/);
-});

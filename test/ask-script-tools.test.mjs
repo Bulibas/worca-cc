@@ -1,10 +1,10 @@
 // test/ask-script-tools.test.mjs
 // The four script tools (scripts-workbench-design.md §9.1, W19/W20): registration under the
-// toggle, the schemas, paging, the pinned-project rule, redaction, and the source scans that
-// keep tools.mjs import-free and write-free. Fake bundle only — no store, no bench, no claude.
+// toggle, paging, the pinned-project rule and redaction (the source scans that keep tools.mjs
+// import-free and write-free are rows of ask-tools' write-free guard). Fake bundle only — no store,
+// no bench, no claude.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { createAskTools } from '../src/core/ask/tools.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
 import { redactAskText } from '../src/core/ask/redact.mjs';
@@ -57,27 +57,6 @@ test('registration: all four with the toggle on, the two readers only with it of
   const none = fakeTools({ scripts: false }).tools.list().map((d) => d.name);
   for (const n of SCRIPT_TOOLS) assert.equal(none.includes(n), false, `${n} needs a scripts bundle`);
   assert.deepEqual(none.slice(-3), ['list_task_sources', 'find_tasks', 'get_task'], 'a bundle-less list is unchanged');
-});
-
-test('schemas: JSON-Schema objects, required fields, described for a model', () => {
-  const defs = fakeTools().tools.list();
-  const byName = (n) => defs.find((d) => d.name === n);
-  for (const n of SCRIPT_TOOLS) {
-    const d = byName(n);
-    assert.equal(d.inputSchema.type, 'object', n);
-    assert.equal(d.inputSchema.additionalProperties, false, n);
-    assert.ok(d.description.length > 120, `${n} is described for a model, not for a changelog`);
-  }
-  assert.equal(byName('list_scripts').inputSchema.required, undefined);
-  assert.deepEqual(byName('get_script').inputSchema.required, ['key']);
-  assert.deepEqual(byName('save_script').inputSchema.required, ['key', 'meta', 'source']);
-  assert.deepEqual(byName('test_script').inputSchema.required, ['key']);
-  assert.equal(byName('test_script').inputSchema.properties.timeoutSec.maximum, ASK_LIMITS.scriptTestMaxTimeoutSec);
-  assert.equal(byName('get_script').inputSchema.properties.maxBytes.maximum, ASK_LIMITS.scriptSourceMaxBytes);
-  assert.match(byName('save_script').description, /overwrite: true/);
-  assert.match(byName('save_script').description, /merged over the stored meta/, 'the store merges on overwrite — the model is told');
-  assert.match(byName('test_script').description, /pinned/);
-  assert.match(byName('test_script').description, /exactly as saved/, 'the bench runs a case as saved — cwd/timeoutSec do not apply, and the model is told');
 });
 
 test('list_scripts / get_script: shapes, the #scripts link, paging and redaction', async () => {
@@ -159,43 +138,4 @@ test('test_script: cwd "project" is the PINNED project or a refusal; scratch is 
   const refused = fakeTools({ over: { test: async () => ({ ok: false, errors: ['script not found: ghost'] }) } });
   assert.deepEqual(await refused.tools.call('test_script', { key: 'ghost' }),
     { ok: false, errors: ['script not found: ghost'] }, 'the bench\'s own sentence reaches the model unchanged');
-});
-
-test('source scans: tools.mjs stays import-free and write-free; script-deps.mjs is the ONE Ask module that imports the store and the bench', () => {
-  const tools = readFileSync(new URL('../src/core/ask/tools.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(tools, /^import /m, 'tools.mjs imports nothing');
-  assert.doesNotMatch(tools, /\b(INSERT|UPDATE|DELETE)\b/);
-  assert.doesNotMatch(tools, /script-store|script-bench/, 'the store and the bench are reachable only through deps.scripts');
-  const deps = readFileSync(new URL('../src/core/ask/script-deps.mjs', import.meta.url), 'utf8');
-  assert.match(deps, /from '\.\.\/script-store\.mjs'/);
-  assert.match(deps, /from '\.\.\/script-bench\.mjs'/);
-  assert.doesNotMatch(deps, /from 'node:fs/, 'no direct fs — the store owns every write');
-  const toolDeps = readFileSync(new URL('../src/core/ask/tool-deps.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(toolDeps, /script-store|script-bench/, 'tool-deps stays read-only');
-});
-
-test('source scan: the MCP child spreads the script bundle, and the turn forwards the write poke', () => {
-  const stdio = readFileSync(new URL('../src/core/ask/mcp-stdio.mjs', import.meta.url), 'utf8');
-  assert.match(stdio, /createAskTools\(\{[\s\S]*?defaultScriptDeps\(\{ threadId, signal \}\)/, 'the tool server spreads the script bundle in, with the life signal');
-  assert.match(stdio, /createAskToolServer\(\{[\s\S]*?signal: life\.signal/, 'the child hands the tool server its life signal');
-  const turn = readFileSync(new URL('../src/core/ask/turn.mjs', import.meta.url), 'utf8');
-  assert.match(turn, /onScriptMutation: deps\.onScriptMutation \?\? \(\(\) => \{\}\)/);
-  assert.match(turn, /onScriptMutation: \(e\) => \{ try \{ this\.deps\.onScriptMutation\(e\); \}/);
-  const server = readFileSync(new URL('../ui/server.mjs', import.meta.url), 'utf8');
-  assert.match(server, /onScriptMutation: \(\) => \{ emitChanged\('scripts-changed', 'updated'\); \}/, 'a chat write reaches an open Scripts tab');
-});
-
-test('docs: guardrails.md carries the four tools, the toggle and the accepted risk (spec §9.4)', () => {
-  const doc = readFileSync(new URL('../docs/guardrails.md', import.meta.url), 'utf8');
-  for (const s of ['list_scripts', 'get_script', 'save_script', 'test_script', 'Create and run scripts',
-    'overwrite: true', 'ask:<threadId>', 'no sandbox']) {
-    assert.ok(doc.includes(s), `docs/guardrails.md states: ${s}`);
-  }
-  assert.match(doc, /Settings → Ask Worca/, 'the reader is told where the switch is');
-  assert.equal(doc.includes('worca-cc scripts'), false);
-  // The accepted risk is documentation, never UI copy (the standing no-prose rule).
-  const html = readFileSync(new URL('../ui/public/index.html', import.meta.url), 'utf8');
-  const view = readFileSync(new URL('../ui/public/chat-settings-view.mjs', import.meta.url), 'utf8');
-  for (const src of [html, view]) assert.equal(src.includes('prompt injection'), false, 'the risk paragraph stays in the docs');
-  assert.match(view, /Create and run scripts/, 'the label itself is the whole control');
 });

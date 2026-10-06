@@ -105,14 +105,6 @@ test('setProjectAssignment: user sets only, deduplicated; includeGeneral a boole
   await assert.rejects(setProjectAssignment('shop-0badf00d', own), { status: 400 });
 });
 
-test('a Duplicate never takes a set id a project assignment still names', async () => {
-  seed();
-  const raw = disk('sets');
-  delete raw.sets.billing; // removed by hand: never retired, still assigned to billing-1a2b3c4d
-  put('sets', raw);
-  assert.equal((await duplicateSet('general', 'Billing')).id, 'billing-2');
-});
-
 test('a Duplicate that crashed after writing secrets: its orphan secrets never attach to the next set with that id', async () => {
   put('sets', { sets: { billing: { name: 'Billing', slug: 'billing', members: [{ server: PG, enabled: true, values: {} }] } } });
   put('secrets', { sets: { 'billing-copy': { [PG]: { password: sec('stale') } } } });

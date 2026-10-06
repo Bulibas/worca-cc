@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { buildClaudeArgs, planClaudeInvocation } from '../src/core/claude-runner.mjs';
 import { INVESTIGATOR_AGENT, ctxSubagentEffort, investigatorAgents, fanOutDirective, runOpts } from '../src/core/phases.mjs';
 import { resolveGraph } from '../src/core/workflows.mjs';
@@ -52,24 +53,27 @@ test('planClaudeInvocation keeps --agents inline JSON on the over-limit branch (
   assert.ok(!plan.args.some((a) => a.length > 1000), 'the staged argv carries no long free text (the definition is short)');
 });
 
-test('ctxSubagentEffort / investigatorAgents: fan-out + a valid effort pin only', () => {
-  assert.equal(ctxSubagentEffort(pinned()), 'high');
-  assert.equal(ctxSubagentEffort(pinned({ fanOut: false })), '');
-  assert.equal(ctxSubagentEffort(pinned({ subagentEffort: 'turbo' })), '');
-  assert.equal(investigatorAgents(pinned({ subagentEffort: '' })), undefined);
-  const def = investigatorAgents(pinned())[INVESTIGATOR_AGENT];
-  assert.equal(def.model, 'opus');
-  assert.equal(def.effort, 'high');
-  assert.deepEqual(def.tools, ['Read', 'Grep', 'Glob', 'Bash', 'Skill']);
-  assert.equal(investigatorAgents(pinned({ endpointRouted: true }))[INVESTIGATOR_AGENT].model, undefined,
-    'a routed node pins no model: the child rides the node\'s endpoint');
-  assert.equal(investigatorAgents(pinned({ subagentModel: 'auto' }))[INVESTIGATOR_AGENT].model, undefined, 'no alias -> no model key');
-});
-
-test('runOpts carries agents only for a pinned node', () => {
-  const call = { role: 'r', prompt: 'p', systemPrompt: 's', allowedTools: ['Read'] };
-  assert.ok(runOpts({ ...pinned(), claudeOpts: {}, projectDir: '/x' }, call).agents[INVESTIGATOR_AGENT]);
-  assert.equal(runOpts({ node: { fanOut: true }, claudeOpts: {}, projectDir: '/x' }, call).agents, undefined);
+test('ctxSubagentEffort / investigatorAgents / runOpts: fan-out + a valid effort pin only; agents ride runOpts only when pinned', async () => {
+  await checkRows([
+    { name: 'ctxSubagentEffort / investigatorAgents: fan-out + a valid effort pin only', run: () => {
+      assert.equal(ctxSubagentEffort(pinned()), 'high');
+      assert.equal(ctxSubagentEffort(pinned({ fanOut: false })), '');
+      assert.equal(ctxSubagentEffort(pinned({ subagentEffort: 'turbo' })), '');
+      assert.equal(investigatorAgents(pinned({ subagentEffort: '' })), undefined);
+      const def = investigatorAgents(pinned())[INVESTIGATOR_AGENT];
+      assert.equal(def.model, 'opus');
+      assert.equal(def.effort, 'high');
+      assert.deepEqual(def.tools, ['Read', 'Grep', 'Glob', 'Bash', 'Skill']);
+      assert.equal(investigatorAgents(pinned({ endpointRouted: true }))[INVESTIGATOR_AGENT].model, undefined,
+        'a routed node pins no model: the child rides the node\'s endpoint');
+      assert.equal(investigatorAgents(pinned({ subagentModel: 'auto' }))[INVESTIGATOR_AGENT].model, undefined, 'no alias -> no model key');
+    } },
+    { name: 'runOpts carries agents only for a pinned node', run: () => {
+      const call = { role: 'r', prompt: 'p', systemPrompt: 's', allowedTools: ['Read'] };
+      assert.ok(runOpts({ ...pinned(), claudeOpts: {}, projectDir: '/x' }, call).agents[INVESTIGATOR_AGENT]);
+      assert.equal(runOpts({ node: { fanOut: true }, claudeOpts: {}, projectDir: '/x' }, call).agents, undefined);
+    } },
+  ]);
 });
 
 test('fanOutDirective: a pinned investigator replaces the BEST-FIT sentence; default bytes unchanged', () => {

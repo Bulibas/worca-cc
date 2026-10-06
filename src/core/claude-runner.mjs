@@ -1280,7 +1280,8 @@ async function emitLog(onEvent, text) {
  * because three consumers need the vocabulary and none of them may hard-code it:
  * meta v2 validation (an unknown `mockRole` is a warning + drop), GET /api/agents
  * (the Agents view's role picker) and the graph executor's mock-role chain.
- * test/mock-writer-roles.test.mjs parses the switch and pins the lockstep.
+ * test/mock-graph.test.mjs ("MOCK_WRITER_ROLES is exactly the writer switch case set") parses the
+ * switch and pins the lockstep.
  */
 export const MOCK_WRITER_ROLES = new Set([
   'clarify', 'planner-plan', 'refiner', 'decomposer', 'implementer', 'reviewer', 'plan-review',
@@ -1294,7 +1295,7 @@ export const MOCK_ROLE_CLARIFY = 'clarify';
 export const MOCK_ROLE_DECOMPOSER = 'decomposer';
 
 /** The memory defragmenter's role, exported like the other two named roles (the switch below
- *  still uses the literal string: mock-writer-roles.test.mjs parses the switch arms). */
+ *  still uses the literal string: test/mock-graph.test.mjs parses the switch arms). */
 export const MOCK_ROLE_MEMORY_DEFRAG = 'memory-defrag';
 
 /**
@@ -1371,6 +1372,17 @@ function emitRaw(onEvent, raw) {
 }
 
 const ASK_CONTEXT_BLOCK_RE = /\[worca context\][\s\S]*?\[\/worca context\]\s*/;
+
+/** Test seam: holdFrame(frame, index) may return a promise that holds a MOCK_SLOW turn after that
+ *  frame until it settles (or the turn is aborted). Unset = the real 300 ms per frame. */
+export const _testing = { holdFrame: null };
+function untilSettledOrAborted(p, signal) {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.resolve();
+  let onAbort;
+  const aborted = new Promise((r) => { onAbort = r; signal.addEventListener('abort', onAbort, { once: true }); });
+  return Promise.race([Promise.resolve(p), aborted]).finally(() => signal.removeEventListener('abort', onAbort));
+}
 
 /**
  * The offline Ask Worca assistant: frames in the shapes probed on claude 2.1.239
@@ -1572,10 +1584,13 @@ async function mockAsk({ markers, prompt, cwd, onEvent, signal, resumeSessionId 
   }
 
   safeEmit(onEvent, { type: 'session', sessionId: SID });
-  for (const f of frames) {
+  for (const [i, f] of frames.entries()) {
     abortIfNeeded(signal);
     emitRaw(onEvent, f);
-    await new Promise((r) => setTimeout(r, slow ? 300 : 0));
+    const hold = slow && signal && typeof _testing.holdFrame === 'function' ? _testing.holdFrame(f, i) : null;
+    await (hold && typeof hold.then === 'function'
+      ? untilSettledOrAborted(hold, signal)
+      : new Promise((r) => setTimeout(r, slow && !_testing.holdFrame ? 300 : 0)));
   }
   abortIfNeeded(signal);
   if (fail || maxTurns || maxBudget) {

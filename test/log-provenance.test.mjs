@@ -5,18 +5,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { errStreamAttr } from '../src/core/run-harness.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
-test('non-empty stderr yields the stream tag', () => {
-  assert.deepEqual(errStreamAttr('boom'), { stream: 'err' });
-});
-
-test('empty/whitespace/absent stderr yields NO tag', () => {
-  assert.equal(errStreamAttr(''), null);
-  assert.equal(errStreamAttr('   '), null);
-  assert.equal(errStreamAttr(undefined), null);
-});
-
-test('extra attrs merge under the tag and survive without it', () => {
-  assert.deepEqual(errStreamAttr('boom', { nodeId: 'n1' }), { nodeId: 'n1', stream: 'err' });
-  assert.deepEqual(errStreamAttr('', { nodeId: 'n1' }), { nodeId: 'n1' });
+test('errStreamAttr: tag only for non-empty stderr; extra attrs merge with or without it', async () => {
+  await checkRows([
+    { name: 'non-empty stderr yields the stream tag', run: () => {
+      assert.deepEqual(errStreamAttr('boom'), { stream: 'err' });
+    } },
+    { name: 'empty/whitespace/absent stderr yields NO tag', run: () => {
+      assert.equal(errStreamAttr(''), null);
+      assert.equal(errStreamAttr('   '), null);
+      assert.equal(errStreamAttr(undefined), null);
+    } },
+    { name: 'extra attrs merge under the tag and survive without it', run: () => {
+      assert.deepEqual(errStreamAttr('boom', { nodeId: 'n1' }), { nodeId: 'n1', stream: 'err' });
+      assert.deepEqual(errStreamAttr('', { nodeId: 'n1' }), { nodeId: 'n1' });
+    } },
+  ]);
 });

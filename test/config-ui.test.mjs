@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -12,7 +13,6 @@ const trackDom = useDomRelease(afterEach);
 const htmlPath = fileURLToPath(new URL('../ui/public/index.html', import.meta.url));
 const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
 const html = readFileSync(htmlPath, 'utf8');
-const appjs = readFileSync(appPath, 'utf8');
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -45,65 +45,38 @@ async function openSettings(window) {
   await tick();
 }
 
-test('the agents accordion hosts the model + effort selectors app.js builds', () => {
-  // The per-step controls are no longer static markup — index.html supplies the
-  // accordion shell and app.js fills one row per node (newpipeline-ux-design.md §4.7).
-  assert.ok(html.includes('id="agents-config"'), 'missing the accordion shell');
-  assert.ok(html.includes('id="agents-rows"'), 'missing the accordion row host');
-  assert.ok(appjs.includes('step-model'), 'missing model select class');
-  assert.ok(appjs.includes('step-effort'), 'missing effort select class');
-});
-
-test('app.js loads, renders, and saves per-step config', () => {
-  assert.ok(appjs.includes('/api/config'), 'app.js does not use /api/config');
-  assert.ok(appjs.includes('renderAgentRows'), 'missing renderAgentRows');
-  assert.ok(appjs.includes('saveAgentRow'), 'missing the accordion save path');
-  // The add flow navigates to the global Models view (configurable-models §4.9).
-  assert.ok(appjs.includes('goAddModel'), 'missing add-model navigation flow');
-});
-
 // ---------------------------------------------------------------------------
 // Phase 6 (§5.1): the `projectsRoot` settings field, beside the Worca CC root.
 // ---------------------------------------------------------------------------
-const PROJECTS_ROOT_HINT =
-  'The top-level folder under which your projects live. Its CLAUDE.md, .claude/skills, and '
-  + '.mcp.json are made available to every pipeline agent. Leave empty to use your home folder.';
-
-test('settings markup carries a Projects root folder field, its picker, and the tooltip hint', () => {
-  assert.ok(html.includes('id="settingsProjectsRoot"'), 'missing #settingsProjectsRoot input');
-  assert.ok(html.includes('<label for="settingsProjectsRoot">Projects root folder</label>'),
-    'missing/renamed "Projects root folder" label');
-  assert.ok(html.includes('id="settingsProjectsRootBrowse"'), 'missing folder-picker button');
-  // The hint lives in the ⓘ tooltip now; it is wrapped across source lines — compare whitespace-collapsed.
-  assert.ok(html.replace(/\s+/g, ' ').includes(PROJECTS_ROOT_HINT), 'projectsRoot hint text drifted from §5.1');
-});
-
-test('settings view renders the field and reflects the server projectsRoot + default', async () => {
-  const { window } = await boot({
-    fetchHandler: (url) => (url.includes('/api/settings')
-      ? Promise.resolve({ ok: true, status: 200, json: async () => ({ root: '', projectsRoot: '/home/me/code', projectsRootDefault: '/home/me', default: '/home/me' }) })
-      : null),
-  });
-  await openSettings(window);
-  const input = window.document.querySelector('#settingsProjectsRoot');
-  assert.ok(input, 'settings view has a projects-root input');
-  assert.equal(input.value, '/home/me/code', 'the persisted projectsRoot loaded into the field');
-  assert.equal(input.placeholder, '/home/me', 'the blank-field fallback shown as the placeholder');
-});
-
-// The pinned hint promises "Leave blank to use your home folder", so an unset
-// key MUST reach the user as an empty field — the API reports the RAW setting,
-// never the effective one (which is never '').
-test('an unset projectsRoot leaves the field blank, with the fallback only as placeholder', async () => {
-  const { window } = await boot({
-    fetchHandler: (url) => (url.includes('/api/settings')
-      ? Promise.resolve({ ok: true, status: 200, json: async () => ({ root: '', projectsRoot: '', projectsRootDefault: '/home/me', default: '/home/me' }) })
-      : null),
-  });
-  await openSettings(window);
-  const input = window.document.querySelector('#settingsProjectsRoot');
-  assert.equal(input.value, '', 'unset reads as a blank field, not as the default path');
-  assert.equal(input.placeholder, '/home/me');
+test('settings view reflects a stored projectsRoot, and an unset one stays blank with the fallback only as placeholder', async () => {
+  await checkRows([
+    { name: 'settings view renders the field and reflects the server projectsRoot + default', run: async () => {
+      const { window } = await boot({
+        fetchHandler: (url) => (url.includes('/api/settings')
+          ? Promise.resolve({ ok: true, status: 200, json: async () => ({ root: '', projectsRoot: '/home/me/code', projectsRootDefault: '/home/me', default: '/home/me' }) })
+          : null),
+      });
+      await openSettings(window);
+      const input = window.document.querySelector('#settingsProjectsRoot');
+      assert.ok(input, 'settings view has a projects-root input');
+      assert.equal(input.value, '/home/me/code', 'the persisted projectsRoot loaded into the field');
+      assert.equal(input.placeholder, '/home/me', 'the blank-field fallback shown as the placeholder');
+    } },
+    // The pinned hint promises "Leave blank to use your home folder", so an unset
+    // key MUST reach the user as an empty field — the API reports the RAW setting,
+    // never the effective one (which is never '').
+    { name: 'an unset projectsRoot leaves the field blank, with the fallback only as placeholder', run: async () => {
+      const { window } = await boot({
+        fetchHandler: (url) => (url.includes('/api/settings')
+          ? Promise.resolve({ ok: true, status: 200, json: async () => ({ root: '', projectsRoot: '', projectsRootDefault: '/home/me', default: '/home/me' }) })
+          : null),
+      });
+      await openSettings(window);
+      const input = window.document.querySelector('#settingsProjectsRoot');
+      assert.equal(input.value, '', 'unset reads as a blank field, not as the default path');
+      assert.equal(input.placeholder, '/home/me');
+    } },
+  ]);
 });
 
 // With WORCA_PROJECTS_ROOT exported and nothing persisted, the server reports

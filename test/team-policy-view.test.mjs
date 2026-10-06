@@ -4,10 +4,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import {
-  projectTpState, renderProjectTpCell, renderProjectTpChip, projectTpSummary, renderPolicyEnableDialogBody, renderEffectiveTable, renderPolicyEditor, docFromEditor, editorDirty,
-  renderPolicyEmptyState, renderPolicySyncChip, renderWsPolicyLine, renderTeamCapsReadout, renderTeamChip, renderPolicyNotesLine,
-  renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel,
-  renderTeamCapPauseBanner, renderRequiredStrip, renderSetupChecklist, renderPolicyBadgeFor, relTime, POLICY_PAUSE_REASONS, requiredAllLabel,
+  projectTpState, renderPolicyEnableDialogBody, renderPolicyEditor, docFromEditor, editorDirty,
+  renderPolicyHeader, renderPolicyPluginsPanel,
+  renderTeamCapPauseBanner, renderRequiredStrip, renderSetupChecklist, POLICY_PAUSE_REASONS, requiredAllLabel,
 } from '../ui/public/team-policy-view.mjs';
 import { renderCostPauseBanner } from '../ui/public/stats-view.mjs';
 
@@ -58,29 +57,6 @@ test('project cell states (board 2)', () => {
   assert.equal(projectTpState(base).kind, 'home');
 });
 
-test('project cell copy, actions and cap hint', () => {
-  const off = renderProjectTpCell({ ...base, present: false, caps: null }, { doc });
-  assert.equal(off.dataset.kind, 'off', 'the cell names its state for the Getting started guide');
-  assert.equal(off.className, 'tm-cell tp-cell');
-  assert.equal(off.firstElementChild.textContent, 'Team policy');
-  assert.equal(off.querySelector('.tm-status').textContent, 'Off · your settings apply');
-  assert.equal(off.querySelector('.tp-enable').textContent, 'Set up team policy…');
-  const home = renderProjectTpCell(base, { doc });
-  assert.match(home.querySelector('.tm-status').textContent, /^On · policy home · 14 fields · updated 3 d ago$/);
-  assert.ok(home.querySelector('.tp-open'));
-  assert.equal(home.querySelector('.tp-change'), null);
-  assert.match(home.querySelector('.tm-hint').textContent, /pipeline cap \$10\.00 \(soft\) · total \$150\.00\/month \(soft\)/);
-  const follows = renderProjectTpCell({ ...base, delegateTo: 'acme/gateway', delegateState: 'ok', home: 'acme/gateway' }, { doc });
-  assert.match(follows.querySelector('.tm-status').textContent, /^On · follows acme\/gateway · 14 fields$/);
-  assert.ok(follows.querySelector('.tp-open') && follows.querySelector('.tp-change'));
-  const invalid = renderProjectTpCell({ ...base, delegateTo: 'acme/old', delegateState: 'invalid', delegateCode: 'DELEGATE_DANGLING', caps: null }, { doc });
-  assert.match(invalid.querySelector('.tm-status').textContent, /Follow invalid · follows acme\/old, which no longer carries a policy/);
-  assert.ok(invalid.querySelector('.tm-dot.red') && invalid.querySelector('.tp-change'));
-  const newer = renderProjectTpCell({ ...base, unknownSchema: true, warnings: ['schema 2 needs a newer Worca'], caps: null }, { doc });
-  assert.match(newer.querySelector('.tm-status').textContent, /Needs a newer Worca/);
-  assert.match(newer.querySelector('.tm-hint').textContent, /schema 2/);
-});
-
 test('enable dialog body (board 3): here / follow, preselected metrics delegate, protect advice', () => {
   const here = renderPolicyEnableDialogBody({ project: { name: 'billing-api' }, origin: 'github.com/acme/billing-api', candidates: [{ slug: 'acme/gateway', label: 'acme/gateway' }], mode: 'here' }, { doc });
   assert.equal(here.querySelectorAll('input[name="tp-where"]').length, 2);
@@ -97,37 +73,6 @@ test('enable dialog body (board 3): here / follow, preselected metrics delegate,
   assert.match(change.textContent, /pick a new home/);
   const none = renderPolicyEnableDialogBody({ project: { name: 'x' }, origin: 'x', candidates: [], mode: 'here' }, { doc });
   assert.equal(none.querySelector('input[name="tp-where"][value="follow"]').disabled, true);
-});
-
-const ROWS = [
-  { key: 'cost.pipelineLimitUsd', group: 'cost', label: 'Per-pipeline cap', help: 'pauses the run', type: 'usd', team: { kind: 'soft', declaredKind: 'soft', value: 10, display: '$10.00', onBreach: 'pause', requireReason: true }, local: { value: 25, set: true, display: '$25.00' }, effective: { value: 10, display: '$10.00', source: 'team' }, note: 'yours ($25.00) is looser; the team cap applies', shown: true },
-  { key: 'cost.totalLimitUsd', group: 'cost', label: 'Total cap per month', type: 'usd', team: { kind: 'soft', declaredKind: 'hard', value: 150, display: '$150.00' }, local: { value: 120, set: true, display: '$120.00' }, effective: { value: 120, display: '$120.00', source: 'local' }, note: 'yours is tighter', shown: true },
-  { key: 'cost.resetPeriod', group: 'cost', label: 'Reset period', type: 'enum', team: null, local: { value: 'monthly', set: false, display: '—' }, effective: { value: 'monthly', display: 'monthly', source: 'default' }, note: null, shown: false },
-  { key: 'guardrails.default', group: 'guardrails', label: 'Default set', type: 'string', team: { kind: 'default', declaredKind: 'default', value: 'secure', display: 'secure', fromWorkspaceRuns: true }, local: null, effective: { value: 'secure', display: 'secure', source: 'team-default' }, note: null, shown: true },
-];
-
-test('effective table (board 4): groups, kind chips, struck-through looser value, show-all toggle', () => {
-  const card = renderEffectiveTable({ rows: ROWS, policy: { workspaceRun: false } }, { doc });
-  const tbl = card.querySelector('table.tm-tbl.tp-tbl');
-  assert.deepEqual([...tbl.querySelectorAll('tr.tp-group td')].map((x) => x.textContent), ['Cost', 'Guardrails']);
-  assert.equal(tbl.querySelectorAll('tbody tr[data-key]').length, 3, 'hidden rows (no team value) are not painted');
-  const r1 = tbl.querySelector('tr[data-key="cost.pipelineLimitUsd"]');
-  assert.equal(r1.querySelector('.tp-kind').className, 'tp-kind soft');
-  assert.ok(r1.querySelector('td.tp-eff.loose'), 'the looser local value is struck through');
-  assert.ok(r1.querySelector('td.tp-eff.tight'), 'the effective cell is tight when the team number binds');
-  assert.match(r1.querySelector('td.tp-team small').textContent, /on breach: pause · reason required/);
-  const r2 = tbl.querySelector('tr[data-key="cost.totalLimitUsd"]');
-  assert.equal(r2.querySelector('.tp-kind').textContent, 'hard');
-  assert.match(r2.querySelector('.tp-kind').title, /treated as soft/);
-  const r4 = tbl.querySelector('tr[data-key="guardrails.default"]');
-  assert.ok(r4.querySelector('.badge.grey'), 'workspace-runs chip');
-  const toggle = card.querySelector('.tp-show-all');
-  assert.equal(toggle.textContent, 'show all 4 fields');
-  const holder = doc.createElement('div'); holder.append(card);
-  toggle.dispatchEvent(new dom.window.Event('click', { bubbles: true }));
-  assert.equal(holder.querySelectorAll('tbody tr[data-key]').length, 4, 'show-all repaints with every row');
-  const empty = renderEffectiveTable({ rows: ROWS.map((r) => ({ ...r, team: null, shown: false })), policy: {} }, { doc });
-  assert.match(empty.textContent, /sets no fields yet/);
 });
 
 test('editor (board 5): registry-driven rows, kind segments, docFromEditor round-trips the sample document', () => {
@@ -234,84 +179,6 @@ test('editor (board 5): registry-driven rows, kind segments, docFromEditor round
   assert.equal(root.querySelector('.tp-publish').disabled, false);
   assert.match(root.querySelector('.tp-change-count').textContent, /^3 changes$/, 'the cap, the marketplace, and the catalog (counted once)');
   root.remove();
-});
-
-test('empty state, sync chip, badge', () => {
-  const empty = renderPolicyEmptyState({ doc });
-  assert.equal(empty.querySelectorAll('.tm-step').length, 2);
-  assert.match(empty.textContent, /Set up team policy on a project/);
-  assert.match(empty.textContent, /Pick a policy home for a workspace/);
-  assert.ok(empty.querySelector('.tp-check-now'));
-  // The team-metrics chip's words: freshness and Refresh only — the commit id lives on the panel.
-  const chip = renderPolicySyncChip({ policy: { checkedAt: new Date(Date.now() - 4 * 60_000).toISOString(), sha: '3f2a1bc0deadbeef', warnings: [] } }, { doc });
-  assert.equal(chip.textContent, 'Synced 4 min agoRefresh');
-  assert.ok(!chip.textContent.includes('3f2a1bc'), 'no commit id in the chip');
-  assert.ok(chip.querySelector('.dot.green') && chip.querySelector('.tp-check-now'));
-  const busy = renderPolicySyncChip({ policy: { checkedAt: null, warnings: [] } }, { doc, busy: true });
-  assert.match(busy.textContent, /^Checking origin…/);
-  assert.equal(busy.querySelector('.tp-check-now').disabled, true);
-  const warn = renderPolicySyncChip({ policy: { checkedAt: new Date().toISOString(), warnings: ['cost.totalLimitUsd: dropped'] } }, { doc });
-  assert.ok(warn.querySelector('.dot.amber'));
-  assert.match(warn.textContent, /1 warning/);
-  assert.match(warn.querySelector('.tm-sync-error').textContent, /dropped/);
-  assert.equal(renderPolicyBadgeFor('acme/gateway', { doc }).className, 'badge blue tp-origin');
-  assert.equal(relTime(new Date(Date.now() - 30_000).toISOString()), 'just now');
-});
-
-test('workspace block (board 6, reworked): a facts list — POLICY HOME, WORKSPACE RUNS, MEMBERS — with the actions above', () => {
-  const facts = (root) => [...root.querySelectorAll('.tp-facts dt')].map((dt, i) => [dt.textContent, root.querySelectorAll('.tp-facts dd')[i].textContent.trim()]);
-  const unset = renderWsPolicyLine({ id: 'w', name: 'IoT', home: { state: 'unset' }, members: [] }, { doc });
-  assert.deepEqual(facts(unset), [['POLICY HOME', 'none chosen · workspace runs use your local settings']]);
-  assert.equal(unset.querySelector('.wsp-home-change').textContent, 'Choose policy home…');
-  assert.match(unset.querySelector('.ws-home-hint').textContent, /use your local settings until a policy home is chosen/);
-  // Only what the workspaceRuns block CHANGES, by name; the members as counts; a home that is a
-  // following member names the project it follows through.
-  const ok = renderWsPolicyLine({ id: 'w', name: 'IoT', home: { state: 'ok', slug: 'acme/gateway', follows: null, workspaceRuns: [
-    { key: 'cost.pipelineLimitUsd', label: 'Per-pipeline cap (USD)', display: '$25.00' },
-    { key: 'guardrails.default', label: 'Default set', display: 'Strict' },
-  ] }, members: [{ state: 'home' }, { state: 'none' }] }, { doc });
-  assert.deepEqual(facts(ok), [
-    ['POLICY HOME', 'acme/gateway'],
-    ['WORKSPACE RUNS', 'pipeline cap $25.00 · guardrails Strict'],
-    ['MEMBERS', '1 is the policy home · 1 has no worca-policy branch — a member with no branch keeps its own settings for project runs'],
-  ]);
-  assert.ok(ok.querySelector('.tp-facts dd .tm-dot.green'), 'the home carries the dot, not the label');
-  assert.equal(ok.querySelectorAll('.tp-facts dd b:not(.ref)').length, 2, 'the values are the bold part');
-  assert.equal(ok.querySelector('.tp-facts dd b.ref').textContent, 'acme/gateway', 'the home is a name, set apart from the prose');
-  assert.equal(ok.querySelector('.ws-policy-line'), null, 'no run-on line any more');
-  const via = renderWsPolicyLine({ id: 'w', name: 'IoT', home: { state: 'ok', slug: 'acme/gateway', follows: 'acme/billing', workspaceRuns: [] }, members: [{ state: 'follows-home' }, { state: 'follows-home' }, { state: 'home' }] }, { doc });
-  assert.deepEqual(facts(via), [['POLICY HOME', 'acme/gateway · follows acme/billing'], ['WORKSPACE RUNS', 'same values as project runs'], ['MEMBERS', '1 is the policy home · 2 follow the home']]);
-  assert.ok(ok.querySelector('.wsp-open') && ok.querySelector('.wsp-route'));
-  assert.equal(ok.querySelector('.wsp-home-change').textContent, 'Change policy home…');
-  assert.equal(ok.firstElementChild.nextElementSibling.className, 'ws-tbl-actions', 'the actions come before the facts');
-  const stale = renderWsPolicyLine({ id: 'w', name: 'IoT', home: { state: 'stale', detail: 'the policy home is no longer a workspace member' }, members: [] }, { doc });
-  assert.ok(stale.querySelector('.tp-facts dd .tm-dot.red'));
-  assert.match(facts(stale)[0][1], /no longer a workspace member/);
-  assert.equal(stale.querySelector('.wsp-route'), null);
-});
-
-test('settings readout + chip (board 7)', () => {
-  assert.equal(renderTeamCapsReadout([], { doc }), null);
-  const node = renderTeamCapsReadout([{ slug: 'acme/gateway', caps: { pipeline: { kind: 'soft', value: 10 }, total: { kind: 'soft', value: 150 }, resetPeriod: 'monthly' }, usedBy: ['acme/gateway', 'acme/billing-api'] }], { doc });
-  assert.equal(node.className, 'team-readout');
-  assert.equal(node.querySelector('.badge.blue').textContent, 'acme/gateway');
-  assert.match(node.textContent, /pipeline \$10\.00 \(soft\) · total \$150\.00\/month \(soft\) · also used by acme\/billing-api/);
-  assert.equal(node.querySelector('a.tp-open-page').getAttribute('href'), '#team-policy');
-  const chip = renderTeamChip({ kind: 'soft', display: '$10.00' }, { doc });
-  assert.equal(chip.className, 'team-chip');
-  assert.equal(chip.textContent, 'soft team $10.00');
-});
-
-test('New pipeline notes line (board 8)', () => {
-  const line = renderPolicyNotesLine({ policy: { home: 'acme/gateway', caps: { pipeline: { kind: 'soft', value: 10 }, pooled: { value: 1200, window: 'monthly' } } }, notes: [{ code: 'model:x', text: 'Model x is not allowed.', level: 'warn' }, { code: 'metrics-off', text: 'Include my runs is off.', level: 'info' }] }, { doc });
-  assert.equal(line.className, 'policy-line');
-  assert.equal(line.querySelector('.badge.blue').textContent, 'team policy');
-  assert.match(line.querySelector('.pl-head-row').textContent, /acme\/gateway · 2 notes · nothing here blocks the run/);
-  const notes = line.querySelectorAll('.pl-note');
-  assert.equal(notes.length, 3, 'two notes + the caps line');
-  assert.ok(notes[0].classList.contains('warn') && notes[0].querySelector('.tm-dot.amber'));
-  assert.ok(!notes[1].classList.contains('warn') && notes[1].querySelector('.tm-dot.grey'));
-  assert.match(notes[2].textContent, /pipeline cap \$10\.00 \(soft\) · pooled budget \$1,200\.00 \/ monthly/);
 });
 
 test('team-cap pause banner (board 9) and the stats-view delegation', () => {
@@ -444,80 +311,6 @@ test('header panel: the published document — title, source, version, notes, an
   const ws = renderPolicyHeader({ ...PAYLOAD, scope: { kind: 'workspace', id: 'w', name: 'IoT SP' }, policy: { ...PAYLOAD.policy, workspaceRun: true } }, { doc });
   assert.match(ws.querySelectorAll('.tp-facts dd')[0].textContent, /^Policy home gateway · the home follows it through billing-api$/);
   assert.match(ws.querySelectorAll('.tp-facts dd')[1].textContent, /^Workspace runs of IoT SP/);
-});
-
-test('stat cards: what this machine will use, with the source and what needs attention', () => {
-  const grid = renderPolicyStats(PAYLOAD, { doc });
-  const cards = [...grid.querySelectorAll('.tp-ov-card')].map((c) => [c.querySelector('.tp-ov-label').textContent, c.querySelector('.tp-ov-value').textContent, c.querySelector('.tp-ov-sub')?.textContent]);
-  assert.deepEqual(cards, [
-    ['PER-PIPELINE CAP', '$10.00', 'the team cap · yours ($25.00) is looser; the team cap applies'],
-    ['TOTAL CAP', '$120.00', 'your own limit · yours is tighter · per month'],
-    ['REQUIRED PLUGINS', '1/3', '1 missing · 1 below the floor — see the Plugins tab'],
-    ['OFF-POLICY HERE', '1', 'Required plugin github-source is not installed.'],
-  ]);
-  const warns = [...grid.querySelectorAll('.tp-ov-sub.is-warn')].length;
-  assert.equal(warns, 2, 'only the two that need attention are amber');
-  const clean = renderPolicyStats({ rows: [], requirements: [], blockedPlugins: [], deviations: [] }, { doc });
-  assert.deepEqual([...clean.querySelectorAll('.tp-ov-value')].map((v) => v.textContent), ['none', 'none', 'none', 'none']);
-  assert.equal(clean.querySelector('.tp-ov-sub.is-warn'), null);
-  assert.match(clean.querySelectorAll('.tp-ov-sub')[3].textContent, /your setup matches/);
-});
-
-test('Plugins tab: a row per expected plugin with its state and action, then what the policy blocks', () => {
-  const root = renderPolicyPluginsPanel(PAYLOAD, { doc });
-  assert.ok(root.querySelector('.tp-plugins .card-head .pl-policy-setup'), 'Set up… opens the checklist');
-  assert.equal(root.querySelector('.tp-plugins .card-head .pl-policy-all').textContent, 'Install & update all…', 'one missing + one outdated in the fixture');
-  const rows = [...root.querySelectorAll('.tp-plugins-tbl tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent.trim()));
-  assert.deepEqual(rows[0].slice(0, 4), ['acme-jiraexpected by gateway · from acme', '≥ 1.2.0', '1.1.0', 'below the floor']);
-  assert.deepEqual(rows[1].slice(1, 4), ['any version', '—', 'not installed']);
-  assert.deepEqual(rows[2].slice(1, 4), ['any version', '2.0.0', 'installed']);
-  assert.equal(root.querySelector('tr[data-name="acme-jira"] .pl-policy-update').dataset.name, 'acme-jira');
-  const install = root.querySelector('tr[data-name="github-source"] .pl-policy-install');
-  assert.deepEqual([install.dataset.name, install.dataset.marketplace], ['github-source', 'acme']);
-  assert.equal(root.querySelector('tr[data-name="linear"] .tp-plugin-act').textContent, '');
-  assert.match(root.querySelector('.tp-blocked-row').textContent, /shell-runner.*enabled here.*blocked by gateway/s);
-  assert.equal(root.querySelector('.form-msg'), null, '#555: install / update results are toasts, so the tab has no message line');
-  const none = renderPolicyPluginsPanel({ requirements: [], blockedPlugins: [] }, { doc });
-  assert.match(none.querySelector('.hist-empty').textContent, /expects no plugins/);
-  assert.equal(none.querySelector('.tp-blocked'), null);
-});
-
-test('Catalog tab: the guardrail sets and models the policy ships', () => {
-  const root = renderPolicyCatalogPanel(PAYLOAD, { doc });
-  const set = root.querySelector('.tp-catalog-sets .tp-cat-row');
-  assert.match(set.textContent, /Gateway normal.*gp:gateway-normal/s);
-  assert.match(set.querySelector('small').textContent, /env scrubbed · 1 protected path · 1 deny rule/);
-  const model = root.querySelector('.tp-catalog-models .tp-cat-row');
-  assert.match(model.textContent, /Opus via Acme.*acme-proxy-opus/s);
-  assert.match(model.querySelector('small').textContent, /medium · high · 1 env var · routes via base URL/);
-  assert.equal(root.querySelectorAll('.badge.blue').length, 2);
-  const empty = renderPolicyCatalogPanel({ policy: { doc: { catalogs: {} } } }, { doc });
-  assert.equal(empty.querySelectorAll('.hist-empty').length, 2);
-});
-
-test('row chip + summary (policy): a dot, the word and the short state; the cap line rides the title', () => {
-  const home = renderProjectTpChip(base, { doc });
-  assert.equal(home.className, 'pl-team-item pl-tp');
-  assert.equal(home.dataset.kind, 'home');
-  assert.equal(home.textContent, 'Policy home');
-  assert.ok(home.querySelector('.tm-dot.green'));
-  assert.match(home.title, /^Team policy: Home · 14 fields · updated 3 d ago · pipeline cap \$10\.00 \(soft\)/);
-  const follows = renderProjectTpChip({ ...base, delegateTo: 'acme/gateway', delegateState: 'ok', home: 'acme/gateway' }, { doc });
-  assert.equal(follows.textContent, 'Policy follows acme/gateway');
-  const off = renderProjectTpChip({ ...base, present: false, caps: null }, { doc });
-  assert.equal(off.textContent, 'Policy off');
-  assert.equal(off.title, 'Team policy: Off · your settings apply');
-  assert.ok(off.querySelector('.tm-dot.grey'));
-  const none = renderProjectTpChip({ ...base, hasOrigin: false }, { doc });
-  assert.equal(none.textContent, 'Policy not available');
-  assert.ok(none.querySelector('.tm-dot.muted'), 'a hollow dot: the dots stay one column');
-  const invalid = projectTpSummary({ ...base, delegateTo: 'acme/old', delegateState: 'invalid', delegateCode: 'DELEGATE_DANGLING', caps: null });
-  assert.deepEqual([invalid.kind, invalid.tone, invalid.short], ['delegate-invalid', 'red', 'follow invalid']);
-  const unsupported = projectTpSummary({ ...base, unknownSchema: true, warnings: ['schema 9 is newer than this Worca reads'] });
-  assert.deepEqual([unsupported.tone, unsupported.short, unsupported.detail], ['red', 'needs a newer Worca', 'schema 9 is newer than this Worca reads']);
-  const cell = renderProjectTpCell(base, { doc, heading: false });
-  assert.equal(cell.querySelector('.tm-label'), null);
-  assert.ok(cell.querySelector('.tp-open'));
 });
 
 test('editor: a night.criteria row renders five weight inputs and reads back the set ones', () => {

@@ -4,6 +4,7 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { pickFolderNative, pickAppNative, _testing } from '../src/core/folder-dialog.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 afterEach(() => _testing.reset());
 
@@ -13,103 +14,129 @@ function runner(result) {
   return calls;
 }
 
-test('darwin: picked path is trimmed of newline and trailing slash', async () => {
-  _testing.set({ platform: 'darwin', env: {} });
-  const calls = runner({ ok: true, stdout: '/Users/me/dev/app/\n', stderr: '', code: 0, timedOut: false });
-  assert.deepEqual(await pickFolderNative(), { status: 'picked', path: '/Users/me/dev/app' });
-  assert.equal(calls[0].cmd, 'osascript');
+test('darwin: osascript results map to picked (trimmed, "/" kept), canceled (-128) or unsupported (no GUI, timeout)', async () => {
+  // afterEach resets only between tests: each row starts from a reset, as its own test did.
+  await checkRows([
+    { name: 'darwin: picked path is trimmed of newline and trailing slash', run: async () => {
+      _testing.set({ platform: 'darwin', env: {} });
+      const calls = runner({ ok: true, stdout: '/Users/me/dev/app/\n', stderr: '', code: 0, timedOut: false });
+      assert.deepEqual(await pickFolderNative(), { status: 'picked', path: '/Users/me/dev/app' });
+      assert.equal(calls[0].cmd, 'osascript');
+    } },
+    { name: 'darwin: user cancel (-128) maps to canceled', run: async () => {
+      _testing.reset();
+      _testing.set({ platform: 'darwin', env: {} });
+      runner({ ok: false, stdout: '', stderr: 'execution error: User canceled. (-128)', code: 1, timedOut: false });
+      assert.deepEqual(await pickFolderNative(), { status: 'canceled' });
+    } },
+    { name: 'darwin: non-cancel failure (no GUI session) maps to unsupported', run: async () => {
+      _testing.reset();
+      _testing.set({ platform: 'darwin', env: {} });
+      runner({ ok: false, stdout: '', stderr: 'execution error: No user interaction allowed. (-1713)', code: 1, timedOut: false });
+      assert.deepEqual(await pickFolderNative(), { status: 'unsupported' });
+    } },
+    { name: 'darwin: picking the filesystem root keeps "/"', run: async () => {
+      _testing.reset();
+      _testing.set({ platform: 'darwin', env: {} });
+      runner({ ok: true, stdout: '/\n', stderr: '', code: 0, timedOut: false });
+      assert.deepEqual(await pickFolderNative(), { status: 'picked', path: '/' });
+    } },
+    { name: 'a timed-out dialog maps to unsupported', run: async () => {
+      _testing.reset();
+      _testing.set({ platform: 'darwin', env: {} });
+      runner({ ok: false, stdout: '', stderr: 'dialog timed out', code: -1, timedOut: true });
+      assert.deepEqual(await pickFolderNative(), { status: 'unsupported' });
+    } },
+  ]);
 });
 
-test('darwin: user cancel (-128) maps to canceled', async () => {
-  _testing.set({ platform: 'darwin', env: {} });
-  runner({ ok: false, stdout: '', stderr: 'execution error: User canceled. (-128)', code: 1, timedOut: false });
-  assert.deepEqual(await pickFolderNative(), { status: 'canceled' });
+test('win32: STA powershell, TopMost-owned dialog, empty stdout is a cancel, multiple returns a one-element list', async () => {
+  // afterEach resets only between tests: each row starts from a reset, as its own test did.
+  await checkRows([
+    { name: 'win32: empty stdout with ok exit maps to canceled; dialog runs on an STA thread', run: async () => {
+      _testing.set({ platform: 'win32', env: {} });
+      const calls = runner({ ok: true, stdout: '', stderr: '', code: 0, timedOut: false });
+      assert.deepEqual(await pickFolderNative(), { status: 'canceled' });
+      assert.equal(calls[0].cmd, 'powershell.exe');
+      assert.ok(calls[0].args.includes('-STA'));
+    } },
+    { name: 'win32: the dialog is owned by a SHOWN TopMost form, so it opens above the browser', run: async () => {
+      _testing.reset();
+      // The server's PowerShell child is never the foreground process, so an unowned dialog (or one
+      // whose TopMost owner is never shown) opens BEHIND the browser window: the user sees nothing.
+      _testing.set({ platform: 'win32', env: {} });
+      const calls = runner({ ok: true, stdout: '', stderr: '', code: 0, timedOut: false });
+      await pickFolderNative();
+      const script = calls[0].args[calls[0].args.indexOf('-Command') + 1];
+      assert.match(script, /\$o\.TopMost = \$true/);
+      assert.match(script, /\$o\.Show\(\)/);
+      assert.match(script, /\$d\.ShowDialog\(\$o\)/);
+    } },
+    { name: 'win32 multiple: FolderBrowserDialog is single-select; one path comes back as a list', run: async () => {
+      _testing.reset();
+      _testing.set({ platform: 'win32', env: {} });
+      runner({ ok: true, stdout: 'C:\\dev\\app\r\n', stderr: '', code: 0, timedOut: false });
+      assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'picked', path: 'C:\\dev\\app', paths: ['C:\\dev\\app'] });
+    } },
+  ]);
 });
 
-test('darwin: non-cancel failure (no GUI session) maps to unsupported', async () => {
-  _testing.set({ platform: 'darwin', env: {} });
-  runner({ ok: false, stdout: '', stderr: 'execution error: No user interaction allowed. (-1713)', code: 1, timedOut: false });
-  assert.deepEqual(await pickFolderNative(), { status: 'unsupported' });
+test('linux: headless is unsupported unspawned; a zenity cancel stops there, a missing zenity falls back to kdialog', async () => {
+  // afterEach resets only between tests: each row starts from a reset, as its own test did.
+  await checkRows([
+    { name: 'linux: headless (no DISPLAY/WAYLAND_DISPLAY) is unsupported without spawning', run: async () => {
+      let spawned = 0;
+      _testing.set({ platform: 'linux', env: {}, runner: async () => { spawned += 1; return { ok: false, stdout: '', stderr: '', code: -1, timedOut: false }; } });
+      assert.deepEqual(await pickFolderNative(), { status: 'unsupported' });
+      assert.equal(spawned, 0);
+    } },
+    { name: 'linux: zenity missing falls back to kdialog', run: async () => {
+      _testing.reset();
+      const calls = [];
+      _testing.set({
+        platform: 'linux',
+        env: { DISPLAY: ':0', HOME: '/home/me' },
+        runner: async (cmd) => {
+          calls.push(cmd);
+          if (cmd === 'zenity') return { ok: false, stdout: '', stderr: 'spawn zenity ENOENT', code: -1, timedOut: false };
+          return { ok: true, stdout: '/home/me/dev\n', stderr: '', code: 0, timedOut: false };
+        },
+      });
+      assert.deepEqual(await pickFolderNative(), { status: 'picked', path: '/home/me/dev' });
+      assert.deepEqual(calls, ['zenity', 'kdialog']);
+    } },
+    { name: 'linux: zenity exit 1 is a user cancel; kdialog is not tried', run: async () => {
+      _testing.reset();
+      const calls = [];
+      _testing.set({
+        platform: 'linux', env: { DISPLAY: ':0' },
+        runner: async (cmd) => { calls.push(cmd); return { ok: false, stdout: '', stderr: '', code: 1, timedOut: false }; },
+      });
+      assert.deepEqual(await pickFolderNative(), { status: 'canceled' });
+      assert.deepEqual(calls, ['zenity']);
+    } },
+  ]);
 });
 
-test('darwin: picking the filesystem root keeps "/"', async () => {
-  _testing.set({ platform: 'darwin', env: {} });
-  runner({ ok: true, stdout: '/\n', stderr: '', code: 0, timedOut: false });
-  assert.deepEqual(await pickFolderNative(), { status: 'picked', path: '/' });
-});
-
-test('win32: empty stdout with ok exit maps to canceled; dialog runs on an STA thread', async () => {
-  _testing.set({ platform: 'win32', env: {} });
-  const calls = runner({ ok: true, stdout: '', stderr: '', code: 0, timedOut: false });
-  assert.deepEqual(await pickFolderNative(), { status: 'canceled' });
-  assert.equal(calls[0].cmd, 'powershell.exe');
-  assert.ok(calls[0].args.includes('-STA'));
-});
-
-test('win32: the dialog is owned by a SHOWN TopMost form, so it opens above the browser', async () => {
-  // The server's PowerShell child is never the foreground process, so an unowned dialog (or one
-  // whose TopMost owner is never shown) opens BEHIND the browser window: the user sees nothing.
-  _testing.set({ platform: 'win32', env: {} });
-  const calls = runner({ ok: true, stdout: '', stderr: '', code: 0, timedOut: false });
-  await pickFolderNative();
-  const script = calls[0].args[calls[0].args.indexOf('-Command') + 1];
-  assert.match(script, /\$o\.TopMost = \$true/);
-  assert.match(script, /\$o\.Show\(\)/);
-  assert.match(script, /\$d\.ShowDialog\(\$o\)/);
-});
-
-test('linux: headless (no DISPLAY/WAYLAND_DISPLAY) is unsupported without spawning', async () => {
-  let spawned = 0;
-  _testing.set({ platform: 'linux', env: {}, runner: async () => { spawned += 1; return { ok: false, stdout: '', stderr: '', code: -1, timedOut: false }; } });
-  assert.deepEqual(await pickFolderNative(), { status: 'unsupported' });
-  assert.equal(spawned, 0);
-});
-
-test('linux: zenity missing falls back to kdialog', async () => {
-  const calls = [];
-  _testing.set({
-    platform: 'linux',
-    env: { DISPLAY: ':0', HOME: '/home/me' },
-    runner: async (cmd) => {
-      calls.push(cmd);
-      if (cmd === 'zenity') return { ok: false, stdout: '', stderr: 'spawn zenity ENOENT', code: -1, timedOut: false };
-      return { ok: true, stdout: '/home/me/dev\n', stderr: '', code: 0, timedOut: false };
-    },
-  });
-  assert.deepEqual(await pickFolderNative(), { status: 'picked', path: '/home/me/dev' });
-  assert.deepEqual(calls, ['zenity', 'kdialog']);
-});
-
-test('linux: zenity exit 1 is a user cancel; kdialog is not tried', async () => {
-  const calls = [];
-  _testing.set({
-    platform: 'linux', env: { DISPLAY: ':0' },
-    runner: async (cmd) => { calls.push(cmd); return { ok: false, stdout: '', stderr: '', code: 1, timedOut: false }; },
-  });
-  assert.deepEqual(await pickFolderNative(), { status: 'canceled' });
-  assert.deepEqual(calls, ['zenity']);
-});
-
-test('WORCA_NO_NATIVE_DIALOG=1 forces unsupported without spawning', async () => {
-  let spawned = 0;
-  _testing.set({ platform: 'darwin', env: { WORCA_NO_NATIVE_DIALOG: '1' }, runner: async () => { spawned += 1; return { ok: true, stdout: '/x\n', stderr: '', code: 0, timedOut: false }; } });
-  assert.deepEqual(await pickFolderNative(), { status: 'unsupported' });
-  assert.equal(spawned, 0);
-});
-
-test('a second concurrent pick reports busy', async () => {
-  let release;
-  _testing.set({ platform: 'darwin', env: {}, runner: () => new Promise((r) => { release = r; }) });
-  const first = pickFolderNative();
-  assert.deepEqual(await pickFolderNative(), { status: 'busy' });
-  release({ ok: true, stdout: '/tmp\n', stderr: '', code: 0, timedOut: false });
-  assert.deepEqual(await first, { status: 'picked', path: '/tmp' });
-});
-
-test('a timed-out dialog maps to unsupported', async () => {
-  _testing.set({ platform: 'darwin', env: {} });
-  runner({ ok: false, stdout: '', stderr: 'dialog timed out', code: -1, timedOut: true });
-  assert.deepEqual(await pickFolderNative(), { status: 'unsupported' });
+test('guards: WORCA_NO_NATIVE_DIALOG forces unsupported unspawned; a concurrent pick is busy', async () => {
+  // afterEach resets only between tests: each row starts from a reset, as its own test did.
+  await checkRows([
+    { name: 'WORCA_NO_NATIVE_DIALOG=1 forces unsupported without spawning', run: async () => {
+      let spawned = 0;
+      _testing.set({ platform: 'darwin', env: { WORCA_NO_NATIVE_DIALOG: '1' }, runner: async () => { spawned += 1; return { ok: true, stdout: '/x\n', stderr: '', code: 0, timedOut: false }; } });
+      assert.deepEqual(await pickFolderNative(), { status: 'unsupported' });
+      assert.equal(spawned, 0);
+    } },
+    { name: 'a second concurrent pick reports busy', run: async () => {
+      _testing.reset();
+      let release;
+      _testing.set({ platform: 'darwin', env: {}, runner: () => new Promise((r) => { release = r; }) });
+      const first = pickFolderNative();
+      assert.deepEqual(await pickFolderNative(), { status: 'busy' });
+      release({ ok: true, stdout: '/tmp\n', stderr: '', code: 0, timedOut: false });
+      assert.deepEqual(await first, { status: 'picked', path: '/tmp' });
+    } },
+  ]);
 });
 
 test('purpose picks the dialog title from a closed set; unknown purpose falls back to the project title', async () => {
@@ -128,64 +155,62 @@ test('purpose picks the dialog title from a closed set; unknown purpose falls ba
   ]);
 });
 
-test('darwin multiple: runs choose folder with multiple selections and returns every path', async () => {
-  _testing.set({ platform: 'darwin', env: {} });
-  const calls = runner({ ok: true, stdout: '/Users/me/dev/a/\n/Users/me/dev/b/\n\n', stderr: '', code: 0, timedOut: false });
-  assert.deepEqual(await pickFolderNative({ multiple: true }), {
-    status: 'picked', path: '/Users/me/dev/a', paths: ['/Users/me/dev/a', '/Users/me/dev/b'],
-  });
-  const script = calls[0].args.join('\n');
-  assert.match(script, /with multiple selections allowed/);
-  assert.match(script, /prompt "Select a project folder"/, 'title still comes from the closed set');
+test('darwin multiple: every path returned, duplicates collapsed, cancel still canceled', async () => {
+  // afterEach resets only between tests: each row starts from a reset, as its own test did.
+  await checkRows([
+    { name: 'darwin multiple: runs choose folder with multiple selections and returns every path', run: async () => {
+      _testing.set({ platform: 'darwin', env: {} });
+      const calls = runner({ ok: true, stdout: '/Users/me/dev/a/\n/Users/me/dev/b/\n\n', stderr: '', code: 0, timedOut: false });
+      assert.deepEqual(await pickFolderNative({ multiple: true }), {
+        status: 'picked', path: '/Users/me/dev/a', paths: ['/Users/me/dev/a', '/Users/me/dev/b'],
+      });
+      const script = calls[0].args.join('\n');
+      assert.match(script, /with multiple selections allowed/);
+      assert.match(script, /prompt "Select a project folder"/, 'title still comes from the closed set');
+    } },
+    { name: 'darwin multiple: cancel (-128) still maps to canceled', run: async () => {
+      _testing.reset();
+      _testing.set({ platform: 'darwin', env: {} });
+      runner({ ok: false, stdout: '', stderr: 'execution error: User canceled. (-128)', code: 1, timedOut: false });
+      assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'canceled' });
+    } },
+    { name: 'multiple: duplicate lines are collapsed', run: async () => {
+      _testing.reset();
+      _testing.set({ platform: 'darwin', env: {} });
+      runner({ ok: true, stdout: '/x/a\n/x/a/\n', stderr: '', code: 0, timedOut: false });
+      assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'picked', path: '/x/a', paths: ['/x/a'] });
+    } },
+  ]);
 });
 
-test('darwin multiple: cancel (-128) still maps to canceled', async () => {
-  _testing.set({ platform: 'darwin', env: {} });
-  runner({ ok: false, stdout: '', stderr: 'execution error: User canceled. (-128)', code: 1, timedOut: false });
-  assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'canceled' });
-});
-
-test('single mode keeps its exact reply shape (no paths key)', async () => {
-  _testing.set({ platform: 'darwin', env: {} });
-  runner({ ok: true, stdout: '/Users/me/dev/a/\n', stderr: '', code: 0, timedOut: false });
-  assert.deepEqual(await pickFolderNative(), { status: 'picked', path: '/Users/me/dev/a' });
-});
-
-test('multiple: duplicate lines are collapsed', async () => {
-  _testing.set({ platform: 'darwin', env: {} });
-  runner({ ok: true, stdout: '/x/a\n/x/a/\n', stderr: '', code: 0, timedOut: false });
-  assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'picked', path: '/x/a', paths: ['/x/a'] });
-});
-
-test('linux multiple: zenity gets --multiple with a newline separator', async () => {
-  const calls = [];
-  _testing.set({
-    platform: 'linux', env: { DISPLAY: ':0' },
-    runner: async (cmd, args) => { calls.push({ cmd, args }); return { ok: true, stdout: '/home/me/a\n/home/me/b\n', stderr: '', code: 0, timedOut: false }; },
-  });
-  assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'picked', path: '/home/me/a', paths: ['/home/me/a', '/home/me/b'] });
-  assert.ok(calls[0].args.includes('--multiple'));
-  assert.ok(calls[0].args.includes('--separator=\n'));
-});
-
-test('linux multiple: kdialog fallback is single-select and returns a one-element list', async () => {
-  const calls = [];
-  _testing.set({
-    platform: 'linux', env: { DISPLAY: ':0', HOME: '/home/me' },
-    runner: async (cmd, args) => {
-      calls.push({ cmd, args });
-      if (cmd === 'zenity') return { ok: false, stdout: '', stderr: 'spawn zenity ENOENT', code: -1, timedOut: false };
-      return { ok: true, stdout: '/home/me/dev\n', stderr: '', code: 0, timedOut: false };
-    },
-  });
-  assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'picked', path: '/home/me/dev', paths: ['/home/me/dev'] });
-  assert.ok(!calls[1].args.includes('--multiple'));
-});
-
-test('win32 multiple: FolderBrowserDialog is single-select; one path comes back as a list', async () => {
-  _testing.set({ platform: 'win32', env: {} });
-  runner({ ok: true, stdout: 'C:\\dev\\app\r\n', stderr: '', code: 0, timedOut: false });
-  assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'picked', path: 'C:\\dev\\app', paths: ['C:\\dev\\app'] });
+test('linux multiple: zenity --multiple, kdialog fallback single-select as a one-element list', async () => {
+  // afterEach resets only between tests: each row starts from a reset, as its own test did.
+  await checkRows([
+    { name: 'linux multiple: zenity gets --multiple with a newline separator', run: async () => {
+      const calls = [];
+      _testing.set({
+        platform: 'linux', env: { DISPLAY: ':0' },
+        runner: async (cmd, args) => { calls.push({ cmd, args }); return { ok: true, stdout: '/home/me/a\n/home/me/b\n', stderr: '', code: 0, timedOut: false }; },
+      });
+      assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'picked', path: '/home/me/a', paths: ['/home/me/a', '/home/me/b'] });
+      assert.ok(calls[0].args.includes('--multiple'));
+      assert.ok(calls[0].args.includes('--separator=\n'));
+    } },
+    { name: 'linux multiple: kdialog fallback is single-select and returns a one-element list', run: async () => {
+      _testing.reset();
+      const calls = [];
+      _testing.set({
+        platform: 'linux', env: { DISPLAY: ':0', HOME: '/home/me' },
+        runner: async (cmd, args) => {
+          calls.push({ cmd, args });
+          if (cmd === 'zenity') return { ok: false, stdout: '', stderr: 'spawn zenity ENOENT', code: -1, timedOut: false };
+          return { ok: true, stdout: '/home/me/dev\n', stderr: '', code: 0, timedOut: false };
+        },
+      });
+      assert.deepEqual(await pickFolderNative({ multiple: true }), { status: 'picked', path: '/home/me/dev', paths: ['/home/me/dev'] });
+      assert.ok(!calls[1].args.includes('--multiple'));
+    } },
+  ]);
 });
 
 // ── Browse… for Settings › Runs › Actions › Editor / Terminal: pickAppNative ──

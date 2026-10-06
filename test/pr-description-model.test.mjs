@@ -69,9 +69,7 @@ test('settings: prDescriptionModel round-trips through the API, validates BEFORE
   assert.throws(() => assertPrDescriptionModelInput(42), /catalog model id/);
   assert.throws(() => assertPrDescriptionModelInput('nope', [{ id: 'claude-opus-5-5' }]), /unknown model "nope"/);
   await assert.rejects(() => setPrDescriptionModel(42), /catalog model id/);
-});
-
-test('settings: a stored id the catalog no longer carries reports the default as effective', async () => {
+  // A stored id the catalog no longer carries reports the default as effective.
   const { writeFile, mkdir, readFile } = await import('node:fs/promises');
   const { settingsFile } = await import('../src/core/settings.mjs');
   const file = settingsFile();

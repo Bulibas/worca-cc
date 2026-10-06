@@ -34,6 +34,8 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
 import { _resetForTests, getDb } from '../src/core/db.mjs';
 import { posix } from './helpers/posix-path.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 useTempHome(after);
 
@@ -50,15 +52,7 @@ async function tmp(prefix = 'worca-cc-rr-') {
 }
 
 async function freshRepo(prefix = 'worca-cc-rr-repo-') {
-  const dir = await tmp(prefix);
-  const g = (args) => spawnSync('git', args, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'seed.txt'), 'seed\n');
-  g(['add', '-A']);
-  g(['commit', '-qm', 'init']);
-  return dir;
+  return templateRepo('rr-repo', { branch: 'main', user: true, files: { 'seed.txt': 'seed\n' }, into: await tmp(prefix) });
 }
 
 function branchList(dir) {
@@ -90,26 +84,7 @@ async function withMode(mode, fn) {
 
 // ── §10 flag reader: precedence + validation ──────────────────────────────────
 
-test('runRootMode: default is detached (the Phase-5 flip landed)', async () => {
-  assert.equal(DEFAULT_RUN_ROOT_MODE, 'detached');
-  await withMode(undefined, () => {
-    assert.equal(runRootMode(), 'detached');
-  });
-});
-
-test('runRootMode: WORCA_RUN_ROOT env is honored and read FRESH on every call', async () => {
-  await withMode('detached', () => {
-    assert.equal(runRootMode(), 'detached');
-    // Same process, same module instance: flipping the env must take effect at once
-    // (no module-load caching — the whole per-test pinning scheme depends on it).
-    process.env.WORCA_RUN_ROOT = 'legacy';
-    assert.equal(runRootMode(), 'legacy');
-    process.env.WORCA_RUN_ROOT = 'detached';
-    assert.equal(runRootMode(), 'detached');
-  });
-});
-
-test('runRootMode: precedence env > settings.runRootMode > default, + invalid-value fallback', async () => {
+test('runRootMode: default is detached, env is read fresh, precedence env > settings > default, invalid values fall back with a warning', async () => {
   // Sandbox HOME so settingsFile() resolves into a temp dir (mirrors settings.test.mjs).
   const home = await tmp('worca-cc-rr-home-');
   const prev = {
@@ -128,6 +103,20 @@ test('runRootMode: precedence env > settings.runRootMode > default, + invalid-va
   try {
     // No settings key, no env -> the code constant.
     assert.equal(runRootMode(), DEFAULT_RUN_ROOT_MODE);
+    // The default is detached (the Phase-5 flip landed).
+    assert.equal(DEFAULT_RUN_ROOT_MODE, 'detached');
+    assert.equal(runRootMode(), 'detached');
+
+    // WORCA_RUN_ROOT is honored and read FRESH on every call: same process, same module
+    // instance, so flipping the env must take effect at once (no module-load caching —
+    // the whole per-test pinning scheme depends on it).
+    process.env.WORCA_RUN_ROOT = 'detached';
+    assert.equal(runRootMode(), 'detached');
+    process.env.WORCA_RUN_ROOT = 'legacy';
+    assert.equal(runRootMode(), 'legacy');
+    process.env.WORCA_RUN_ROOT = 'detached';
+    assert.equal(runRootMode(), 'detached');
+    delete process.env.WORCA_RUN_ROOT;
 
     // settings.runRootMode is read (unknown keys already survive read-modify-write,
     // so it is hand-writable from day one).
@@ -166,8 +155,18 @@ test('runRootMode: precedence env > settings.runRootMode > default, + invalid-va
 
 // ── detached layout: worktrees under the run root, nothing in the project ─────
 
-test('detached: the worktree lands at <worcaHome>/runs/<id>/repos/<projectKey>', async () => {
+// ONE detached default-workflow run carries the five detached-layout checks. The
+// default workflow declares ZERO skills (`grep requiresSkills agents/` → nothing), so the
+// CLAUDE.md row fails if context assembly is ever re-nested under the
+// `if (requiredSkills.length)` guard.
+test('detached single run: worktree under <worcaHome>/runs/<id>/repos/<key>, nothing under <projectDir>/.worca-cc, run.json (minimal + extended) and CLAUDE.md assembled from the real dir, results.json/diff.patch carry the edit', async () => {
   const repo = await freshRepo();
+  await writeFile(join(repo, 'CLAUDE.md'), '# real project memory\nMEMBER-TOKEN-1\n');
+  spawnSync('git', ['-C', repo, 'add', '-A']);
+  spawnSync('git', ['-C', repo, 'commit', '-qm', 'memory']);
+  // An UNCOMMITTED edit: the whole point of assembling from the real dir (E6).
+  await writeFile(join(repo, 'CLAUDE.md'), '# real project memory\nUNCOMMITTED-TOKEN-2\n');
+
   await withMode('detached', async () => {
     const orch = createOrchestrator({
       projectDir: repo, prompt: 'Add login flow', auto: true, claude: { mock: true },
@@ -176,29 +175,97 @@ test('detached: the worktree lands at <worcaHome>/runs/<id>/repos/<projectKey>',
     // Capture the worktree path while the run is live (teardown removes it).
     let seen = null;
     orch.on('state', (s) => { if (!seen && s.branch?.worktreeDir) seen = s.branch.worktreeDir; });
-    const res = await orch.run();
-    assert.equal(res.status, 'done', JSON.stringify(res));
-    const id = orch.getState().id;
-    const expected = join(await realpath(worcaHome()), 'runs', id, 'repos', projectKey(repo));
-    assert.equal(seen, expected, `worktree under the run root: ${seen}`);
-    assert.equal(orch.getState().branch.runRootMode, 'detached', 'the mode pin rides state.branch');
-  });
-});
-
-test('detached: NOTHING is created under <projectDir>/.worca-cc', async () => {
-  const repo = await freshRepo();
-  await withMode('detached', async () => {
-    const orch = createOrchestrator({
-      projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
+    // Read the minimal manifest at the first state with a worktree — teardown removes the run root.
+    let manifest = null;
+    orch.on('state', async (s) => {
+      if (manifest || !s.branch?.worktreeDir) return;
+      manifest = await readRunManifest(join(worcaHome(), 'runs', s.id));
+    });
+    // Read CLAUDE.md + the extended manifest once assembly has run.
+    let assembled = null;
+    orch.on('state', async (s) => {
+      if (assembled || !s.branch?.worktreeDir) return;
+      const runRoot = join(worcaHome(), 'runs', s.id);
+      const text = await readFile(join(runRoot, 'CLAUDE.md'), 'utf8').catch(() => null);
+      if (!text) return;                                   // assembly has not run yet
+      assembled = { text, manifest: await readRunManifest(runRoot) };
+    });
+    // Inject an agent-like edit into the worktree so the diff is non-empty.
+    let injected = false;
+    orch.on('state', (s) => {
+      if (injected || !s.branch?.worktreeDir || !existsSync(s.branch.worktreeDir)) return;
+      injected = true;
+      writeFileSync(join(s.branch.worktreeDir, 'agent.txt'), 'agent\n');
     });
     const res = await orch.run();
-    assert.equal(res.status, 'done', JSON.stringify(res));
-    assert.ok(!existsSync(join(repo, '.worca-cc')),
-      `<projectDir>/.worca-cc must not exist on a detached run: ${join(repo, '.worca-cc')}`);
+
+    await checkRows([
+      { name: 'detached: the worktree lands at <worcaHome>/runs/<id>/repos/<projectKey>', run: async () => {
+        assert.equal(res.status, 'done', JSON.stringify(res));
+        const id = orch.getState().id;
+        const expected = join(await realpath(worcaHome()), 'runs', id, 'repos', projectKey(repo));
+        assert.equal(seen, expected, `worktree under the run root: ${seen}`);
+        assert.equal(orch.getState().branch.runRootMode, 'detached', 'the mode pin rides state.branch');
+      } },
+      { name: 'detached: NOTHING is created under <projectDir>/.worca-cc', run: () => {
+        assert.equal(res.status, 'done', JSON.stringify(res));
+        assert.ok(!existsSync(join(repo, '.worca-cc')),
+          `<projectDir>/.worca-cc must not exist on a detached run: ${join(repo, '.worca-cc')}`);
+      } },
+      { name: 'detached: _setupRunRoot writes a readable minimal run.json with REAL projectDirs', run: async () => {
+        assert.equal(res.status, 'done', JSON.stringify(res));
+        assert.ok(manifest, 'run.json was readable during the run');
+        assert.equal(manifest.pipelineId, orch.getState().id);
+        assert.equal(manifest.runRootMode, 'detached');
+        assert.equal(manifest.isWorkspace, false);
+        assert.equal(manifest.members.length, 1);
+        const m = manifest.members[0];
+        assert.equal(m.projectKey, projectKey(repo));
+        assert.equal(m.projectDir, repo, 'the REAL repo — what `git worktree remove` needs');
+        assert.equal(m.worktreeDir,
+          join(await realpath(worcaHome()), 'runs', orch.getState().id, 'repos', m.projectKey));
+      } },
+      { name: 'detached: the default workflow writes <runRoot>/CLAUDE.md and the EXTENDED run.json', run: () => {
+        assert.equal(res.status, 'done', JSON.stringify(res));
+        assert.ok(assembled, '<runRoot>/CLAUDE.md existed during the run (§9.2 post-condition)');
+        assert.match(assembled.text, new RegExp(`^# Worca CC run ${orch.getState().id}\\n`));
+        assert.match(assembled.text, /UNCOMMITTED-TOKEN-2/, 'the REAL dir was inlined, not the checkout');
+        assert.match(assembled.text, new RegExp(`repos/${projectKey(repo)}`), 'the roster names the checkout path');
+        // §5.4: the roster carries each member's branch and checkpoint ref.
+        assert.match(assembled.text, new RegExp(`branch: \`${orch.getState().branch.feature}\``));
+        assert.match(assembled.text, /checkpoint: `[0-9a-f]{7,}`/, 'the diff base is in the roster');
+        // The manifest carries the Phase-3 context fields beside the Phase-1 minimal ones.
+        const m = assembled.manifest;
+        assert.equal(m.pipelineId, orch.getState().id);
+        assert.ok(m.bytes && typeof m.bytes.total === 'number' && m.bytes.total > 0, JSON.stringify(m.bytes));
+        assert.ok(m.renames && m.renames.skills && m.renames.mcpServers, 'the rename maps are recorded');
+        assert.deepEqual(m.skillResolutions, {}, 'the default workflow declares zero skills');
+        assert.ok(Array.isArray(m.warnings));
+        assert.equal(m.capabilities.mcpGrants, 'server', 'the V1(a) outcome is recorded in run.json');
+        assert.equal(m.capabilities.probed, false, 'mock runs never spawn claude, so no probe');
+        assert.equal(m.mcpConfigPath, null, 'no MCP server anywhere in this fixture');
+      } },
+      { name: 'detached single run: results.json / diff.patch carry the mock edit (checkpoint mirror)', run: async () => {
+        assert.equal(res.status, 'done', JSON.stringify(res));
+        assert.ok(injected, 'precondition: a file was injected into the worktree');
+        const dir = orch.getState().pipelineDir;
+        const results = JSON.parse(await readFile(join(dir, RESULTS_FILE), 'utf8'));
+        const patch = await readFile(join(dir, DIFF_PATCH_FILE), 'utf8');
+        // Single-project OUTPUT shape is byte-identical: ONE results.json with the flat
+        // shape (no perProject rollup) and ONE un-prefixed patch.
+        assert.equal(results.perProject, undefined, 'single-project results keep the flat shape');
+        const touched = [...(results.newFiles || []), ...(results.changedFiles || [])];
+        assert.ok(touched.length > 0, `single-run results must be non-empty: ${JSON.stringify(results)}`);
+        assert.ok(touched.some((f) => f.path === 'agent.txt'), 'the injected edit is in results.json');
+        assert.ok(results.summary.filesNew + results.summary.filesChanged > 0, 'the summary counts it too');
+        assert.match(patch, /agent\.txt/, 'the injected edit is in diff.patch');
+        assert.doesNotMatch(patch, /^# /m, 'no per-member `# <key>` prefix on a single run');
+      } },
+    ]);
   });
 });
 
-test('legacy (pinned): the worktree stays at <projectDir>/.worca-cc/worktrees/<id>', async () => {
+test('legacy (pinned): the worktree stays at <projectDir>/.worca-cc/worktrees/<id> and NO context is assembled', async () => {
   const repo = await freshRepo();
   await withMode('legacy', async () => {
     const orch = createOrchestrator({
@@ -207,11 +274,25 @@ test('legacy (pinned): the worktree stays at <projectDir>/.worca-cc/worktrees/<i
     let seen = null;
     orch.on('state', (s) => { if (!seen && s.branch?.worktreeDir) seen = s.branch.worktreeDir; });
     const res = await orch.run();
-    assert.equal(res.status, 'done', JSON.stringify(res));
-    const id = orch.getState().id;
-    assert.match(posix(seen), /\.worca-cc\/worktrees\//, `legacy placement retained: ${seen}`);
-    assert.ok(seen.endsWith(join('.worca-cc', 'worktrees', id)), `legacy dir is the pipelineId: ${seen}`);
-    assert.ok(!existsSync(join(worcaHome(), 'runs', id)), 'legacy runs create no run root');
+    await checkRows([
+      { name: 'legacy (pinned): the worktree stays at <projectDir>/.worca-cc/worktrees/<id>', run: () => {
+        assert.equal(res.status, 'done', JSON.stringify(res));
+        const id = orch.getState().id;
+        assert.match(posix(seen), /\.worca-cc\/worktrees\//, `legacy placement retained: ${seen}`);
+        assert.ok(seen.endsWith(join('.worca-cc', 'worktrees', id)), `legacy dir is the pipelineId: ${seen}`);
+        assert.ok(!existsSync(join(worcaHome(), 'runs', id)), 'legacy runs create no run root');
+      } },
+      { name: 'legacy (pinned): the default workflow assembles NO context at all', run: () => {
+        assert.equal(res.status, 'done', JSON.stringify(res));
+        assert.equal(orch.runContext, null, 'no assembly on a legacy run (§10 rollback contract)');
+        assert.equal(orch.mcpConfigPath, null, 'so no --mcp-config can reach argv');
+        assert.deepEqual(orch.mcpServerGrants, []);
+        // The memory mount is the ONE legacy injected path (mounted in both modes since P1; without
+        // the exclusion a legacy run would commit its memory into the user's branch).
+        assert.deepEqual(orch.injectedPaths, { [projectKey(repo)]: [{ path: '.claude/rules/worca', kind: 'memory', source: null }] });
+        assert.ok(!existsSync(join(worcaHome(), 'runs', orch.getState().id)));
+      } },
+    ]);
   });
 });
 
@@ -248,133 +329,6 @@ test('createWorktree: the containment guard rejects a traversal-shaped checkoutN
   }
   // Nothing was created for any rejected attempt.
   assert.deepEqual(await readdir(base), []);
-});
-
-// ── the minimal run.json ──────────────────────────────────────────────────────
-
-test('detached: _setupRunRoot writes a readable minimal run.json with REAL projectDirs', async () => {
-  const repo = await freshRepo();
-  await withMode('detached', async () => {
-    const orch = createOrchestrator({
-      projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
-    });
-    // Read the manifest while the run is live — teardown removes the run root.
-    let manifest = null;
-    orch.on('state', async (s) => {
-      if (manifest || !s.branch?.worktreeDir) return;
-      manifest = await readRunManifest(join(worcaHome(), 'runs', s.id));
-    });
-    const res = await orch.run();
-    assert.equal(res.status, 'done', JSON.stringify(res));
-    assert.ok(manifest, 'run.json was readable during the run');
-    assert.equal(manifest.pipelineId, orch.getState().id);
-    assert.equal(manifest.runRootMode, 'detached');
-    assert.equal(manifest.isWorkspace, false);
-    assert.equal(manifest.members.length, 1);
-    const m = manifest.members[0];
-    assert.equal(m.projectKey, projectKey(repo));
-    assert.equal(m.projectDir, repo, 'the REAL repo — what `git worktree remove` needs');
-    assert.equal(m.worktreeDir,
-      join(await realpath(worcaHome()), 'runs', orch.getState().id, 'repos', m.projectKey));
-  });
-});
-
-// ── Phase 3 (§9.2): the DEFAULT workflow produces CLAUDE.md + the extended run.json ──
-// The default workflow declares ZERO skills (`grep requiresSkills agents/` → nothing),
-// so this is the test that fails if context assembly is ever re-nested under the
-// `if (requiredSkills.length)` guard.
-
-test('detached: the default workflow writes <runRoot>/CLAUDE.md and the EXTENDED run.json', async () => {
-  const repo = await freshRepo();
-  await writeFile(join(repo, 'CLAUDE.md'), '# real project memory\nMEMBER-TOKEN-1\n');
-  spawnSync('git', ['-C', repo, 'add', '-A']);
-  spawnSync('git', ['-C', repo, 'commit', '-qm', 'memory']);
-  // An UNCOMMITTED edit: the whole point of assembling from the real dir (E6).
-  await writeFile(join(repo, 'CLAUDE.md'), '# real project memory\nUNCOMMITTED-TOKEN-2\n');
-
-  await withMode('detached', async () => {
-    const orch = createOrchestrator({
-      projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
-    });
-    let seen = null;
-    orch.on('state', async (s) => {
-      if (seen || !s.branch?.worktreeDir) return;
-      const runRoot = join(worcaHome(), 'runs', s.id);
-      const text = await readFile(join(runRoot, 'CLAUDE.md'), 'utf8').catch(() => null);
-      if (!text) return;                                   // assembly has not run yet
-      seen = { text, manifest: await readRunManifest(runRoot) };
-    });
-    const res = await orch.run();
-    assert.equal(res.status, 'done', JSON.stringify(res));
-    assert.ok(seen, '<runRoot>/CLAUDE.md existed during the run (§9.2 post-condition)');
-    assert.match(seen.text, new RegExp(`^# Worca CC run ${orch.getState().id}\\n`));
-    assert.match(seen.text, /UNCOMMITTED-TOKEN-2/, 'the REAL dir was inlined, not the checkout');
-    assert.match(seen.text, new RegExp(`repos/${projectKey(repo)}`), 'the roster names the checkout path');
-    // §5.4: the roster carries each member's branch and checkpoint ref.
-    assert.match(seen.text, new RegExp(`branch: \`${orch.getState().branch.feature}\``));
-    assert.match(seen.text, /checkpoint: `[0-9a-f]{7,}`/, 'the diff base is in the roster');
-    // The manifest carries the Phase-3 context fields beside the Phase-1 minimal ones.
-    const m = seen.manifest;
-    assert.equal(m.pipelineId, orch.getState().id);
-    assert.ok(m.bytes && typeof m.bytes.total === 'number' && m.bytes.total > 0, JSON.stringify(m.bytes));
-    assert.ok(m.renames && m.renames.skills && m.renames.mcpServers, 'the rename maps are recorded');
-    assert.deepEqual(m.skillResolutions, {}, 'the default workflow declares zero skills');
-    assert.ok(Array.isArray(m.warnings));
-    assert.equal(m.capabilities.mcpGrants, 'server', 'the V1(a) outcome is recorded in run.json');
-    assert.equal(m.capabilities.probed, false, 'mock runs never spawn claude, so no probe');
-    assert.equal(m.mcpConfigPath, null, 'no MCP server anywhere in this fixture');
-  });
-});
-
-test('legacy (pinned): the default workflow assembles NO context at all', async () => {
-  const repo = await freshRepo();
-  await withMode('legacy', async () => {
-    const orch = createOrchestrator({
-      projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
-    });
-    const res = await orch.run();
-    assert.equal(res.status, 'done', JSON.stringify(res));
-    assert.equal(orch.runContext, null, 'no assembly on a legacy run (§10 rollback contract)');
-    assert.equal(orch.mcpConfigPath, null, 'so no --mcp-config can reach argv');
-    assert.deepEqual(orch.mcpServerGrants, []);
-    // The memory mount is the ONE legacy injected path (mounted in both modes since P1; without
-    // the exclusion a legacy run would commit its memory into the user's branch).
-    assert.deepEqual(orch.injectedPaths, { [projectKey(repo)]: [{ path: '.claude/rules/worca', kind: 'memory', source: null }] });
-    assert.ok(!existsSync(join(worcaHome(), 'runs', orch.getState().id)));
-  });
-});
-
-// ── the checkpoint-mirror fix: single-run results are NOT empty ───────────────
-
-test('detached single run: results.json / diff.patch carry the mock edit (checkpoint mirror)', async () => {
-  const repo = await freshRepo();
-  await withMode('detached', async () => {
-    const orch = createOrchestrator({
-      projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
-    });
-    // Inject an agent-like edit into the worktree so the diff is non-empty.
-    let injected = false;
-    orch.on('state', (s) => {
-      if (injected || !s.branch?.worktreeDir || !existsSync(s.branch.worktreeDir)) return;
-      injected = true;
-      writeFileSync(join(s.branch.worktreeDir, 'agent.txt'), 'agent\n');
-    });
-    const res = await orch.run();
-    assert.equal(res.status, 'done', JSON.stringify(res));
-    assert.ok(injected, 'precondition: a file was injected into the worktree');
-    const dir = orch.getState().pipelineDir;
-    const results = JSON.parse(await readFile(join(dir, RESULTS_FILE), 'utf8'));
-    const patch = await readFile(join(dir, DIFF_PATCH_FILE), 'utf8');
-    // Single-project OUTPUT shape is byte-identical: ONE results.json with the flat
-    // shape (no perProject rollup) and ONE un-prefixed patch.
-    assert.equal(results.perProject, undefined, 'single-project results keep the flat shape');
-    const touched = [...(results.newFiles || []), ...(results.changedFiles || [])];
-    assert.ok(touched.length > 0, `single-run results must be non-empty: ${JSON.stringify(results)}`);
-    assert.ok(touched.some((f) => f.path === 'agent.txt'), 'the injected edit is in results.json');
-    assert.ok(results.summary.filesNew + results.summary.filesChanged > 0, 'the summary counts it too');
-    assert.match(patch, /agent\.txt/, 'the injected edit is in diff.patch');
-    assert.doesNotMatch(patch, /^# /m, 'no per-member `# <key>` prefix on a single run');
-  });
 });
 
 // ── §8.13 removal guard ──────────────────────────────────────────────────────
@@ -457,63 +411,42 @@ test('sweep: KEEP running/pausing/paused/interrupted; REMOVE done/stopped/error;
   for (const [, e] of byId) assert.ok(branches.includes(e.branch), `branch ${e.branch} KEPT`);
 });
 
-test('sweep: terminal run with a live manifest retention record is kept', async () => {
-  const home = await tmp('worca-cc-rr-retain-');
-  const repo = await freshRepo();
-  const e = await seedRunRoot(home, 'retain01', repo);
-  await updateRunManifest(e.runRoot, {
-    retain: { reason: 'commit_failed', members: [{ worktreeDir: e.worktreeDir }] },
-  });
-  const res = await sweepRunRoots({ worcaHome: home, statusOf: () => 'done', log: () => {} });
-  assert.deepEqual(res.keep, [e.runRoot]);
-  assert.ok(existsSync(e.worktreeDir));
-});
-
-test('sweep: stale manifest retention self-clears after the worktree is removed by hand', async () => {
-  const home = await tmp('worca-cc-rr-retain-stale-');
-  const repo = await freshRepo();
-  const e = await seedRunRoot(home, 'retain02', repo);
-  await updateRunManifest(e.runRoot, {
-    retain: { reason: 'commit_failed', members: [{ worktreeDir: e.worktreeDir }] },
-  });
-  await rm(e.worktreeDir, { recursive: true, force: true });
-  const res = await sweepRunRoots({ worcaHome: home, statusOf: () => 'done', log: () => {} });
-  assert.deepEqual(res.removed, [e.runRoot]);
-  assert.ok(!existsSync(e.runRoot));
-});
-
-test('sweep: retainOf keeps a terminal root when the manifest has no retain block', async () => {
-  const home = await tmp('worca-cc-rr-retain-db-');
-  const repo = await freshRepo();
-  const e = await seedRunRoot(home, 'retain03', repo);
-  const retained = { reason: 'commit_failed', members: [{ worktreeDir: e.worktreeDir }] };
-  const res = await sweepRunRoots({
-    worcaHome: home, statusOf: () => 'done', retainOf: () => retained, log: () => {},
-  });
-  assert.deepEqual(res.keep, [e.runRoot]);
-});
-
-test('sweep: a throwing retainOf skips the root untouched (three-state doctrine)', async () => {
-  const home = await tmp('worca-cc-rr-retain-throw-');
-  const repo = await freshRepo();
-  const e = await seedRunRoot(home, 'retain04', repo);
-  const res = await sweepRunRoots({
-    worcaHome: home, statusOf: () => 'done',
-    retainOf: () => { throw new Error('db exploded'); }, log: () => {},
-  });
-  assert.ok(!res.removed.includes(e.runRoot), 'retention-unknown must never mean remove');
-  assert.ok(existsSync(e.runRoot), 'run root untouched');
-  assert.ok(res.failed.includes(e.runRoot), 'reported as SKIPPED, not silently ignored');
-});
-
-test('sweep: `interrupted` explicitly survives — the crash-recovery guard', async () => {
-  const home = await tmp('worca-cc-rr-int-');
-  const repo = await freshRepo();
-  const e = await seedRunRoot(home, 'intrrupt', repo);
-  const res = await sweepRunRoots({ worcaHome: home, statusOf: () => 'interrupted', log: () => {} });
-  assert.deepEqual(res.removed, [], 'nothing removed');
-  assert.ok(existsSync(e.runRoot), 'the interrupted run root survives the boot that made it resumable');
-  assert.ok(existsSync(e.worktreeDir), 'its uncommitted work is still on disk');
+test('sweep: retention — a live manifest retain record or a retainOf answer keeps a terminal root; a stale retain record self-clears', async () => {
+  await checkRows([
+    { name: 'sweep: terminal run with a live manifest retention record is kept', run: async () => {
+      const home = await tmp('worca-cc-rr-retain-');
+      const repo = await freshRepo();
+      const e = await seedRunRoot(home, 'retain01', repo);
+      await updateRunManifest(e.runRoot, {
+        retain: { reason: 'commit_failed', members: [{ worktreeDir: e.worktreeDir }] },
+      });
+      const res = await sweepRunRoots({ worcaHome: home, statusOf: () => 'done', log: () => {} });
+      assert.deepEqual(res.keep, [e.runRoot]);
+      assert.ok(existsSync(e.worktreeDir));
+    } },
+    { name: 'sweep: stale manifest retention self-clears after the worktree is removed by hand', run: async () => {
+      const home = await tmp('worca-cc-rr-retain-stale-');
+      const repo = await freshRepo();
+      const e = await seedRunRoot(home, 'retain02', repo);
+      await updateRunManifest(e.runRoot, {
+        retain: { reason: 'commit_failed', members: [{ worktreeDir: e.worktreeDir }] },
+      });
+      await rm(e.worktreeDir, { recursive: true, force: true });
+      const res = await sweepRunRoots({ worcaHome: home, statusOf: () => 'done', log: () => {} });
+      assert.deepEqual(res.removed, [e.runRoot]);
+      assert.ok(!existsSync(e.runRoot));
+    } },
+    { name: 'sweep: retainOf keeps a terminal root when the manifest has no retain block', run: async () => {
+      const home = await tmp('worca-cc-rr-retain-db-');
+      const repo = await freshRepo();
+      const e = await seedRunRoot(home, 'retain03', repo);
+      const retained = { reason: 'commit_failed', members: [{ worktreeDir: e.worktreeDir }] };
+      const res = await sweepRunRoots({
+        worcaHome: home, statusOf: () => 'done', retainOf: () => retained, log: () => {},
+      });
+      assert.deepEqual(res.keep, [e.runRoot]);
+    } },
+  ]);
 });
 
 test('sweep: an unknown status is quarantine-logged, never removed', async () => {
@@ -593,30 +526,73 @@ test('sweep: with run.json deleted it falls back to the injected membersOf callb
 // interrupted run — with the rescue triple skipped too, because that only runs when a
 // row exists. These tests pin the three-state contract.
 
-test('sweep: a THROWING statusOf leaves the run root untouched, logs, and never throws out', async () => {
-  const home = await tmp('worca-cc-rr-dbfail-');
-  const repo = await freshRepo();
-  const e = await seedRunRoot(home, 'dbfail01', repo);
-  const logs = [];
-  const res = await sweepRunRoots({
-    worcaHome: home,
-    statusOf: () => { throw new Error('SQLITE_CANTOPEN: unable to open database file'); },
-    membersOf: async () => { throw new Error('membersOf must not even be consulted'); },
-    log: (lvl, msg) => logs.push(`${lvl}:${msg}`),
-  });
-  // Nothing removed, nothing renamed — a transient DB problem must not
-  // orphan-quarantine everything either.
-  assert.deepEqual(res.removed, [], 'nothing was removed');
-  assert.deepEqual(res.quarantined, [], 'nothing was renamed');
-  assert.deepEqual(res.keep, [], 'and it is not silently counted as kept');
-  assert.deepEqual(res.failed, [e.runRoot], 'the root is reported as a classification failure');
-  assert.ok(existsSync(e.runRoot), 'the run root survives verbatim');
-  assert.ok(existsSync(e.worktreeDir), 'so does the checkout with its uncommitted work');
-  assert.ok(existsSync(join(e.runRoot, 'run.json')), 'and its manifest');
-  assert.ok(branchList(repo).includes(e.branch), 'the branch is untouched');
-  // Loud: both the log sink and the durable warnings list name the failure.
-  assert.ok(logs.some((l) => l.startsWith('warn:') && /lookup FAILED/.test(l)), `logs: ${JSON.stringify(logs)}`);
-  assert.ok(res.warnings.some((w) => /SQLITE_CANTOPEN/.test(w)), `warnings: ${JSON.stringify(res.warnings)}`);
+test('sweep: a lookup failure (throwing statusOf / retainOf / membersOf, or no statusOf) leaves the root untouched and reports it in failed', async () => {
+  await checkRows([
+    { name: 'sweep: a throwing retainOf skips the root untouched (three-state doctrine)', run: async () => {
+      const home = await tmp('worca-cc-rr-retain-throw-');
+      const repo = await freshRepo();
+      const e = await seedRunRoot(home, 'retain04', repo);
+      const res = await sweepRunRoots({
+        worcaHome: home, statusOf: () => 'done',
+        retainOf: () => { throw new Error('db exploded'); }, log: () => {},
+      });
+      assert.ok(!res.removed.includes(e.runRoot), 'retention-unknown must never mean remove');
+      assert.ok(existsSync(e.runRoot), 'run root untouched');
+      assert.ok(res.failed.includes(e.runRoot), 'reported as SKIPPED, not silently ignored');
+    } },
+    { name: 'sweep: a THROWING statusOf leaves the run root untouched, logs, and never throws out', run: async () => {
+      const home = await tmp('worca-cc-rr-dbfail-');
+      const repo = await freshRepo();
+      const e = await seedRunRoot(home, 'dbfail01', repo);
+      const logs = [];
+      const res = await sweepRunRoots({
+        worcaHome: home,
+        statusOf: () => { throw new Error('SQLITE_CANTOPEN: unable to open database file'); },
+        membersOf: async () => { throw new Error('membersOf must not even be consulted'); },
+        log: (lvl, msg) => logs.push(`${lvl}:${msg}`),
+      });
+      // Nothing removed, nothing renamed — a transient DB problem must not
+      // orphan-quarantine everything either.
+      assert.deepEqual(res.removed, [], 'nothing was removed');
+      assert.deepEqual(res.quarantined, [], 'nothing was renamed');
+      assert.deepEqual(res.keep, [], 'and it is not silently counted as kept');
+      assert.deepEqual(res.failed, [e.runRoot], 'the root is reported as a classification failure');
+      assert.ok(existsSync(e.runRoot), 'the run root survives verbatim');
+      assert.ok(existsSync(e.worktreeDir), 'so does the checkout with its uncommitted work');
+      assert.ok(existsSync(join(e.runRoot, 'run.json')), 'and its manifest');
+      assert.ok(branchList(repo).includes(e.branch), 'the branch is untouched');
+      // Loud: both the log sink and the durable warnings list name the failure.
+      assert.ok(logs.some((l) => l.startsWith('warn:') && /lookup FAILED/.test(l)), `logs: ${JSON.stringify(logs)}`);
+      assert.ok(res.warnings.some((w) => /SQLITE_CANTOPEN/.test(w)), `warnings: ${JSON.stringify(res.warnings)}`);
+    } },
+    { name: 'sweep: a missing statusOf callback classifies nothing and removes nothing', run: async () => {
+      const home = await tmp('worca-cc-rr-nocb-');
+      const repo = await freshRepo();
+      const e = await seedRunRoot(home, 'nocb0001', repo);
+      const res = await sweepRunRoots({ worcaHome: home, log: () => {} }); // no statusOf
+      assert.deepEqual(res.removed, []);
+      assert.deepEqual(res.quarantined, []);
+      assert.deepEqual(res.failed, [e.runRoot]);
+      assert.ok(existsSync(e.runRoot), 'a caller that forgets the lookup destroys nothing');
+    } },
+    { name: 'sweep: a THROWING membersOf (manifest gone) leaves the root untouched too', run: async () => {
+      const home = await tmp('worca-cc-rr-mfail-');
+      const repo = await freshRepo();
+      const e = await seedRunRoot(home, 'mfail001', repo);
+      await rm(join(e.runRoot, 'run.json'), { force: true });   // forces the DB fallback
+      const res = await sweepRunRoots({
+        worcaHome: home,
+        statusOf: () => 'done',
+        membersOf: async () => { throw new Error('no such table: pipelines'); },
+        log: () => {},
+      });
+      assert.deepEqual(res.removed, [], 'we cannot enumerate what to clean up, so we remove nothing');
+      assert.deepEqual(res.failed, [e.runRoot]);
+      assert.ok(existsSync(e.runRoot), 'the run root survives');
+      assert.ok(existsSync(e.worktreeDir), 'and so does the member checkout');
+      assert.ok(res.warnings.some((w) => /member lookup FAILED/.test(w)), JSON.stringify(res.warnings));
+    } },
+  ]);
 });
 
 test('sweep: one root failing classification does not stop the others', async () => {
@@ -638,36 +614,7 @@ test('sweep: one root failing classification does not stop the others', async ()
   assert.ok(!existsSync(good.runRoot));
 });
 
-test('sweep: a missing statusOf callback classifies nothing and removes nothing', async () => {
-  const home = await tmp('worca-cc-rr-nocb-');
-  const repo = await freshRepo();
-  const e = await seedRunRoot(home, 'nocb0001', repo);
-  const res = await sweepRunRoots({ worcaHome: home, log: () => {} }); // no statusOf
-  assert.deepEqual(res.removed, []);
-  assert.deepEqual(res.quarantined, []);
-  assert.deepEqual(res.failed, [e.runRoot]);
-  assert.ok(existsSync(e.runRoot), 'a caller that forgets the lookup destroys nothing');
-});
-
-test('sweep: a THROWING membersOf (manifest gone) leaves the root untouched too', async () => {
-  const home = await tmp('worca-cc-rr-mfail-');
-  const repo = await freshRepo();
-  const e = await seedRunRoot(home, 'mfail001', repo);
-  await rm(join(e.runRoot, 'run.json'), { force: true });   // forces the DB fallback
-  const res = await sweepRunRoots({
-    worcaHome: home,
-    statusOf: () => 'done',
-    membersOf: async () => { throw new Error('no such table: pipelines'); },
-    log: () => {},
-  });
-  assert.deepEqual(res.removed, [], 'we cannot enumerate what to clean up, so we remove nothing');
-  assert.deepEqual(res.failed, [e.runRoot]);
-  assert.ok(existsSync(e.runRoot), 'the run root survives');
-  assert.ok(existsSync(e.worktreeDir), 'and so does the member checkout');
-  assert.ok(res.warnings.some((w) => /member lookup FAILED/.test(w)), JSON.stringify(res.warnings));
-});
-
-test('runRootSweepLookups: a real DB failure PROPAGATES instead of reading as "no row"', async () => {
+test('runRootSweepLookups and legacySweepLookups: a real DB failure (worca-cc.db is a directory) PROPAGATES instead of reading as no row', async () => {
   // Make <worcaHome>/worca-cc.db a DIRECTORY so node:sqlite cannot open it. This is
   // the shape of the real hazard (corrupt/unopenable DB), and the contract is that the
   // callback throws rather than returning null.
@@ -677,20 +624,29 @@ test('runRootSweepLookups: a real DB failure PROPAGATES instead of reading as "n
   _resetForTests();
   try {
     await mkdir(join(base, '.worca-cc', 'worca-cc.db'), { recursive: true });
-    const { statusOf, membersOf } = runRootSweepLookups();
-    assert.throws(() => statusOf('whatever'), /.+/, 'statusOf must THROW, not return null');
-    await assert.rejects(() => membersOf('whatever'), /.+/, 'membersOf must REJECT, not resolve null');
-    // And the sweep survives it: a run root under this broken home is skipped whole.
-    const runRoot = join(base, '.worca-cc', 'runs', 'brokendb');
-    await mkdir(runRoot, { recursive: true });
-    await writeRunManifest(runRoot, { pipelineId: 'brokendb', members: [] });
-    const res = await sweepRunRoots({
-      worcaHome: join(base, '.worca-cc'), ...runRootSweepLookups(), log: () => {},
-    });
-    assert.deepEqual(res.removed, []);
-    assert.deepEqual(res.quarantined, []);
-    assert.deepEqual(res.failed, [runRoot]);
-    assert.ok(existsSync(runRoot), 'an unopenable DB reclaims NOTHING');
+    await checkRows([
+      { name: 'runRootSweepLookups: a real DB failure PROPAGATES instead of reading as "no row"', run: async () => {
+        const { statusOf, membersOf } = runRootSweepLookups();
+        assert.throws(() => statusOf('whatever'), /.+/, 'statusOf must THROW, not return null');
+        await assert.rejects(() => membersOf('whatever'), /.+/, 'membersOf must REJECT, not resolve null');
+        // And the sweep survives it: a run root under this broken home is skipped whole.
+        const runRoot = join(base, '.worca-cc', 'runs', 'brokendb');
+        await mkdir(runRoot, { recursive: true });
+        await writeRunManifest(runRoot, { pipelineId: 'brokendb', members: [] });
+        const res = await sweepRunRoots({
+          worcaHome: join(base, '.worca-cc'), ...runRootSweepLookups(), log: () => {},
+        });
+        assert.deepEqual(res.removed, []);
+        assert.deepEqual(res.quarantined, []);
+        assert.deepEqual(res.failed, [runRoot]);
+        assert.ok(existsSync(runRoot), 'an unopenable DB reclaims NOTHING');
+      } },
+      { name: 'legacySweepLookups: a real DB failure PROPAGATES instead of reading as "no rows"', run: () => {
+        // An unopenable DB must throw out of the factory, so the caller sweeps NOTHING —
+        // rather than handing the sweep a lookup that reads every legacy worktree as row-less.
+        assert.throws(() => legacySweepLookups(), /.+/, 'legacySweepLookups must THROW');
+      } },
+    ]);
   } finally {
     _resetForTests();
     if (prevHome === undefined) delete process.env.WORCA_HOME;
@@ -732,18 +688,29 @@ test('sweep: no <worcaHome>/runs dir at all is a silent no-op', async () => {
 
 // ── the legacy sweep (defined + tested HERE; wired at boot in Phase 7) ───────
 
-test('sweepLegacyWorktrees: a TOTAL no-op while the effective mode is legacy', async () => {
+test('sweepLegacyWorktrees / sweepLegacyWorktreesAll: a TOTAL no-op while the effective mode is legacy', async () => {
   const repo = await freshRepo();
   const wt = await createWorktree({
     projectDir: repo, pipelineId: 'legacy01', sourceBranch: 'main', featureBranch: 'worca-cc/legacy01',
   });
-  // `done` would normally be removed — but under legacy this dir is the LIVE
-  // location of every active run, so sweeping it would make the documented §10
-  // rollback self-destroying.
-  const res = await sweepLegacyWorktrees(repo, { statusOf: () => 'done', mode: () => 'legacy' });
-  assert.equal(res.skipped, true, 'the sweep declares itself skipped');
-  assert.deepEqual(res.removed, []);
-  assert.ok(existsSync(wt.worktreeDir), 'the live legacy checkout is untouched');
+  await checkRows([
+    { name: 'sweepLegacyWorktrees: a TOTAL no-op while the effective mode is legacy', run: async () => {
+      // `done` would normally be removed — but under legacy this dir is the LIVE
+      // location of every active run, so sweeping it would make the documented §10
+      // rollback self-destroying.
+      const res = await sweepLegacyWorktrees(repo, { statusOf: () => 'done', mode: () => 'legacy' });
+      assert.equal(res.skipped, true, 'the sweep declares itself skipped');
+      assert.deepEqual(res.removed, []);
+      assert.ok(existsSync(wt.worktreeDir), 'the live legacy checkout is untouched');
+    } },
+    { name: 'sweepLegacyWorktreesAll: a TOTAL no-op while the effective mode is legacy', run: async () => {
+      const res = await sweepLegacyWorktreesAll([repo], { statusOf: () => 'done', mode: 'legacy', log: () => {} });
+      assert.equal(res.skipped, true);
+      assert.equal(res.projects, 0, 'not one project dir is even read under legacy');
+      assert.deepEqual(res.removed, []);
+      assert.ok(existsSync(wt.worktreeDir), 'the live legacy checkout is untouched');
+    } },
+  ]);
 });
 
 test('sweepLegacyWorktrees (mode=detached): skips non-terminal ids, prunes terminal ones, keeps branches', async () => {
@@ -836,18 +803,6 @@ test('sweepLegacyWorktreesAll: fans out over every given project dir, and is ide
   assert.ok(branches.includes('worca-cc/faneda01'), 'branches survive every disposition');
 });
 
-test('sweepLegacyWorktreesAll: a TOTAL no-op while the effective mode is legacy', async () => {
-  const a = await freshRepo();
-  const wt = await createWorktree({
-    projectDir: a, pipelineId: 'fanleg01', sourceBranch: 'main', featureBranch: 'worca-cc/fanleg01',
-  });
-  const res = await sweepLegacyWorktreesAll([a], { statusOf: () => 'done', mode: 'legacy', log: () => {} });
-  assert.equal(res.skipped, true);
-  assert.equal(res.projects, 0, 'not one project dir is even read under legacy');
-  assert.deepEqual(res.removed, []);
-  assert.ok(existsSync(wt.worktreeDir), 'the live legacy checkout is untouched');
-});
-
 test('legacySweepLookups: a snapshot statusOf + every worktree path any row still claims', async () => {
   // Seeded against the module-level temp home (useTempHome), like the rest of the
   // DB-touching assertions in this file.
@@ -873,23 +828,4 @@ test('legacySweepLookups: a snapshot statusOf + every worktree path any row stil
   assert.ok(referencedPaths.has('/tmp/p1/.worca-cc/worktrees/lkupdn01'));
   assert.ok(referencedPaths.has('/tmp/wa/.worca-cc/worktrees/lkupws01'));
   assert.ok(referencedPaths.has('/tmp/wb/.worca-cc/worktrees/lkupws01'));
-});
-
-test('legacySweepLookups: a real DB failure PROPAGATES instead of reading as "no rows"', async () => {
-  // Same hazard shape as the runRootSweepLookups case above: an unopenable DB must
-  // throw out of the factory, so the caller sweeps NOTHING — rather than handing the
-  // sweep a lookup that reads every legacy worktree as row-less.
-  const base = await tmp('worca-cc-rr-legacydb-');
-  const prevHome = process.env.WORCA_HOME;
-  process.env.WORCA_HOME = base;
-  _resetForTests();
-  try {
-    await mkdir(join(base, '.worca-cc', 'worca-cc.db'), { recursive: true });
-    assert.throws(() => legacySweepLookups(), /.+/, 'legacySweepLookups must THROW');
-  } finally {
-    _resetForTests();
-    if (prevHome === undefined) delete process.env.WORCA_HOME;
-    else process.env.WORCA_HOME = prevHome;
-    _resetForTests();
-  }
 });

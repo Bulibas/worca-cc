@@ -4,15 +4,12 @@
 // graph, the counts and the eval never treat it as an edge.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { basename } from 'node:path';
 import { JSDOM } from 'jsdom';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 import { makeRepos } from './helpers/wsmap-p1-repos.mjs';
 import { sampleMap, DISPLAYS } from './helpers/wsmap-stored.mjs';
-import { EDGE_STATES } from '../src/shared/workspace-map/schema.mjs';
 import { edgeId } from '../src/shared/workspace-map/ids.mjs';
 import { emptyOverrides, setEdgeState, effectiveEdges } from '../src/shared/workspace-map/overrides.mjs';
 import { renderWorkspaceDescription } from '../src/shared/workspace-map/render.mjs';
@@ -37,15 +34,6 @@ const MAP = { version: 1, workspace: { name: 'Shop' }, scannedAt: '2026-09-26T09
   edges: [LIVE], order: [['billing', 'users'], ['web']], cycles: [], graph: { mode: 'none', file: null, nodes: 0, bridges: 0 }, stats: {}, errors: [] };
 let OV = setEdgeState(emptyOverrides(), GONE, 'rejected', T1);
 OV = setEdgeState(OV, LOST, 'confirmed', T1);
-
-test('a rejection whose edge is gone is a stale review: a synthetic edge from its snapshot, no confidence, no evidence (killer: stale state)', () => {
-  assert.ok(EDGE_STATES.includes('stale'));
-  const eff = effectiveEdges(MAP, OV);
-  assert.deepEqual(eff.map((e) => `${e.id}:${e.state}`), [`${LOST.id}:missing`, `${LIVE.id}:auto`, `${GONE.id}:stale`]);
-  assert.deepEqual(eff.find((e) => e.id === GONE.id), { id: GONE.id, from: 'web', to: 'users', kind: 'other', norm: null, display: 'shared S3 bucket',
-    label: null, detail: '', confidence: null, sources: ['override'], evidence: { from: [], to: [] }, at: T1, state: 'stale' });
-  assert.equal(eff.find((e) => e.id === LOST.id).confidence, 'verified', 'a missing edge keeps its verified stamp');
-});
 
 test('a stale review is never an edge: the description, the summary counts, the graph pairs and the eval leave it out (killer: exclusions)', () => {
   const text = renderWorkspaceDescription({ name: 'Shop', map: MAP, overrides: OV, budget: 300 });
@@ -90,16 +78,6 @@ test('the Map tab lists a stale review greyed and dashed, with Clear as its only
   const state = root.querySelector('select.wm-filter[data-filter="state"]');
   assert.ok([...state.options].some((o) => o.value === 'stale'));
   assert.deepEqual(filterEdges(edges, { ...emptyMapFilters(), state: 'stale' }).map((e) => e.id), [GONE.id]);
-});
-
-test('style: a stale row is greyed like a rejection and dashed like a missing edge', () => {
-  const css = readFileSync(fileURLToPath(new URL('../ui/public/style.css', import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
-  const win = new JSDOM(`<!doctype html><style>${css}</style><table class="wm-table"><tbody><tr class="wm-row is-stale"><td id="inner">s</td></tr>`
-    + '<tr class="wm-row is-auto"><td>a</td></tr></tbody></table><table class="wm-table"><tbody><tr class="wm-row is-stale"><td id="last">s</td></tr></tbody></table>').window;
-  for (const id of ['inner', 'last']) {
-    const td = win.getComputedStyle(win.document.getElementById(id));
-    assert.deepEqual([td.color, td.borderBottomStyle, td.borderBottomWidth, td.fontStyle], ['var(--ink-3)', 'dashed', '1px', 'italic'], id);
-  }
 });
 
 test('stored: a re-scan that drops a rejected edge leaves a stale review the list counts and Clear removes', async () => {

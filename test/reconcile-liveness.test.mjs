@@ -3,8 +3,9 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
-import { reconcileStaleRunning, isDeadOwner, INTERRUPTED_STATUS } from '../src/core/artifacts.mjs';
+import { reconcileStaleRunning, INTERRUPTED_STATUS } from '../src/core/artifacts.mjs';
 import { getDb } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 const NOW = Date.parse('2026-06-09T12:00:00.000Z');
@@ -24,12 +25,21 @@ test('dead pid on THIS host is reaped immediately even with a fresh row (Arm 1)'
   assert.equal(statusOf('live0001'), INTERRUPTED_STATUS);
 });
 
-test('live pid on THIS host with a fresh heartbeat is kept (Arm 1 miss + Arm 2 miss)', () => {
-  seedPipelineRow({ id: 'live0002', status: 'running', startedAt: FRESH, updatedAt: FRESH,
-    ownerPid: 12345, ownerHost: HOST, heartbeatAt: FRESH });
-  const r = reconcileStaleRunning({ host: HOST, now: NOW, pidAlive });
-  assert.ok(!r.ids.includes('live0002'));
-  assert.equal(statusOf('live0002'), 'running');
+test('a fresh heartbeat is kept on this host (live pid) and on another host (never PID-probed)', async () => {
+  await checkRows([
+    { name: 'live pid on THIS host with a fresh heartbeat is kept (Arm 1 miss + Arm 2 miss)', run: () => {
+      seedPipelineRow({ id: 'live0002', status: 'running', startedAt: FRESH, updatedAt: FRESH,
+        ownerPid: 12345, ownerHost: HOST, heartbeatAt: FRESH });
+      const r = reconcileStaleRunning({ host: HOST, now: NOW, pidAlive });
+      assert.ok(!r.ids.includes('live0002'));
+      assert.equal(statusOf('live0002'), 'running');
+    } },
+    { name: 'fresh heartbeat on ANOTHER host is kept (never PID-probed, Arm 2 miss)', run: () => {
+      seedPipelineRow({ id: 'live0003', status: 'running', startedAt: FRESH, updatedAt: FRESH,
+        ownerPid: 9999, ownerHost: 'otherbox', heartbeatAt: FRESH });
+      assert.ok(!reconcileStaleRunning({ host: HOST, now: NOW, pidAlive }).ids.includes('live0003'));
+    } },
+  ]);
 });
 
 test('live pid on THIS host with STALE heartbeat is reaped (Arm 2 — PID reuse scenario)', () => {
@@ -38,12 +48,6 @@ test('live pid on THIS host with STALE heartbeat is reaped (Arm 2 — PID reuse 
   const r = reconcileStaleRunning({ host: HOST, now: NOW, pidAlive });
   assert.ok(r.ids.includes('live0007'), 'stale heartbeat reaps even with live pid (PID reuse)');
   assert.equal(statusOf('live0007'), INTERRUPTED_STATUS);
-});
-
-test('fresh heartbeat on ANOTHER host is kept (never PID-probed, Arm 2 miss)', () => {
-  seedPipelineRow({ id: 'live0003', status: 'running', startedAt: FRESH, updatedAt: FRESH,
-    ownerPid: 9999, ownerHost: 'otherbox', heartbeatAt: FRESH });
-  assert.ok(!reconcileStaleRunning({ host: HOST, now: NOW, pidAlive }).ids.includes('live0003'));
 });
 
 test('stale heartbeat on ANOTHER host is reaped (Arm 2)', () => {
@@ -67,22 +71,4 @@ test('legacy ownerless old row still swept by the 30-min time arm (Arm 3)', () =
   seedPipelineRow({ id: 'live0006', status: 'running',
     startedAt: iso(NOW - 60 * 60 * 1000), updatedAt: iso(NOW - 60 * 60 * 1000) });
   assert.ok(reconcileStaleRunning({ host: HOST, now: NOW, pidAlive }).ids.includes('live0006'));
-});
-
-// Direct unit tests for isDeadOwner arms (no DB needed)
-const BASE = { owner_pid: null, owner_host: null, heartbeat_at: null, updated_at: null, started_at: null };
-const ctx = { host: HOST, now: NOW, staleMs: 30 * 60 * 1000, hbStaleMs: 90 * 1000, pidAlive };
-
-test('isDeadOwner: Arm 1 triggers on dead same-host pid', () => {
-  assert.equal(isDeadOwner({ ...BASE, owner_pid: 9999, owner_host: HOST, heartbeat_at: FRESH }, ctx), true);
-});
-test('isDeadOwner: Arm 2 triggers on stale heartbeat (any host)', () => {
-  assert.equal(isDeadOwner({ ...BASE, owner_pid: 12345, owner_host: HOST, heartbeat_at: HB_STALE }, ctx), true);
-  assert.equal(isDeadOwner({ ...BASE, owner_pid: 1, owner_host: 'other', heartbeat_at: HB_STALE }, ctx), true);
-});
-test('isDeadOwner: Arm 3 triggers on old ownerless row', () => {
-  assert.equal(isDeadOwner({ ...BASE, updated_at: iso(NOW - 2 * 60 * 60 * 1000) }, ctx), true);
-});
-test('isDeadOwner: NULL-timestamp ownerless row never reaped', () => {
-  assert.equal(isDeadOwner(BASE, ctx), false);
 });

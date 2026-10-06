@@ -10,6 +10,7 @@ import { app, runs } from '../ui/server.mjs';
 import { recordArtifact, writeStoreMeta } from '../src/core/artifacts.mjs';
 import { _resetForTests, getDb } from '../src/core/db.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let srv, base, home, prevHome;
 const KEY = 'beta-00000002';
@@ -51,12 +52,15 @@ after(async () => {
 const del = (id, qs) => fetch(`${base}/api/runs/${id}?${qs}`, { method: 'DELETE' });
 const discard = (id, qs) => fetch(`${base}/api/runs/${id}/discard-worktree?${qs}`, { method: 'POST' });
 
-test('400 when neither projectKey nor projectDir is given', async () => {
-  assert.equal((await del('pp', '')).status, 400);
-});
-
-test('404 for an unknown id', async () => {
-  assert.equal((await del('nope', `projectKey=${KEY}`)).status, 404);
+test('DELETE /api/runs/:id: 400 without scope, 404 for an unknown id', async () => {
+  await checkRows([
+    { name: '400 when neither projectKey nor projectDir is given', run: async () => {
+      assert.equal((await del('pp', '')).status, 400);
+    } },
+    { name: '404 for an unknown id', run: async () => {
+      assert.equal((await del('nope', `projectKey=${KEY}`)).status, 404);
+    } },
+  ]);
 });
 
 test('409 when the pipeline is live/active in this process', async () => {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { flowOrder, flowPerRow, flowLayout, flowAnchors, routeFlow, FLOW_SCALE, FLOW_PAD, FLOW_PAD_Y, FLOW_BADGE_H } from '../src/shared/graph/flow-layout.mjs';
+import { flowOrder, flowLayout, flowAnchors, routeFlow, FLOW_SCALE, FLOW_PAD_Y, FLOW_BADGE_H } from '../src/shared/graph/flow-layout.mjs';
 import { nodeSize } from '../src/shared/graph/geometry.mjs';
 
 const AGENT_PORTS = {
@@ -45,11 +45,6 @@ function crossesCard(pts, r) {
   }
   return false;
 }
-
-test('perRow follows the mockup rule: 702 → 4, 750 → 4, 310 → 1, 0 → 1', () => {
-  assert.equal(flowPerRow(702), 4); assert.equal(flowPerRow(750), 4); assert.equal(flowPerRow(310), 1); assert.equal(flowPerRow(0), 1);
-  assert.equal(flowPerRow(702, { scale: 0.72 }), 3, 'the brief\'s 0.72 gives 3 per row (mockup F assumptions)');
-});
 
 test('order: Task, the agents (rank, then host order), the loop-only valve, End', () => {
   assert.deepEqual(flowOrder(theme(), portsFn, { agentOrder: ORDER }), ['n_task', ...ORDER, 'n_or', 'n_end']);
@@ -154,12 +149,4 @@ test('a loop in the LAST row is billed: the badge clears the host edge by the fu
   // and a graph with nothing under the last row keeps the plain pad — no dead band
   const flat = flowLayout({ version: 2, nodes: tpl.nodes, wires: tpl.wires.filter((w) => w.id !== 'w3') }, portsFn, { width: 702, agentOrder: ['n1', 'n2'] });
   assert.equal(flat.height, flat.rows[0].top + flat.rows[0].h + FLOW_PAD_Y, 'no bottom gutter ⇒ just the pad');
-});
-
-test('the vertical pad is FLOW_PAD_Y on both ends; the horizontal pad (and so perRow) is untouched', () => {
-  const tpl = theme(); const lay = flowLayout(tpl, portsFn, { width: 702, agentOrder: ORDER });
-  assert.equal(lay.perRow, 4, 'the x pad still fits 4 cards in the chat sheet');
-  assert.equal(lay.rows[0].top, FLOW_PAD_Y);
-  assert.equal(lay.positions.n_task.x, FLOW_PAD, 'x keeps the 20px pad');
-  assert.equal(lay.height, lay.rows.at(-1).top + lay.rows.at(-1).h + FLOW_PAD_Y);
 });

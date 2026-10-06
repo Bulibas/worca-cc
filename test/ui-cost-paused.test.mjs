@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -142,36 +143,37 @@ test('cost_pipeline pause: the row reads "Cost limit" in Needs you, the run page
   assert.equal(resumeOf(page).querySelector('.rd-btn-label').textContent, 'Resume');
 });
 
-test('cb-override: confirm modal -> single resume POST with ignoreCostCap:true', async () => {
+test('cb-override: confirm -> exactly one resume POST with ignoreCostCap:true; cancel posts nothing', async () => {
   const ctx = await boot();
   await pausedRun(ctx, 'cost_pipeline');
   const page = await openRunPage(ctx);
-  page.querySelector('.cb-override').click();
-  await ctx.tick();
-  const modal = ctx.window.document.querySelector('#confirm-modal');
-  assert.equal(modal.classList.contains('hidden'), false, 'override asks for confirmation first');
-  assert.match(ctx.window.document.querySelector('#confirm-message').textContent, /total budget limit still applies/i);
-  assert.equal(ctx.window.fetch.length >= 0, true);
-  const before = ctx.fetchCalls.filter((c) => c.url.includes('/api/resume')).length;
-  assert.equal(before, 0, 'nothing posted until the user confirms');
-  ctx.window.document.querySelector('#confirm-ok').click();
-  await ctx.tick();
-  await ctx.tick();
-  const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/resume'));
-  assert.equal(posts.length, 1, 'exactly one resume POST');
-  assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'pl_1', baseCheck: true, ignoreCostCap: true });
-});
-
-test('cb-override: cancelling the confirm posts nothing', async () => {
-  const ctx = await boot();
-  await pausedRun(ctx, 'cost_pipeline');
-  const page = await openRunPage(ctx);
-  page.querySelector('.cb-override').click();
-  await ctx.tick();
-  ctx.window.document.querySelector('#confirm-cancel').click();
-  await ctx.tick();
-  await ctx.tick();
-  assert.equal(ctx.fetchCalls.filter((c) => c.url.includes('/api/resume')).length, 0);
+  // Cancel first: the confirm row then proves the same banner still posts exactly once.
+  await checkRows([
+    { name: 'cb-override: cancelling the confirm posts nothing', run: async () => {
+      page.querySelector('.cb-override').click();
+      await ctx.tick();
+      ctx.window.document.querySelector('#confirm-cancel').click();
+      await ctx.tick();
+      await ctx.tick();
+      assert.equal(ctx.fetchCalls.filter((c) => c.url.includes('/api/resume')).length, 0);
+    } },
+    { name: 'cb-override: confirm modal -> single resume POST with ignoreCostCap:true', run: async () => {
+      page.querySelector('.cb-override').click();
+      await ctx.tick();
+      const modal = ctx.window.document.querySelector('#confirm-modal');
+      assert.equal(modal.classList.contains('hidden'), false, 'override asks for confirmation first');
+      assert.match(ctx.window.document.querySelector('#confirm-message').textContent, /total budget limit still applies/i);
+      assert.equal(ctx.window.fetch.length >= 0, true);
+      const before = ctx.fetchCalls.filter((c) => c.url.includes('/api/resume')).length;
+      assert.equal(before, 0, 'nothing posted until the user confirms');
+      ctx.window.document.querySelector('#confirm-ok').click();
+      await ctx.tick();
+      await ctx.tick();
+      const posts = ctx.fetchCalls.filter((c) => c.url.includes('/api/resume'));
+      assert.equal(posts.length, 1, 'exactly one resume POST');
+      assert.deepEqual(JSON.parse(posts[0].opts.body), { pipelineId: 'pl_1', baseCheck: true, ignoreCostCap: true });
+    } },
+  ]);
 });
 
 test('cost_total pause: red banner, Resume disabled with reset-date tooltip', async () => {
@@ -205,27 +207,30 @@ test('budget-changed unblocking re-enables Resume on the run page', async () => 
   assert.match(resume().title, /^Resume/, 'the ordinary Resume tooltip comes back');
 });
 
-test('a non-cost pause reads a plain "Paused" and shows no banner', async () => {
-  const ctx = await boot();
-  const card = await pausedRun(ctx, undefined);   // manual pause carries no reason
-  assert.equal(rowWord(card), 'Paused');
-  assert.equal(rowWord(needsRow(ctx, '[data-run-id="r1"]')), 'Paused', 'every pause needs you (D5)');
-  const page = await openRunPage(ctx);
-  assert.equal(page.querySelector('.rd-banners .cost-banner'), null, 'no cost banner on the run page');
-  assert.equal(page.querySelector('.rd-banners .pause-error-banner'), null, 'no error banner either');
-  assert.equal(resumeOf(page).disabled, false);
-});
-
-test('an error pause: the row reads "Paused" in Needs you, error banner (no cost banner) on the run page, Resume enabled', async () => {
-  const ctx = await boot();
-  const card = await pausedRun(ctx, 'error', 'claude exited with code 1: disk full');
-  assert.equal(rowWord(card), 'Paused');
-  assert.equal(card.querySelector('.cost-banner'), null);
-  assert.equal(rowWord(needsRow(ctx, '[data-run-id="r1"]')), 'Paused');
-  const page = await openRunPage(ctx);
-  assert.equal(page.querySelector('.rd-banners .cost-banner'), null, 'no cost banner for an error pause');
-  assert.match(page.querySelector('.rd-banners .pause-error-banner').textContent, /disk full/);
-  assert.equal(resumeOf(page).disabled, false, 'an error pause is always resumable from the run page too');
+test('non-cost pauses (manual, error) read \'Paused\' in Needs you, show no cost banner (error banner for an error pause) and keep Resume enabled', async () => {
+  await checkRows([
+    { name: 'a non-cost pause reads a plain "Paused" and shows no banner', run: async () => {
+      const ctx = await boot();
+      const card = await pausedRun(ctx, undefined);   // manual pause carries no reason
+      assert.equal(rowWord(card), 'Paused');
+      assert.equal(rowWord(needsRow(ctx, '[data-run-id="r1"]')), 'Paused', 'every pause needs you (D5)');
+      const page = await openRunPage(ctx);
+      assert.equal(page.querySelector('.rd-banners .cost-banner'), null, 'no cost banner on the run page');
+      assert.equal(page.querySelector('.rd-banners .pause-error-banner'), null, 'no error banner either');
+      assert.equal(resumeOf(page).disabled, false);
+    } },
+    { name: 'an error pause: the row reads "Paused" in Needs you, error banner (no cost banner) on the run page, Resume enabled', run: async () => {
+      const ctx = await boot();
+      const card = await pausedRun(ctx, 'error', 'claude exited with code 1: disk full');
+      assert.equal(rowWord(card), 'Paused');
+      assert.equal(card.querySelector('.cost-banner'), null);
+      assert.equal(rowWord(needsRow(ctx, '[data-run-id="r1"]')), 'Paused');
+      const page = await openRunPage(ctx);
+      assert.equal(page.querySelector('.rd-banners .cost-banner'), null, 'no cost banner for an error pause');
+      assert.match(page.querySelector('.rd-banners .pause-error-banner').textContent, /disk full/);
+      assert.equal(resumeOf(page).disabled, false, 'an error pause is always resumable from the run page too');
+    } },
+  ]);
 });
 
 // Resume + the cost-pause banner live on the History DETAIL screen; the list row
@@ -302,7 +307,7 @@ test('reload parity: a hello-seeded paused run with pauseReason renders its row 
   // Field-for-field the real hello summary: every key ui/server.mjs
   // summarizeRuns() emits, in its order. The SERVER half of this contract
   // (wireRun storing entry.pauseReason, summarizeRuns emitting it) is pinned
-  // separately by test/server-pause-reason.test.mjs — keep the two in step.
+  // separately by the pauseReason tests in test/server-event-names.test.mjs — keep the two in step.
   ctx.recv({
     type: 'hello',
     runs: [{
@@ -352,33 +357,36 @@ const errorArms = (url) => {
   return null;
 };
 
-test('history: an error pause reads "Paused" on its row; the detail screen shows the error banner and an enabled Resume', async () => {
-  const ctx = await boot({ fetchHandler: errorArms });
-  ctx.showHistory();
-  await ctx.settle();
-  const card = groupRow(ctx, '[data-pipeline-id="h3"]');
-  assert.ok(card, 'the paused saved run is listed');
-  assert.equal(rowWord(card), 'Paused');
+test('history error pause: row reads Paused, detail shows the error banner + enabled Resume, also from a deep link with no list row', async () => {
+  await checkRows([
+    { name: 'history: an error pause reads "Paused" on its row; the detail screen shows the error banner and an enabled Resume', run: async () => {
+      const ctx = await boot({ fetchHandler: errorArms });
+      ctx.showHistory();
+      await ctx.settle();
+      const card = groupRow(ctx, '[data-pipeline-id="h3"]');
+      assert.ok(card, 'the paused saved run is listed');
+      assert.equal(rowWord(card), 'Paused');
 
-  ctx.showDetail('k1', 'h3');
-  await ctx.settle();
-  const resume = ctx.window.document.querySelector('#hist-detail .hd-resume');
-  assert.equal(resume.disabled, false, 'an error pause never gates Resume');
-  assert.match(resume.title, /Paused after an error: claude exited with code 1: disk full/);
-  const banner = ctx.window.document.querySelector('#hist-detail .hd-banners .pause-error-banner');
-  assert.ok(banner, 'the detail screen shows the error-pause banner');
-  assert.match(banner.textContent, /Paused after an error/);
-  assert.match(banner.textContent, /disk full/);
-  assert.equal(ctx.window.document.querySelector('#hist-detail .hd-banners .cost-banner'), null, 'no cost banner for an error pause');
-});
-
-test('history deep link: the DETAIL payload alone (no list row yet) still shows the error banner', async () => {
-  // A list without the entry — only the detail arm knows the pause cause (rowToState).
-  const arms = (url) => (url.endsWith('/api/history/k1/h3') ? errorDetailArm('h3') : (url.endsWith('/api/history') ? historyList([]) : null));
-  const ctx = await boot({ fetchHandler: arms });
-  ctx.showDetail('k1', 'h3');
-  await ctx.settle();
-  const banner = ctx.window.document.querySelector('#hist-detail .hd-banners .pause-error-banner');
-  assert.ok(banner, 'the banner falls back to data.state.pauseReason/pauseDetail');
-  assert.match(banner.textContent, /disk full/);
+      ctx.showDetail('k1', 'h3');
+      await ctx.settle();
+      const resume = ctx.window.document.querySelector('#hist-detail .hd-resume');
+      assert.equal(resume.disabled, false, 'an error pause never gates Resume');
+      assert.match(resume.title, /Paused after an error: claude exited with code 1: disk full/);
+      const banner = ctx.window.document.querySelector('#hist-detail .hd-banners .pause-error-banner');
+      assert.ok(banner, 'the detail screen shows the error-pause banner');
+      assert.match(banner.textContent, /Paused after an error/);
+      assert.match(banner.textContent, /disk full/);
+      assert.equal(ctx.window.document.querySelector('#hist-detail .hd-banners .cost-banner'), null, 'no cost banner for an error pause');
+    } },
+    { name: 'history deep link: the DETAIL payload alone (no list row yet) still shows the error banner', run: async () => {
+      // A list without the entry — only the detail arm knows the pause cause (rowToState).
+      const arms = (url) => (url.endsWith('/api/history/k1/h3') ? errorDetailArm('h3') : (url.endsWith('/api/history') ? historyList([]) : null));
+      const ctx = await boot({ fetchHandler: arms });
+      ctx.showDetail('k1', 'h3');
+      await ctx.settle();
+      const banner = ctx.window.document.querySelector('#hist-detail .hd-banners .pause-error-banner');
+      assert.ok(banner, 'the banner falls back to data.state.pauseReason/pauseDetail');
+      assert.match(banner.textContent, /disk full/);
+    } },
+  ]);
 });

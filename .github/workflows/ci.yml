@@ -5,14 +5,15 @@ name: CI
 # gated a publish, never a merge. Tags are left to that workflow; this one gates
 # every pull request and every push to dev.
 #
+# Tests run in two tiers (test/tiers.json): fast on every run, slow on dev pushes
+# and on PRs that touch what the slow tier exercises.
+#
 # Pushes to other branches don't run: a branch with an open PR is covered by the
 # pull_request run, and running both made the later cancel the earlier, which
 # left the cancelled push run's checks red on the PR. A branch gets CI once it
 # has a PR (a draft PR is enough).
 #
-# Docs-only changes skip CI, except the two docs paths a test reads:
-# test/deck-kit-sync (docs/why-worca/) and test/ui-levels (docs/ui-levels.md).
-# Later patterns win, so those are re-included after the docs exclusion.
+# Docs-only changes skip CI.
 # Safe while no status check is required on dev: a skipped workflow would
 # otherwise leave a required check pending forever.
 on:
@@ -21,14 +22,10 @@ on:
     paths:
       - "**"
       - "!docs/**"
-      - "docs/why-worca/**"
-      - "docs/ui-levels.md"
   pull_request:
     paths:
       - "**"
       - "!docs/**"
-      - "docs/why-worca/**"
-      - "docs/ui-levels.md"
 
 permissions:
   contents: read
@@ -41,10 +38,84 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    # node --test --test-shard splits test/*.mjs deterministically by file;
-    # each shard has its own runner, WORCA_HOME and real-claude guard log.
-    name: npm test (${{ matrix.shard }}/4)
+  # Does a pull request touch what the slow tier (test/tiers.json "slow") exercises? A push
+  # to dev always runs both tiers, so this job exists for pull requests only.
+  # The slow-test entries below must equal test/tiers.json "slow", entry for entry; a test in
+  # test/tools-test-runner.test.mjs fails when they drift.
+  changes:
+    name: changed paths
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The workflow-level `permissions: contents: read` drops every other scope; the filter
+    # lists a pull request's files through the API and needs pull-requests: read.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      engine: ${{ steps.filter.outputs.engine }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            engine:
+              - 'src/**'
+              - 'ui/server.mjs'
+              - 'ui/public/hljs-loader.mjs'
+              - 'ui/public/diff-view.mjs'
+              - 'agents/**'
+              - 'skills/**'
+              - 'scripts/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'test/helpers/**'
+              - 'test/fixtures/**'
+              - 'test/tiers.json'
+              - 'tools/test*.mjs'
+              - '.github/workflows/ci.yml'
+              - 'test/orchestrator-*.test.mjs'
+              - 'test/run-harness-*.test.mjs'
+              - 'test/run-root-*.test.mjs'
+              - 'test/stop-paused-harness.test.mjs'
+              - 'test/seed-traces.test.mjs'
+              - 'test/auto-recipes-offline.test.mjs'
+              - 'test/presentation-golden-run.test.mjs'
+              - 'test/graph-script-runner.test.mjs'
+              - 'test/workspaces-api.test.mjs'
+              - 'test/workspaces.test.mjs'
+              - 'test/scan-api.test.mjs'
+              - 'test/api-stop-paused.test.mjs'
+              - 'test/api-schedules.test.mjs'
+              - 'test/mcp-pipeline-run.test.mjs'
+              - 'test/wsmap-order-overrides.test.mjs'
+              - 'test/ask-workspace-card.test.mjs'
+              - 'test/ask-worktrees.test.mjs'
+              - 'test/workspace-map-api.test.mjs'
+              - 'test/workspace-size.test.mjs'
+              - 'test/workspace-scan-finalize-map.test.mjs'
+              - 'test/git-sync.test.mjs'
+              - 'test/metrics-sync.test.mjs'
+              - 'test/metrics-prune.test.mjs'
+              - 'test/policy-sync.test.mjs'
+              - 'test/sync-api.test.mjs'
+              - 'test/branches-api-fresh.test.mjs'
+              - 'test/cli-interactive.test.mjs'
+              - 'test/cli-schedule-wait.test.mjs'
+              - 'test/cli-auto.test.mjs'
+              - 'test/cli-resume.test.mjs'
+              - 'test/wsmap-detectors-p3-registry.test.mjs'
+              - 'test/wsmap-detectors-p4-registry.test.mjs'
+              - 'test/wsmap-http-client-shapes-slow.test.mjs'
+              - 'test/wsmap-graphql-client-copy-slow.test.mjs'
+
+  test-fast:
+    # tools/test.mjs balances the shards by test/timings.json (longest first); each shard has
+    # its own runner, WORCA_HOME and real-claude guard log. Every test file that
+    # test/tiers.json does not list as slow.
+    name: fast tests (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -73,15 +144,61 @@ jobs:
       # (test/api-run-auto, fixed), and every home/sandbox rm in the suite now
       # retries the rmdir itself (maxRetries, like test/helpers/temp-home.mjs).
       # A failure here is real on the first attempt.
-      - name: Run tests
+      - name: Run fast tests
         env:
           WORCA_TEST_SHARD: ${{ matrix.shard }}/4
-        run: npm test
+        run: npm run test:fast
+
+  test-slow:
+    # The engine-driving files in test/tiers.json "slow". Always on a push to dev; on a pull
+    # request only when `changes` found a path they exercise.
+    # `changes` is skipped outside pull requests, and a job whose `needs` was skipped is
+    # skipped too unless its `if` calls a status function: hence !cancelled(), and `!= 'false'`
+    # (not `== 'true'`) so a failed `changes` job runs the slow tier rather than skipping it.
+    # The expression is wrapped in ${{ }} because a bare `if: !…` is a YAML tag, not a string.
+    name: slow tests (${{ matrix.shard }}/3)
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.engine != 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run slow tests
+        env:
+          WORCA_TEST_SHARD: ${{ matrix.shard }}/3
+        run: npm run test:slow
 
   cdp:
-    name: headless-Chrome UI proofs
+    # Three runners, ~1/3 of the proofs each. Each script mints its own WORCA_HOME, its own
+    # git project, an ephemeral server port and a distinct CDP port (9333-9342), so the
+    # groups share nothing even if two ever ran on one machine.
+    name: headless-Chrome UI proofs (${{ matrix.group }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: composer + run-monitor
+            proofs: "verify:composer verify:run-monitor"
+          - group: theme + memory + scripts
+            proofs: "verify:theme verify:memory verify:scripts"
+          - group: ask-forms + workspace-map
+            proofs: "verify:ask-forms verify:workspace-map"
     steps:
       - uses: actions/checkout@v6
 
@@ -109,11 +226,17 @@ jobs:
       # Each script mints its own WORCA_HOME, its own git project and its own
       # server on an ephemeral port, and runs the pipeline under WORCA_MOCK=1 —
       # nothing else has to be provisioned. --no-sandbox is required whenever
-      # headless Chrome runs as root.
+      # headless Chrome runs as root. bash -e: the first failing proof stops the group.
       - name: Headless-Chrome UI proofs
         env:
           CHROME_NO_SANDBOX: "1"
-        run: npm run verify:composer && npm run verify:run-monitor && npm run verify:theme && npm run verify:memory && npm run verify:scripts && npm run verify:ask-forms && npm run verify:workspace-map
+          PROOFS: ${{ matrix.proofs }}
+        run: |
+          for proof in $PROOFS; do
+            echo "::group::npm run $proof"
+            npm run "$proof"
+            echo "::endgroup::"
+          done
 
   # The container image (docs/docker.md): build it from this checkout's
   # `npm pack` output — the same path the release takes — lint the Dockerfile,

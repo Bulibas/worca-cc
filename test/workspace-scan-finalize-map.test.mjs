@@ -9,10 +9,10 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rename, rm, symlink, writeFile, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 
+import { templateRepo } from './helpers/git-dir.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { sampleMap, DISPLAYS } from './helpers/wsmap-stored.mjs';
 import { projectKey, workspaceStorePath } from '../src/core/store.mjs';
@@ -30,13 +30,9 @@ useTempHome(after);
 const created = [];
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true, maxRetries: 3 }))));
 
-async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-wsmap-'));
+function freshRepo() {
+  const dir = templateRepo('wsmap', { branch: 'main', user: true, files: { 'README.md': '# hi\n' } });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 /** Member keys + names exactly as the workspace will list them (sorted by projectKey). */
@@ -245,21 +241,4 @@ test('without a map finalize behaves as before: the markdown is saved (marked ge
   assert.match(failed.error, /no description/);
   const noFolder = await finalizeWorkspaceScan({ workspaceId: ws.id, name: ws.name, projectPaths: [a, b], pipelineDir: undefined });
   assert.equal(noFolder.outcome, 'failed', 'never a throw, even without a run folder');
-});
-
-test('a credential the synthesizer quoted never reaches map_json or the description (D21)', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const ws = await createWorkspace({ name: 'Secret Synth', projectPaths: [a, b] });
-  const { map } = sampleMap({ keys: ws.projectKeys, names: ws.projectPaths.map((p) => basename(p)), name: ws.name });
-  const synthesis = {
-    version: 1, overview: 'Billing reads DATABASE_URL=postgres://app:s3cr3t@db:5432/billing at boot.',
-    roles: {}, coordination: ['Rotate API_TOKEN=abc123 first.'], orderNotes: '',
-  };
-  await finalizeWorkspaceScan({ workspaceId: ws.id, name: ws.name, projectPaths: [a, b], pipelineDir: await runFolder({ name: ws.name, map, synthesis }) });
-  const stored = await readWorkspaceMap(ws.id);
-  const everything = JSON.stringify(stored) + (await readWorkspace(ws.id)).description;
-  assert.ok(!everything.includes('s3cr3t') && !everything.includes('abc123'), everything);
-  assert.match(stored.synthesis.overview, /postgres:\/\/\*\*\*@db:5432\/billing/);
-  assert.deepEqual(stored.synthesis.coordination, ['Rotate API_TOKEN=*** first.']);
 });

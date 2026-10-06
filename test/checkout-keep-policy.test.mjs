@@ -1,12 +1,14 @@
 // test/checkout-keep-policy.test.mjs — keep a finished run's checkout by policy (issue #529, D10/D11).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm, realpath } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 // settingsFile() lives under HOME, not WORCA_HOME: repoint both BEFORE any src/core import,
 // or this test rewrites the developer's real settings.json (keep policy, cap).
@@ -28,16 +30,10 @@ const { keepAfterRun, releaseKeptCheckouts } = await import('../src/core/checkou
 
 const git = (cwd, args) => spawnSync('git', args, { cwd, encoding: 'utf8' });
 const created = [];
-async function freshRepo() {                                       // copy of test/worktree.test.mjs:30-42
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-keep-repo-'));
+function freshRepo() {
+  const dir = realpathSync(templateRepo('keep-repo', { branch: 'main', user: true, files: { 'README.md': '# hi\n' } }));
   created.push(dir);
-  git(dir, ['init', '-q', '-b', 'main']);
-  git(dir, ['config', 'user.email', 't@t']);
-  git(dir, ['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# hi\n');
-  git(dir, ['add', '-A']);
-  git(dir, ['commit', '-qm', 'init']);
-  return realpath(dir);
+  return dir;
 }
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true }))));
 
@@ -49,29 +45,28 @@ async function seedDoneRun(repo, feature, { status = 'done' } = {}) {
   return { id, dir, key };
 }
 
-test('on-success: a done run keeps a checkout after teardown; an error run does not', async () => {
+test('keep policy: on-success keeps a done run with setup pending, not an error run; never is a no-op', async () => {
+  // One on-success checkout serves the setup-pending row too, and the never row reuses its repo.
   await setActionsSettings({ keep: 'on-success' });
   const repo = await freshRepo(); git(repo, ['branch', 'worca-cc/k']);
   const { id } = await seedDoneRun(repo, 'worca-cc/k');
   const r = await keepAfterRun({ pipelineId: id });
-  assert.equal(r.members[0].state, 'checked-out');
-  assert.equal(checkoutRecordsFor(findPipelineRowById(id)).members[0].policy, 'on-success');
-  const { id: bad } = await seedDoneRun(await freshRepo(), 'worca-cc/e', { status: 'error' });
-  assert.equal(await keepAfterRun({ pipelineId: bad }), null);
-});
-
-test('never (default) is a no-op', async () => {
-  await setActionsSettings({ keep: null });
-  const { id } = await seedDoneRun(await freshRepo(), 'worca-cc/n');
-  assert.equal(await keepAfterRun({ pipelineId: id }), null);
-});
-
-test('a kept checkout has setup pending, and nothing runs until the first action (D10, D25)', async () => {
-  await setActionsSettings({ keep: 'on-success' });
-  const repo = await freshRepo(); git(repo, ['branch', 'worca-cc/p']);
-  const { id } = await seedDoneRun(repo, 'worca-cc/p');
-  await keepAfterRun({ pipelineId: id });
-  assert.equal(checkoutRecordsFor(findPipelineRowById(id)).members[0].setup.status, 'pending');
+  await checkRows([
+    { name: 'on-success: a done run keeps a checkout after teardown; an error run does not', run: async () => {
+      assert.equal(r.members[0].state, 'checked-out');
+      assert.equal(checkoutRecordsFor(findPipelineRowById(id)).members[0].policy, 'on-success');
+      const { id: bad } = await seedDoneRun(await freshRepo(), 'worca-cc/e', { status: 'error' });
+      assert.equal(await keepAfterRun({ pipelineId: bad }), null);
+    } },
+    { name: 'never (default) is a no-op', run: async () => {
+      await setActionsSettings({ keep: null });
+      const { id: never } = await seedDoneRun(repo, 'worca-cc/n');
+      assert.equal(await keepAfterRun({ pipelineId: never }), null);
+    } },
+    { name: 'a kept checkout has setup pending, and nothing runs until the first action (D10, D25)', run: () => {
+      assert.equal(checkoutRecordsFor(findPipelineRowById(id)).members[0].setup.status, 'pending');
+    } },
+  ]);
 });
 
 test('until-pr: released when the PR is MERGED or CLOSED, kept while OPEN or absent', async () => {

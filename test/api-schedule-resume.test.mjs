@@ -10,8 +10,9 @@ import { join } from 'node:path';
 import { seedPipeline } from './helpers/db-seed.mjs';
 import { graphResumePoint } from './helpers/graph-templates.mjs';
 import { gitDir } from './helpers/git-dir.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
-let homeDir, srv, base, dir, mod, getDb, schedulerTick, runs, _testing;
+let homeDir, srv, base, dir, mod, getDb, schedulerTick, runs;
 let prevHome, prevMock;
 const JSONH = { 'Content-Type': 'application/json' };
 const call = (method, p, b) => fetch(`${base}${p}`, { method, headers: JSONH, ...(b === undefined ? {} : { body: JSON.stringify(b) }) });
@@ -37,7 +38,6 @@ before(async () => {
   process.env.WORCA_MOCK = '1';
   mod = await import('../ui/server.mjs');
   ({ runs, schedulerTick } = mod);          // api-schedules :69 shape
-  ({ _testing } = mod);                     // server-pause-resume :54 shape (named export)
   ({ getDb } = await import('../src/core/db.mjs'));
   const { addProject } = await import('../src/core/projects.mjs');
   srv = http.createServer(mod.app);
@@ -88,10 +88,19 @@ test('create: 202 with the ticket wire shape, listed by GET /api/schedules, defa
   assert.ok(ev, 'the schedule itself is audited on the run');
 });
 
-test('create refuses a run that is not paused (409) and an unknown pipeline (404)', async () => {
-  const done = await seedPipeline(dir, { title: 'done', status: 'done' });
-  assert.equal((await post('/api/schedules/resume', { pipelineId: done.id, scheduledFor: inFuture(3600_000) })).status, 409);
-  assert.equal((await post('/api/schedules/resume', { pipelineId: 'pl_missing', scheduledFor: inFuture(3600_000) })).status, 404);
+test('create refuses a non-paused run (409), an unknown pipeline (404) and a second open ticket for the same pipeline (409)', async () => {
+  await checkRows([
+    { name: 'create refuses a run that is not paused (409) and an unknown pipeline (404)', run: async () => {
+      const done = await seedPipeline(dir, { title: 'done', status: 'done' });
+      assert.equal((await post('/api/schedules/resume', { pipelineId: done.id, scheduledFor: inFuture(3600_000) })).status, 409);
+      assert.equal((await post('/api/schedules/resume', { pipelineId: 'pl_missing', scheduledFor: inFuture(3600_000) })).status, 404);
+    } },
+    { name: 'one open resume ticket per pipeline (409 on the second)', run: async () => {
+      const { id } = await pausedFixture();
+      assert.equal((await post('/api/schedules/resume', { pipelineId: id, scheduledFor: inFuture(3600_000) })).status, 202);
+      assert.equal((await post('/api/schedules/resume', { pipelineId: id, scheduledFor: inFuture(7200_000) })).status, 409);
+    } },
+  ]);
 });
 
 test('create refuses every cap pause (clarify: team and personal caps always need a live decision)', async () => {
@@ -109,12 +118,6 @@ test('create allows usage_limit / error / recoverable / plain pauses', async () 
     const r = await post('/api/schedules/resume', { pipelineId: id, scheduledFor: inFuture(3600_000) });
     assert.equal(r.status, 202, String(reason));
   }
-});
-
-test('one open resume ticket per pipeline (409 on the second)', async () => {
-  const { id } = await pausedFixture();
-  assert.equal((await post('/api/schedules/resume', { pipelineId: id, scheduledFor: inFuture(3600_000) })).status, 202);
-  assert.equal((await post('/api/schedules/resume', { pipelineId: id, scheduledFor: inFuture(7200_000) })).status, 409);
 });
 
 test('fire: the tick resumes the paused run, audits via the orchestrator, and links the ticket', async () => {
@@ -190,25 +193,6 @@ test('manual stop of a paused run auto-cancels the pending scheduled resume (sto
   assert.ok(found, 'the resumed run is live');
   const stop = await post('/api/stop', { runId: found[0] });
   assert.ok(stop.status === 200 || stop.status === 204, `stop answered ${stop.status}`);
-  assert.equal(getDb().prepare('SELECT status FROM scheduled_runs WHERE id = ?').get(ticketId).status, 'canceled');
-});
-
-test('cancelScheduledResumes cancels only that pipeline’s open tickets (unit)', async () => {
-  const { id } = await pausedFixture();
-  const r = await post('/api/schedules/resume', { pipelineId: id, scheduledFor: inFuture(3600_000) });
-  const { runId: ticketId } = await r.json();
-  _testing.cancelScheduledResumes(id, { by: 'ada', reason: 'the run was stopped by ada' });
-  assert.equal(getDb().prepare('SELECT status FROM scheduled_runs WHERE id = ?').get(ticketId).status, 'canceled');
-});
-
-test('PATCH (move) / DELETE (cancel) ride the existing schedule verbs', async () => {
-  const { id } = await pausedFixture();
-  const r = await post('/api/schedules/resume', { pipelineId: id, scheduledFor: inFuture(3600_000) });
-  const { runId: ticketId } = await r.json();
-  const moved = await call('PATCH', `/api/schedules/${ticketId}`, { scheduledFor: inFuture(7200_000) });
-  assert.equal(moved.status, 200);
-  const gone = await call('DELETE', `/api/schedules/${ticketId}`);
-  assert.equal(gone.status, 200);
   assert.equal(getDb().prepare('SELECT status FROM scheduled_runs WHERE id = ?').get(ticketId).status, 'canceled');
 });
 

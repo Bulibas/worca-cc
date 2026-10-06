@@ -11,6 +11,7 @@ import { loadAgentRegistry, DEFAULT_AGENTS_DIR } from '../src/core/agent-registr
 import { validateFormDef, normalizeAskBlock } from '../src/shared/forms/form-def.mjs';
 import { autoAnswer, collectAnswer } from '../src/shared/forms/answer.mjs';
 import { resolveAnswerSchema } from '../src/shared/forms/schema.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const registry = loadAgentRegistry(DEFAULT_AGENTS_DIR, { userAgentsDir: null, includePlugins: false });
 const withForms = Object.values(registry).filter((m) => m.ask && m.ask.forms);
@@ -49,34 +50,29 @@ test('no built-in sidecar declares an ask block the normalizer would drop', () =
   assert.deepEqual(bad, []);
 });
 
-test('the reviewer ships review-findings, and it survives the registry normalizer', () => {
-  const def = registry.reviewer.ask.forms['review-findings'];
-  assert.ok(def, 'meta.ask must be in normalizeMeta’s fixed key set, or it is silently dropped');
-  assert.equal(def.version, 1);
-  assert.equal(def.title, 'Confirm these findings');
-  // The whole point of the form: a per-item verdict over a LIST, which the
-  // legacy `≤8 × single choice` shape cannot express.
-  const item = def.layout.find((i) => i.widget === 'review-list');
-  assert.ok(item, 'a review-list is what beats generic questions here');
-  assert.equal(item.bind, 'data.findings');
-  assert.equal(item.field, 'findings');
-  assert.deepEqual(def.answer.properties.findings.items.properties.verdict.enum, ['keep', 'waive']);
-  assert.equal(def.answer.properties.findings.items.properties.verdict.default, 'keep');
-  assert.deepEqual(def.answer.required, ['findings']);
-});
-
-test('the reviewer’s auto answer KEEPS every finding', () => {
-  const def = registry.reviewer.ask.forms['review-findings'];
-  const values = autoAnswer(def, def.example);
-  assert.equal(values.findings.length, def.example.findings.length);
-  for (const f of values.findings) assert.equal(f.verdict, 'keep');
-  assert.equal(values.notes, undefined, 'an optional free-text field is absent in auto, not empty');
-});
-
-test('the prompt tells the reviewer when and how to use the form', () => {
-  const md = readFileSync(join(DEFAULT_AGENTS_DIR, 'worca-cc-code-reviewer.md'), 'utf8');
-  assert.match(md, /review-findings/);
-  assert.match(md, /"form"\s*:\s*"review-findings"/, 'the exact payload shape, not a paraphrase');
-  assert.match(md, /waive/i);
-  assert.doesNotMatch(md, /worca-cc /, 'user-facing prose says "worca"');
+test('the reviewer ships review-findings through the normalizer, and its auto answer KEEPS every finding', async () => {
+  await checkRows([
+    { name: 'the reviewer ships review-findings, and it survives the registry normalizer', run: () => {
+      const def = registry.reviewer.ask.forms['review-findings'];
+      assert.ok(def, 'meta.ask must be in normalizeMeta’s fixed key set, or it is silently dropped');
+      assert.equal(def.version, 1);
+      assert.equal(def.title, 'Confirm these findings');
+      // The whole point of the form: a per-item verdict over a LIST, which the
+      // legacy `≤8 × single choice` shape cannot express.
+      const item = def.layout.find((i) => i.widget === 'review-list');
+      assert.ok(item, 'a review-list is what beats generic questions here');
+      assert.equal(item.bind, 'data.findings');
+      assert.equal(item.field, 'findings');
+      assert.deepEqual(def.answer.properties.findings.items.properties.verdict.enum, ['keep', 'waive']);
+      assert.equal(def.answer.properties.findings.items.properties.verdict.default, 'keep');
+      assert.deepEqual(def.answer.required, ['findings']);
+    } },
+    { name: 'the reviewer’s auto answer KEEPS every finding', run: () => {
+      const def = registry.reviewer.ask.forms['review-findings'];
+      const values = autoAnswer(def, def.example);
+      assert.equal(values.findings.length, def.example.findings.length);
+      for (const f of values.findings) assert.equal(f.verdict, 'keep');
+      assert.equal(values.notes, undefined, 'an optional free-text field is absent in auto, not empty');
+    } },
+  ]);
 });

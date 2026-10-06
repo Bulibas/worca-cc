@@ -8,8 +8,12 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
+import { projectKey } from '../src/core/store.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { posix } from './helpers/posix-path.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
+import { stopAt, afterStarts } from './helpers/engines.mjs';
 
 useTempHome(after); // store writes -> isolated temp home, not real ~/.worca-cc
 
@@ -29,48 +33,92 @@ const created = [];
 after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true }))));
 
 async function freshRepo() {
-  const dir = await mkdtemp(join(tmpdir(), 'worca-cc-orch-'));
+  const dir = templateRepo('orch', { branch: 'main', user: true, files: { 'seed.txt': 'seed\n' } });
   created.push(dir);
-  const g = (args) => spawnSync('git', args, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'seed.txt'), 'seed\n');
-  g(['add', '-A']);
-  g(['commit', '-qm', 'init']);
   return dir;
 }
 
-test('orchestrator creates a worktree on source branch with a derived feature branch', async () => {
+test('legacy single-project run: worktree off main with derived worca-cc/ branch, agent work committed to the kept branch, worktree removed, no workspace discriminators', async () => {
+  // One legacy single-project run serves four former tests (one row each), among them
+  // orchestrator-workspace.test.mjs's single-project back-compat guard (same run, same pin).
   const repo = await freshRepo();
+  const mainSha = spawnSync('git', ['-C', repo, 'rev-parse', 'main']).stdout.toString().trim();
   const orch = createOrchestrator({
-    projectDir: repo,
-    prompt: 'Add login flow',
-    auto: true,
-    claude: { mock: true },
-    branch: { source: 'main' },
+    projectDir: repo, prompt: 'Add login flow', auto: true, claude: { mock: true }, branch: { source: 'main' },
+  });
+  // Simulate an agent editing a file inside the worktree as soon as it exists.
+  let injected = false;
+  orch.on('state', (s) => {
+    if (!injected && s.branch && s.branch.worktreeDir && existsSync(s.branch.worktreeDir)) {
+      injected = true;
+      writeFileSync(join(s.branch.worktreeDir, 'agent-output.txt'), 'work from the agent\n');
+    }
   });
   const result = await orch.run();
   assert.equal(result.status, 'done', JSON.stringify(result));
 
-  const wtBase = join(repo, '.worca-cc', 'worktrees');
-  assert.ok(existsSync(wtBase), 'worktrees base dir should exist');
+  await checkRows([
+    { name: 'orchestrator creates a worktree on source branch with a derived feature branch', run: () => {
+      const wtBase = join(repo, '.worca-cc', 'worktrees');
+      assert.ok(existsSync(wtBase), 'worktrees base dir should exist');
 
-  const state = orch.getState();
-  assert.ok(state.branch, 'state.branch should be set');
-  assert.equal(state.branch.source, 'main');
-  assert.match(state.branch.feature, /^worca-cc\//);
-  assert.match(posix(state.branch.worktreeDir), /\.worca-cc\/worktrees\//);
-  assert.equal(state.branch.reusedExisting, false);
+      const state = orch.getState();
+      assert.ok(state.branch, 'state.branch should be set');
+      assert.equal(state.branch.source, 'main');
+      assert.match(state.branch.feature, /^worca-cc\//);
+      assert.match(posix(state.branch.worktreeDir), /\.worca-cc\/worktrees\//);
+      assert.equal(state.branch.reusedExisting, false);
 
-  // The plan/review name linkage is persisted so a later delete is exact.
-  assert.equal(typeof state.baseName, 'string');
-  assert.match(state.datePrefix, /^\d{2}-\d{2}-\d{2}$/);
+      // The plan/review name linkage is persisted so a later delete is exact.
+      assert.equal(typeof state.baseName, 'string');
+      assert.match(state.datePrefix, /^\d{2}-\d{2}-\d{2}$/);
 
-  const head = spawnSync('git', ['-C', repo, 'rev-parse', '--abbrev-ref', 'HEAD']);
-  assert.equal(head.stdout.toString().trim(), 'main');
+      const head = spawnSync('git', ['-C', repo, 'rev-parse', '--abbrev-ref', 'HEAD']);
+      assert.equal(head.stdout.toString().trim(), 'main');
+    } },
+    { name: 'C1: on done the worktree dir is removed but the feature branch is kept', run: () => {
+      const feature = orch.getState().branch.feature;
+      const wtDir = orch.getState().branch.worktreeDir;
+      assert.ok(!existsSync(wtDir), `worktree dir should be removed, still present: ${wtDir}`);
+      assert.ok(branchList(repo).includes(feature), `feature branch ${feature} should be KEPT on success`);
+    } },
+    { name: 'on done the agent work is COMMITTED to the kept feature branch', run: () => {
+      assert.ok(injected, 'precondition: a file was injected into the worktree');
+      const feature = orch.getState().branch.feature;
+
+      // The kept branch must have advanced past main and contain the agent's file.
+      const featSha = spawnSync('git', ['-C', repo, 'rev-parse', feature]).stdout.toString().trim();
+      assert.notEqual(featSha, mainSha, 'feature branch should carry a new commit, not still equal main');
+      const fileInCommit = spawnSync('git', ['-C', repo, 'show', `${feature}:agent-output.txt`]);
+      assert.equal(fileInCommit.status, 0, 'agent-output.txt must be committed on the kept feature branch');
+      assert.match(fileInCommit.stdout.toString(), /work from the agent/);
+    } },
+    { name: 'back-compat: a single-project run (no workspace opts) is unchanged', run: () => {
+      const state = orch.getState();
+      assert.equal(state.target, undefined, 'no workspace discriminator on a single-project run');
+      assert.equal(state.workspaceKey, undefined);
+      // Phase 1 (run-root plumbing): the per-member maps are initialized in the
+      // constructor state literal so getState()'s snapshot shape is stable across modes
+      // and targets — a single-project run now carries a ONE-entry map keyed by its own
+      // projectKey (previously undefined). Nothing else about the single-project shape
+      // moved: `target`/`workspaceKey` stay absent and the scalars below are unchanged.
+      const onlyKey = projectKey(repo);
+      assert.deepEqual(Object.keys(state.checkpointRefs), [onlyKey], 'one-entry per-member ref map');
+      assert.deepEqual(Object.keys(state.branches), [onlyKey], 'one-entry per-member branches map');
+      // The single-project branch object shape is unchanged.
+      assert.ok(state.branch && typeof state.branch === 'object');
+      assert.equal(state.branch.source, 'main');
+      assert.match(state.branch.feature, /^worca-cc\//);
+      // Pipeline routes to the PROJECT store, never workspaces/.
+      assert.doesNotMatch(state.pipelineDir, /\/store\/workspaces\//);
+      assert.match(posix(state.pipelineDir), new RegExp(`/store/${projectKey(repo)}/pipelines/`));
+    } },
+  ]);
 });
 
+// The branch is resolved and checked out during setup, before the first agent dispatch, so
+// the naming tests (this one and the HEAD-default source below) stop there instead of
+// running every node.
 test('explicit featureBranch is honored verbatim (after sanitize)', async () => {
   const repo = await freshRepo();
   const orch = createOrchestrator({
@@ -80,7 +128,7 @@ test('explicit featureBranch is honored verbatim (after sanitize)', async () => 
     claude: { mock: true },
     branch: { source: 'main', feature: 'feat/my-thing' },
   });
-  await orch.run();
+  assert.equal((await stopAt(orch, afterStarts(1))).status, 'stopped');
   assert.equal(orch.getState().branch.feature, 'feat/my-thing');
 });
 
@@ -89,19 +137,6 @@ function branchList(dir) {
   return spawnSync('git', ['-C', dir, 'branch', '--format=%(refname:short)'])
     .stdout.toString().split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
 }
-
-test('C1: on done the worktree dir is removed but the feature branch is kept', async () => {
-  const repo = await freshRepo();
-  const orch = createOrchestrator({
-    projectDir: repo, prompt: 'Add login flow', auto: true, claude: { mock: true }, branch: { source: 'main' },
-  });
-  const result = await orch.run();
-  assert.equal(result.status, 'done', JSON.stringify(result));
-  const feature = orch.getState().branch.feature;
-  const wtDir = orch.getState().branch.worktreeDir;
-  assert.ok(!existsSync(wtDir), `worktree dir should be removed, still present: ${wtDir}`);
-  assert.ok(branchList(repo).includes(feature), `feature branch ${feature} should be KEPT on success`);
-});
 
 test('C1: on stop the worktree dir is removed but the branch is KEPT with partial work', async () => {
   const repo = await freshRepo();
@@ -131,33 +166,6 @@ test('C1: on stop the worktree dir is removed but the branch is KEPT with partia
   const fileInCommit = spawnSync('git', ['-C', repo, 'show', `${feature}:partial.txt`]);
   assert.equal(fileInCommit.status, 0, 'partial.txt must be committed on the kept branch');
   assert.match(fileInCommit.stdout.toString(), /work in progress/);
-});
-
-test('on done the agent work is COMMITTED to the kept feature branch', async () => {
-  const repo = await freshRepo();
-  const mainSha = spawnSync('git', ['-C', repo, 'rev-parse', 'main']).stdout.toString().trim();
-  const orch = createOrchestrator({
-    projectDir: repo, prompt: 'Add login flow', auto: true, claude: { mock: true }, branch: { source: 'main' },
-  });
-  // Simulate an agent editing a file inside the worktree as soon as it exists.
-  let injected = false;
-  orch.on('state', (s) => {
-    if (!injected && s.branch && s.branch.worktreeDir && existsSync(s.branch.worktreeDir)) {
-      injected = true;
-      writeFileSync(join(s.branch.worktreeDir, 'agent-output.txt'), 'work from the agent\n');
-    }
-  });
-  const result = await orch.run();
-  assert.equal(result.status, 'done', JSON.stringify(result));
-  assert.ok(injected, 'precondition: a file was injected into the worktree');
-  const feature = orch.getState().branch.feature;
-
-  // The kept branch must have advanced past main and contain the agent's file.
-  const featSha = spawnSync('git', ['-C', repo, 'rev-parse', feature]).stdout.toString().trim();
-  assert.notEqual(featSha, mainSha, 'feature branch should carry a new commit, not still equal main');
-  const fileInCommit = spawnSync('git', ['-C', repo, 'show', `${feature}:agent-output.txt`]);
-  assert.equal(fileInCommit.status, 0, 'agent-output.txt must be committed on the kept feature branch');
-  assert.match(fileInCommit.stdout.toString(), /work from the agent/);
 });
 
 // ── C2: nested projectDir must NOT mutate the enclosing repo ──────────────────
@@ -199,6 +207,6 @@ test('source branch defaults to actual HEAD when not "main"', async () => {
   const orch = createOrchestrator({
     projectDir: dir, prompt: 'x', auto: true, claude: { mock: true },
   });
-  await orch.run();
+  assert.equal((await stopAt(orch, afterStarts(1))).status, 'stopped');
   assert.equal(orch.getState().branch.source, 'master');
 });

@@ -1,6 +1,7 @@
 // test/ask-run-card.test.mjs — the run progress card module: snapshot, pill, route, DOM.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { JSDOM } from 'jsdom';
 import { snapshotFromState, runPill, progressRoute, createRunProgressCard, PROGRESS_CARD_TYPE } from '../ui/public/ask-run-card.mjs';
 
@@ -48,101 +49,107 @@ test('snapshotFromState: a REST row becomes a frozen snapshot with decor, progre
   assert.equal(snapshotFromState(null), null);
 });
 
-test('runPill: the Running list table in branch order — paused reasons, the question, terminal states, the newest agent', () => {
-  const base = snapshotFromState(STATE(), { now: 0 });
-  assert.deepEqual(runPill({ ...base, active: [] }), { family: 'peach', text: 'Running' });
-  assert.deepEqual(runPill(base), { family: 'green', text: 'Implementer' }, 'one active agent: its label in its colour');
-  assert.deepEqual(runPill({ ...base, active: [base.active[0], base.active[0]] }), { family: 'peach', text: '2 agents running' });
-  assert.deepEqual(runPill({ ...base, status: 'pausing' }), { family: 'amber', text: 'Pausing…' });
-  assert.deepEqual(runPill({ ...base, status: 'paused', pauseReason: 'cost_total' }), { family: 'amber', text: 'Paused · total budget' });
-  assert.deepEqual(runPill({ ...base, status: 'paused', pauseReason: null }), { family: 'amber', text: 'Paused' });
-  assert.deepEqual(runPill({ ...base, status: 'interrupted' }), { family: 'amber', text: 'Interrupted' });
-  assert.deepEqual(runPill({ ...base, pendingQuestion: { kind: 'questions', questions: [{}] } }), { family: 'amber', text: 'Waiting for your answer' });
-  assert.deepEqual(runPill({ ...base, status: 'done', pendingQuestion: { kind: 'workflow' } }), { family: 'amber', text: 'Waiting · your decision' }, 'the question outranks a terminal status (hello can seed both)');
-  assert.deepEqual(runPill({ ...base, status: 'starting' }), { family: 'peach', text: 'Starting' });
-  assert.deepEqual(runPill({ ...base, status: 'done' }), { family: 'green', text: 'Done' });
-  assert.deepEqual(runPill({ ...base, status: 'error' }), { family: 'red', text: 'Error' });
-  assert.deepEqual(runPill({ ...base, status: 'stopped' }), { family: 'red', text: 'Stopped' });
-  assert.deepEqual(runPill(null), { family: 'peach', text: 'Starting' });
+test('runPill table and progressRoute (live → #running, rest → History, unknown → started link)', async () => {
+  await checkRows([
+    { name: 'runPill: the Running list table in branch order — paused reasons, the question, terminal states, the newest agent', run: async () => {
+      const base = snapshotFromState(STATE(), { now: 0 });
+      assert.deepEqual(runPill({ ...base, active: [] }), { family: 'peach', text: 'Running' });
+      assert.deepEqual(runPill(base), { family: 'green', text: 'Implementer' }, 'one active agent: its label in its colour');
+      assert.deepEqual(runPill({ ...base, active: [base.active[0], base.active[0]] }), { family: 'peach', text: '2 agents running' });
+      assert.deepEqual(runPill({ ...base, status: 'pausing' }), { family: 'amber', text: 'Pausing…' });
+      assert.deepEqual(runPill({ ...base, status: 'paused', pauseReason: 'cost_total' }), { family: 'amber', text: 'Paused · total budget' });
+      assert.deepEqual(runPill({ ...base, status: 'paused', pauseReason: null }), { family: 'amber', text: 'Paused' });
+      assert.deepEqual(runPill({ ...base, status: 'interrupted' }), { family: 'amber', text: 'Interrupted' });
+      assert.deepEqual(runPill({ ...base, pendingQuestion: { kind: 'questions', questions: [{}] } }), { family: 'amber', text: 'Waiting for your answer' });
+      assert.deepEqual(runPill({ ...base, status: 'done', pendingQuestion: { kind: 'workflow' } }), { family: 'amber', text: 'Waiting · your decision' }, 'the question outranks a terminal status (hello can seed both)');
+      assert.deepEqual(runPill({ ...base, status: 'starting' }), { family: 'peach', text: 'Starting' });
+      assert.deepEqual(runPill({ ...base, status: 'done' }), { family: 'green', text: 'Done' });
+      assert.deepEqual(runPill({ ...base, status: 'error' }), { family: 'red', text: 'Error' });
+      assert.deepEqual(runPill({ ...base, status: 'stopped' }), { family: 'red', text: 'Stopped' });
+      assert.deepEqual(runPill(null), { family: 'peach', text: 'Starting' });
+    } },
+    { name: 'progressRoute: live → #running/<runId>; rest → History by key; nothing known → the started link', run: async () => {
+      const live = { ...snapshotFromState(STATE()), source: 'live', runId: 'run-uuid-9' };
+      assert.equal(progressRoute(IDENT, live), '#running/run-uuid-9');
+      assert.equal(progressRoute(IDENT, snapshotFromState(STATE({ status: 'done' }))), '#history/proj-00000001/abcd1234');
+      assert.equal(progressRoute({ ...IDENT, projectKey: null, workspaceId: 'wks-1' }, snapshotFromState(STATE({ status: 'done' }))), '#history/workspaces/wks-1/abcd1234');
+      assert.equal(progressRoute({ ...IDENT, pipelineId: null }, null), '#running/run-uuid-1');
+      assert.equal(progressRoute({ ...IDENT, runId: null }, null), '#history/proj-00000001/abcd1234');
+      assert.equal(progressRoute({ ...IDENT, runId: null, pipelineId: null }, null), '#running/');
+    } },
+  ]);
 });
 
-test('progressRoute: live → #running/<runId>; rest → History by key; nothing known → the started link', () => {
-  const live = { ...snapshotFromState(STATE()), source: 'live', runId: 'run-uuid-9' };
-  assert.equal(progressRoute(IDENT, live), '#running/run-uuid-9');
-  assert.equal(progressRoute(IDENT, snapshotFromState(STATE({ status: 'done' }))), '#history/proj-00000001/abcd1234');
-  assert.equal(progressRoute({ ...IDENT, projectKey: null, workspaceId: 'wks-1' }, snapshotFromState(STATE({ status: 'done' }))), '#history/workspaces/wks-1/abcd1234');
-  assert.equal(progressRoute({ ...IDENT, pipelineId: null }, null), '#running/run-uuid-1');
-  assert.equal(progressRoute({ ...IDENT, runId: null }, null), '#history/proj-00000001/abcd1234');
-  assert.equal(progressRoute({ ...IDENT, runId: null, pipelineId: null }, null), '#running/');
-});
-
-test('createRunProgressCard: renders the head, stats, chips and graph; update() patches in place and keeps the mount', () => {
-  const doc = dom();
-  const opened = [];
-  const card = createRunProgressCard({ doc, ident: IDENT, onOpen: (href) => opened.push(href) });
-  doc.body.appendChild(card.el);
-  assert.ok(card.el.classList.contains('ask-card') && card.el.classList.contains('ask-rc'), 'keeps the .ask-card base class (the started-link pin selects through it)');
-  assert.equal(card.el.querySelector('a.ask-rc-open').getAttribute('href'), '#running/run-uuid-1');
-  assert.equal(card.el.querySelector('.ask-rc-pill').textContent, 'Starting');
-  const snap = { ...snapshotFromState(STATE(), { now: 0 }), source: 'live', runId: 'run-uuid-1' };
-  card.update(snap, 0);
-  assert.equal(card.el.querySelector('.ask-rc-title').textContent, 'Fix login');
-  assert.equal(card.el.querySelector('.ask-rc-pill').className, 'ask-rc-pill st-green');
-  assert.equal(card.el.querySelector('.ask-rc-time').textContent, '1m 5s');
-  assert.equal(card.el.querySelector('.ask-rc-cost').textContent, '$0.42');
-  assert.equal(card.el.querySelector('.ask-rc-prog').textContent, '1/2 agents');
-  const chips = [...card.el.querySelectorAll('.ask-rc-agent')];
-  assert.deepEqual(chips.map((c) => c.textContent), ['Implementer']);
-  assert.ok(chips[0].querySelector('.ask-rc-agent-dot'), 'the pulse is a real element, not a ::before (the dock reduced-motion blanket reaches it)');
-  assert.equal(chips[0].style.getPropertyValue('--c'), 'var(--green)');
-  assert.ok(card.el.classList.contains('is-live'));
-  const host = card.el.querySelector('.ask-rc-graph');
-  assert.equal(host.hidden, false);
-  const stage = host.querySelector('.gv-stage');
-  assert.ok(stage && stage.classList.contains('gv-flow'), 'flow layout, the chat renderer');
-  assert.ok(host.querySelector('.node[data-node-id="n_impl"]').classList.contains('is-active'), 'decor applied (the view keys cards by data-node-id)');
-  assert.ok(host.querySelector('.node[data-node-id="n_plan"]').classList.contains('is-done'));
-  assert.equal(host.querySelector('.wbadge .wfired'), null, 'no delivery yet: no loop badge');
-  assert.equal(host.querySelectorAll('.xfoot').length, 0, 'G1: no footer bands in a flow host');
-  assert.equal(host.querySelectorAll('.nrun').length, 0, 'D19: no per-node total pips in the chat card');
-  assert.ok(host.querySelector('.gv-wires path.wire-live'), 'ants on the trigger wire of the in-flight execution');
-  // G2 for the ants: the panel's relayoutCards() path re-renders the wires (dropping wire-live) — the card puts them back
-  card.relayout(400);
-  assert.ok(host.querySelector('.gv-wires path.wire-live'), 'ants survive a relayout');
-  assert.ok(host.querySelector('.node[data-node-id="n_impl"]').classList.contains('is-active'));
-  // a later generation: same element, same stage, new statuses
-  const snap2 = { ...snapshotFromState(STATE({ status: 'done', active: [], steps: [step({ executionId: 'x:n_plan:1', nodeId: 'n_plan', ordinal: 1 }), step({ executionId: 'x:n_impl:1', nodeId: 'n_impl', ordinal: 1 })], wireDeliveries: { w3: 2 }, endReached: true, result: null }), { now: 0 }), source: 'live', runId: 'run-uuid-1' };
-  card.update(snap2, 0);
-  assert.equal(host.querySelector('.gv-stage'), stage, 'the graph mount survives an update');
-  assert.equal(card.el.querySelector('.ask-rc-pill').textContent, 'Done');
-  assert.ok(card.el.classList.contains('is-terminal') && !card.el.classList.contains('is-live'));
-  assert.equal(card.el.querySelectorAll('.ask-rc-agent').length, 0);
-  assert.equal(host.querySelector('.wbadge .wfired').textContent, '2×', 'loop badge from wireDeliveries');
-  // relayout re-applies the decor the re-render dropped (G2, the panel's relayoutCards path)
-  card.relayout(400);
-  assert.equal(host.querySelector('.wbadge .wfired').textContent, '2×');
-  assert.ok(host.querySelector('.node[data-node-id="n_impl"]').classList.contains('is-done'));
-  card.el.querySelector('a.ask-rc-open').click();
-  assert.deepEqual(opened, ['#running/run-uuid-1']);
-  card.destroy();
-  assert.equal(host.style.height, '', 'destroy releases the flow height');
-});
-
-test('createRunProgressCard: the question banner, the error reason, a v1 run without a graph', () => {
-  const doc = dom();
-  const card = createRunProgressCard({ doc, ident: IDENT });
-  doc.body.appendChild(card.el);
-  card.update({ ...snapshotFromState(STATE(), { now: 0 }), source: 'live', runId: 'r', pendingQuestion: { kind: 'questions', questions: [{}, {}] } }, 0);
-  const banner = card.el.querySelector('.ask-rc-banner');
-  assert.equal(banner.hidden, false);
-  assert.equal(banner.textContent, 'Waiting for your answer — 2 questions');
-  assert.equal(card.el.querySelector('.ask-rc-pill').textContent, 'Waiting for your answer');
-  card.update({ ...snapshotFromState(STATE({ status: 'error', active: [] }), { now: 0 }) }, 0);
-  assert.equal(banner.hidden, true);
-  card.setReason('Run failed: Preflight failed');
-  assert.equal(card.el.querySelector('.ask-rc-reason').textContent, 'Run failed: Preflight failed');
-  card.update(snapshotFromState(STATE({ stepper: { steps: [] } })), 0);
-  assert.equal(card.el.querySelector('.ask-rc-graph').hidden, true, 'a v1 stepper draws nothing');
-  assert.equal(card.el.querySelector('.ask-rc-prog').textContent, '—');
-  assert.equal(PROGRESS_CARD_TYPE, 'progress');
+test('createRunProgressCard: head, stats, chips, graph, question banner, error reason and a v1 run without a graph; update() patches in place and keeps the mount', async () => {
+  await checkRows([
+    { name: 'createRunProgressCard: renders the head, stats, chips and graph; update() patches in place and keeps the mount', run: () => {
+      const doc = dom();
+      const opened = [];
+      const card = createRunProgressCard({ doc, ident: IDENT, onOpen: (href) => opened.push(href) });
+      doc.body.appendChild(card.el);
+      assert.ok(card.el.classList.contains('ask-card') && card.el.classList.contains('ask-rc'), 'keeps the .ask-card base class (the started-link pin selects through it)');
+      assert.equal(card.el.querySelector('a.ask-rc-open').getAttribute('href'), '#running/run-uuid-1');
+      assert.equal(card.el.querySelector('.ask-rc-pill').textContent, 'Starting');
+      const snap = { ...snapshotFromState(STATE(), { now: 0 }), source: 'live', runId: 'run-uuid-1' };
+      card.update(snap, 0);
+      assert.equal(card.el.querySelector('.ask-rc-title').textContent, 'Fix login');
+      assert.equal(card.el.querySelector('.ask-rc-pill').className, 'ask-rc-pill st-green');
+      assert.equal(card.el.querySelector('.ask-rc-time').textContent, '1m 5s');
+      assert.equal(card.el.querySelector('.ask-rc-cost').textContent, '$0.42');
+      assert.equal(card.el.querySelector('.ask-rc-prog').textContent, '1/2 agents');
+      const chips = [...card.el.querySelectorAll('.ask-rc-agent')];
+      assert.deepEqual(chips.map((c) => c.textContent), ['Implementer']);
+      assert.ok(chips[0].querySelector('.ask-rc-agent-dot'), 'the pulse is a real element, not a ::before (the dock reduced-motion blanket reaches it)');
+      assert.equal(chips[0].style.getPropertyValue('--c'), 'var(--green)');
+      assert.ok(card.el.classList.contains('is-live'));
+      const host = card.el.querySelector('.ask-rc-graph');
+      assert.equal(host.hidden, false);
+      const stage = host.querySelector('.gv-stage');
+      assert.ok(stage && stage.classList.contains('gv-flow'), 'flow layout, the chat renderer');
+      assert.ok(host.querySelector('.node[data-node-id="n_impl"]').classList.contains('is-active'), 'decor applied (the view keys cards by data-node-id)');
+      assert.ok(host.querySelector('.node[data-node-id="n_plan"]').classList.contains('is-done'));
+      assert.equal(host.querySelector('.wbadge .wfired'), null, 'no delivery yet: no loop badge');
+      assert.equal(host.querySelectorAll('.xfoot').length, 0, 'G1: no footer bands in a flow host');
+      assert.equal(host.querySelectorAll('.nrun').length, 0, 'D19: no per-node total pips in the chat card');
+      assert.ok(host.querySelector('.gv-wires path.wire-live'), 'ants on the trigger wire of the in-flight execution');
+      // G2 for the ants: the panel's relayoutCards() path re-renders the wires (dropping wire-live) — the card puts them back
+      card.relayout(400);
+      assert.ok(host.querySelector('.gv-wires path.wire-live'), 'ants survive a relayout');
+      assert.ok(host.querySelector('.node[data-node-id="n_impl"]').classList.contains('is-active'));
+      // a later generation: same element, same stage, new statuses
+      const snap2 = { ...snapshotFromState(STATE({ status: 'done', active: [], steps: [step({ executionId: 'x:n_plan:1', nodeId: 'n_plan', ordinal: 1 }), step({ executionId: 'x:n_impl:1', nodeId: 'n_impl', ordinal: 1 })], wireDeliveries: { w3: 2 }, endReached: true, result: null }), { now: 0 }), source: 'live', runId: 'run-uuid-1' };
+      card.update(snap2, 0);
+      assert.equal(host.querySelector('.gv-stage'), stage, 'the graph mount survives an update');
+      assert.equal(card.el.querySelector('.ask-rc-pill').textContent, 'Done');
+      assert.ok(card.el.classList.contains('is-terminal') && !card.el.classList.contains('is-live'));
+      assert.equal(card.el.querySelectorAll('.ask-rc-agent').length, 0);
+      assert.equal(host.querySelector('.wbadge .wfired').textContent, '2×', 'loop badge from wireDeliveries');
+      // relayout re-applies the decor the re-render dropped (G2, the panel's relayoutCards path)
+      card.relayout(400);
+      assert.equal(host.querySelector('.wbadge .wfired').textContent, '2×');
+      assert.ok(host.querySelector('.node[data-node-id="n_impl"]').classList.contains('is-done'));
+      card.el.querySelector('a.ask-rc-open').click();
+      assert.deepEqual(opened, ['#running/run-uuid-1']);
+      card.destroy();
+      assert.equal(host.style.height, '', 'destroy releases the flow height');
+    } },
+    { name: 'createRunProgressCard: the question banner, the error reason, a v1 run without a graph', run: () => {
+      const doc = dom();
+      const card = createRunProgressCard({ doc, ident: IDENT });
+      doc.body.appendChild(card.el);
+      card.update({ ...snapshotFromState(STATE(), { now: 0 }), source: 'live', runId: 'r', pendingQuestion: { kind: 'questions', questions: [{}, {}] } }, 0);
+      const banner = card.el.querySelector('.ask-rc-banner');
+      assert.equal(banner.hidden, false);
+      assert.equal(banner.textContent, 'Waiting for your answer — 2 questions');
+      assert.equal(card.el.querySelector('.ask-rc-pill').textContent, 'Waiting for your answer');
+      card.update({ ...snapshotFromState(STATE({ status: 'error', active: [] }), { now: 0 }) }, 0);
+      assert.equal(banner.hidden, true);
+      card.setReason('Run failed: Preflight failed');
+      assert.equal(card.el.querySelector('.ask-rc-reason').textContent, 'Run failed: Preflight failed');
+      card.update(snapshotFromState(STATE({ stepper: { steps: [] } })), 0);
+      assert.equal(card.el.querySelector('.ask-rc-graph').hidden, true, 'a v1 stepper draws nothing');
+      assert.equal(card.el.querySelector('.ask-rc-prog').textContent, '—');
+      assert.equal(PROGRESS_CARD_TYPE, 'progress');
+    } },
+  ]);
 });

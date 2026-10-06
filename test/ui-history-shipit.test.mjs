@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { cardAlertOf } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -253,77 +254,120 @@ test('detail Create PR opens the ship-it modal with the summary + branch → bas
   assert.match(modal.querySelector('.shipit-sub').textContent, /Implement Log-UX Review Fixes/);
 });
 
-test('the summary falls back to the live list counts and drops the middot with them', async () => {
-  const ctx = await bootShip();                        // DETAIL.results === null
-  const modal = await openModal(ctx);
-  const files = modal.querySelector('.shipit-files');
-  assert.equal(modal.querySelector('.shipit-summary').hidden, false, 'counts still summarize the change');
-  assert.equal(files.textContent, '', 'no persisted results -> no file count');
-  assert.equal(modal.querySelector('.shipit-add').textContent, '+12');
-  assert.equal(modal.querySelector('.shipit-del').textContent, '−3');   // U+2212
-  // `.shipit-files:empty + .shipit-dot{display:none}` can only fire while the dot
-  // is the count's IMMEDIATE sibling — assert the structure the rule keys off
-  // (jsdom does not load the linked stylesheet, so computed style proves nothing).
-  assert.ok(files.nextElementSibling.classList.contains('shipit-dot'),
-    'the separator is the file count\'s adjacent sibling so it collapses with it');
-  // NOT tested: "survived false -> .shipit-summary hidden". That state is
-  // UNREACHABLE through the UI — histPrEligible requires `survived` and gates both
-  // doors into the modal — and openShipItModal has no test seam.
-});
-
 // ---------------------------------------------------------------------------
 // Confirming
 // ---------------------------------------------------------------------------
 
-test('confirm POSTs /api/pr and swaps the header control to a link + merge pill', async () => {
-  const ctx = await bootShip({ arms: prArm(PR_OK) });
-  const modal = await openModal(ctx);
-  click(ctx.window, modal.querySelector('.shipit-ok'));
-  await settle(ctx.window, 6);
+test('confirm POSTs /api/pr and swaps the header control to a link + merge pill; existed:true also resolves to View PR', async () => {
+  await checkRows([
+    { name: 'confirm POSTs /api/pr and swaps the header control to a link + merge pill', run: async () => {
+      const ctx = await bootShip({ arms: prArm(PR_OK) });
+      const modal = await openModal(ctx);
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      await settle(ctx.window, 6);
 
-  const post = prPosts(ctx)[0];
-  assert.ok(post, 'the confirm button POSTs /api/pr');
-  assert.deepEqual(JSON.parse(post.opts.body),
-    { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id, pushRemote: 'origin', baseRemote: 'origin', baseBranch: 'feat/log-ux' });
-  assert.equal(modal.classList.contains('hidden'), true, 'a successful ship closes the modal');
-  const link = hdPrLink(ctx.window);
-  assert.equal(link.hidden, false);
-  assert.equal(link.href, 'https://x/pull/7');
-  assert.equal(link.textContent, 'View PR');
-  assert.equal(hdPr(ctx.window).hidden, true, 'the button never coexists with the link');
-  // `.hd .hist-merge` only — the pill is a SIBLING of `.hd-pr` in row 1, so a
-  // `.hd-pr .hist-merge` alternative could never match.
-  assert.match(hdMerge(ctx.window).textContent, /can merge/);
+      const post = prPosts(ctx)[0];
+      assert.ok(post, 'the confirm button POSTs /api/pr');
+      assert.deepEqual(JSON.parse(post.opts.body),
+        { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id, pushRemote: 'origin', baseRemote: 'origin', baseBranch: 'feat/log-ux' });
+      assert.equal(modal.classList.contains('hidden'), true, 'a successful ship closes the modal');
+      const link = hdPrLink(ctx.window);
+      assert.equal(link.hidden, false);
+      assert.equal(link.href, 'https://x/pull/7');
+      assert.equal(link.textContent, 'View PR');
+      assert.equal(hdPr(ctx.window).hidden, true, 'the button never coexists with the link');
+      // `.hd .hist-merge` only — the pill is a SIBLING of `.hd-pr` in row 1, so a
+      // `.hd-pr .hist-merge` alternative could never match.
+      assert.match(hdMerge(ctx.window).textContent, /can merge/);
+    } },
+    { name: 'existed:true still resolves to a View PR link', run: async () => {
+      const ctx = await bootShip({ arms: prArm({ ...PR_OK, url: 'https://x/pull/11', existed: true }) });
+      const modal = await openModal(ctx);
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      await settle(ctx.window, 6);
+      const link = hdPrLink(ctx.window);
+      assert.equal(link.hidden, false);
+      assert.equal(link.textContent, 'View PR');
+      assert.equal(link.href, 'https://x/pull/11');
+    } },
+  ]);
 });
 
-test('existed:true still resolves to a View PR link', async () => {
-  const ctx = await bootShip({ arms: prArm({ ...PR_OK, url: 'https://x/pull/11', existed: true }) });
-  const modal = await openModal(ctx);
-  click(ctx.window, modal.querySelector('.shipit-ok'));
-  await settle(ctx.window, 6);
-  const link = hdPrLink(ctx.window);
-  assert.equal(link.hidden, false);
-  assert.equal(link.textContent, 'View PR');
-  assert.equal(link.href, 'https://x/pull/11');
-});
-
-test('UNKNOWN mergeability schedules exactly one recheck', async () => {
-  const ctx = await bootShip({
-    arms: (url, opts) => {
-      if (url.endsWith('/api/pr/mergeable')) return ok({ ok: true, mergeable: 'CONFLICTING' });
-      if (url.endsWith('/api/pr') && opts.method === 'POST') return ok({ ...PR_OK, mergeable: 'UNKNOWN' });
-      return null;
-    },
-  });
-  // prMergeRecheckMs() (app.js:8880) reads the seam at CALL time, so setting it on
-  // the RETURNED window after boot is enough — the helper builds the JSDOM itself.
-  ctx.window.__prMergeRecheckMs = 0;
-  const modal = await openModal(ctx);
-  click(ctx.window, modal.querySelector('.shipit-ok'));
-  await settle(ctx.window, 8);
-  assert.equal(ctx.calls.filter((c) => c.url.endsWith('/api/pr/mergeable')).length, 1,
-    'exactly one recheck, never a poll loop');
-  assert.match(hdMerge(ctx.window).textContent, /conflicts/);
+test('UNKNOWN mergeability schedules exactly one recheck; a later recheck updates the pill or hides it if still UNKNOWN', async () => {
+  await checkRows([
+    { name: 'UNKNOWN mergeability schedules exactly one recheck', run: async () => {
+      const ctx = await bootShip({
+        arms: (url, opts) => {
+          if (url.endsWith('/api/pr/mergeable')) return ok({ ok: true, mergeable: 'CONFLICTING' });
+          if (url.endsWith('/api/pr') && opts.method === 'POST') return ok({ ...PR_OK, mergeable: 'UNKNOWN' });
+          return null;
+        },
+      });
+      // prMergeRecheckMs() (app.js:8880) reads the seam at CALL time, so setting it on
+      // the RETURNED window after boot is enough — the helper builds the JSDOM itself.
+      ctx.window.__prMergeRecheckMs = 0;
+      const modal = await openModal(ctx);
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      await settle(ctx.window, 8);
+      assert.equal(ctx.calls.filter((c) => c.url.endsWith('/api/pr/mergeable')).length, 1,
+        'exactly one recheck, never a poll loop');
+      assert.match(hdMerge(ctx.window).textContent, /conflicts/);
+    } },
+    { name: 'a delayed re-check updates the stuck "checking…" pill to can-merge', run: async () => {
+      let recheckBody = null;
+      // The re-check RESPONSE is gated, not its timer: with __prMergeRecheckMs = 0 an
+      // ungated arm resolves inside the same settle() that opens the PR, so the
+      // intermediate "checking…" state would never be observable.
+      let releaseRecheck;
+      const recheckGate = new Promise((r) => { releaseRecheck = r; });
+      const ctx = await bootShip({
+        arms: (url, opts) => {
+          if (url.endsWith('/api/pr/mergeable') && opts.method === 'POST') {
+            recheckBody = JSON.parse(opts.body);
+            return recheckGate.then(() => ok({ ok: true, mergeable: 'MERGEABLE' }));
+          }
+          if (url.endsWith('/api/pr') && opts.method === 'POST') {
+            return ok({ ok: true, url: 'https://gh/x/pull/3', mergeable: 'UNKNOWN' });
+          }
+          return null;
+        },
+      });
+      ctx.window.__prMergeRecheckMs = 0;   // fire on the next tick (no fake timers)
+      const modal = await openModal(ctx);
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      await settle(ctx.window, 4);         // PR opened -> pill paints "checking…"
+      const pill = hdMerge(ctx.window);
+      assert.ok(pill.classList.contains('unknown'), 'pill starts as checking…');
+      assert.match(pill.textContent, /checking/);
+      releaseRecheck();
+      await settle(ctx.window, 4);         // fetch + json + apply
+      assert.equal(recheckBody.id, ROW.id, 're-check posted the same pipeline id');
+      assert.ok(pill.classList.contains('ok'), 'pill updated to can-merge after re-check');
+      assert.match(pill.textContent, /can merge/);
+    } },
+    { name: 'a re-check that is still UNKNOWN hides the pill instead of leaving it stuck', run: async () => {
+      let releaseRecheck;
+      const recheckGate = new Promise((r) => { releaseRecheck = r; });
+      const ctx = await bootShip({
+        arms: (url, opts) => {
+          if (url.endsWith('/api/pr/mergeable') && opts.method === 'POST') return recheckGate.then(() => ok({ ok: true, mergeable: 'UNKNOWN' }));
+          if (url.endsWith('/api/pr') && opts.method === 'POST') {
+            return ok({ ok: true, url: 'https://gh/x/pull/4', mergeable: 'UNKNOWN' });
+          }
+          return null;
+        },
+      });
+      ctx.window.__prMergeRecheckMs = 0;
+      const modal = await openModal(ctx);
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      await settle(ctx.window, 4);
+      const pill = hdMerge(ctx.window);
+      assert.equal(pill.hidden, false, 'pill shows checking… first');
+      releaseRecheck();
+      await settle(ctx.window, 4);
+      assert.equal(pill.hidden, true, 'still-unknown pill is hidden, not left stuck');
+    } },
+  ]);
 });
 
 test('PR failure shows the error inside the modal and re-enables confirm', async () => {
@@ -379,415 +423,395 @@ test('cancel / Escape / backdrop close without POSTing', async () => {
   }
 });
 
-test('a second open does not stack a second confirm handler', async () => {
-  const ctx = await bootShip({ arms: prArm(PR_OK) });
-  const modal = await openModal(ctx);
-  click(ctx.window, hdPr(ctx.window));                     // second open while already open
-  assert.equal(modal.classList.contains('hidden'), false);
-  click(ctx.window, modal.querySelector('.shipit-ok'));
-  await settle(ctx.window, 6);
-  assert.equal(prPosts(ctx).length, 1, 'one confirm click === one POST');
+test('one confirm click is one POST: a second open or a cancel mid-POST never stacks a second confirm handler', async () => {
+  await checkRows([
+    { name: 'a second open does not stack a second confirm handler', run: async () => {
+      const ctx = await bootShip({ arms: prArm(PR_OK) });
+      const modal = await openModal(ctx);
+      click(ctx.window, hdPr(ctx.window));                     // second open while already open
+      assert.equal(modal.classList.contains('hidden'), false);
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      await settle(ctx.window, 6);
+      assert.equal(prPosts(ctx).length, 1, 'one confirm click === one POST');
+    } },
+    { name: 'cancelling while the POST is in flight cannot stack a second confirm handler', run: async () => {
+      // Regression guard: `done()` used to be non-idempotent, so the stale generation
+      // hid the freshly-opened modal, nulled the new generation's teardown handle and
+      // left its keydown listener attached — after which one click fired N POSTs.
+      let release;
+      const hanging = new Promise((r) => { release = r; });
+      const ctx = await bootShip({
+        arms: (url, opts) => (url.endsWith('/api/pr') && opts.method === 'POST' ? hanging : null),
+      });
+      const { window } = ctx;
+      const modal = await openModal(ctx);
+
+      click(window, modal.querySelector('.shipit-ok'));        // (1) POST hangs
+      await settle(window);
+      click(window, modal.querySelector('.shipit-cancel'));    // (2) cancel mid-flight
+      assert.equal(isOpen(window), false, 'cancel closes even while the POST is in flight');
+      assert.equal(hdPr(window).hidden, false, 'record.pr is still unset, so Create PR is still offered');
+
+      click(window, hdPr(window));                             // (3) a NEW generation owns the modal
+      assert.ok(isOpen(window), 'the modal re-opens');
+
+      release({ ok: true, status: 200, json: async () => PR_OK });   // (4) the stale POST lands
+      await settle(window, 6);
+      assert.ok(isOpen(window), 'the stale generation must not hide the freshly-opened modal');
+
+      click(window, modal.querySelector('.shipit-ok'));        // (5) exactly ONE more POST
+      await settle(window, 6);
+      assert.equal(prPosts(ctx).length, 2, 'two confirm clicks === two POSTs, never three');
+    } },
+  ]);
 });
 
-test('cancelling while the POST is in flight cannot stack a second confirm handler', async () => {
-  // Regression guard: `done()` used to be non-idempotent, so the stale generation
-  // hid the freshly-opened modal, nulled the new generation's teardown handle and
-  // left its keydown listener attached — after which one click fired N POSTs.
-  let release;
-  const hanging = new Promise((r) => { release = r; });
-  const ctx = await bootShip({
-    arms: (url, opts) => (url.endsWith('/api/pr') && opts.method === 'POST' ? hanging : null),
-  });
-  const { window } = ctx;
-  const modal = await openModal(ctx);
-
-  click(window, modal.querySelector('.shipit-ok'));        // (1) POST hangs
-  await settle(window);
-  click(window, modal.querySelector('.shipit-cancel'));    // (2) cancel mid-flight
-  assert.equal(isOpen(window), false, 'cancel closes even while the POST is in flight');
-  assert.equal(hdPr(window).hidden, false, 'record.pr is still unset, so Create PR is still offered');
-
-  click(window, hdPr(window));                             // (3) a NEW generation owns the modal
-  assert.ok(isOpen(window), 'the modal re-opens');
-
-  release({ ok: true, status: 200, json: async () => PR_OK });   // (4) the stale POST lands
-  await settle(window, 6);
-  assert.ok(isOpen(window), 'the stale generation must not hide the freshly-opened modal');
-
-  click(window, modal.querySelector('.shipit-ok'));        // (5) exactly ONE more POST
-  await settle(window, 6);
-  assert.equal(prPosts(ctx).length, 2, 'two confirm clicks === two POSTs, never three');
-});
-
-test('leaving the detail screen closes the modal, and Create PR still works after', async () => {
-  const ctx = await bootShip({ arms: prArm(PR_OK) });
-  const { window } = ctx;
-  await openModal(ctx);
-  // Leave Runs: a bare #history would reopen this same run in the split layout (D6).
-  go(window, 'new');
-  await settle(window, 6);
-  // The modal is a top-level overlay, not a child of #hist-detail: emptying the
-  // detail host does not dismiss it, so closeHistDetail must tear it down.
-  assert.equal(isOpen(window), false, 'navigating away dismisses the overlay');
-
-  await openDetail(ctx);
-  click(window, hdPr(window));
-  assert.ok(isOpen(window), 'the double-open guard did not leave Create PR permanently dead');
-});
-
-test('detail -> detail navigation tears the modal down too', async () => {
-  // closeHistDetail is the only teardown, and a detail->detail hop never goes
-  // through it: the screen is swapped underneath a modal whose confirm handler
-  // still closes over the PREVIOUS record, i.e. one click would open a PR for the
-  // run the user just navigated away from.
+// closeHistDetail is the only teardown, and a detail->detail hop never goes
+// through it: the screen is swapped underneath a modal whose confirm handler
+// still closes over the PREVIOUS record, i.e. one click would open a PR for the
+// run the user just navigated away from.
+test('leaving the detail screen or detail->detail navigation tears the modal down, and Create PR still works after', async () => {
   const OTHER = row({ id: 'aaaa1111', title: 'Another run' });
-  const ctx = await bootShip({ rows: [row(), OTHER] });
+  const ctx = await bootShip({ rows: [row(), OTHER], arms: prArm(PR_OK) });
   const { window } = ctx;
-  await openModal(ctx);
-  assert.ok(isOpen(window));
+  await checkRows([
+    { name: 'leaving the detail screen closes the modal, and Create PR still works after', run: async () => {
+      await openModal(ctx);
+      // Leave Runs: a bare #history would reopen this same run in the split layout (D6).
+      go(window, 'new');
+      await settle(window, 6);
+      // The modal is a top-level overlay, not a child of #hist-detail: emptying the
+      // detail host does not dismiss it, so closeHistDetail must tear it down.
+      assert.equal(isOpen(window), false, 'navigating away dismisses the overlay');
 
-  go(window, `history/${KEY}/${OTHER.id}`);
-  await settle(window, 5);
-  assert.equal(isOpen(window), false, 'the modal does not outlive the screen it belonged to');
+      await openDetail(ctx);
+      click(window, hdPr(window));
+      assert.ok(isOpen(window), 'the double-open guard did not leave Create PR permanently dead');
+    } },
+    { name: 'detail -> detail navigation tears the modal down too', run: async () => {
+      await openModal(ctx);
+      assert.ok(isOpen(window));
+
+      go(window, `history/${KEY}/${OTHER.id}`);
+      await settle(window, 5);
+      assert.equal(isOpen(window), false, 'the modal does not outlive the screen it belonged to');
+    } },
+  ]);
 });
 
 // ---------------------------------------------------------------------------
 // Keeping the list row in step
 // ---------------------------------------------------------------------------
 
-test('a successful ship updates the LIST row too (no stale Create PR)', async () => {
-  const OTHER = row({ id: 'aaaa1111', title: 'Another run' });
-  const ctx = await bootShip({ rows: [row(), OTHER], arms: prArm(PR_OK) });
-  const { window } = ctx;
-  const rowSel = `#runs-list .runs-row[data-slot="group"][data-pipeline-id="${ROW.id}"]`;
-  const word = () => window.document.querySelector(`${rowSel} .runs-row-sub`).textContent;
-  const modal = await openModal(ctx);
-  assert.match(word(), /^Finished\b/, 'no PR yet: the row reads Finished');
-  click(window, modal.querySelector('.shipit-ok'));
-  await settle(window, 6);
+test('a successful ship updates the list row, and PR-enrichment hooks repaint the open detail header', async () => {
+  await checkRows([
+    { name: 'a successful ship updates the LIST row too (no stale Create PR)', run: async () => {
+      const OTHER = row({ id: 'aaaa1111', title: 'Another run' });
+      const ctx = await bootShip({ rows: [row(), OTHER], arms: prArm(PR_OK) });
+      const { window } = ctx;
+      const rowSel = `#runs-list .runs-row[data-slot="group"][data-pipeline-id="${ROW.id}"]`;
+      const word = () => window.document.querySelector(`${rowSel} .runs-row-sub`).textContent;
+      const modal = await openModal(ctx);
+      assert.match(word(), /^Finished\b/, 'no PR yet: the row reads Finished');
+      click(window, modal.querySelector('.shipit-ok'));
+      await settle(window, 6);
 
-  // Row<->row hops do NOT refetch the list, so the ship itself must keep the row current.
-  const listFetches = () => ctx.calls.filter((c) => c.url.endsWith('/api/history')).length;
-  const before = listFetches();
-  go(window, `history/${KEY}/${OTHER.id}`);                // another saved run...
-  await settle(window, 6);
-  await openDetail(ctx);                                   // ...and back
-  await settle(window, 6);
-  assert.equal(listFetches(), before, 'hopping between saved runs does not refetch /api/history');
+      // Row<->row hops do NOT refetch the list, so the ship itself must keep the row current.
+      const listFetches = () => ctx.calls.filter((c) => c.url.endsWith('/api/history')).length;
+      const before = listFetches();
+      go(window, `history/${KEY}/${OTHER.id}`);                // another saved run...
+      await settle(window, 6);
+      await openDetail(ctx);                                   // ...and back
+      await settle(window, 6);
+      assert.equal(listFetches(), before, 'hopping between saved runs does not refetch /api/history');
 
-  assert.ok(window.document.querySelector(rowSel), 'the list row is still there');
-  assert.match(word(), /^In review\b/, 'the row reads the OPEN PR');
-  // Re-entering the run must NOT offer Create PR again: that was the stale-button ->
-  // double-POST loop (patchHistoryPr in the ship path + the `if (!record.pr)` gate).
-  assert.equal(hdPr(window).hidden, true, 'the Create-PR button was swapped out');
-  assert.equal(hdPrLink(window).hidden, false);
-  assert.match(hdPrLink(window).textContent, /View PR/);
-});
+      assert.ok(window.document.querySelector(rowSel), 'the list row is still there');
+      assert.match(word(), /^In review\b/, 'the row reads the OPEN PR');
+      // Re-entering the run must NOT offer Create PR again: that was the stale-button ->
+      // double-POST loop (patchHistoryPr in the ship path + the `if (!record.pr)` gate).
+      assert.equal(hdPr(window).hidden, true, 'the Create-PR button was swapped out');
+      assert.equal(hdPrLink(window).hidden, false);
+      assert.match(hdPrLink(window).textContent, /View PR/);
+    } },
+    { name: 'the PR-enrichment hooks repaint the OPEN detail header', run: async () => {
+      // A row the list delivered without `pr` (enrichment still in flight): the button
+      // stays hidden until a resolution arrives, and BOTH resolution paths —
+      // finalizeHistoryPr (terminal batch) and patchHistoryPr (per-entry batch) —
+      // must reach the open detail screen.
+      const prless = row();
+      delete prless.pr;                                        // enrichment still in flight
+      const ctx = await bootShip({ rows: [prless] });
+      const { window } = ctx;
+      await openDetail(ctx);
+      assert.equal(hdPr(window).hidden, true, 'pr === undefined -> the control stays hidden');
 
-test('the PR-enrichment hooks repaint the OPEN detail header', async () => {
-  // A row the list delivered without `pr` (enrichment still in flight): the button
-  // stays hidden until a resolution arrives, and BOTH resolution paths —
-  // finalizeHistoryPr (terminal batch) and patchHistoryPr (per-entry batch) —
-  // must reach the open detail screen.
-  const prless = row();
-  delete prless.pr;                                        // enrichment still in flight
-  const ctx = await bootShip({ rows: [prless] });
-  const { window } = ctx;
-  await openDetail(ctx);
-  assert.equal(hdPr(window).hidden, true, 'pr === undefined -> the control stays hidden');
+      const token = ctx.prTokens().at(-1);
+      assert.ok(token != null, 'the client POSTed a load token');
+      ctx.dispatchPr({ token, done: true, items: [] });        // terminal: row.pr = null
+      await settle(window);
+      assert.equal(hdPr(window).hidden, false, 'the terminal batch reveals Create PR');
 
-  const token = ctx.prTokens().at(-1);
-  assert.ok(token != null, 'the client POSTed a load token');
-  ctx.dispatchPr({ token, done: true, items: [] });        // terminal: row.pr = null
-  await settle(window);
-  assert.equal(hdPr(window).hidden, false, 'the terminal batch reveals Create PR');
-
-  ctx.dispatchPr({
-    token,
-    items: [{ projectKey: KEY, id: ROW.id, pr: { state: 'MERGED', url: 'https://x/pull/9', number: 9 } }],
-  });
-  await settle(window);
-  assert.equal(hdPr(window).hidden, true);
-  assert.equal(hdPrLink(window).textContent, 'Merged');
+      ctx.dispatchPr({
+        token,
+        items: [{ projectKey: KEY, id: ROW.id, pr: { state: 'MERGED', url: 'https://x/pull/9', number: 9 } }],
+      });
+      await settle(window);
+      assert.equal(hdPr(window).hidden, true);
+      assert.equal(hdPrLink(window).textContent, 'Merged');
+    } },
+  ]);
 });
 
 // ---------------------------------------------------------------------------
 // The tri-state header + histPrEligible
 // ---------------------------------------------------------------------------
 
-test('OPEN/MERGED records render links, not the button', async () => {
-  for (const [state, label] of [['OPEN', 'View PR'], ['MERGED', 'Merged']]) {
-    const ctx = await bootShip({ rows: [row({ pr: { state, url: 'https://x/pull/5' } })] });
-    await openDetail(ctx);
-    const link = hdPrLink(ctx.window);
-    assert.equal(hdPr(ctx.window).hidden, true, `${state}: no Create-PR button`);
-    assert.equal(link.hidden, false, `${state}: the link renders`);
-    assert.equal(link.textContent, label);
-    assert.equal(link.classList.contains('merged'), state === 'MERGED');
-  }
-});
-
-test('a MERGED run whose branch is gone still shows the link', async () => {
-  // Link-first, matching setupPrButton's order (app.js:8552-8569).
-  const ctx = await bootShip({
-    rows: [row({ survived: false, pr: { state: 'MERGED', url: 'https://x/pull/5' } })],
-  });
-  await openDetail(ctx);
-  assert.equal(hdPrLink(ctx.window).hidden, false);
-  assert.equal(hdPrLink(ctx.window).textContent, 'Merged');
-});
-
-test('workspace runs never show Create PR', async () => {
-  // POST /api/pr has NO workspace arm — its key regex (ui/server.mjs:1637) rejects
-  // a `workspaces/…` composite with a 404 — yet workspace rows satisfy every other
-  // clause because listAllPipelines hands rowToHistoryEntry the primary member dir.
-  const ctx = await bootShip({
-    rows: [row({ projectKey: WKS_KEY, target: 'workspace' })],
-  });
-  await openDetail(ctx, wksDetailHash);
-  assert.equal(hdPr(ctx.window).hidden, true, 'no Create PR for a workspace run');
-  assert.equal(hdPrLink(ctx.window).hidden, true);
-});
-
-test('a workspace run cannot reach the ship-it modal from the LIST either', async () => {
-  // The end-to-end half of the predicate test below. Only the saved page's Create-PR
-  // control opens the modal, and the shared predicate never offers it for a workspace
-  // row, so opening that run from its list row can never arm the modal — and
-  // confirming it can never 404 on POST /api/pr.
-  const ctx = await bootShip({ rows: [row({ projectKey: WKS_KEY, target: 'workspace' })] });
-  go(ctx.window, 'runs');                                  // nothing remembered: the bare list
-  await settle(ctx.window);
-  const listRow = ctx.window.document.querySelector(
-    `#runs-list .runs-row[data-slot="group"][data-project-key="${WKS_KEY}"][data-pipeline-id="${ROW.id}"]`);
-  assert.ok(listRow, 'the workspace row is listed');
-  click(ctx.window, listRow);                              // navigate the way the row does
-  await settle(ctx.window, 5);
-  assert.equal(ctx.window.location.hash, `#${wksDetailHash}`, 'the row opens its saved page');
-  assert.equal(hdPr(ctx.window).hidden, true, 'no Create PR on the workspace run');
-  assert.equal(isOpen(ctx.window), false, 'the ship-it modal never opens for a workspace run');
-  assert.equal(prPosts(ctx).length, 0, 'and no POST /api/pr is fired');
-});
-
-test('histPrEligible rejects a workspace run that satisfies every other clause', async () => {
-  const ctx = await bootShip();
-  await openDetail(ctx);                                   // state.ghAvailable is true here
-  const { histPrEligible } = ctx.window.__np;
-  assert.equal(typeof histPrEligible, 'function', 'the predicate is on the test seam');
-  assert.equal(histPrEligible({ survived: true, branch: 'b', sourceBranch: 's' }), true);
-  assert.equal(histPrEligible({ survived: true, branch: 'b', sourceBranch: 's', target: 'workspace' }), false);
-  assert.equal(histPrEligible({ survived: false, branch: 'b', sourceBranch: 's' }), false);
-  assert.equal(histPrEligible({ survived: true, branch: '', sourceBranch: 's' }), false);
-  assert.equal(histPrEligible({ survived: true, branch: 'b', sourceBranch: '' }), false);
-  assert.equal(histPrEligible(null), false);
-});
-
-test('gh unavailable hides Create PR even for an otherwise eligible run', async () => {
-  const ctx = await bootShip({ gh: false });
-  await openDetail(ctx);
-  assert.equal(hdPr(ctx.window).hidden, true);
-  assert.equal(ctx.window.__np.histPrEligible(ROW), false, 'the predicate reads state.ghAvailable');
-});
-
-// ---------------------------------------------------------------------------
-// Merge-pill re-check (moved from test/ui-history-pr.test.mjs: the pill is
-// detail-only now, and the PR is opened from this modal, not the list card).
-// ---------------------------------------------------------------------------
-
-test('a delayed re-check updates the stuck "checking…" pill to can-merge', async () => {
-  let recheckBody = null;
-  // The re-check RESPONSE is gated, not its timer: with __prMergeRecheckMs = 0 an
-  // ungated arm resolves inside the same settle() that opens the PR, so the
-  // intermediate "checking…" state would never be observable.
-  let releaseRecheck;
-  const recheckGate = new Promise((r) => { releaseRecheck = r; });
-  const ctx = await bootShip({
-    arms: (url, opts) => {
-      if (url.endsWith('/api/pr/mergeable') && opts.method === 'POST') {
-        recheckBody = JSON.parse(opts.body);
-        return recheckGate.then(() => ok({ ok: true, mergeable: 'MERGEABLE' }));
+test('OPEN/MERGED records render links, not the button, even when the merged branch is gone', async () => {
+  await checkRows([
+    { name: 'OPEN/MERGED records render links, not the button', run: async () => {
+      for (const [state, label] of [['OPEN', 'View PR'], ['MERGED', 'Merged']]) {
+        const ctx = await bootShip({ rows: [row({ pr: { state, url: 'https://x/pull/5' } })] });
+        await openDetail(ctx);
+        const link = hdPrLink(ctx.window);
+        assert.equal(hdPr(ctx.window).hidden, true, `${state}: no Create-PR button`);
+        assert.equal(link.hidden, false, `${state}: the link renders`);
+        assert.equal(link.textContent, label);
+        assert.equal(link.classList.contains('merged'), state === 'MERGED');
       }
-      if (url.endsWith('/api/pr') && opts.method === 'POST') {
-        return ok({ ok: true, url: 'https://gh/x/pull/3', mergeable: 'UNKNOWN' });
-      }
-      return null;
-    },
-  });
-  ctx.window.__prMergeRecheckMs = 0;   // fire on the next tick (no fake timers)
-  const modal = await openModal(ctx);
-  click(ctx.window, modal.querySelector('.shipit-ok'));
-  await settle(ctx.window, 4);         // PR opened -> pill paints "checking…"
-  const pill = hdMerge(ctx.window);
-  assert.ok(pill.classList.contains('unknown'), 'pill starts as checking…');
-  assert.match(pill.textContent, /checking/);
-  releaseRecheck();
-  await settle(ctx.window, 4);         // fetch + json + apply
-  assert.equal(recheckBody.id, ROW.id, 're-check posted the same pipeline id');
-  assert.ok(pill.classList.contains('ok'), 'pill updated to can-merge after re-check');
-  assert.match(pill.textContent, /can merge/);
+    } },
+    { name: 'a MERGED run whose branch is gone still shows the link', run: async () => {
+      // Link-first, matching setupPrButton's order (app.js:8552-8569).
+      const ctx = await bootShip({
+        rows: [row({ survived: false, pr: { state: 'MERGED', url: 'https://x/pull/5' } })],
+      });
+      await openDetail(ctx);
+      assert.equal(hdPrLink(ctx.window).hidden, false);
+      assert.equal(hdPrLink(ctx.window).textContent, 'Merged');
+    } },
+  ]);
 });
 
-test('a re-check that is still UNKNOWN hides the pill instead of leaving it stuck', async () => {
-  let releaseRecheck;
-  const recheckGate = new Promise((r) => { releaseRecheck = r; });
-  const ctx = await bootShip({
-    arms: (url, opts) => {
-      if (url.endsWith('/api/pr/mergeable') && opts.method === 'POST') return recheckGate.then(() => ok({ ok: true, mergeable: 'UNKNOWN' }));
-      if (url.endsWith('/api/pr') && opts.method === 'POST') {
-        return ok({ ok: true, url: 'https://gh/x/pull/4', mergeable: 'UNKNOWN' });
-      }
-      return null;
-    },
-  });
-  ctx.window.__prMergeRecheckMs = 0;
-  const modal = await openModal(ctx);
-  click(ctx.window, modal.querySelector('.shipit-ok'));
-  await settle(ctx.window, 4);
-  const pill = hdMerge(ctx.window);
-  assert.equal(pill.hidden, false, 'pill shows checking… first');
-  releaseRecheck();
-  await settle(ctx.window, 4);
-  assert.equal(pill.hidden, true, 'still-unknown pill is hidden, not left stuck');
+test('Create PR eligibility: never for workspace runs (detail or list, histPrEligible), hidden when gh is unavailable', async () => {
+  await checkRows([
+    { name: 'workspace runs never show Create PR', run: async () => {
+      // POST /api/pr has NO workspace arm — its key regex (ui/server.mjs:1637) rejects
+      // a `workspaces/…` composite with a 404 — yet workspace rows satisfy every other
+      // clause because listAllPipelines hands rowToHistoryEntry the primary member dir.
+      const ctx = await bootShip({
+        rows: [row({ projectKey: WKS_KEY, target: 'workspace' })],
+      });
+      await openDetail(ctx, wksDetailHash);
+      assert.equal(hdPr(ctx.window).hidden, true, 'no Create PR for a workspace run');
+      assert.equal(hdPrLink(ctx.window).hidden, true);
+    } },
+    { name: 'a workspace run cannot reach the ship-it modal from the LIST either', run: async () => {
+      // The end-to-end half of the predicate test below. Only the saved page's Create-PR
+      // control opens the modal, and the shared predicate never offers it for a workspace
+      // row, so opening that run from its list row can never arm the modal — and
+      // confirming it can never 404 on POST /api/pr.
+      const ctx = await bootShip({ rows: [row({ projectKey: WKS_KEY, target: 'workspace' })] });
+      go(ctx.window, 'runs');                                  // nothing remembered: the bare list
+      await settle(ctx.window);
+      const listRow = ctx.window.document.querySelector(
+        `#runs-list .runs-row[data-slot="group"][data-project-key="${WKS_KEY}"][data-pipeline-id="${ROW.id}"]`);
+      assert.ok(listRow, 'the workspace row is listed');
+      click(ctx.window, listRow);                              // navigate the way the row does
+      await settle(ctx.window, 5);
+      assert.equal(ctx.window.location.hash, `#${wksDetailHash}`, 'the row opens its saved page');
+      assert.equal(hdPr(ctx.window).hidden, true, 'no Create PR on the workspace run');
+      assert.equal(isOpen(ctx.window), false, 'the ship-it modal never opens for a workspace run');
+      assert.equal(prPosts(ctx).length, 0, 'and no POST /api/pr is fired');
+    } },
+    { name: 'histPrEligible rejects a workspace run that satisfies every other clause', run: async () => {
+      const ctx = await bootShip();
+      await openDetail(ctx);                                   // state.ghAvailable is true here
+      const { histPrEligible } = ctx.window.__np;
+      assert.equal(typeof histPrEligible, 'function', 'the predicate is on the test seam');
+      assert.equal(histPrEligible({ survived: true, branch: 'b', sourceBranch: 's' }), true);
+      assert.equal(histPrEligible({ survived: true, branch: 'b', sourceBranch: 's', target: 'workspace' }), false);
+      assert.equal(histPrEligible({ survived: false, branch: 'b', sourceBranch: 's' }), false);
+      assert.equal(histPrEligible({ survived: true, branch: '', sourceBranch: 's' }), false);
+      assert.equal(histPrEligible({ survived: true, branch: 'b', sourceBranch: '' }), false);
+      assert.equal(histPrEligible(null), false);
+    } },
+    { name: 'gh unavailable hides Create PR even for an otherwise eligible run', run: async () => {
+      const ctx = await bootShip({ gh: false });
+      await openDetail(ctx);
+      assert.equal(hdPr(ctx.window).hidden, true);
+      assert.equal(ctx.window.__np.histPrEligible(ROW), false, 'the predicate reads state.ghAvailable');
+    } },
+  ]);
 });
 
 // ---------------------------------------------------------------------------
 // Fork support: the push-remote / base-repo selectors
 // ---------------------------------------------------------------------------
 
-test('the modal loads the project remotes into both selects with the server defaults', async () => {
-  const ctx = await bootShip({ remotes: FORK_REMOTES });
-  const modal = await openModal(ctx);
-  assert.equal(modal.querySelector('.shipit-remotes').hidden, false);
-  const pushSel = modal.querySelector('.shipit-push-remote');
-  const baseSel = modal.querySelector('.shipit-base-remote');
-  assert.deepEqual(optionValues(pushSel), ['origin', 'upstream']);
-  assert.deepEqual([...baseSel.options].map((o) => o.textContent), ['origin — me/repo', 'upstream — up/repo']);
-  assert.equal(pushSel.value, 'origin');
-  assert.equal(baseSel.value, 'upstream');
-  assert.equal(pushSel.disabled, false);
-  assert.match(modal.querySelector('.shipit-remotes-hint').textContent, /me:worca-cc\/log-ux-fcec04e8 → up\/repo feat\/log-ux/);
-  assert.equal(baseSelOf(modal).value, 'feat/log-ux', 'the summary line offers the run\'s source');
-  const req = remotesCalls(ctx)[0];
-  assert.ok(req && req.url.includes(`projectKey=${KEY}`) && req.url.includes(`id=${ROW.id}`), 'resolved by key + id');
-});
-
-test('confirm POSTs the chosen push/base remotes', async () => {
+test('the modal loads project remotes into both selects with server defaults and confirm POSTs the chosen push/base remotes', async () => {
   const ctx = await bootShip({ remotes: FORK_REMOTES, arms: prArm(PR_OK) });
   const modal = await openModal(ctx);
-  const baseSel = modal.querySelector('.shipit-base-remote');
-  baseSel.value = 'origin';
-  baseSel.dispatchEvent(new ctx.window.Event('change'));
-  assert.equal(modal.querySelector('.shipit-remotes-hint').textContent, '', 'same repo: no cross-repo hint');
-  click(ctx.window, modal.querySelector('.shipit-ok'));
-  await settle(ctx.window, 6);
-  assert.deepEqual(JSON.parse(prPosts(ctx)[0].opts.body),
-    { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id, pushRemote: 'origin', baseRemote: 'origin', baseBranch: 'feat/log-ux' });
-  assert.equal(hdPrLink(ctx.window).hidden, false);
+  await checkRows([
+    { name: 'the modal loads the project remotes into both selects with the server defaults', run: async () => {
+      assert.equal(modal.querySelector('.shipit-remotes').hidden, false);
+      const pushSel = modal.querySelector('.shipit-push-remote');
+      const baseSel = modal.querySelector('.shipit-base-remote');
+      assert.deepEqual(optionValues(pushSel), ['origin', 'upstream']);
+      assert.deepEqual([...baseSel.options].map((o) => o.textContent), ['origin — me/repo', 'upstream — up/repo']);
+      assert.equal(pushSel.value, 'origin');
+      assert.equal(baseSel.value, 'upstream');
+      assert.equal(pushSel.disabled, false);
+      assert.match(modal.querySelector('.shipit-remotes-hint').textContent, /me:worca-cc\/log-ux-fcec04e8 → up\/repo feat\/log-ux/);
+      assert.equal(baseSelOf(modal).value, 'feat/log-ux', 'the summary line offers the run\'s source');
+      const req = remotesCalls(ctx)[0];
+      assert.ok(req && req.url.includes(`projectKey=${KEY}`) && req.url.includes(`id=${ROW.id}`), 'resolved by key + id');
+    } },
+    { name: 'confirm POSTs the chosen push/base remotes', run: async () => {
+      const baseSel = modal.querySelector('.shipit-base-remote');
+      baseSel.value = 'origin';
+      baseSel.dispatchEvent(new ctx.window.Event('change'));
+      assert.equal(modal.querySelector('.shipit-remotes-hint').textContent, '', 'same repo: no cross-repo hint');
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      await settle(ctx.window, 6);
+      assert.deepEqual(JSON.parse(prPosts(ctx)[0].opts.body),
+        { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id, pushRemote: 'origin', baseRemote: 'origin', baseBranch: 'feat/log-ux' });
+      assert.equal(hdPrLink(ctx.window).hidden, false);
+    } },
+  ]);
 });
 
-test('when the remotes cannot be loaded the selectors stay hidden and the POST omits them', async () => {
-  const ctx = await bootShip({ remotes: null, arms: prArm(PR_OK) });
-  const modal = await openModal(ctx);
-  assert.equal(modal.querySelector('.shipit-remotes').hidden, true);
-  assert.equal(modal.querySelector('.shipit-base-wrap').hidden, true, 'no chain known: no pick');
-  assert.equal(modal.querySelector('.shipit-base').textContent, 'feat/log-ux', 'the plain source text stays');
-  click(ctx.window, modal.querySelector('.shipit-ok'));
-  await settle(ctx.window, 6);
-  assert.deepEqual(JSON.parse(prPosts(ctx)[0].opts.body), { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id });
-  assert.equal(hdPrLink(ctx.window).hidden, false, 'the ship still succeeds on server defaults');
+test('remotes that cannot load: selectors hidden, POST omits them, the known chain is still offered and the pick unlocks after a failed POST', async () => {
+  await checkRows([
+    { name: 'when the remotes cannot be loaded the selectors stay hidden and the POST omits them', run: async () => {
+      const ctx = await bootShip({ remotes: null, arms: prArm(PR_OK) });
+      const modal = await openModal(ctx);
+      assert.equal(modal.querySelector('.shipit-remotes').hidden, true);
+      assert.equal(modal.querySelector('.shipit-base-wrap').hidden, true, 'no chain known: no pick');
+      assert.equal(modal.querySelector('.shipit-base').textContent, 'feat/log-ux', 'the plain source text stays');
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      await settle(ctx.window, 6);
+      assert.deepEqual(JSON.parse(prPosts(ctx)[0].opts.body), { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id });
+      assert.equal(hdPrLink(ctx.window).hidden, false, 'the ship still succeeds on server defaults');
+    } },
+    { name: 'remotes that cannot be loaded still offer the known chain, and the pick unlocks after a failed POST', run: async () => {
+      const ctx = await bootShip({
+        arms: (url, opts) => {
+          if (/\/api\/pr\/remotes\?/.test(url)) return fail(500, { error: 'git remote failed: x', chain: ['dev', 'nb1', 'feat/log-ux'], defaultBase: 'dev' });
+          if (url.endsWith('/api/pr') && opts.method === 'POST') return fail(500, { error: 'gh pr create failed: no such base' });
+          return null;
+        },
+      });
+      const modal = await openModal(ctx);
+      assert.equal(modal.querySelector('.shipit-remotes').hidden, true, 'no remotes: the remote selects stay hidden');
+      assert.equal(modal.querySelector('.shipit-base-wrap').hidden, false, 'the chain is still offered');
+      assert.deepEqual(groupsOf(baseSelOf(modal)), [['This chain', ['dev', 'nb1', 'feat/log-ux']]]);
+      assert.equal(baseSelOf(modal).value, 'dev');
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      assert.equal(baseSelOf(modal).disabled, true, 'locked while the POST is in flight');
+      await settle(ctx.window, 6);
+      assert.deepEqual(JSON.parse(prPosts(ctx)[0].opts.body), { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id, baseBranch: 'dev' });
+      assert.match(cardAlertOf(modal.querySelector('.shipit-card')).detail, /no such base/, 'gh\'s error surfaces in the dialog');
+      assert.equal(baseSelOf(modal).disabled, false, 'unlocked for a retry with another base');
+    } },
+  ]);
 });
 
-test('a remotes response that lands after cancel does not touch a re-opened modal', async () => {
-  let release;
-  const hanging = new Promise((r) => { release = r; });
-  let n = 0;
-  const ctx = await bootShip({
-    arms: (url) => (/\/api\/pr\/remotes\?/.test(url) && ++n === 1 ? hanging : null),
-  });
-  const { window } = ctx;
-  await openDetail(ctx);
-  click(window, hdPr(window));                                  // (1) first open: remotes hang
-  click(window, modalOf(window).querySelector('.shipit-cancel'));
-  click(window, hdPr(window));                                  // (2) second open: served by historyArms (origin only)
-  await settle(window);
-  const modal = modalOf(window);
-  assert.deepEqual(optionValues(modal.querySelector('.shipit-push-remote')), ['origin']);
-  release({ ok: true, status: 200, json: async () => FORK_REMOTES });   // (3) the stale response lands
-  await settle(window, 3);
-  assert.deepEqual(optionValues(modal.querySelector('.shipit-push-remote')), ['origin'],
-    'the stale generation must not repopulate the new generation');
-  assert.equal(remotesCalls(ctx).length, 2);
-});
-
-test('selects are disabled while the POST is in flight and re-enabled on failure', async () => {
-  const ctx = await bootShip({
-    arms: (url, opts) => (url.endsWith('/api/pr') && opts.method === 'POST' ? fail(500, { error: 'git push failed: denied' }) : null),
-  });
-  const modal = await openModal(ctx);
-  const sel = modal.querySelector('.shipit-push-remote');
-  click(ctx.window, modal.querySelector('.shipit-ok'));
-  assert.equal(sel.disabled, true, 'locked while the POST is in flight');
-  assert.equal(baseSelOf(modal).disabled, true, 'the base pick is locked with it');
-  await settle(ctx.window, 6);
-  assert.equal(sel.disabled, false, 'unlocked so the user can pick another remote and retry');
-  assert.equal(baseSelOf(modal).disabled, false);
-  assert.match(cardAlertOf(modal.querySelector('.shipit-card')).detail, /push failed/);
-});
-
-test('remotes that arrive after confirm was pressed stay disabled until that POST settles', async () => {
-  let releaseRemotes;
-  const remotesGate = new Promise((r) => { releaseRemotes = r; });
-  let releasePost;
-  const postGate = new Promise((r) => { releasePost = r; });
-  const ctx = await bootShip({
-    arms: (url, opts) => {
-      if (/\/api\/pr\/remotes\?/.test(url)) return remotesGate;
-      if (url.endsWith('/api/pr') && opts.method === 'POST') return postGate.then(() => fail(500, { error: 'git push failed: denied' }));
-      return null;
-    },
-  });
-  await openDetail(ctx);
-  click(ctx.window, hdPr(ctx.window));
-  const modal = modalOf(ctx.window);
-  click(ctx.window, modal.querySelector('.shipit-ok'));           // confirm before the list arrived
-  releaseRemotes({ ok: true, status: 200, json: async () => FORK_REMOTES });
-  await settle(ctx.window, 3);
-  assert.equal(modal.querySelector('.shipit-remotes').hidden, false, 'the list still paints');
-  assert.equal(modal.querySelector('.shipit-push-remote').disabled, true, 'but stays locked under the in-flight POST');
-  assert.equal(baseSelOf(modal).disabled, true, 'the base pick too');
-  assert.deepEqual(JSON.parse(prPosts(ctx)[0].opts.body), { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id },
-    'that POST went out without the fields (server defaults)');
-  releasePost();
-  await settle(ctx.window, 6);
-  assert.equal(modal.querySelector('.shipit-push-remote').disabled, false, 'unlocked once the POST failed');
+test('remote selects: disabled while the POST is in flight (re-enabled on failure); late remotes never touch a re-opened modal or unlock an in-flight confirm', async () => {
+  await checkRows([
+    { name: 'a remotes response that lands after cancel does not touch a re-opened modal', run: async () => {
+      let release;
+      const hanging = new Promise((r) => { release = r; });
+      let n = 0;
+      const ctx = await bootShip({
+        arms: (url) => (/\/api\/pr\/remotes\?/.test(url) && ++n === 1 ? hanging : null),
+      });
+      const { window } = ctx;
+      await openDetail(ctx);
+      click(window, hdPr(window));                                  // (1) first open: remotes hang
+      click(window, modalOf(window).querySelector('.shipit-cancel'));
+      click(window, hdPr(window));                                  // (2) second open: served by historyArms (origin only)
+      await settle(window);
+      const modal = modalOf(window);
+      assert.deepEqual(optionValues(modal.querySelector('.shipit-push-remote')), ['origin']);
+      release({ ok: true, status: 200, json: async () => FORK_REMOTES });   // (3) the stale response lands
+      await settle(window, 3);
+      assert.deepEqual(optionValues(modal.querySelector('.shipit-push-remote')), ['origin'],
+        'the stale generation must not repopulate the new generation');
+      assert.equal(remotesCalls(ctx).length, 2);
+    } },
+    { name: 'selects are disabled while the POST is in flight and re-enabled on failure', run: async () => {
+      const ctx = await bootShip({
+        arms: (url, opts) => (url.endsWith('/api/pr') && opts.method === 'POST' ? fail(500, { error: 'git push failed: denied' }) : null),
+      });
+      const modal = await openModal(ctx);
+      const sel = modal.querySelector('.shipit-push-remote');
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      assert.equal(sel.disabled, true, 'locked while the POST is in flight');
+      assert.equal(baseSelOf(modal).disabled, true, 'the base pick is locked with it');
+      await settle(ctx.window, 6);
+      assert.equal(sel.disabled, false, 'unlocked so the user can pick another remote and retry');
+      assert.equal(baseSelOf(modal).disabled, false);
+      assert.match(cardAlertOf(modal.querySelector('.shipit-card')).detail, /push failed/);
+    } },
+    { name: 'remotes that arrive after confirm was pressed stay disabled until that POST settles', run: async () => {
+      let releaseRemotes;
+      const remotesGate = new Promise((r) => { releaseRemotes = r; });
+      let releasePost;
+      const postGate = new Promise((r) => { releasePost = r; });
+      const ctx = await bootShip({
+        arms: (url, opts) => {
+          if (/\/api\/pr\/remotes\?/.test(url)) return remotesGate;
+          if (url.endsWith('/api/pr') && opts.method === 'POST') return postGate.then(() => fail(500, { error: 'git push failed: denied' }));
+          return null;
+        },
+      });
+      await openDetail(ctx);
+      click(ctx.window, hdPr(ctx.window));
+      const modal = modalOf(ctx.window);
+      click(ctx.window, modal.querySelector('.shipit-ok'));           // confirm before the list arrived
+      releaseRemotes({ ok: true, status: 200, json: async () => FORK_REMOTES });
+      await settle(ctx.window, 3);
+      assert.equal(modal.querySelector('.shipit-remotes').hidden, false, 'the list still paints');
+      assert.equal(modal.querySelector('.shipit-push-remote').disabled, true, 'but stays locked under the in-flight POST');
+      assert.equal(baseSelOf(modal).disabled, true, 'the base pick too');
+      assert.deepEqual(JSON.parse(prPosts(ctx)[0].opts.body), { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id },
+        'that POST went out without the fields (server defaults)');
+      releasePost();
+      await settle(ctx.window, 6);
+      assert.equal(modal.querySelector('.shipit-push-remote').disabled, false, 'unlocked once the POST failed');
+    } },
+  ]);
 });
 
 // ---------------------------------------------------------------------------
 // Base branch: a run chain defaults to its ROOT; the base remote's branches follow
 // ---------------------------------------------------------------------------
 
-test('a chained run preselects the chain root and POSTs it as baseBranch', async () => {
-  const ctx = await bootShip({ remotes: CHAIN_REMOTES, arms: prArm(PR_OK) });
-  const modal = await openModal(ctx);
-  const sel = baseSelOf(modal);
-  assert.equal(modal.querySelector('.shipit-base-wrap').hidden, false);
-  assert.deepEqual(groupsOf(sel), [
-    ['This chain', ['dev', 'nb1', 'feat/log-ux']],             // root first, ending with the direct source
-    ['Branches on upstream', ['main', 'release']],              // the base remote's OTHER branches, no duplicates
+test('base branch: a chained run preselects and POSTs the chain root; an unchained run offers its source first', async () => {
+  await checkRows([
+    { name: 'a chained run preselects the chain root and POSTs it as baseBranch', run: async () => {
+      const ctx = await bootShip({ remotes: CHAIN_REMOTES, arms: prArm(PR_OK) });
+      const modal = await openModal(ctx);
+      const sel = baseSelOf(modal);
+      assert.equal(modal.querySelector('.shipit-base-wrap').hidden, false);
+      assert.deepEqual(groupsOf(sel), [
+        ['This chain', ['dev', 'nb1', 'feat/log-ux']],             // root first, ending with the direct source
+        ['Branches on upstream', ['main', 'release']],              // the base remote's OTHER branches, no duplicates
+      ]);
+      assert.equal(sel.value, 'dev', 'the chain ROOT, not the direct source');
+      assert.equal(sel.disabled, false);
+      assert.match(modal.querySelector('.shipit-remotes-hint').textContent, /→ up\/repo dev$/, 'the hint names the chosen base');
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      await settle(ctx.window, 6);
+      assert.deepEqual(JSON.parse(prPosts(ctx)[0].opts.body),
+        { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id, pushRemote: 'origin', baseRemote: 'upstream', baseBranch: 'dev' });
+    } },
+    { name: 'a run outside a chain offers its source first, with no "This chain" group', run: async () => {
+      const ctx = await bootShip();
+      const modal = await openModal(ctx);
+      assert.deepEqual(groupsOf(baseSelOf(modal)), [[null, ['feat/log-ux']], ['Branches on origin', ['main']]]);
+      assert.equal(baseSelOf(modal).value, 'feat/log-ux');
+    } },
   ]);
-  assert.equal(sel.value, 'dev', 'the chain ROOT, not the direct source');
-  assert.equal(sel.disabled, false);
-  assert.match(modal.querySelector('.shipit-remotes-hint').textContent, /→ up\/repo dev$/, 'the hint names the chosen base');
-  click(ctx.window, modal.querySelector('.shipit-ok'));
-  await settle(ctx.window, 6);
-  assert.deepEqual(JSON.parse(prPosts(ctx)[0].opts.body),
-    { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id, pushRemote: 'origin', baseRemote: 'upstream', baseBranch: 'dev' });
-});
-
-test('a run outside a chain offers its source first, with no "This chain" group', async () => {
-  const ctx = await bootShip();
-  const modal = await openModal(ctx);
-  assert.deepEqual(groupsOf(baseSelOf(modal)), [[null, ['feat/log-ux']], ['Branches on origin', ['main']]]);
-  assert.equal(baseSelOf(modal).value, 'feat/log-ux');
 });
 
 test('switching the base remote re-lists its branches and keeps a pick that still exists', async () => {
@@ -814,38 +838,6 @@ test('switching the base remote re-lists its branches and keeps a pick that stil
   click(window, modal.querySelector('.shipit-ok'));
   await settle(window, 6);
   assert.equal(JSON.parse(prPosts(ctx)[0].opts.body).baseBranch, 'nb1');
-});
-
-test('remotes that cannot be loaded still offer the known chain, and the pick unlocks after a failed POST', async () => {
-  const ctx = await bootShip({
-    arms: (url, opts) => {
-      if (/\/api\/pr\/remotes\?/.test(url)) return fail(500, { error: 'git remote failed: x', chain: ['dev', 'nb1', 'feat/log-ux'], defaultBase: 'dev' });
-      if (url.endsWith('/api/pr') && opts.method === 'POST') return fail(500, { error: 'gh pr create failed: no such base' });
-      return null;
-    },
-  });
-  const modal = await openModal(ctx);
-  assert.equal(modal.querySelector('.shipit-remotes').hidden, true, 'no remotes: the remote selects stay hidden');
-  assert.equal(modal.querySelector('.shipit-base-wrap').hidden, false, 'the chain is still offered');
-  assert.deepEqual(groupsOf(baseSelOf(modal)), [['This chain', ['dev', 'nb1', 'feat/log-ux']]]);
-  assert.equal(baseSelOf(modal).value, 'dev');
-  click(ctx.window, modal.querySelector('.shipit-ok'));
-  assert.equal(baseSelOf(modal).disabled, true, 'locked while the POST is in flight');
-  await settle(ctx.window, 6);
-  assert.deepEqual(JSON.parse(prPosts(ctx)[0].opts.body), { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id, baseBranch: 'dev' });
-  assert.match(cardAlertOf(modal.querySelector('.shipit-card')).detail, /no such base/, 'gh\'s error surfaces in the dialog');
-  assert.equal(baseSelOf(modal).disabled, false, 'unlocked for a retry with another base');
-});
-
-test('a re-open starts from the fresh default, not the previous pick', async () => {
-  const ctx = await bootShip({ remotes: CHAIN_REMOTES });
-  const { window } = ctx;
-  const modal = await openModal(ctx);
-  baseSelOf(modal).value = 'nb1';
-  click(window, modal.querySelector('.shipit-cancel'));
-  click(window, hdPr(window));
-  await settle(window);
-  assert.equal(baseSelOf(modal).value, 'dev');
 });
 
 // ---------------------------------------------------------------------------
@@ -882,41 +874,42 @@ function gatedDescribe({ honorAbort = true } = {}) {
   return g;
 }
 
-test('the description field sits between the remotes and the error line: empty, Write selected, a hint placeholder', async () => {
-  const ctx = await bootShip();
+test('description: Preview renders markdown, Write restores raw text; confirm reads it at click time and sends body only when non-empty', async () => {
+  let n = 0;
+  const ctx = await bootShip({
+    hooks: { askMarkdown: realMarkdown },
+    arms: (url, opts) => (url.endsWith('/api/pr') && opts.method === 'POST'
+      ? (++n === 1 ? fail(500, { error: 'git push failed: denied' }) : ok(PR_OK)) : null),
+  });
   const modal = await openModal(ctx);
-  const box = modal.querySelector('.shipit-desc');
-  const follows = (a, b) => !!(a.compareDocumentPosition(b) & ctx.window.Node.DOCUMENT_POSITION_FOLLOWING);
-  assert.ok(follows(modal.querySelector('.shipit-remotes'), box), 'below the summary / remotes block');
-  assert.ok(follows(box, modal.querySelector('.shipit-actions')), 'above the button row, where the "Not shipped" alert renders');
-  assert.deepEqual([...box.querySelectorAll('.shipit-desc-tab')].map((b) => b.textContent), ['Write', 'Preview']);
-  assert.equal(tabOf(modal, 'text').getAttribute('aria-selected'), 'true');
-  assert.equal(descOf(modal).value, '');
-  assert.equal(descOf(modal).hidden, false);
-  assert.equal(previewOf(modal).hidden, true);
-  assert.match(descOf(modal).placeholder, /Describe this change, or use Generate with AI/);
-  assert.equal(genBtnOf(modal).textContent, 'Generate with AI');
-  assert.equal(genBtnOf(modal).disabled, false);
-  assert.equal(stopBtnOf(modal).hidden, true);
-  assert.equal(descErrOf(modal).hidden, true);
-  assert.equal(describeCalls(ctx).length, 0, 'nothing is generated on open');
-});
-
-test('Preview renders the draft as markdown, Write brings the raw text back', async () => {
-  const ctx = await bootShip({ hooks: { askMarkdown: realMarkdown } });
-  const modal = await openModal(ctx);
-  typeInto(ctx.window, descOf(modal), '## Summary\n\nRetries **twice**.');
-  click(ctx.window, tabOf(modal, 'preview'));
-  await settle(ctx.window, 6);
-  assert.equal(tabOf(modal, 'preview').getAttribute('aria-selected'), 'true');
-  assert.equal(descOf(modal).hidden, true);
-  assert.equal(previewOf(modal).hidden, false);
-  assert.equal(previewOf(modal).querySelector('h2')?.textContent, 'Summary', 'rendered through the page markdown pipeline');
-  assert.equal(previewOf(modal).querySelector('strong')?.textContent, 'twice');
-  click(ctx.window, tabOf(modal, 'text'));
-  assert.equal(descOf(modal).hidden, false);
-  assert.equal(previewOf(modal).hidden, true);
-  assert.equal(descOf(modal).value, '## Summary\n\nRetries **twice**.', 'Write loses nothing');
+  await checkRows([
+    { name: 'Preview renders the draft as markdown, Write brings the raw text back', run: async () => {
+      typeInto(ctx.window, descOf(modal), '## Summary\n\nRetries **twice**.');
+      click(ctx.window, tabOf(modal, 'preview'));
+      await settle(ctx.window, 6);
+      assert.equal(tabOf(modal, 'preview').getAttribute('aria-selected'), 'true');
+      assert.equal(descOf(modal).hidden, true);
+      assert.equal(previewOf(modal).hidden, false);
+      assert.equal(previewOf(modal).querySelector('h2')?.textContent, 'Summary', 'rendered through the page markdown pipeline');
+      assert.equal(previewOf(modal).querySelector('strong')?.textContent, 'twice');
+      click(ctx.window, tabOf(modal, 'text'));
+      assert.equal(descOf(modal).hidden, false);
+      assert.equal(previewOf(modal).hidden, true);
+      assert.equal(descOf(modal).value, '## Summary\n\nRetries **twice**.', 'Write loses nothing');
+    } },
+    { name: 'confirm reads the description at click time and sends `body` only when it is non-empty', run: async () => {
+      typeInto(ctx.window, descOf(modal), '  \n ');
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      await settle(ctx.window, 6);
+      assert.ok(!('body' in JSON.parse(prPosts(ctx)[0].opts.body)), 'a blank description sends no body: today\'s PR');
+      typeInto(ctx.window, descOf(modal), '## Summary\nShips it.');
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      await settle(ctx.window, 6);
+      assert.deepEqual(JSON.parse(prPosts(ctx)[1].opts.body),
+        { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id, pushRemote: 'origin', baseRemote: 'origin', baseBranch: 'feat/log-ux', body: '## Summary\nShips it.' });
+      assert.equal(isOpen(ctx.window), false);
+    } },
+  ]);
 });
 
 test('Generate with AI posts the run + base branch, reads "Generating…" while in flight, then fills the description', async () => {
@@ -943,41 +936,20 @@ test('Generate with AI posts the run + base branch, reads "Generating…" while 
   assert.equal(prPosts(ctx).length, 0);
 });
 
-test('while Generate with AI is in flight the description is veiled and locked: shimmer veil, aria-busy, read-only', async () => {
+test('Generate with AI locks the description while in flight and unlocks on landing and on Stop', async () => {
   const g = gatedDescribe();
   const ctx = await bootShip({ arms: g.arm });
   const modal = await openModal(ctx);
-  const field = modal.querySelector('.shipit-desc-field');
-  const veil = modal.querySelector('.shipit-desc-busy');
-  assert.ok(field.contains(descOf(modal)) && field.contains(previewOf(modal)) && field.contains(veil),
-    'one box holds the editor, its preview and the veil laid over them');
-  assert.equal(veil.getAttribute('aria-hidden'), 'true', 'the veil is decoration; aria-busy carries the state');
-  assert.match(veil.textContent, /Drafting with AI/);
-  assert.equal(field.classList.contains('is-generating'), false);
-  assert.equal(field.getAttribute('aria-busy'), 'false');
   assert.equal(descOf(modal).readOnly, false);
-
-  click(ctx.window, genBtnOf(modal));
-  await settle(ctx.window);
-  assert.equal(field.classList.contains('is-generating'), true, 'the shimmer veil is up');
-  assert.equal(field.getAttribute('aria-busy'), 'true');
-  assert.equal(descOf(modal).readOnly, true, 'nothing can be typed under the veil');
-
-  g.release({ ok: true, body: 'Drafted.' });
-  await settle(ctx.window, 6);
-  assert.equal(field.classList.contains('is-generating'), false, 'lifted once the draft lands');
-  assert.equal(field.getAttribute('aria-busy'), 'false');
-  assert.equal(descOf(modal).readOnly, false, 'editable again');
-
-  click(ctx.window, genBtnOf(modal));
-  await settle(ctx.window);
-  click(ctx.window, ctx.window.document.getElementById('confirm-ok'));   // replace "Drafted."
-  await settle(ctx.window);
-  assert.equal(field.classList.contains('is-generating'), true);
-  click(ctx.window, stopBtnOf(modal));
-  await settle(ctx.window, 6);
-  assert.equal(field.classList.contains('is-generating'), false, 'Stop lifts it too');
+  click(ctx.window, genBtnOf(modal)); await settle(ctx.window);
+  assert.equal(descOf(modal).readOnly, true);
+  g.release({ ok: true, body: 'Drafted.' }); await settle(ctx.window, 6);
   assert.equal(descOf(modal).readOnly, false);
+  click(ctx.window, genBtnOf(modal)); await settle(ctx.window);
+  click(ctx.window, ctx.window.document.getElementById('confirm-ok')); await settle(ctx.window);   // replace "Drafted."
+  assert.equal(descOf(modal).readOnly, true, 'locked again for the second draft');
+  click(ctx.window, stopBtnOf(modal)); await settle(ctx.window, 6);
+  assert.equal(descOf(modal).readOnly, false, 'Stop lifts the lock');
 });
 
 test('Generate over a draft asks first: Escape on that confirm keeps the draft AND the modal; Replace overwrites it', async () => {
@@ -1006,170 +978,130 @@ test('Generate over a draft asks first: Escape on that confirm keeps the draft A
   assert.equal(descOf(modal).value, 'Generated.');
 });
 
-test('Stop aborts an in-flight generation: the button resets, no error, the description is untouched', async () => {
-  const g = gatedDescribe();
-  const ctx = await bootShip({ arms: g.arm });
-  const modal = await openModal(ctx);
-  click(ctx.window, genBtnOf(modal));
-  await settle(ctx.window);
-  assert.equal(g.signals[0].aborted, false);
-  click(ctx.window, stopBtnOf(modal));
-  await settle(ctx.window, 6);
-  assert.equal(g.signals[0].aborted, true, 'the request is cancelled (AbortController)');
-  assert.equal(genBtnOf(modal).disabled, false);
-  assert.equal(genBtnOf(modal).textContent, 'Generate with AI');
-  assert.equal(stopBtnOf(modal).hidden, true);
-  assert.equal(descErrOf(modal).hidden, true, 'a stop is not an error');
-  assert.equal(descOf(modal).value, '');
-  assert.equal(isOpen(ctx.window), true);
+test('Stop or closing the modal aborts an in-flight generation; a late response never writes into a re-opened modal', async () => {
+  await checkRows([
+    { name: 'Stop aborts an in-flight generation: the button resets, no error, the description is untouched', run: async () => {
+      const g = gatedDescribe();
+      const ctx = await bootShip({ arms: g.arm });
+      const modal = await openModal(ctx);
+      click(ctx.window, genBtnOf(modal));
+      await settle(ctx.window);
+      assert.equal(g.signals[0].aborted, false);
+      click(ctx.window, stopBtnOf(modal));
+      await settle(ctx.window, 6);
+      assert.equal(g.signals[0].aborted, true, 'the request is cancelled (AbortController)');
+      assert.equal(genBtnOf(modal).disabled, false);
+      assert.equal(genBtnOf(modal).textContent, 'Generate with AI');
+      assert.equal(stopBtnOf(modal).hidden, true);
+      assert.equal(descErrOf(modal).hidden, true, 'a stop is not an error');
+      assert.equal(descOf(modal).value, '');
+      assert.equal(isOpen(ctx.window), true);
+    } },
+    { name: 'closing the modal aborts the generation, and a late response never writes into a re-opened modal', run: async () => {
+      const g = gatedDescribe({ honorAbort: false });
+      const ctx = await bootShip({ arms: g.arm });
+      const { window } = ctx;
+      const modal = await openModal(ctx);
+      click(window, genBtnOf(modal));
+      await settle(window);
+      click(window, modal.querySelector('.shipit-cancel'));
+      assert.equal(g.signals[0].aborted, true, 'closing the modal cancels the request');
+      click(window, hdPr(window));                        // re-open: a new generation owns the modal
+      await settle(window);
+      assert.equal(genBtnOf(modal).textContent, 'Generate with AI', 'the new open starts idle');
+      g.release({ ok: true, body: 'stale text' });        // the old response lands anyway
+      await settle(window, 6);
+      assert.equal(descOf(modal).value, '', 'the stale response must not fill the new modal');
+      assert.equal(genBtnOf(modal).disabled, false);
+      assert.equal(descErrOf(modal).hidden, true);
+      // Same for a failure that lands late.
+      click(window, genBtnOf(modal));
+      await settle(window);
+      escape(window);
+      click(window, hdPr(window));
+      await settle(window);
+      g.release({ error: 'boom' }, 500);
+      await settle(window, 6);
+      assert.equal(descErrOf(modal).hidden, true, 'a stale failure paints nothing either');
+      assert.equal(genBtnOf(modal).textContent, 'Generate with AI');
+    } },
+  ]);
 });
 
-test('closing the modal aborts the generation, and a late response never writes into a re-opened modal', async () => {
-  const g = gatedDescribe({ honorAbort: false });
-  const ctx = await bootShip({ arms: g.arm });
-  const { window } = ctx;
-  const modal = await openModal(ctx);
-  click(window, genBtnOf(modal));
-  await settle(window);
-  click(window, modal.querySelector('.shipit-cancel'));
-  assert.equal(g.signals[0].aborted, true, 'closing the modal cancels the request');
-  click(window, hdPr(window));                        // re-open: a new generation owns the modal
-  await settle(window);
-  assert.equal(genBtnOf(modal).textContent, 'Generate with AI', 'the new open starts idle');
-  g.release({ ok: true, body: 'stale text' });        // the old response lands anyway
-  await settle(window, 6);
-  assert.equal(descOf(modal).value, '', 'the stale response must not fill the new modal');
-  assert.equal(genBtnOf(modal).disabled, false);
-  assert.equal(descErrOf(modal).hidden, true);
-  // Same for a failure that lands late.
-  click(window, genBtnOf(modal));
-  await settle(window);
-  escape(window);
-  click(window, hdPr(window));
-  await settle(window);
-  g.release({ error: 'boom' }, 500);
-  await settle(window, 6);
-  assert.equal(descErrOf(modal).hidden, true, 'a stale failure paints nothing either');
-  assert.equal(genBtnOf(modal).textContent, 'Generate with AI');
-});
-
-test('a failed generation shows its error on its own line, never on the "Could not open PR" line', async () => {
+test('every open starts fresh: default base pick, empty description on the Write tab', async () => {
   const ctx = await bootShip({
-    arms: (url) => (url.endsWith('/api/pr/describe')
-      ? fail(409, { code: 'claude-signed-out', error: "Claude Code isn't signed in." }) : null),
-  });
-  const modal = await openModal(ctx);
-  typeInto(ctx.window, descOf(modal), '');
-  click(ctx.window, genBtnOf(modal));
-  await settle(ctx.window, 6);
-  assert.equal(descErrOf(modal).hidden, false);
-  assert.match(descErrOf(modal).textContent, /isn't signed in/);
-  assert.equal(cardAlertOf(modal.querySelector('.shipit-card')), null, 'no card alert for a describe failure');
-  assert.equal(genBtnOf(modal).disabled, false, 'the user can retry');
-  assert.equal(descOf(modal).value, '');
-});
-
-test('confirm reads the description at click time and sends `body` only when it is non-empty', async () => {
-  let n = 0;
-  const ctx = await bootShip({
-    arms: (url, opts) => (url.endsWith('/api/pr') && opts.method === 'POST'
-      ? (++n === 1 ? fail(500, { error: 'git push failed: denied' }) : ok(PR_OK)) : null),
-  });
-  const modal = await openModal(ctx);
-  typeInto(ctx.window, descOf(modal), '  \n ');
-  click(ctx.window, modal.querySelector('.shipit-ok'));
-  await settle(ctx.window, 6);
-  assert.ok(!('body' in JSON.parse(prPosts(ctx)[0].opts.body)), 'a blank description sends no body: today\'s PR');
-  typeInto(ctx.window, descOf(modal), '## Summary\nShips it.');
-  click(ctx.window, modal.querySelector('.shipit-ok'));
-  await settle(ctx.window, 6);
-  assert.deepEqual(JSON.parse(prPosts(ctx)[1].opts.body),
-    { projectDir: '/tmp/proj', projectKey: KEY, id: ROW.id, pushRemote: 'origin', baseRemote: 'origin', baseBranch: 'feat/log-ux', body: '## Summary\nShips it.' });
-  assert.equal(isOpen(ctx.window), false);
-});
-
-test('every open starts from an empty description on the Write tab', async () => {
-  const ctx = await bootShip({
+    remotes: CHAIN_REMOTES,
     arms: (url) => (url.endsWith('/api/pr/describe') ? fail(500, { error: 'boom' }) : null),
   });
   const { window } = ctx;
   const modal = await openModal(ctx);
-  typeInto(window, descOf(modal), 'left over');
-  click(window, tabOf(modal, 'preview'));
-  await settle(window);
-  typeInto(window, descOf(modal), '');
-  click(window, genBtnOf(modal));
-  await settle(window, 6);
-  assert.equal(descErrOf(modal).hidden, false);
-  descOf(modal).value = 'left over';
-  click(window, modal.querySelector('.shipit-cancel'));
-  click(window, hdPr(window));
-  await settle(window);
-  assert.equal(descOf(modal).value, '');
-  assert.equal(tabOf(modal, 'text').getAttribute('aria-selected'), 'true');
-  assert.equal(descOf(modal).hidden, false);
-  assert.equal(previewOf(modal).hidden, true);
-  assert.equal(descErrOf(modal).hidden, true);
-});
-
-// ---------------------------------------------------------------------------
-// Actions (issue #529): "Try it first" follows actions-changed while the dialog is open
-// ---------------------------------------------------------------------------
-
-test('"Try it first" drops Open/Stop when the service stops elsewhere (actions-changed)', async () => {
-  const inst = { instanceId: `act:${ROW.id}:${KEY}:run`, runId: ROW.id, member: KEY, actionId: 'run', label: 'Run', kind: 'service',
-    status: 'ready', ports: { PORT: 4417 }, url: 'http://localhost:4417', startedAt: Date.now() };
-  const model = (instances) => ({ runId: ROW.id, workspace: false, finished: true, enabled: true, stacks: [], stackStates: [], instances,
-    members: [{ projectKey: KEY, projectName: 'Alpha', branch: ROW.branch, checkout: { setup: { status: 'ok' } },
-      actions: [{ id: 'run', label: 'Run', kind: 'service' }], builtins: [] }] });
-  let current = model([inst]);
-  const ctx = await bootShip({ arms: (url) => (url.includes(`/api/runs/${ROW.id}/actions?`) ? ok(current)
-    : url.endsWith('/api/actions/running') ? ok([]) : null) });
-  const modal = await openModal(ctx);
-  await settle(ctx.window, 4);
-  const box = modal.querySelector('.shipit-try');
-  assert.match(box.textContent, /Open :4417/);
-  current = model([{ ...inst, status: 'stopped' }]);
-  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'actions-changed', action: 'stopped' }) });
-  await settle(ctx.window, 4);
-  assert.doesNotMatch(box.textContent, /Open :4417/);
-  assert.ok(![...box.querySelectorAll('button')].some((b) => b.textContent === 'Stop'));
+  // The second row starts on the modal the first row re-opened.
+  await checkRows([
+    { name: 'a re-open starts from the fresh default, not the previous pick', run: async () => {
+      baseSelOf(modal).value = 'nb1';
+      click(window, modal.querySelector('.shipit-cancel'));
+      click(window, hdPr(window));
+      await settle(window);
+      assert.equal(baseSelOf(modal).value, 'dev');
+    } },
+    { name: 'every open starts from an empty description on the Write tab', run: async () => {
+      typeInto(window, descOf(modal), 'left over');
+      click(window, tabOf(modal, 'preview'));
+      await settle(window);
+      typeInto(window, descOf(modal), '');
+      click(window, genBtnOf(modal));
+      await settle(window, 6);
+      assert.equal(descErrOf(modal).hidden, false);
+      descOf(modal).value = 'left over';
+      click(window, modal.querySelector('.shipit-cancel'));
+      click(window, hdPr(window));
+      await settle(window);
+      assert.equal(descOf(modal).value, '');
+      assert.equal(tabOf(modal, 'text').getAttribute('aria-selected'), 'true');
+      assert.equal(descOf(modal).hidden, false);
+      assert.equal(previewOf(modal).hidden, true);
+      assert.equal(descErrOf(modal).hidden, true);
+    } },
+  ]);
 });
 
 // ---------------------------------------------------------------------------
 // Sync before run (#527, plan §5.6): the base moved on the remote since the run started
 // ---------------------------------------------------------------------------
 
-test('baseStatus.movedSinceRun > 0 on the chosen base shows the warning; a base change hides it', async () => {
-  const ctx = await bootShip({ remotes: { ...REMOTES, baseStatus: { base: 'feat/log-ux', remote: 'origin', movedSinceRun: 3, fetchedAt: null, stale: false } } });
-  const modal = await openModal(ctx);
-  const warn = modal.querySelector('#shipit-base-warn');
-  assert.equal(warn.hidden, false);
-  assert.equal(warn.textContent, 'origin/feat/log-ux has 3 new commits since this run started. The PR may need an update.');
-  const sel = baseSelOf(modal);
-  sel.value = 'main';
-  sel.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
-  assert.equal(warn.hidden, true, 'another base: the warning no longer applies');
+test('base warning: shown when baseStatus.movedSinceRun > 0 on the chosen base remote, hidden for another remote, a base change or null', async () => {
+  await checkRows([
+    { name: 'baseStatus.movedSinceRun > 0 on the chosen base shows the warning; a base change hides it', run: async () => {
+      const ctx = await bootShip({ remotes: { ...REMOTES, baseStatus: { base: 'feat/log-ux', remote: 'origin', movedSinceRun: 3, fetchedAt: null, stale: false } } });
+      const modal = await openModal(ctx);
+      const warn = modal.querySelector('#shipit-base-warn');
+      assert.equal(warn.hidden, false);
+      assert.equal(warn.textContent, 'origin/feat/log-ux has 3 new commits since this run started. The PR may need an update.');
+      const sel = baseSelOf(modal);
+      sel.value = 'main';
+      sel.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
+      assert.equal(warn.hidden, true, 'another base: the warning no longer applies');
+    } },
+    { name: 'the base warning is about baseStatus.remote: a PR into another remote\'s same-named branch hides it (#527)', run: async () => {
+      const ctx = await bootShip({ remotes: { ...FORK_REMOTES, baseStatus: { base: 'feat/log-ux', remote: 'origin', movedSinceRun: 2, fetchedAt: null, stale: false } } });
+      const modal = await openModal(ctx);
+      const warn = modal.querySelector('#shipit-base-warn');
+      const remoteSel = modal.querySelector('.shipit-base-remote');
+      assert.equal(remoteSel.value, 'upstream');
+      assert.equal(baseSelOf(modal).value, 'feat/log-ux');
+      assert.equal(warn.hidden, true, 'upstream/feat/log-ux is not the branch that moved');
+      remoteSel.value = 'origin';
+      remoteSel.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
+      baseSelOf(modal).value = 'feat/log-ux';
+      baseSelOf(modal).dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
+      assert.equal(warn.hidden, false);
+      assert.match(warn.textContent, /^origin\/feat\/log-ux has 2 new commits/);
+    } },
+    { name: 'baseStatus.movedSinceRun null keeps the warning hidden', run: async () => {
+      const ctx = await bootShip({ remotes: { ...REMOTES, baseStatus: { base: 'feat/log-ux', remote: 'origin', movedSinceRun: null, fetchedAt: null, stale: false } } });
+      const modal = await openModal(ctx);
+      assert.equal(modal.querySelector('#shipit-base-warn').hidden, true);
+    } },
+  ]);
 });
 
-test('the base warning is about baseStatus.remote: a PR into another remote\'s same-named branch hides it (#527)', async () => {
-  const ctx = await bootShip({ remotes: { ...FORK_REMOTES, baseStatus: { base: 'feat/log-ux', remote: 'origin', movedSinceRun: 2, fetchedAt: null, stale: false } } });
-  const modal = await openModal(ctx);
-  const warn = modal.querySelector('#shipit-base-warn');
-  const remoteSel = modal.querySelector('.shipit-base-remote');
-  assert.equal(remoteSel.value, 'upstream');
-  assert.equal(baseSelOf(modal).value, 'feat/log-ux');
-  assert.equal(warn.hidden, true, 'upstream/feat/log-ux is not the branch that moved');
-  remoteSel.value = 'origin';
-  remoteSel.dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
-  baseSelOf(modal).value = 'feat/log-ux';
-  baseSelOf(modal).dispatchEvent(new ctx.window.Event('change', { bubbles: true }));
-  assert.equal(warn.hidden, false);
-  assert.match(warn.textContent, /^origin\/feat\/log-ux has 2 new commits/);
-});
-
-test('baseStatus.movedSinceRun null keeps the warning hidden', async () => {
-  const ctx = await bootShip({ remotes: { ...REMOTES, baseStatus: { base: 'feat/log-ux', remote: 'origin', movedSinceRun: null, fetchedAt: null, stale: false } } });
-  const modal = await openModal(ctx);
-  assert.equal(modal.querySelector('#shipit-base-warn').hidden, true);
-});

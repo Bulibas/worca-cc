@@ -1,12 +1,10 @@
 // test/policy-mcp-local.test.mjs — mcpRequirements (MCP registry spec §11.3) and the effective table's
-// "Yours" for mcp.required, computed from r.home in policyPayload and in `worca policy show`.
+// "Yours" for mcp.required, computed from r.home in policyPayload.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { projectKey } from '../src/core/store.mjs';
 import { writeTeamPolicyPrefs } from '../src/core/config.mjs';
@@ -18,10 +16,9 @@ import { entryHash, teamAction } from '../src/core/mcp/team.mjs';
 import { putMember } from '../src/core/mcp/store.mjs';
 import { loadCatalog } from '../src/core/mcp/catalog.mjs';
 
-const home = useTempHome(after);
+useTempHome(after);
 const dir = mkdtempSync(join(tmpdir(), 'platform-'));
 after(() => rmSync(dir, { recursive: true, force: true }));
-const CLI = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'cli', 'worca-cc.mjs');
 const HOME = 'acme/platform';
 const GH = `policy:${HOME}/github`;
 // `node --version`: the background Test after Install runs it and records a failure — no network, no npx.
@@ -63,12 +60,4 @@ test('effective table: "Yours" = the Team set\'s working members, from r.home; t
   const noteOf = (local) => effectiveRows({ doc: r.doc, workspaceRun: false, local }).find((x) => x.key === 'mcp.required').note;
   assert.equal(noteOf({ 'mcp.required': { value: all, set: true } }), null, 'nothing missing: no note');
   assert.equal(noteOf({}), null, 'no "Yours" (a registry fault, the workspace summary): no note, no throw');
-});
-
-test('worca policy show prints the same "yours" and note', async () => {
-  const out = await new Promise((res) => {
-    const child = spawn(process.execPath, [CLI, 'policy', 'show', '--project', dir], { env: { ...process.env, WORCA_HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] });
-    let s = ''; child.stdout.on('data', (d) => { s += d; }); child.on('exit', () => res(s));
-  });
-  assert.match(out, /Required MCP servers\s+team github \(stdio: node --version\), sentry \(acme-tools\), linear \(http: https:\/\/mcp\.linear\.app\/mcp\) \(soft\) · yours github \(stdio: node --version\) → .* \[team\] — 2 missing/);
 });

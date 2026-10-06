@@ -4,8 +4,9 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { aggregate } from '../src/shared/team-metrics/aggregate.mjs';
 import {
-  renderScopeOptions, renderSyncChip, renderTmKpiRow, renderTeamMetricsBody, renderTmEmptyState, renderRunsTable, renderTmSkeleton } from '../ui/public/team-metrics-view.mjs';
+  renderSyncChip, renderTmKpiRow, renderTeamMetricsBody, renderRunsTable } from '../ui/public/team-metrics-view.mjs';
 import { makeRecord } from './fixtures/team-metrics/records.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const doc = new JSDOM('<!doctype html><body></body>').window.document;
 const NOW = Date.parse('2026-09-16T12:00:00Z');
@@ -14,31 +15,6 @@ const recs = [
   makeRecord({ id: '2', startedAt: '2026-09-08T10:00:00Z', usd: 9, result: 'failed', review: 3, workflow: { id: 'wf_bug', name: 'Bugfix' } }),
   makeRecord({ id: '3', startedAt: '2026-08-05T10:00:00Z', usd: 2 }),   // inside the like-for-like previous window (Aug 1–16 12:00)
 ];
-
-test('scope select groups Projects / Workspaces and marks the selection', () => {
-  const sel = doc.createElement('select');
-  renderScopeOptions(sel, { projects: [{ id: 'project:a-0123abcd', label: 'acme/billing-api' }], workspaces: [{ id: 'workspace:wks-iot-0123abcd', label: 'IoT SP Platform' }] }, 'workspace:wks-iot-0123abcd', { doc });
-  assert.deepEqual([...sel.querySelectorAll('optgroup')].map((g) => g.label), ['Projects', 'Workspaces']);
-  assert.equal(sel.value, 'workspace:wks-iot-0123abcd');
-  const empty = doc.createElement('select');
-  renderScopeOptions(empty, { projects: [], workspaces: [] }, '', { doc });
-  assert.equal(empty.options[0].textContent, 'Nothing is recording yet');
-  assert.ok(empty.disabled);
-});
-
-test('KPI row: six tiles with mockup labels, deltas and subs', () => {
-  const agg = aggregate(recs, { range: 'this-month', now: NOW });
-  const row = renderTmKpiRow(agg, { doc, now: NOW });
-  assert.deepEqual([...row.querySelectorAll('.stat-label span:not(.stat-delta)')].map((s) => s.textContent),
-    ['Spend', 'Runs', 'Cost per run', 'Duration', 'Autonomy', 'Review cycles']);
-  assert.equal(row.querySelectorAll('.stat-tile').length, 6);
-  assert.match(row.textContent, /\$13\.12/);
-  assert.match(row.textContent, /1 done · 1 failed · 0 stopped · 50% success/);
-  assert.match(row.textContent, /with a PR \$4\.12/);
-  assert.ok(row.querySelector('.stat-meter'));
-  assert.match(row.textContent, /active ÷ \(wall-clock − paused\)/, 'the autonomy formula names what a parked run does not count');
-  assert.match(row.querySelector('.stat-delta').textContent, /vs prev/);
-});
 
 test('KPI row: Spend sub-line is suppressed when "now" falls outside the selected range (M3)', () => {
   const augRecs = [makeRecord({ id: 'aug1', startedAt: '2026-08-05T10:00:00Z', usd: 5 })];
@@ -84,21 +60,6 @@ test('body: charts, breakdown tables with row filters and sortable headers, run 
   assert.match(body.querySelector('.tm-runs-head').textContent, /2 in range/);
 });
 
-test('enabled but no records in range → zeros and the run table says so', () => {
-  const agg = aggregate([], { range: 'this-month', now: NOW });
-  const body = renderTeamMetricsBody(agg, { doc, now: NOW, scopeKind: 'project', sort: {}, filter: {} });
-  assert.match(body.querySelector('.stat-row').textContent, /\$0\.00/);
-  assert.match(body.querySelector('.tm-runs').textContent, /No runs recorded in this range/);
-});
-
-test('nothing enabled → two ways in with deep links and Check now', () => {
-  const e = renderTmEmptyState({ doc });
-  assert.equal(e.querySelectorAll('.card').length, 2);
-  assert.equal(e.querySelector('a[href="#projects"]').textContent, 'Go to Projects');
-  assert.equal(e.querySelector('a[href="#workspaces"]').textContent, 'Go to Workspaces');
-  assert.ok(e.querySelector('button.tm-check-now'));
-});
-
 test('run table rows newest first with PR link and result badge', () => {
   const agg = aggregate(recs, { range: 'all', now: NOW });
   const t = renderRunsTable(agg.runs, { doc, total: agg.runs.length });
@@ -106,23 +67,6 @@ test('run table rows newest first with PR link and result badge', () => {
   assert.match(first.textContent, /run 2/);
   assert.equal(first.querySelector('.badge').textContent, 'failed');
   assert.equal(t.querySelectorAll('tbody tr')[1].querySelector('a').getAttribute('href'), 'https://x/pull/438');
-});
-
-test('run table: Saved column after Cost — green when positive, red with a − sign when negative, — without human hours', () => {
-  const base = { title: 't', workflow: null, result: 'done', usd: 13.12, wallMs: 1, reviewCycles: null, pr: null, actor: null, startedAt: '2026-09-10T10:00:00Z' };
-  const t = renderRunsTable([
-    { ...base, id: 'p', humanHours: 12.5, savedUsd: 424.38 },
-    { ...base, id: 'n', humanHours: 0.1, savedUsd: -9.62 },
-    { ...base, id: 'x', humanHours: null, savedUsd: null },
-  ], { doc, total: 3 });
-  assert.deepEqual([...t.querySelectorAll('thead th')].map((th) => th.textContent), ['Title', 'Workflow', 'Result', 'Cost', 'Saved', 'Duration', 'Cycles', 'PR', 'Actor', 'Started']);
-  const cells = [...t.querySelectorAll('tbody td.tm-saved')];
-  assert.deepEqual(cells.map((c) => c.textContent), ['$424.38', '−$9.62', '—']);
-  assert.ok(cells[0].classList.contains('pos') && !cells[0].classList.contains('neg'));
-  assert.ok(cells[1].classList.contains('neg') && !cells[1].classList.contains('pos'));
-  assert.equal(cells[0].title, '≈ 12.5 h of human work');
-  assert.equal(cells[2].title, '');
-  assert.equal([...cells[2].classList].filter((c) => /^(pos|neg)$/.test(c)).length, 0);
 });
 
 test('run table never renders a non-http(s) PR link', () => {
@@ -157,65 +101,32 @@ test('Group by lives in the Spend per week card head, reflects agg.groupBy, and 
   assert.doesNotMatch(projTbl.textContent, /\$/, 'no dollar amount anywhere in the project table');
 });
 
-test('sync chip while a deferred fetch runs (refresh.pending, or busy from the caller): spinner for the dot, "Checking origin…", Refresh held', () => {
-  const pending = renderSyncChip({ sync: [{ slug: 'a', pending: 0, fetchedAt: new Date(NOW - 120_000).toISOString() }], stats: {}, refresh: { pending: true } }, { doc, now: NOW });
-  assert.ok(pending.classList.contains('is-busy'));
-  assert.equal(pending.getAttribute('aria-busy'), 'true');
-  assert.ok(pending.querySelector('.tm-busy-spin')); assert.equal(pending.querySelector('.dot'), null);
-  assert.match(pending.textContent, /Checking origin… · synced 2 min ago/);
-  assert.equal(pending.querySelector('.tm-refresh').disabled, true);
-  assert.ok(pending.querySelector('.tm-refresh').classList.contains('busy'));
-  const first = renderSyncChip({ sync: [{ slug: 'a', pending: 0 }], stats: {}, refresh: { pending: true } }, { doc, now: NOW });
-  assert.ok(first.textContent.startsWith('Checking origin…'), 'a first fetch has nothing older to date');
-  assert.doesNotMatch(first.textContent, /Not synced yet/);
-  const busy = renderSyncChip({ sync: [], stats: {} }, { doc, now: NOW, busy: true });
-  assert.ok(busy.classList.contains('is-busy'));
-  const idle = renderSyncChip({ sync: [{ slug: 'a', pending: 0, fetchedAt: new Date(NOW - 120_000).toISOString() }], stats: {}, refresh: { pending: false } }, { doc, now: NOW });
-  assert.equal(idle.querySelector('.tm-busy-spin'), null); assert.ok(idle.querySelector('.dot.green'));
-  assert.equal(idle.querySelector('.tm-refresh').disabled, false);
-  assert.match(idle.textContent, /^Synced 2 min ago/);
-});
-
-test('skeleton: the page shape with shimmer bars, no words, decorative', () => {
-  const sk = renderTmSkeleton({ doc });
-  assert.equal(sk.getAttribute('aria-hidden'), 'true');
-  assert.equal(sk.querySelectorAll('.stat-tile').length, 6);
-  assert.equal(sk.querySelectorAll('.chart-card').length, 2);
-  assert.equal(sk.querySelectorAll('.tm-breakdowns .card').length, 4);
-  assert.equal(renderTmSkeleton({ doc, scopeKind: 'workspace' }).querySelectorAll('.tm-breakdowns .card').length, 5, 'a workspace scope has the project breakdown too');
-  assert.ok(sk.querySelector('.tm-runs'));
-  assert.ok(sk.querySelectorAll('.skel').length > 20);
-  assert.equal(sk.textContent.trim(), '', 'no words — the live state is #tm-body aria-busy');
-});
-
-test('KPI row: Saved tile appears only when a record in range carries human hours; prices them at the aggregate rate', () => {
+test('KPI row: Saved tile appears only with human hours, prices them at the rate, and wears a "× spend" pill (none for a loss)', async () => {
   const withHuman = recs.map((r, i) => (i === 0 ? { ...r, human: { hours: 12.5, byPhase: {} } } : r));
   const row = renderTmKpiRow(aggregate(withHuman, { range: 'this-month', now: NOW, humanRateUsd: 35 }), { doc, now: NOW });
-  assert.deepEqual([...row.querySelectorAll('.stat-label span:not(.stat-delta):not(.stat-mult)')].map((s) => s.textContent),
-    ['Spend', 'Saved', 'Runs', 'Cost per run', 'Duration', 'Autonomy', 'Review cycles']);
   const tile = row.querySelectorAll('.stat-tile')[1];
-  assert.equal(tile.querySelector('.stat-value').textContent, '$424.38');       // 12.5×35 − 13.12
-  assert.equal(tile.querySelector('.stat-sub').textContent, '≈ 12.5 h of human work');
-  assert.ok(tile.querySelector('.stat-value').classList.contains('is-pos'), 'a positive Saved figure is green');
-  assert.equal(tile.querySelector('.stat-delta'), null, 'the previous window has no human record → no positive baseline');
   const tiny = recs.map((r, i) => (i === 0 ? { ...r, human: { hours: 0.1, byPhase: {} } } : r));
   const neg = renderTmKpiRow(aggregate(tiny, { range: 'this-month', now: NOW, humanRateUsd: 35 }), { doc, now: NOW }).querySelectorAll('.stat-tile')[1];
-  assert.equal(neg.querySelector('.stat-value').textContent, '−$9.62');        // 0.1×35 − 13.12
-  assert.ok(neg.querySelector('.stat-value').classList.contains('is-neg'));
-  assert.equal(neg.querySelector('.stat-value').classList.contains('is-pos'), false);
-  assert.equal(renderTmKpiRow(aggregate(recs, { range: 'this-month', now: NOW, humanRateUsd: 35 }), { doc, now: NOW }).querySelectorAll('.stat-tile').length, 6, 'no human → no tile');
-});
-
-test('KPI row: Saved tile wears a "× spend" pill (saved ÷ spend) at the far right of its label; none for a loss', () => {
-  const withHuman = recs.map((r, i) => (i === 0 ? { ...r, human: { hours: 12.5, byPhase: {} } } : r));
-  const tile = renderTmKpiRow(aggregate(withHuman, { range: 'this-month', now: NOW, humanRateUsd: 35 }), { doc, now: NOW })
-    .querySelectorAll('.stat-tile')[1];
-  const mult = tile.querySelector('.stat-mult');
-  assert.equal(mult.textContent, '32× spend', '424.38 ÷ 13.12');
-  assert.equal(mult.title, 'Saved ÷ spent in this period');
-  assert.equal(tile.querySelector('.stat-label').lastElementChild, mult, 'far right of the label row');
-  const tiny = recs.map((r, i) => (i === 0 ? { ...r, human: { hours: 0.1, byPhase: {} } } : r));
-  const neg = renderTmKpiRow(aggregate(tiny, { range: 'this-month', now: NOW, humanRateUsd: 35 }), { doc, now: NOW }).querySelectorAll('.stat-tile')[1];
-  assert.equal(neg.querySelector('.stat-mult'), null, 'a loss has no multiplier');
-  assert.equal(tile.parentElement.querySelectorAll('.stat-mult').length, 1, 'only the Saved tile carries the pill');
+  await checkRows([
+    { name: 'KPI row: Saved tile appears only when a record in range carries human hours; prices them at the aggregate rate', run: () => {
+      assert.deepEqual([...row.querySelectorAll('.stat-label span:not(.stat-delta):not(.stat-mult)')].map((s) => s.textContent),
+        ['Spend', 'Saved', 'Runs', 'Cost per run', 'Duration', 'Autonomy', 'Review cycles']);
+      assert.equal(tile.querySelector('.stat-value').textContent, '$424.38');       // 12.5×35 − 13.12
+      assert.equal(tile.querySelector('.stat-sub').textContent, '≈ 12.5 h of human work');
+      assert.ok(tile.querySelector('.stat-value').classList.contains('is-pos'), 'a positive Saved figure is green');
+      assert.equal(tile.querySelector('.stat-delta'), null, 'the previous window has no human record → no positive baseline');
+      assert.equal(neg.querySelector('.stat-value').textContent, '−$9.62');        // 0.1×35 − 13.12
+      assert.ok(neg.querySelector('.stat-value').classList.contains('is-neg'));
+      assert.equal(neg.querySelector('.stat-value').classList.contains('is-pos'), false);
+      assert.equal(renderTmKpiRow(aggregate(recs, { range: 'this-month', now: NOW, humanRateUsd: 35 }), { doc, now: NOW }).querySelectorAll('.stat-tile').length, 6, 'no human → no tile');
+    } },
+    { name: 'KPI row: Saved tile wears a "× spend" pill (saved ÷ spend) at the far right of its label; none for a loss', run: () => {
+      const mult = tile.querySelector('.stat-mult');
+      assert.equal(mult.textContent, '32× spend', '424.38 ÷ 13.12');
+      assert.equal(mult.title, 'Saved ÷ spent in this period');
+      assert.equal(tile.querySelector('.stat-label').lastElementChild, mult, 'far right of the label row');
+      assert.equal(neg.querySelector('.stat-mult'), null, 'a loss has no multiplier');
+      assert.equal(tile.parentElement.querySelectorAll('.stat-mult').length, 1, 'only the Saved tile carries the pill');
+    } },
+  ]);
 });

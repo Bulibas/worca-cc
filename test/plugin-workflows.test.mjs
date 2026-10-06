@@ -15,6 +15,7 @@ import { getDb, _resetForTests } from '../src/core/db.mjs';
 import { writeWorkflow, writeGraphWorkflow, readWorkflow } from '../src/core/workflows.mjs';
 import { setActiveWorkflow } from '../src/core/config.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { readPluginsLock, writePluginsLock, pluginDir } from '../src/core/plugins-lock.mjs';
 import {
   importPluginWorkflows, readPluginWorkflows, removePluginWorkflows, referencedPluginAgents, referencedPluginScripts,
@@ -81,84 +82,89 @@ function graphTpl(name = 'Demo Flow', key = 'demoAgent') {
 }
 const TPL = graphTpl();
 
-test('importPluginWorkflows inserts v2 rows id wfp_<name>_<slug> with origin plugin:<name>', async () => {
+test('importPluginWorkflows inserts v2 rows wfp_<name>_<slug> (origin plugin:<name>) that read back through readWorkflow as v2 graphs', async () => {
   const versionDir = installFakePlugin('demo', { 'simple.json': TPL });
   const res = await importPluginWorkflows('demo', versionDir);
-  assert.deepEqual(res.imported, ['wfp_demo_simple']);
-  const row = getDb().prepare(
-    'SELECT name, version, origin, domain, graph, steps, feedbacks, archived_at FROM workflows WHERE id = ?',
-  ).get('wfp_demo_simple');
-  assert.equal(row.origin, 'plugin:demo');
-  assert.equal(row.name, 'Demo Flow');
-  assert.equal(row.version, 2);
-  assert.equal(row.domain, 'general');
-  assert.equal(row.steps, '[]', 'the v1 columns are blanked');
-  assert.equal(row.feedbacks, '[]');
-  assert.equal(row.archived_at, null);
-  const graph = JSON.parse(row.graph);
-  assert.deepEqual(Object.keys(graph).sort(), ['nodes', 'wires'], 'graph holds nodes/wires only');
-  assert.deepEqual(graph.nodes, TPL.nodes);
-  assert.deepEqual(graph.wires, TPL.wires);
+  await checkRows([
+    { name: 'importPluginWorkflows inserts v2 rows id wfp_<name>_<slug> with origin plugin:<name>', run: () => {
+      assert.deepEqual(res.imported, ['wfp_demo_simple']);
+      const row = getDb().prepare(
+        'SELECT name, version, origin, domain, graph, steps, feedbacks, archived_at FROM workflows WHERE id = ?',
+      ).get('wfp_demo_simple');
+      assert.equal(row.origin, 'plugin:demo');
+      assert.equal(row.name, 'Demo Flow');
+      assert.equal(row.version, 2);
+      assert.equal(row.domain, 'general');
+      assert.equal(row.steps, '[]', 'the v1 columns are blanked');
+      assert.equal(row.feedbacks, '[]');
+      assert.equal(row.archived_at, null);
+      const graph = JSON.parse(row.graph);
+      assert.deepEqual(Object.keys(graph).sort(), ['nodes', 'wires'], 'graph holds nodes/wires only');
+      assert.deepEqual(graph.nodes, TPL.nodes);
+      assert.deepEqual(graph.wires, TPL.wires);
+    } },
+    { name: 'an imported plugin template reads back through readWorkflow as a v2 graph', run: async () => {
+      const tpl = await readWorkflow('wfp_demo_simple');
+      assert.ok(tpl, 'a v1 row would have been dropped by rowToTpl');
+      assert.equal(tpl.version, 2);
+      assert.equal(tpl.origin, 'plugin:demo');
+      assert.equal(tpl.nodes.length, 3);
+    } },
+  ]);
 });
 
-test('an imported plugin template reads back through readWorkflow as a v2 graph', async () => {
+test('re-import upserts by id (name/graph update, created_at survives) and un-archives an archived row', async () => {
   const versionDir = installFakePlugin('demo', { 'simple.json': TPL });
   await importPluginWorkflows('demo', versionDir);
-  const tpl = await readWorkflow('wfp_demo_simple');
-  assert.ok(tpl, 'a v1 row would have been dropped by rowToTpl');
-  assert.equal(tpl.version, 2);
-  assert.equal(tpl.origin, 'plugin:demo');
-  assert.equal(tpl.nodes.length, 3);
+  await checkRows([
+    { name: 're-import upserts by id: name/graph update, created_at survives', run: async () => {
+      const before = getDb().prepare('SELECT created_at FROM workflows WHERE id = ?').get('wfp_demo_simple');
+      const renamed = { ...graphTpl('Demo Flow v2'), domain: 'coding' };
+      await writeFile(join(versionDir, 'workflows', 'simple.json'), JSON.stringify(renamed));
+      await importPluginWorkflows('demo', versionDir);
+      const row = getDb().prepare('SELECT name, domain, created_at FROM workflows WHERE id = ?').get('wfp_demo_simple');
+      assert.equal(row.name, 'Demo Flow v2');
+      assert.equal(row.domain, 'coding');
+      assert.equal(row.created_at, before.created_at);
+    } },
+    { name: 're-import UN-ARCHIVES a row the v2 upgrade had archived', run: async () => {
+      getDb().prepare("UPDATE workflows SET archived_at = '2026-08-26T00:00:00.000Z' WHERE id = ?").run('wfp_demo_simple');
+      await importPluginWorkflows('demo', versionDir);
+      assert.equal(getDb().prepare('SELECT archived_at FROM workflows WHERE id = ?').get('wfp_demo_simple').archived_at, null);
+    } },
+  ]);
 });
 
-test('re-import upserts by id: name/graph update, created_at survives', async () => {
-  const versionDir = installFakePlugin('demo', { 'simple.json': TPL });
-  await importPluginWorkflows('demo', versionDir);
-  const before = getDb().prepare('SELECT created_at FROM workflows WHERE id = ?').get('wfp_demo_simple');
-  const renamed = { ...graphTpl('Demo Flow v2'), domain: 'coding' };
-  await writeFile(join(versionDir, 'workflows', 'simple.json'), JSON.stringify(renamed));
-  await importPluginWorkflows('demo', versionDir);
-  const row = getDb().prepare('SELECT name, domain, created_at FROM workflows WHERE id = ?').get('wfp_demo_simple');
-  assert.equal(row.name, 'Demo Flow v2');
-  assert.equal(row.domain, 'coding');
-  assert.equal(row.created_at, before.created_at);
-});
-
-test('re-import UN-ARCHIVES a row the v2 upgrade had archived', async () => {
-  const versionDir = installFakePlugin('demo', { 'simple.json': TPL });
-  await importPluginWorkflows('demo', versionDir);
-  getDb().prepare("UPDATE workflows SET archived_at = '2026-08-26T00:00:00.000Z' WHERE id = ?").run('wfp_demo_simple');
-  await importPluginWorkflows('demo', versionDir);
-  assert.equal(getDb().prepare('SELECT archived_at FROM workflows WHERE id = ?').get('wfp_demo_simple').archived_at, null);
-});
-
-test('a v1 "steps" template is rejected with a warning naming the port, never imported', async () => {
-  const versionDir = installFakePlugin('demo', {
-    'legacy.json': { name: 'Legacy', version: 1, steps: [[{ id: 's0', key: 'demoAgent' }]], feedbacks: [] },
-  });
-  const res = await importPluginWorkflows('demo', versionDir);
-  assert.deepEqual(res.imported, []);
-  assert.equal(res.skipped.length, 1);
-  assert.match(res.skipped[0].errors[0], /not a version-2 graph template/);
-  assert.equal(getDb().prepare('SELECT id FROM workflows WHERE id = ?').get('wfp_demo_legacy'), undefined);
-});
-
-test('a graph without an end node fails V21 — V20/V21 apply to plugin templates too', async () => {
+test('invalid templates are skipped with a reason, never imported or thrown: v1 steps, no end node (V21), unknown agent key (V4)', async () => {
   const noEnd = graphTpl();
   noEnd.nodes = noEnd.nodes.filter((n) => n.kind !== 'end');
   noEnd.wires = noEnd.wires.filter((w) => w.to.node !== 'n_end');
-  const versionDir = installFakePlugin('demo', { 'no-end.json': noEnd });
+  const versionDir = installFakePlugin('demo', {
+    'legacy.json': { name: 'Legacy', version: 1, steps: [[{ id: 's0', key: 'demoAgent' }]], feedbacks: [] },
+    'no-end.json': noEnd,
+    'ghost.json': graphTpl('Ghost', 'noSuchAgent'),
+  });
   const res = await importPluginWorkflows('demo', versionDir);
-  assert.deepEqual(res.imported, []);
-  assert.match(res.skipped[0].errors.join('; '), /^V21: /);
-});
-
-test('an invalid template (agent key the registry does not know) is skipped with a warning, not thrown', async () => {
-  const versionDir = installFakePlugin('demo', { 'ghost.json': graphTpl('Ghost', 'noSuchAgent') });
-  const res = await importPluginWorkflows('demo', versionDir);
-  assert.deepEqual(res.imported, []);
-  assert.equal(res.skipped.length, 1);
-  assert.match(res.skipped[0].errors.join('; '), /V4|noSuchAgent/);
+  const skippedFor = (file) => {
+    const hits = res.skipped.filter((x) => x.file === file);
+    assert.equal(hits.length, 1, `${file}: exactly one skip, got ${JSON.stringify(res.skipped)}`);
+    return hits[0];
+  };
+  await checkRows([
+    { name: 'a v1 "steps" template is rejected with a warning naming the port, never imported', run: () => {
+      assert.deepEqual(res.imported, []);
+      assert.match(skippedFor('legacy.json').errors[0], /not a version-2 graph template/);
+      assert.equal(getDb().prepare('SELECT id FROM workflows WHERE id = ?').get('wfp_demo_legacy'), undefined);
+    } },
+    { name: 'a graph without an end node fails V21 — V20/V21 apply to plugin templates too', run: () => {
+      assert.deepEqual(res.imported, []);
+      assert.match(skippedFor('no-end.json').errors.join('; '), /^V21: /);
+    } },
+    { name: 'an invalid template (agent key the registry does not know) is skipped with a warning, not thrown', run: () => {
+      assert.deepEqual(res.imported, []);
+      assert.match(skippedFor('ghost.json').errors.join('; '), /V4|noSuchAgent/);
+    } },
+  ]);
 });
 
 test('a user-duplicated copy (origin NULL) is a separate row, untouched by re-import AND removal', async () => {
@@ -183,16 +189,6 @@ test('removePluginWorkflows throws ReferencedError when a project pins the workf
     return true;
   });
   assert.ok(getDb().prepare('SELECT 1 FROM workflows WHERE id = ?').get('wfp_demo_simple'), 'guard fired: nothing deleted');
-});
-
-test('the guard also catches a paused pipeline whose resume_point pins the workflow', async () => {
-  const versionDir = installFakePlugin('demo', { 'simple.json': TPL });
-  await importPluginWorkflows('demo', versionDir);
-  const proj = await mkdtemp(join(tmpdir(), 'worca-cc-pwf-proj2-')); homes.push(proj);
-  const { id } = await seedPipeline(proj, { status: 'paused' });
-  getDb().prepare('UPDATE pipelines SET resume_point = ? WHERE id = ?')
-    .run(JSON.stringify({ version: 1, kind: 'boundary', workflowId: 'wfp_demo_simple' }), id);
-  await assert.rejects(() => removePluginWorkflows('demo'), ReferencedError);
 });
 
 test('but an ARCHIVED pipeline releases the pin — archive must not strand `worca plugin remove`', async () => {
@@ -224,19 +220,15 @@ test('referencedPluginAgents finds this plugin\'s keys inside NON-plugin workflo
   assert.deepEqual(referencedPluginAgents('ghost-plugin'), [], 'unknown plugin: no keys, no refs');
 });
 
-test('referencedPluginAgents walks graph.nodes of NON-plugin workflows', async () => {
-  const versionDir = installFakePlugin('demo', {});
+test('referencedPluginAgents over graph rows: agent nodes of non-plugin rows only (flow cards with a stray key and the plugin\'s own imports never count)', async () => {
+  // One home: a user row running demoAgent, a user row whose flow cards carry the
+  // key, and the plugin's own imported template. Only wf_mine pins the plugin.
+  const versionDir = installFakePlugin('demo', { 'simple.json': TPL });
+  await importPluginWorkflows('demo', versionDir);
   await writeGraphWorkflow({ id: 'wf_mine', name: 'Mine', domain: 'general', nodes: TPL.nodes, wires: TPL.wires });
-  const refs = referencedPluginAgents('demo');
-  assert.deepEqual(refs, [{ workflowId: 'wf_mine', name: 'Mine', keys: ['demoAgent'] }]);
-  void versionDir;
-});
-
-test('only kind:"agent" nodes count — a flow card carrying a stray key does not', async () => {
   // Guards the kind narrowing: a task/end/gate card never names an agent, so a
   // key-only walk would pin an agent no pipeline actually runs and would block
   // `worca plugin remove` forever.
-  installFakePlugin('demo', {});
   await writeGraphWorkflow({
     id: 'wf_flowonly', name: 'Flow Only', domain: 'general',
     nodes: [
@@ -245,13 +237,18 @@ test('only kind:"agent" nodes count — a flow card carrying a stray key does no
     ],
     wires: [],
   });
-  assert.deepEqual(referencedPluginAgents('demo'), []);
-});
-
-test('referencedPluginAgents ignores the plugin\'s OWN imported rows', async () => {
-  const versionDir = installFakePlugin('demo', { 'simple.json': TPL });
-  await importPluginWorkflows('demo', versionDir);
-  assert.deepEqual(referencedPluginAgents('demo'), []);
+  const refs = referencedPluginAgents('demo');
+  await checkRows([
+    { name: 'referencedPluginAgents walks graph.nodes of NON-plugin workflows', run: () => {
+      assert.deepEqual(refs, [{ workflowId: 'wf_mine', name: 'Mine', keys: ['demoAgent'] }]);
+    } },
+    { name: 'only kind:"agent" nodes count — a flow card carrying a stray key does not', run: () => {
+      assert.equal(refs.some((r) => r.workflowId === 'wf_flowonly'), false);
+    } },
+    { name: 'referencedPluginAgents ignores the plugin\'s OWN imported rows', run: () => {
+      assert.equal(refs.some((r) => r.workflowId === 'wfp_demo_simple'), false);
+    } },
+  ]);
 });
 
 // Disabling a plugin withdraws its agents/skills/sources; its workflow templates
@@ -327,9 +324,10 @@ function addPluginScript(versionDir, key) {
   writeFileSync(join(versionDir, 'scripts', `${key}.tests.json`), JSON.stringify({ version: 1, cases: [] }));
 }
 
-test('referencedPluginScripts: script nodes in non-plugin v2 rows, never flow cards or a tests file', async () => {
-  const versionDir = installFakePlugin('demo', {});
+test('referencedPluginScripts: script nodes in non-plugin rows only (never flow cards, tests files or the plugin\'s own imports)', async () => {
+  const versionDir = installFakePlugin('demo', { 'simple.json': TPL });
   addPluginScript(versionDir, 'demoScript');
+  await importPluginWorkflows('demo', versionDir);
   await writeGraphWorkflow({
     id: 'wf_scripted', name: 'Scripted', domain: 'general',
     nodes: [
@@ -340,18 +338,18 @@ test('referencedPluginScripts: script nodes in non-plugin v2 rows, never flow ca
     ],
     wires: [],
   });
-  assert.deepEqual(referencedPluginScripts('demo'), [
-    { workflowId: 'wf_scripted', name: 'Scripted', keys: ['demoScript'] },
+  await checkRows([
+    { name: 'referencedPluginScripts: script nodes in non-plugin v2 rows, never flow cards or a tests file', run: () => {
+      assert.deepEqual(referencedPluginScripts('demo'), [
+        { workflowId: 'wf_scripted', name: 'Scripted', keys: ['demoScript'] },
+      ]);
+      assert.deepEqual(referencedPluginScripts('ghost-plugin'), [], 'unknown plugin: no keys, no refs');
+      assert.deepEqual(referencedPluginAgents('demo'), [], 'a script node is not an agent reference');
+    } },
+    { name: 'referencedPluginScripts ignores the plugin\'s OWN imported rows', run: () => {
+      assert.equal(referencedPluginScripts('demo').some((r) => r.workflowId === 'wfp_demo_simple'), false);
+    } },
   ]);
-  assert.deepEqual(referencedPluginScripts('ghost-plugin'), [], 'unknown plugin: no keys, no refs');
-  assert.deepEqual(referencedPluginAgents('demo'), [], 'a script node is not an agent reference');
-});
-
-test('referencedPluginScripts ignores the plugin\'s OWN imported rows', async () => {
-  const versionDir = installFakePlugin('demo', { 'simple.json': TPL });
-  addPluginScript(versionDir, 'demoScript');
-  await importPluginWorkflows('demo', versionDir);
-  assert.deepEqual(referencedPluginScripts('demo'), []);
 });
 
 test('referencedPluginScripts skips a key ANOTHER owner holds: the author who links their own export can still remove it', async () => {

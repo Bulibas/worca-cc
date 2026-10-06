@@ -9,6 +9,7 @@ import { app, runs } from '../ui/server.mjs';
 import { _resetForTests, getDb } from '../src/core/db.mjs';
 import { recordCostDelta } from '../src/core/cost-budget.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let srv, base, home, sandboxHome, seededProjectDir;
 const prevEnv = {};
@@ -49,24 +50,27 @@ after(async () => {
   if (seededProjectDir) await rm(seededProjectDir, { recursive: true, force: true });
 });
 
-test('GET /api/budget returns the budgetStatus shape', async () => {
-  const res = await fetch(`${base}/api/budget`);
-  assert.equal(res.status, 200);
-  const b = await res.json();
-  for (const k of ['pipelineLimitUsd', 'totalLimitUsd', 'resetPeriod', 'windowStartMs',
-    'windowEndMs', 'msUntilReset', 'windowSpendUsd', 'allTimeSpendUsd', 'remainingUsd', 'blocked']) {
-    assert.ok(k in b, `budget.${k}`);
-  }
-  assert.equal(b.blocked, false);
-});
-
-test('GET /api/budget also carries the window savings the sidebar shows', async () => {
-  // A run started now lands in the current window; its hours price at the default $35/h
-  // (the HOME sandbox has no stored rate).
-  await seedPipeline(seededProjectDir, { status: 'done', humanHours: 2 });
-  const b = await (await fetch(`${base}/api/budget`)).json();
-  assert.equal(b.windowHumanHours, 2);
-  assert.equal(b.windowSavedUsd, Math.round((2 * 35 - b.windowSpendUsd) * 100) / 100);
+test('GET /api/budget returns the budgetStatus shape with window savings', async () => {
+  await checkRows([
+    { name: 'GET /api/budget returns the budgetStatus shape', run: async () => {
+      const res = await fetch(`${base}/api/budget`);
+      assert.equal(res.status, 200);
+      const b = await res.json();
+      for (const k of ['pipelineLimitUsd', 'totalLimitUsd', 'resetPeriod', 'windowStartMs',
+        'windowEndMs', 'msUntilReset', 'windowSpendUsd', 'allTimeSpendUsd', 'remainingUsd', 'blocked']) {
+        assert.ok(k in b, `budget.${k}`);
+      }
+      assert.equal(b.blocked, false);
+    } },
+    { name: 'GET /api/budget also carries the window savings the sidebar shows', run: async () => {
+      // A run started now lands in the current window; its hours price at the default $35/h
+      // (the HOME sandbox has no stored rate).
+      await seedPipeline(seededProjectDir, { status: 'done', humanHours: 2 });
+      const b = await (await fetch(`${base}/api/budget`)).json();
+      assert.equal(b.windowHumanHours, 2);
+      assert.equal(b.windowSavedUsd, Math.round((2 * 35 - b.windowSpendUsd) * 100) / 100);
+    } },
+  ]);
 });
 
 test('settings roundtrip for the three budget keys', async () => {

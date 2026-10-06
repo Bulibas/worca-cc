@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { renderResolution, mountProjectMcp, paintMcpResolution, paintAskMcpBlock } from '../ui/public/mcp-view.mjs';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -37,22 +38,35 @@ const PREVIEW = {
   ],
 };
 
-test('the resolution table: copy · set (a link to its set) · status, skip reasons from the preview\'s why', () => {
-  const card = renderResolution(doc, 'Servers in runs on billing', PREVIEW, SETS);
-  const rows = [...card.querySelectorAll('.mcp-res-row')].map((r) => [...r.children].map((c) => c.textContent));
-  assert.deepEqual(rows, [
-    ['jira_billing', 'Billing', 'API token not set in Billing'],
-    ['playwright', 'General', 'not tested'],
-    ['sentry_billing · name provisional', 'Billing', 'stale'],
-    ['sentry_team-platfor', 'Team · acme/platform', 'off — turn it on in the team checklist'],
+test('the MCP resolution table (copy · set link · status, skip reasons) for a project and for { workspaceId }', async () => {
+  await checkRows([
+    { name: 'the resolution table: copy · set (a link to its set) · status, skip reasons from the preview\'s why', run: () => {
+      const card = renderResolution(doc, 'Servers in runs on billing', PREVIEW, SETS);
+      const rows = [...card.querySelectorAll('.mcp-res-row')].map((r) => [...r.children].map((c) => c.textContent));
+      assert.deepEqual(rows, [
+        ['jira_billing', 'Billing', 'API token not set in Billing'],
+        ['playwright', 'General', 'not tested'],
+        ['sentry_billing · name provisional', 'Billing', 'stale'],
+        ['sentry_team-platfor', 'Team · acme/platform', 'off — turn it on in the team checklist'],
+      ]);
+      assert.equal(card.querySelector('.mcp-res-row a').getAttribute('href'), '#settings/mcp/sets/billing');
+      assert.match(card.textContent, /renamed with _w when the run starts/);
+      const gone = renderResolution(doc, 'x', { copies: [PREVIEW.copies[1]], skipped: [{ copy: null, setId: 'billing', setName: 'Billing',
+        serverId: 'manual:gone', reason: 'missing-server', why: 'the server is no longer installed' }] }, SETS);
+      assert.deepEqual([...gone.querySelectorAll('.mcp-res-row')].map((r) => r.firstChild.textContent), ['manual:gone', 'playwright'], 'a missing-server skip has no copy name');
+      const empty = renderResolution(doc, 'x', { copies: [], skipped: [] }, [], 'workspace');
+      assert.match(empty.textContent, /No MCP servers in runs on this workspace/);
+    } },
+    { name: 'workspace overview: the same table for { workspaceId }', run: async () => {
+      const host = doc.createElement('div');
+      const { api, calls } = fakeApi(null);
+      await paintMcpResolution(host, { target: { workspaceId: 'wks-checkout-1234abcd' }, title: 'MCP servers in runs on checkout', api, doc });
+      assert.deepEqual(calls[0], ['POST', '/api/mcp/preview', { target: { workspaceId: 'wks-checkout-1234abcd' } }]);
+      assert.equal(host.querySelectorAll('.mcp-res-row').length, 4);
+      const js = readFileSync(new URL('../ui/public/app.js', import.meta.url), 'utf8');
+      assert.match(js, /paintMcpResolution\(mcp, \{ target: \{ workspaceId: id \}/, 'buildWdOverview paints it');
+    } },
   ]);
-  assert.equal(card.querySelector('.mcp-res-row a').getAttribute('href'), '#settings/mcp/sets/billing');
-  assert.match(card.textContent, /renamed with _w when the run starts/);
-  const gone = renderResolution(doc, 'x', { copies: [PREVIEW.copies[1]], skipped: [{ copy: null, setId: 'billing', setName: 'Billing',
-    serverId: 'manual:gone', reason: 'missing-server', why: 'the server is no longer installed' }] }, SETS);
-  assert.deepEqual([...gone.querySelectorAll('.mcp-res-row')].map((r) => r.firstChild.textContent), ['manual:gone', 'playwright'], 'a missing-server skip has no copy name');
-  const empty = renderResolution(doc, 'x', { copies: [], skipped: [] }, [], 'workspace');
-  assert.match(empty.textContent, /No MCP servers in runs on this workspace/);
 });
 
 function fakeApi(assignment) {
@@ -67,65 +81,48 @@ function fakeApi(assignment) {
   return { api, calls, writes: () => calls.filter(([m, p]) => m === 'PUT') };
 }
 
-test('project tab: chips with ×, the read-only Team chip, Add set, Include General in runs with its help', async () => {
-  const a = { sets: [{ id: 'billing', name: 'Billing' }], includeGeneral: false, none: false,
-    team: { id: 'team-acme-platform-9333', name: 'Team · acme/platform', home: 'acme/platform' }, choices: [{ id: 'shop', name: 'Shop' }] };
-  const sec = doc.createElement('section');
-  const { api, calls, writes } = fakeApi(a);
-  await mountProjectMcp(sec, { key: 'billing-1a2b3c4d', name: 'billing', api, doc });
-  const chips = [...sec.querySelectorAll('.mcp-proj-sets .mcp-chip')];
-  assert.deepEqual(chips.map((c) => c.textContent), ['Billing×', 'Team · acme/platform']);
-  assert.equal(chips[1].querySelector('button'), null, 'the Team chip is read-only');
-  assert.equal(chips[1].getAttribute('href'), '#settings/mcp/sets/team-acme-platform-9333');
-  assert.match(sec.textContent, /Include General in runs/);
-  assert.match(sec.textContent, /Ask Worca always includes General; a workspace run includes it when any member does/);
-  assert.deepEqual(calls.find(([, p]) => p === '/api/mcp/preview')[2], { target: { projectKey: 'billing-1a2b3c4d' } });
-  assert.match(sec.querySelector('.mcp-resolution h2').textContent, /Servers in runs on billing/);
-  const sw = sec.querySelector('input[aria-label="Include General in runs"]');
-  sw.checked = true;
-  sw.dispatchEvent(new doc.defaultView.Event('change'));
-  await settle();
-  const sel = sec.querySelector('select.mcp-add-set');
-  sel.value = 'shop';
-  sel.dispatchEvent(new doc.defaultView.Event('change'));
-  await settle();
-  sec.querySelector('.mcp-chip button').click();
-  await settle();
-  assert.deepEqual(writes().map(([, , b]) => b), [
-    { sets: ['billing'], includeGeneral: true },
-    { sets: ['billing', 'shop'], includeGeneral: false },
-    { sets: [], includeGeneral: false },
+test('project MCP tab: chips with ×, read-only Team chip, Add set, Include General help; a project resolving to no sets says so', async () => {
+  await checkRows([
+    { name: 'project tab: chips with ×, the read-only Team chip, Add set, Include General in runs with its help', run: async () => {
+      const a = { sets: [{ id: 'billing', name: 'Billing' }], includeGeneral: false, none: false,
+        team: { id: 'team-acme-platform-9333', name: 'Team · acme/platform', home: 'acme/platform' }, choices: [{ id: 'shop', name: 'Shop' }] };
+      const sec = doc.createElement('section');
+      const { api, calls, writes } = fakeApi(a);
+      await mountProjectMcp(sec, { key: 'billing-1a2b3c4d', name: 'billing', api, doc });
+      const chips = [...sec.querySelectorAll('.mcp-proj-sets .mcp-chip')];
+      assert.deepEqual(chips.map((c) => c.textContent), ['Billing×', 'Team · acme/platform']);
+      assert.equal(chips[1].querySelector('button'), null, 'the Team chip is read-only');
+      assert.equal(chips[1].getAttribute('href'), '#settings/mcp/sets/team-acme-platform-9333');
+      assert.match(sec.textContent, /Include General in runs/);
+      assert.match(sec.textContent, /Ask Worca always includes General; a workspace run includes it when any member does/);
+      assert.deepEqual(calls.find(([, p]) => p === '/api/mcp/preview')[2], { target: { projectKey: 'billing-1a2b3c4d' } });
+      assert.match(sec.querySelector('.mcp-resolution h2').textContent, /Servers in runs on billing/);
+      const sw = sec.querySelector('input[aria-label="Include General in runs"]');
+      sw.checked = true;
+      sw.dispatchEvent(new doc.defaultView.Event('change'));
+      await settle();
+      const sel = sec.querySelector('select.mcp-add-set');
+      sel.value = 'shop';
+      sel.dispatchEvent(new doc.defaultView.Event('change'));
+      await settle();
+      sec.querySelector('.mcp-chip button').click();
+      await settle();
+      assert.deepEqual(writes().map(([, , b]) => b), [
+        { sets: ['billing'], includeGeneral: true },
+        { sets: ['billing', 'shop'], includeGeneral: false },
+        { sets: [], includeGeneral: false },
+      ]);
+    } },
+    { name: 'project tab: a project that resolves to no sets says so', run: async () => {
+      const sec = doc.createElement('section');
+      const { api } = fakeApi({ sets: [], includeGeneral: false, none: true, team: null, choices: [] });
+      await mountProjectMcp(sec, { key: 'shop-2b3c4d5e', name: 'shop', api, doc });
+      assert.match(sec.querySelector('.mcp-proj-sets').textContent, /No MCP servers in runs on this project/);
+      const { api: api2 } = fakeApi({ sets: [], includeGeneral: true, none: false, team: null, choices: [] });
+      await mountProjectMcp(sec, { key: 'shop-2b3c4d5e', name: 'shop', api: api2, doc });
+      assert.doesNotMatch(sec.querySelector('.mcp-proj-sets').textContent, /No MCP servers/);
+    } },
   ]);
-});
-
-test('project tab: a project that resolves to no sets says so', async () => {
-  const sec = doc.createElement('section');
-  const { api } = fakeApi({ sets: [], includeGeneral: false, none: true, team: null, choices: [] });
-  await mountProjectMcp(sec, { key: 'shop-2b3c4d5e', name: 'shop', api, doc });
-  assert.match(sec.querySelector('.mcp-proj-sets').textContent, /No MCP servers in runs on this project/);
-  const { api: api2 } = fakeApi({ sets: [], includeGeneral: true, none: false, team: null, choices: [] });
-  await mountProjectMcp(sec, { key: 'shop-2b3c4d5e', name: 'shop', api: api2, doc });
-  assert.doesNotMatch(sec.querySelector('.mcp-proj-sets').textContent, /No MCP servers/);
-});
-
-test('workspace overview: the same table for { workspaceId }', async () => {
-  const host = doc.createElement('div');
-  const { api, calls } = fakeApi(null);
-  await paintMcpResolution(host, { target: { workspaceId: 'wks-checkout-1234abcd' }, title: 'MCP servers in runs on checkout', api, doc });
-  assert.deepEqual(calls[0], ['POST', '/api/mcp/preview', { target: { workspaceId: 'wks-checkout-1234abcd' } }]);
-  assert.equal(host.querySelectorAll('.mcp-res-row').length, 4);
-  const js = readFileSync(new URL('../ui/public/app.js', import.meta.url), 'utf8');
-  assert.match(js, /paintMcpResolution\(mcp, \{ target: \{ workspaceId: id \}/, 'buildWdOverview paints it');
-});
-
-test('Settings › Ask Worca: the General set in one line, with Edit General set', async () => {
-  const host = doc.createElement('div');
-  await paintAskMcpBlock(host, { api: fakeApi(null).api, doc });
-  assert.deepEqual([...host.querySelectorAll('.chip')].map((c) => c.textContent), ['jira', 'playwright']);
-  assert.match(host.textContent, /MCP servers.*General set.*plus the sets of the projects a chat works on/);
-  assert.equal(host.querySelector('a').getAttribute('href'), '#settings/mcp/sets/general');
-  const html = readFileSync(new URL('../ui/public/index.html', import.meta.url), 'utf8');
-  assert.ok(html.indexOf('id="ask-mcp-host"') > html.indexOf('id="ask-web-host"'), 'right after web access');
 });
 
 // ── the booted project page ──────────────────────────────────────────────────

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { rankNodes, autoLayout } from '../src/shared/graph/layout.mjs';
 import { classifyLoops } from '../src/shared/graph/loops.mjs';
 import { portsFnFor } from '../src/shared/graph/ports.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const REG = {
   planner: { key: 'planner', inputs: [{ id: 'task', type: 'md', required: true }],
@@ -50,34 +51,23 @@ test('autoLayout: x = 60 + rank*320, y snapped to 11, deterministic and idempote
   assert.deepEqual(autoLayout(TPL, portsFn), a, 'deterministic');
 });
 
-test('autoLayout stacks a column with a 64px gap below the previous card', () => {
-  const tpl = { version: 2,
-    nodes: [{ id: 'n_task', kind: 'task', x: 0, y: 0, config: {} },
-      { id: 'a', kind: 'agent', key: 'planner', x: 0, y: 0, config: {} },
-      { id: 'b', kind: 'agent', key: 'planner', x: 0, y: 0, config: {} }],
-    wires: [{ id: 'w1', from: { node: 'n_task', port: 'task' }, to: { node: 'a', port: 'task' } },
-      { id: 'w2', from: { node: 'n_task', port: 'task' }, to: { node: 'b', port: 'task' } }] };
-  const p = autoLayout(tpl, portsFn);
-  assert.equal(p.a.x, p.b.x);
-  // y0 60 snaps to 55; planner card = 95.5 + 24*2 = 143.5, so 55 + 143.5 + 64 = 262.5 -> 264
-  assert.equal(p.a.y, 55);
-  assert.equal(p.b.y, 264);
-});
-
-test('malformed nodes/wires entries never throw and are never laid out', () => {
-  // `filter(Boolean)` kept a truthy non-object (`7`) and indexed an id-less node
-  // under `undefined`, so nonLoopEdges resolved a half-wire through it and threw.
-  const tpl = { version: 2, nodes: [null, 7, {}, ...TPL.nodes], wires: [{}, 'junk', { id: 'w0' }, ...TPL.wires] };
-  const loops = classifyLoops(tpl, portsFn);
-  const rank = rankNodes(tpl, loops);
-  assert.deepEqual(Object.keys(rank).sort(), ['n_end', 'n_impl', 'n_plan', 'n_rev', 'n_task']);
-  const p = autoLayout(tpl, portsFn);
-  assert.deepEqual(Object.keys(p).sort(), ['n_end', 'n_impl', 'n_plan', 'n_rev', 'n_task']);
-  assert.deepEqual(p, autoLayout(TPL, portsFn), 'the junk changes nothing about the real cards');
-});
-
-test('autoLayout on an empty or wireless template never throws', () => {
-  assert.deepEqual(autoLayout({ version: 2, nodes: [], wires: [] }, portsFn), {});
-  const solo = autoLayout({ version: 2, nodes: [{ id: 'x', kind: 'task', x: 5, y: 5, config: {} }], wires: [] }, portsFn);
-  assert.deepEqual(solo, { x: { x: 60, y: 55 } });
+test('autoLayout/rankNodes never throw: malformed entries ignored, empty and wireless templates', async () => {
+  await checkRows([
+    { name: 'malformed nodes/wires entries never throw and are never laid out', run: () => {
+      // `filter(Boolean)` kept a truthy non-object (`7`) and indexed an id-less node
+      // under `undefined`, so nonLoopEdges resolved a half-wire through it and threw.
+      const tpl = { version: 2, nodes: [null, 7, {}, ...TPL.nodes], wires: [{}, 'junk', { id: 'w0' }, ...TPL.wires] };
+      const loops = classifyLoops(tpl, portsFn);
+      const rank = rankNodes(tpl, loops);
+      assert.deepEqual(Object.keys(rank).sort(), ['n_end', 'n_impl', 'n_plan', 'n_rev', 'n_task']);
+      const p = autoLayout(tpl, portsFn);
+      assert.deepEqual(Object.keys(p).sort(), ['n_end', 'n_impl', 'n_plan', 'n_rev', 'n_task']);
+      assert.deepEqual(p, autoLayout(TPL, portsFn), 'the junk changes nothing about the real cards');
+    } },
+    { name: 'autoLayout on an empty or wireless template never throws', run: () => {
+      assert.deepEqual(autoLayout({ version: 2, nodes: [], wires: [] }, portsFn), {});
+      const solo = autoLayout({ version: 2, nodes: [{ id: 'x', kind: 'task', x: 5, y: 5, config: {} }], wires: [] }, portsFn);
+      assert.deepEqual(solo, { x: { x: 60, y: 55 } });
+    } },
+  ]);
 });

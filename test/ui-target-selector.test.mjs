@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -47,25 +48,6 @@ async function boot({ local, posted } = {}) {
 }
 const click = (window, node) => node.dispatchEvent(new window.Event('click', { bubbles: true }));
 
-test('default target is project: project pane shown, workspace pane hidden', async () => {
-  const window = await boot();
-  const doc = window.document;
-  assert.equal(doc.querySelector('#target-project-pane').classList.contains('hidden'), false);
-  assert.equal(doc.querySelector('#target-workspace-pane').classList.contains('hidden'), true);
-});
-
-test('switching to Workspace toggles panes (mutual exclusivity) + persists choice', async () => {
-  const window = await boot();
-  const doc = window.document;
-  const wsBtn = doc.querySelector('#target-seg button[data-target="workspace"]');
-  click(window, wsBtn);
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(doc.querySelector('#target-project-pane').classList.contains('hidden'), true, 'project pane hidden');
-  assert.equal(doc.querySelector('#target-workspace-pane').classList.contains('hidden'), false, 'workspace pane shown');
-  assert.equal(doc.querySelector('input[name="target"][value="workspace"]').checked, true, 'hidden radio is the source of truth');
-  assert.equal(window.localStorage.getItem('worca-cc.runTarget'), 'workspace');
-});
-
 test('workspace options skip incomplete workspaces as disabled "+ (incomplete)"', async () => {
   const window = await boot();
   const doc = window.document;
@@ -80,22 +62,7 @@ test('workspace options skip incomplete workspaces as disabled "+ (incomplete)"'
   assert.equal(alpha.disabled, false, 'complete workspace is selectable');
 });
 
-test('selecting a workspace renders its member chips (missing flagged)', async () => {
-  const window = await boot();
-  const doc = window.document;
-  click(window, doc.querySelector('#target-seg button[data-target="workspace"]'));
-  await new Promise((r) => setTimeout(r, 0));
-  const sel = doc.querySelector('#workspaceSelect');
-  sel.value = 'wks-alpha-00000001';
-  sel.dispatchEvent(new window.Event('change', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  const chips = [...doc.querySelectorAll('#ws-members .chip')];
-  assert.equal(chips.length, 2);
-  assert.equal(chips[0].textContent, 'svc-iam');
-  assert.equal(chips[1].textContent, 'svc-ui');
-});
-
-test('workspace mode swaps the single source dropdown for per-project dropdowns', async () => {
+test('selecting a workspace renders its member chips (missing flagged) and swaps the single source dropdown for per-project dropdowns', async () => {
   const window = await boot();
   const doc = window.document;
   click(window, doc.querySelector('#target-seg button[data-target="workspace"]'));
@@ -105,12 +72,22 @@ test('workspace mode swaps the single source dropdown for per-project dropdowns'
   wsel.value = 'wks-alpha-00000001';
   wsel.dispatchEvent(new window.Event('change', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 0));
-  // Single project row hidden; one table row per member shown instead (design v3).
-  assert.equal(doc.querySelector('#bt-project-row').hidden, true);
-  assert.equal(doc.querySelector('#ws-source-branches').classList.contains('hidden'), false);
-  assert.equal(doc.querySelectorAll('#ws-source-branches select.ws-src-select').length, 2);
-  // The "Source branch" field/header itself is never hidden.
-  assert.equal(doc.querySelector('#sourceBranch').closest('.field').classList.contains('hidden'), false);
+  await checkRows([
+    { name: 'selecting a workspace renders its member chips (missing flagged)', run: async () => {
+      const chips = [...doc.querySelectorAll('#ws-members .chip')];
+      assert.equal(chips.length, 2);
+      assert.equal(chips[0].textContent, 'svc-iam');
+      assert.equal(chips[1].textContent, 'svc-ui');
+    } },
+    { name: 'workspace mode swaps the single source dropdown for per-project dropdowns', run: async () => {
+      // Single project row hidden; one table row per member shown instead (design v3).
+      assert.equal(doc.querySelector('#bt-project-row').hidden, true);
+      assert.equal(doc.querySelector('#ws-source-branches').classList.contains('hidden'), false);
+      assert.equal(doc.querySelectorAll('#ws-source-branches select.ws-src-select').length, 2);
+      // The "Source branch" field/header itself is never hidden.
+      assert.equal(doc.querySelector('#sourceBranch').closest('.field').classList.contains('hidden'), false);
+    } },
+  ]);
 });
 
 test('submit in workspace mode sends {workspaceId} and NO projectDir; project mode is unchanged', async () => {

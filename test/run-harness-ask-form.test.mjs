@@ -6,6 +6,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { RunHarness, normalizeClarifyAnswer } from '../src/core/run-harness.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);   // the constructor touches settings/store readers
 
@@ -42,35 +43,38 @@ const validator = (payload) => (payload?.values?.verdict === 'approve' || payloa
   ? { ok: true, payload: { form: ASK.form, version: ASK.version, values: { verdict: payload.values.verdict } } }
   : { ok: false, errors: [{ path: 'verdict', code: 'enum', message: 'verdict must be approve or changes' }] });
 
-test('the question frame carries the whole envelope — and NEITHER validate NOR autoValues', async () => {
-  const h = harness();
-  const p = h._ask({ ...ASK, autoValues: { verdict: 'approve' }, validate: validator });
-  const ev = h.emitted.find((e) => e.name === 'question').payload;
-  assert.equal(ev.kind, 'form');
-  for (const k of ['id', 'agent', 'nodeId', 'executionId', 'askId', 'form', 'version', 'title', 'surface', 'data', 'layout', 'answerSchema', 'fileRefs', 'files']) {
-    assert.ok(k in ev, `the envelope is missing ${k}`);
-  }
-  assert.equal(ev.id, 'questions-x:n1:1-r1');
-  assert.equal(ev.askId, 'questions-x_n1_1-r1');
-  assert.notEqual(ev.id, ev.askId, 'ruling X1: two distinct fields — the answer token and the route token');
-  assert.equal(ev.surface, 'any');
-  assert.deepEqual(ev.fileRefs, ASK.fileRefs);
-  assert.deepEqual(ev.files, ASK.files);
-  assert.equal('validate' in ev, false);
-  assert.equal('autoValues' in ev, false, 'E3: an argument, never a wire field');
-  assert.equal(h.pendingQuestion.id, ASK.id);
-  h.answer(ASK.id, { values: { verdict: 'approve' } });
-  assert.deepEqual(await p, { form: 'review-mockups', version: 2, values: { verdict: 'approve' } });
-});
-
-test('a LEGACY question frame is unchanged: no form keys leak into it', async () => {
-  const h = harness();
-  h._ask({ id: 'q-1', kind: 'questions', questions: [{ id: 'a', question: 'Q?', options: ['x'] }], agent: 'A' });
-  const ev = h.emitted.find((e) => e.name === 'question').payload;
-  for (const k of ['askId', 'form', 'version', 'title', 'surface', 'data', 'layout', 'answerSchema', 'fileRefs', 'files']) {
-    assert.equal(k in ev, false, `${k} must not appear on a legacy frame`);
-  }
-  h.answer('q-1', { answers: [] });
+test('the question frame carries the whole form envelope (never validate/autoValues), and a legacy frame carries none of the form keys', async () => {
+  await checkRows([
+    { name: 'the question frame carries the whole envelope — and NEITHER validate NOR autoValues', run: async () => {
+      const h = harness();
+      const p = h._ask({ ...ASK, autoValues: { verdict: 'approve' }, validate: validator });
+      const ev = h.emitted.find((e) => e.name === 'question').payload;
+      assert.equal(ev.kind, 'form');
+      for (const k of ['id', 'agent', 'nodeId', 'executionId', 'askId', 'form', 'version', 'title', 'surface', 'data', 'layout', 'answerSchema', 'fileRefs', 'files']) {
+        assert.ok(k in ev, `the envelope is missing ${k}`);
+      }
+      assert.equal(ev.id, 'questions-x:n1:1-r1');
+      assert.equal(ev.askId, 'questions-x_n1_1-r1');
+      assert.notEqual(ev.id, ev.askId, 'ruling X1: two distinct fields — the answer token and the route token');
+      assert.equal(ev.surface, 'any');
+      assert.deepEqual(ev.fileRefs, ASK.fileRefs);
+      assert.deepEqual(ev.files, ASK.files);
+      assert.equal('validate' in ev, false);
+      assert.equal('autoValues' in ev, false, 'E3: an argument, never a wire field');
+      assert.equal(h.pendingQuestion.id, ASK.id);
+      h.answer(ASK.id, { values: { verdict: 'approve' } });
+      assert.deepEqual(await p, { form: 'review-mockups', version: 2, values: { verdict: 'approve' } });
+    } },
+    { name: 'a LEGACY question frame is unchanged: no form keys leak into it', run: async () => {
+      const h = harness();
+      h._ask({ id: 'q-1', kind: 'questions', questions: [{ id: 'a', question: 'Q?', options: ['x'] }], agent: 'A' });
+      const ev = h.emitted.find((e) => e.name === 'question').payload;
+      for (const k of ['askId', 'form', 'version', 'title', 'surface', 'data', 'layout', 'answerSchema', 'fileRefs', 'files']) {
+        assert.equal(k in ev, false, `${k} must not appear on a legacy frame`);
+      }
+      h.answer('q-1', { answers: [] });
+    } },
+  ]);
 });
 
 test('AUTO mode answers a form with the D10 auto answer — no hang, no pending question', async () => {

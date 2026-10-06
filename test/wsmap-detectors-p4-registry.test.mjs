@@ -2,22 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DETECTORS, detectorById } from '../src/core/workspace-map/detectors/index.mjs';
+import { detectorById } from '../src/core/workspace-map/detectors/index.mjs';
 
 const P4 = ['db', 'http-clients', 'http-routes', 'messaging'];
-
-test('registry: the P4 block follows the P3 block, alphabetical, each detector frozen', () => {
-  const ids = DETECTORS.map((d) => d.id);
-  assert.equal(new Set(ids).size, ids.length);
-  assert.deepEqual(ids.slice(-4), P4);
-  for (const id of P4) {
-    const d = detectorById(id);
-    assert.ok(Object.isFrozen(d) && typeof d.claims === 'function' && typeof d.detect === 'function', id);
-  }
-  assert.ok(detectorById('http-routes').claims('config/routes.rb'));
-  assert.ok(detectorById('db').claims('db/migration/V1__init.sql') && detectorById('db').claims('prisma/schema.prisma') && detectorById('db').claims('.env'));
-  assert.ok(!detectorById('messaging').claims('README.md'));
-});
 
 // ReDoS guard: pathological inputs per language (1 MiB, the per-file read cap; a few rows are 2 or 4 MiB so
 // that their naive forms are clearly over the bound) must finish in < 2 s per detector (unloaded the

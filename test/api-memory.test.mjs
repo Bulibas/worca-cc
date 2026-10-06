@@ -14,6 +14,7 @@ import {
   memoryRoot, GLOBAL_SCOPE, projectScope, scopeDir, readMemory, readScopeState, writeMemory,
   listSnapshots, MEMORY_NAME_HELP,
 } from '../src/core/memory-store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);   // outer isolation: the mock runs below finish ASYNC in-process
 
@@ -103,50 +104,53 @@ after(async () => {
   await rmWithRetry(homeDir);
 });
 
-test('GET /api/memory/global on a fresh store: empty list, fresh health, no live defrag', async () => {
-  const r = await get('/api/memory/global');
-  assert.equal(r.status, 200);
-  const j = await r.json();
-  assert.deepEqual({ scope: j.scope, project: j.project, files: j.files, defragRunId: j.defragRunId }, { scope: 'global', project: null, files: [], defragRunId: null });
-  assert.equal(j.health.level, 'fresh');
-  assert.equal(j.health.alwaysOnBytes, 0);
-  assert.equal('indexDropped' in j.health, false);
-  assert.deepEqual(j.state, { writesSinceDefrag: 0, lastWriteAt: null, lastDefragAt: null, lastDefragRunId: null, failedWrites: 0, lastFailedAt: null, lastFailedRunId: null });
-});
-
-test('PUT / GET / DELETE a global file: repaired frontmatter, user source, one memory-changed frame per write, then gone', async () => {
-  const { ws, msgs, opened } = openWs();
-  await opened;
-  try {
-    let r = await put('/api/memory/global/files/testing', { text: 'How the suite runs.\nnpm ci first.\n' });
-    assert.equal(r.status, 200);
-    const created = await r.json();
-    assert.equal(created.ok, true); assert.equal(created.name, 'testing'); assert.equal(created.created, true);
-    assert.ok(Number.isInteger(created.bytes) && created.bytes > 0);
-    await waitFor(() => memFrames(msgs, 'global').length === 1);
-    assert.deepEqual(memFrames(msgs, 'global')[0], { type: 'memory-changed', scope: 'global' }, 'no threadId, no seq (B5)');
-    r = await get('/api/memory/global/files/testing');
-    assert.equal(r.status, 200);
-    const f = await r.json();
-    assert.equal(f.name, 'testing');
-    assert.equal(f.meta.source, 'user');
-    assert.equal(f.meta.description, 'How the suite runs.');
-    assert.ok(f.text.startsWith('---\nname: testing\n'));
-    assert.equal(f.body, 'How the suite runs.\nnpm ci first.\n');
-    assert.equal(memFrames(msgs, 'global').length, 1, 'a READ never broadcasts');
-    r = await put('/api/memory/global/files/testing', { text: '---\nname: testing\ndescription: Tests\n---\nChanged.\n' });
-    assert.equal((await r.json()).created, false);
-    r = await get('/api/memory/global');
-    const list = (await r.json()).files;
-    assert.deepEqual(list.map((e) => [e.name, e.description, e.source, e.hasFrontmatter]), [['testing', 'Tests', 'user', true]]);
-    r = await del('/api/memory/global/files/testing');
-    assert.deepEqual(await r.json(), { ok: true });
-    await waitFor(() => memFrames(msgs, 'global').length === 3);   // PUT, PUT, DELETE
-    assert.equal((await get('/api/memory/global/files/testing')).status, 404);
-    assert.equal((await del('/api/memory/global/files/testing')).status, 404);
-    await new Promise((r2) => setTimeout(r2, 60));
-    assert.equal(memFrames(msgs, 'global').length, 3, 'a 404 DELETE never broadcasts');
-  } finally { ws.close(); }
+test('a fresh global store reads empty/fresh, then PUT / GET / DELETE a file: repaired frontmatter, user source, one memory-changed frame per write, then gone', async () => {
+  await checkRows([
+    { name: 'GET /api/memory/global on a fresh store: empty list, fresh health, no live defrag', run: async () => {
+      const r = await get('/api/memory/global');
+      assert.equal(r.status, 200);
+      const j = await r.json();
+      assert.deepEqual({ scope: j.scope, project: j.project, files: j.files, defragRunId: j.defragRunId }, { scope: 'global', project: null, files: [], defragRunId: null });
+      assert.equal(j.health.level, 'fresh');
+      assert.equal(j.health.alwaysOnBytes, 0);
+      assert.equal('indexDropped' in j.health, false);
+      assert.deepEqual(j.state, { writesSinceDefrag: 0, lastWriteAt: null, lastDefragAt: null, lastDefragRunId: null, failedWrites: 0, lastFailedAt: null, lastFailedRunId: null });
+    } },
+    { name: 'PUT / GET / DELETE a global file: repaired frontmatter, user source, one memory-changed frame per write, then gone', run: async () => {
+      const { ws, msgs, opened } = openWs();
+      await opened;
+      try {
+        let r = await put('/api/memory/global/files/testing', { text: 'How the suite runs.\nnpm ci first.\n' });
+        assert.equal(r.status, 200);
+        const created = await r.json();
+        assert.equal(created.ok, true); assert.equal(created.name, 'testing'); assert.equal(created.created, true);
+        assert.ok(Number.isInteger(created.bytes) && created.bytes > 0);
+        await waitFor(() => memFrames(msgs, 'global').length === 1);
+        assert.deepEqual(memFrames(msgs, 'global')[0], { type: 'memory-changed', scope: 'global' }, 'no threadId, no seq (B5)');
+        r = await get('/api/memory/global/files/testing');
+        assert.equal(r.status, 200);
+        const f = await r.json();
+        assert.equal(f.name, 'testing');
+        assert.equal(f.meta.source, 'user');
+        assert.equal(f.meta.description, 'How the suite runs.');
+        assert.ok(f.text.startsWith('---\nname: testing\n'));
+        assert.equal(f.body, 'How the suite runs.\nnpm ci first.\n');
+        assert.equal(memFrames(msgs, 'global').length, 1, 'a READ never broadcasts');
+        r = await put('/api/memory/global/files/testing', { text: '---\nname: testing\ndescription: Tests\n---\nChanged.\n' });
+        assert.equal((await r.json()).created, false);
+        r = await get('/api/memory/global');
+        const list = (await r.json()).files;
+        assert.deepEqual(list.map((e) => [e.name, e.description, e.source, e.hasFrontmatter]), [['testing', 'Tests', 'user', true]]);
+        r = await del('/api/memory/global/files/testing');
+        assert.deepEqual(await r.json(), { ok: true });
+        await waitFor(() => memFrames(msgs, 'global').length === 3);   // PUT, PUT, DELETE
+        assert.equal((await get('/api/memory/global/files/testing')).status, 404);
+        assert.equal((await del('/api/memory/global/files/testing')).status, 404);
+        await new Promise((r2) => setTimeout(r2, 60));
+        assert.equal(memFrames(msgs, 'global').length, 3, 'a 404 DELETE never broadcasts');
+      } finally { ws.close(); }
+    } },
+  ]);
 });
 
 test('write refusals map to statuses: bad name 400 (the shared help string), missing text 400, case twin 409, over the hard cap 413 — and a refused name never creates the scope dir', async () => {
@@ -365,25 +369,24 @@ test('an ORDINARY run that mounted memory broadcasts one memory-changed per moun
   } finally { ws.close(); }
 });
 
-test('MEMORY_NAME_HELP is ONE string: the route and the Memory view share it', async () => {
-  let view = null;
-  try { view = await import('../ui/public/memory-view.mjs'); }
-  catch (err) {
-    assert.equal(err?.code, 'ERR_MODULE_NOT_FOUND', String(err));
-    return;   // Task 11's module is not in the tree yet (a strictly linear execution)
+test('REST writers queue behind the store lock', async () => {
+  const { withStoreLock } = await import('../src/core/memory-sync.mjs');   // same module instance as ui/server.mjs
+  const tick = () => new Promise((r) => setTimeout(r, 100));
+  async function queued(label, fire) {
+    let release;
+    const held = withStoreLock(memoryRoot(), () => new Promise((r) => { release = r; }));
+    let done = false;
+    const req = fire().then((r) => { done = true; return r; });
+    await tick();
+    assert.equal(done, false, `${label} waits for the store lock`);
+    release(); await held;
+    assert.equal((await req).status, 200, `${label} lands once the lock is released`);
   }
-  assert.equal(view.MEMORY_NAME_HELP, MEMORY_NAME_HELP);
-});
-
-test('the REST writers take the store lock every other in-process writer takes', async () => {
-  // A PUT / DELETE / restore that lands during a live run's node sync (or an Ask `remember`)
-  // interleaves readScopeState/bumpScopeState and the snapshot order — one counter increment
-  // lost. Every other in-process writer runs under withStoreLock(memoryRoot()); so do these
-  // three. Pinned in the source (assert.ok, not assert.match: a failing match on a 300 KB
-  // source dumps the whole file): the race needs two real concurrent writers to reproduce.
-  const src = readFileSync(new URL('../ui/server.mjs', import.meta.url), 'utf8');
-  assert.ok(/import \{ validateMemoryScope, withStoreLock \} from '\.\.\/src\/core\/memory-sync\.mjs';/.test(src), 'withStoreLock is imported next to validateMemoryScope');
-  assert.ok(/await withStoreLock\(memoryRoot\(\), \(\) => writeMemory\(memoryRoot\(\), scope, name, text, \{ source: 'user', caps: memoryCaps\(\) \}\)\)/.test(src), 'the PUT writes under the lock');
-  assert.ok(/await withStoreLock\(memoryRoot\(\), \(\) => removeMemory\(memoryRoot\(\), scope, name, \{ source: 'user' \}\)\)/.test(src), 'the DELETE removes under the lock');
-  assert.ok(/await withStoreLock\(memoryRoot\(\), \(\) => restoreSnapshot\(memoryRoot\(\), scope, String\(req\.params\.id \|\| ''\), \{ source: 'user' \}\)\)/.test(src), 'the restore runs under the lock');
+  await queued('PUT', () => put('/api/memory/global/files/lock-probe', { text: 'v1\n' }));
+  assert.equal((await put('/api/memory/global/files/lock-probe', { text: 'v2\n' })).status, 200);   // a snapshot holding v1
+  const { snapshots } = await (await get('/api/memory/global/history')).json();
+  const snap = snapshots.filter((s) => s.files.includes('lock-probe.md')).at(-1);
+  assert.ok(snap, JSON.stringify(snapshots));
+  await queued('restore', () => post(`/api/memory/global/history/${snap.id}/restore`));
+  await queued('DELETE', () => del('/api/memory/global/files/lock-probe'));
 });

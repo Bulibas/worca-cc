@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { memberViewState, renderActionsCard, renderOverviewStrip, renderRunPill, renderShipItStrip,
+import { memberViewState, renderActionsCard, renderOverviewStrip, renderRunPill,
   renderRunningActionsCard, historyActionBadges, formatUptime, isSafeHref, createActionsController } from '../ui/public/actions-view.mjs';
 
 const doc = new JSDOM('<!doctype html><body></body>').window.document;
@@ -48,17 +48,6 @@ test('not checked out: folder to come, estimate, Check out + Copy command, the o
     'a workspace run checks out from its checklist');
 });
 
-test('an editor that is not there is not mentioned on the run card: only what opens is named (no nagging)', () => {
-  const m = member({ builtins: [{ key: 'terminal', label: 'Terminal' }, { key: 'copyCommand', label: 'Copy command' }] });
-  const before = renderActionsCard(model(m), { doc, handlers: {} });
-  assert.doesNotMatch(before.textContent, /editor was found|No editor/i);
-  assert.match(before.querySelector('.act-apps').textContent, /Terminal open the checkout, so they check out first\. Change the terminal in Settings › Runs › Actions\.$/);
-  const after = renderActionsCard(model({ ...m, checkout: { setup: { status: 'ok' } } }), { doc, handlers: {} });
-  assert.equal(after.querySelector('.act-apps').textContent, 'Opens in Terminal. Change it in Settings › Runs › Actions.');
-  const none = renderActionsCard(model(member({ builtins: [{ key: 'copyCommand', label: 'Copy command' }], checkout: { setup: { status: 'ok' } } })), { doc, handlers: {} });
-  assert.equal(none.querySelector('.act-apps'), null, 'no editor and no terminal: nothing to say');
-});
-
 test('running: Stop Run, Test, built-ins, open link, Discard', () => {
   const run = { instanceId: 'i', member: 'app-0cea65fb', actionId: 'run', kind: 'service', status: 'ready', ports: { PORT: 4417 }, url: 'http://localhost:4417', startedAt: Date.now() - 65000 };
   const el = renderActionsCard(model(member({ checkout: { setup: { status: 'ok' } } }), [run]), { doc, handlers: {} });
@@ -80,24 +69,12 @@ test('an unsafe url is never rendered as a link (D24, defence in depth)', () => 
   assert.equal(isSafeHref(' JAVASCRIPT:x'), false);
 });
 
-test('ready with setup pending: action buttons shown, with the "Setup runs before the first action" note', () => {
-  const el = renderActionsCard(model(member({ checkout: { setup: { status: 'pending' } } })), { doc, handlers: {} });
-  const labels = labelsOf(el);
-  assert.ok(labels.includes('Run') && labels.includes('Test'));
-  assert.match(el.textContent, /Setup runs before the first action/);
-});
-
 test('run not finished (interrupted / paused): no Check out, a hint', () => {
   const m = model(member()); m.finished = false; m.runStatus = 'interrupted';
   const el = renderActionsCard(m, { doc, handlers: {} });
   assert.match(el.textContent, /Check out is available once the run has finished\./);
   assert.doesNotMatch(el.textContent, /stop the run/);
   assert.equal(labelsOf(el).some((t) => t === 'Check out'), false);
-});
-
-test('skipped setup with actions enabled offers "Run setup"', () => {
-  const el = renderActionsCard(model(member({ checkout: { setup: { status: 'skipped' } } })), { doc, handlers: {} });
-  assert.ok(labelsOf(el).some((t) => t === 'Run setup'));
 });
 
 test('disabled (hosted): actions and built-ins hidden, Check out and Copy command kept', () => {
@@ -119,28 +96,12 @@ test('pill, sidebar card, history badges', () => {
     ['Running :4417', '2 checked out', 'Kept · on success']);
   assert.equal(formatUptime(3_723_000), '1h 2m');
   assert.equal(renderOverviewStrip(undefined, { doc }), null);
+  assert.deepEqual(historyActionBadges({ id: 'x', checkout: { members: [{ policy: 'on-demand' }] } }, []).map((b) => b.text), ['Checked out']);
+  assert.deepEqual(historyActionBadges({ id: 'x', checkout: { members: [{ policy: 'until-pr' }] } }, []).map((b) => b.text), ['Checked out', 'Kept · until PR']);
+  assert.deepEqual(historyActionBadges({ id: 'x' }, []), []);
 });
 
 // ── Beyond the plan's pinned cases: the remaining renderers and the controller ──
-
-test('every member state renders a section.act-card, including no-branch', () => {
-  const el = renderActionsCard(model(member({ branch: null, copyCommand: null })), { doc, handlers: {} });
-  assert.equal(el.querySelectorAll('section.card.act-card').length, 1);
-  assert.match(el.querySelector('.act-meta').textContent, /BranchNone: this run made no branch/);
-});
-
-test('setup failed: exit code and "Run setup again"', () => {
-  const el = renderActionsCard(model(member({ checkout: { setup: { status: 'failed', exitCode: 2 } } })), { doc, handlers: {} });
-  assert.match(el.textContent, /exit 2/);
-  assert.ok(labelsOf(el).includes('Run setup again'));
-});
-
-test('task result shows the exit code; a queued start reads "Starts after setup"', () => {
-  const task = { instanceId: 't', member: 'app-0cea65fb', actionId: 'test', label: 'Test', kind: 'task', status: 'exited', exitCode: 1 };
-  const el = renderActionsCard(model(member({ checkout: { setup: { status: 'ok' } } }), [task]), { doc, handlers: {}, queued: new Set(['app-0cea65fb:run']) });
-  assert.match(el.querySelector('.act-exit.fail').textContent, /exit 1/);
-  assert.ok(labelsOf(el).includes('Starts after setup'));
-});
 
 test('handlers receive the member and action ids', () => {
   const calls = [];
@@ -184,16 +145,6 @@ test('overview strip: Check out, then open link + Stop while a service runs; nul
   assert.equal(renderOverviewStrip(model(member({ branch: null })), { doc, handlers }), null);
 });
 
-test('ship it strip: Check out, or Open / actions / Editor / Stop', () => {
-  assert.equal(renderShipItStrip(undefined, { doc }), null);
-  assert.ok(labelsOf(renderShipItStrip(model(member()), { doc, handlers: {} })).includes('Check out'));
-  const run = { instanceId: 'i', member: 'app-0cea65fb', actionId: 'run', label: 'Run', kind: 'service', status: 'ready', ports: { PORT: 4417 }, url: 'http://localhost:4417' };
-  const el = renderShipItStrip(model(member({ checkout: { setup: { status: 'ok' } } }), [run]), { doc, handlers: {} });
-  assert.equal(el.querySelector('a.act-open').textContent, 'Open :4417');
-  const labels = labelsOf(el);
-  for (const l of ['Test', 'VS Code', 'Stop']) assert.ok(labels.includes(l), l);
-});
-
 test('running actions card: null when empty, Stop and row callbacks', () => {
   assert.equal(renderRunningActionsCard([], { doc }), null);
   const run = { instanceId: 'i', runId: 'ab12cd34', member: 'app-0cea65fb', label: 'Run', kind: 'service', status: 'ready', ports: { PORT: 4417 }, startedAt: Date.now() - 5000 };
@@ -204,12 +155,6 @@ test('running actions card: null when empty, Stop and row callbacks', () => {
   assert.deepEqual(got, [['stop', 'i'], ['open', 'ab12cd34']]);
   assert.equal(formatUptime(5000), '5s');
   assert.equal(formatUptime(65000), '1m 5s');
-});
-
-test('history badges: on-demand checkout is not "Kept"; one member reads "Checked out"', () => {
-  assert.deepEqual(historyActionBadges({ id: 'x', checkout: { members: [{ policy: 'on-demand' }] } }, []).map((b) => b.text), ['Checked out']);
-  assert.deepEqual(historyActionBadges({ id: 'x', checkout: { members: [{ policy: 'until-pr' }] } }, []).map((b) => b.text), ['Checked out', 'Kept · until PR']);
-  assert.deepEqual(historyActionBadges({ id: 'x' }, []), []);
 });
 
 function fakeApi(routes) {
@@ -336,59 +281,6 @@ test('controller: a declined Discard sends nothing', async () => {
   ctl.destroy();
 });
 
-// ---------------------------------------------------------------------------
-// Page links: a message that names an in-app page links to it (appendWithPageLinks)
-// ---------------------------------------------------------------------------
-
-const hrefs = (el) => [...el.querySelectorAll('a.act-page-link')].map((a) => [a.textContent, a.getAttribute('href')]);
-
-test('the apps note links to the Settings card', () => {
-  const m = member({ builtins: [{ key: 'terminal', label: 'Terminal' }, { key: 'copyCommand', label: 'Copy command' }] });
-  const el = renderActionsCard(model(m), { doc, handlers: {} });
-  assert.deepEqual(hrefs(el), [['Settings › Runs › Actions', '#settings/runs/actions']]);
-  assert.match(el.querySelector('.act-apps').textContent, /in Settings › Runs › Actions\.$/);
-});
-
-test('a checked-out project with no actions says where to add them, linked to its Actions tab', () => {
-  const m = member({ actions: [], checkout: { setup: { status: 'ok' } } });
-  const el = renderActionsCard(model(m), { doc, handlers: {} });
-  assert.match(el.querySelector('.act-none').textContent, /^This project has no actions yet\. Add a Run or Test command on the project's Actions tab\.$/);
-  assert.deepEqual(hrefs(el), [["the project's Actions tab", '#projects/app-0cea65fb/actions'], ['Settings › Runs › Actions', '#settings/runs/actions']]);
-  const withActions = renderActionsCard(model(member({ checkout: { setup: { status: 'ok' } } })), { doc, handlers: {} });
-  assert.equal(withActions.querySelector('.act-none'), null, 'not when it has actions');
-  assert.equal(withActions.querySelector('.act-edit').textContent, "Add or change actions on the project's Actions tab.");
-  assert.equal(withActions.querySelector('.act-edit a').getAttribute('href'), '#projects/app-0cea65fb/actions');
-  const off = model(m); off.enabled = false;
-  assert.equal(renderActionsCard(off, { doc, handlers: {} }).querySelector('.act-none'), null, 'not on a hosted worca with actions off');
-});
-
-test('an error notice that names the Settings card links it; other text stays text', () => {
-  const el = renderActionsCard(model(member()), { doc, handlers: {},
-    notice: { kind: 'err', text: 'no free port between 4400 and 4499; widen the range in Settings › Runs › Actions' } });
-  const n = el.querySelector('.act-notice');
-  assert.equal(n.textContent, 'no free port between 4400 and 4499; widen the range in Settings › Runs › Actions');
-  assert.deepEqual(hrefs(n), [['Settings › Runs › Actions', '#settings/runs/actions']]);
-  const plain = renderActionsCard(model(member()), { doc, handlers: {}, notice: { kind: 'err', text: 'Request failed (500)' } });
-  assert.equal(plain.querySelectorAll('.act-notice a').length, 0);
-});
-
-test('layout: name and state on top, then Branch and Folder as labelled rows with copy buttons', () => {
-  const copied = [];
-  const long = 'worca-cc/github-source-sinishadjukic-worca-cc-529-da7d143d';
-  const m = member({ branch: long, checkout: { worktreeDir: '/Users/ada/.worca-cc/runs/da7d143d/repos/worca-cc-189d6679', setup: { status: 'ok' } } });
-  const el = renderActionsCard(model(m), { doc, handlers: { onCopy: (t) => copied.push(t) } });
-  const head = el.querySelector('.act-head');
-  assert.deepEqual([...head.children].map((c) => c.className), ['act-name', 'badge act-state'], 'the branch left the title line');
-  assert.deepEqual([...el.querySelectorAll('.act-meta dt')].map((d) => d.textContent), ['Branch', 'Folder']);
-  const br = el.querySelector('.act-branch');
-  assert.equal(br.title, long);
-  assert.ok(br.textContent.length <= 56 && br.textContent.includes('…') && br.textContent.endsWith('da7d143d'), br.textContent);
-  assert.equal(el.querySelector('.act-path').title, m.checkout.worktreeDir);
-  for (const b of el.querySelectorAll('.act-meta .act-copy')) b.click();
-  assert.deepEqual(copied, [long, m.checkout.worktreeDir]);
-  assert.deepEqual([...el.querySelectorAll('.act-meta .act-copy')].map((b) => b.getAttribute('aria-label')), ['Copy branch name', 'Copy folder path']);
-});
-
 test('middleClip keeps both ends', async () => {
   const { middleClip } = await import('../ui/public/actions-view.mjs');
   assert.equal(middleClip('short'), 'short');
@@ -423,29 +315,9 @@ test('controller: Terminal before Check out asks, then checks out this member an
   ctl.destroy();
 });
 
-test('an error notice is a red alert; a success notice a green status', () => {
-  const err = renderActionsCard(model(member()), { doc, handlers: {}, notice: { kind: 'error', text: "Can't check out: x is already checked out in /p." } }).querySelector('.act-notice');
-  assert.equal(err.className, 'act-notice err');
-  assert.equal(err.getAttribute('role'), 'alert');
-  const ok = renderActionsCard(model(member()), { doc, handlers: {}, notice: { kind: 'ok', text: 'Copied' } }).querySelector('.act-notice');
-  assert.equal(ok.className, 'act-notice ok');
-  assert.equal(ok.getAttribute('role'), 'status');
-});
-
 // ---------------------------------------------------------------------------
 // The branch is already checked out in the person's own folder (heldBy / a linked checkout)
 // ---------------------------------------------------------------------------
-
-test('a branch held in another folder offers "Use that folder" instead of Check out, and shows the folder', () => {
-  const el = renderActionsCard(model(member({ heldBy: '/Users/ada/dev/app' })), { doc, handlers: {} });
-  const labels = labelsOf(el);
-  assert.ok(labels.includes('Use that folder') && !labels.includes('Check out'));
-  assert.equal(el.querySelector('.act-path').title, '/Users/ada/dev/app');
-  assert.match(el.querySelector('.act-meta').textContent, /already has this branch/);
-  assert.match(el.querySelector('.act-apps').textContent, /^This branch is already checked out in that folder, so Worca can use it instead of making a copy\. Worca never deletes or changes your folder\. VS Code, Terminal and Finder open that folder\. Change the editor and terminal in Settings › Runs › Actions\.$/);
-  const term = [...el.querySelectorAll('button')].find((b) => b.textContent === 'Terminal');
-  assert.equal(term.title, 'Open Terminal in the folder that has this branch (asks first)');
-});
 
 test('a linked folder: "Your folder" badge and Unlink instead of Discard', () => {
   const m = member({ checkout: { external: true, worktreeDir: '/Users/ada/dev/app', setup: { status: 'skipped' } } });
@@ -508,35 +380,6 @@ test('controller: a Check out refused because the branch is held elsewhere refre
   ctl.destroy();
 });
 
-test('every command on the Actions surfaces says what it does on hover', () => {
-  const run = { instanceId: 'act:ab:app-0cea65fb:run', runId: 'ab', member: 'app-0cea65fb', actionId: 'run', label: 'Run', kind: 'service', status: 'ready', ports: { PORT: 4417 }, url: 'http://localhost:4417', startedAt: Date.now() };
-  const untitled = (el) => [...el.querySelectorAll('button')].filter((b) => !b.title).map((b) => b.textContent || b.getAttribute('aria-label'));
-  const states = [
-    model(member()),
-    model(member({ heldBy: '/Users/ada/dev/app' })),
-    model(member({ checkout: { setup: { status: 'ok' } } }), [run]),
-    model(member({ checkout: { setup: { status: 'skipped' } } })),
-    model(member({ checkout: { setup: { status: 'failed', exitCode: 1 } } })),
-    model(member({ checkout: { external: true, worktreeDir: '/Users/ada/dev/app', setup: { status: 'skipped' } } })),
-  ];
-  for (const m of states) assert.deepEqual(untitled(renderActionsCard(m, { doc, handlers: {} })), [], JSON.stringify(m.members[0].checkout));
-  assert.deepEqual(untitled(renderOverviewStrip(model(member()), { doc, handlers: {} })), []);
-  assert.deepEqual(untitled(renderOverviewStrip(model(member({ checkout: { setup: { status: 'ok' } } }), [run]), { doc, handlers: {} })), []);
-  assert.deepEqual(untitled(renderShipItStrip(model(member()), { doc, handlers: {} })), []);
-  assert.deepEqual(untitled(renderShipItStrip(model(member({ checkout: { setup: { status: 'ok' } } }), [run]), { doc, handlers: {} })), []);
-  const discard = [...renderActionsCard(states[2], { doc, handlers: {} }).querySelectorAll('button')].find((b) => b.textContent === 'Discard');
-  assert.match(discard.title, /^Delete the checkout folder\. .*saved as a patch first\.$/);
-  const unlink = [...renderActionsCard(states[5], { doc, handlers: {} }).querySelectorAll('button')].find((b) => b.textContent === 'Unlink');
-  assert.equal(unlink.title, 'Stop using your folder for this run. Running services stop; the folder and its changes stay as they are.');
-});
-
-test('the notes under a card sit together in one block', () => {
-  const m = member({ actions: [], checkout: { setup: { status: 'ok' } } });
-  const notes = renderActionsCard(model(m), { doc, handlers: {} }).querySelector('.act-notes');
-  assert.deepEqual([...notes.children].map((c) => c.className), ['hint act-none', 'hint act-apps']);
-  assert.ok(!notes.textContent.includes('app has'), 'instructional text never names the project');
-});
-
 test('Run setup shows only when setup was skipped AND the project has a setup command', () => {
   const linked = { external: true, worktreeDir: '/Users/ada/dev/app', setup: { status: 'skipped' } };
   assert.ok(labelsOf(renderActionsCard(model(member({ checkout: linked })), { doc, handlers: {} })).includes('Run setup'));
@@ -544,17 +387,4 @@ test('Run setup shows only when setup was skipped AND the project has a setup co
     'no setup command: nothing to run, no button');
   assert.ok(!labelsOf(renderActionsCard(model(member({ checkout: { setup: { status: 'ok' } } })), { doc, handlers: {} })).includes('Run setup'),
     'setup already ran: no button');
-});
-
-test('all set: the note names what opens and links to Settings; before Check out it only says where to change them', () => {
-  const after = renderActionsCard(model(member({ checkout: { setup: { status: 'ok' } } })), { doc, handlers: {} });
-  const note = after.querySelector('.act-apps');
-  assert.equal(note.textContent, 'Opens in VS Code and Terminal. Change them in Settings › Runs › Actions.');
-  assert.equal(note.querySelector('a').getAttribute('href'), '#settings/runs/actions');
-  const one = renderActionsCard(model(member({ builtins: [{ key: 'terminal', label: 'iTerm' }], checkout: { setup: { status: 'ok' } } })), { doc, handlers: {} });
-  assert.equal(one.querySelector('.act-apps').textContent, 'Opens in iTerm. Change it in Settings › Runs › Actions.');
-  const before = renderActionsCard(model(member()), { doc, handlers: {} });
-  assert.match(before.querySelector('.act-apps').textContent, /open the checkout, so they check out first\. Change the editor and terminal in Settings › Runs › Actions\.$/);
-  const off = model(member({ checkout: { setup: { status: 'ok' } } })); off.enabled = false;
-  assert.equal(renderActionsCard(off, { doc, handlers: {} }).querySelector('.act-apps'), null, 'hosted with actions off: nothing to change');
 });

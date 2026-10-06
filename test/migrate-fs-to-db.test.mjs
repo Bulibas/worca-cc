@@ -11,6 +11,7 @@ import { getDb, _resetForTests, migrate, dbPath } from '../src/core/db.mjs';
 import { maybeMigrateFromFs } from '../src/core/migrate-fs-to-db.mjs';
 import { worcaHome } from '../src/core/projects.mjs';
 import { projectKey } from '../src/core/store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const POSIX_SHIM = { skip: process.platform === 'win32' ? 'fake claude shim is a POSIX shell script (no .exe stand-in on Windows)' : false };
 
@@ -306,24 +307,8 @@ test('maybeMigrateFromFs imports the full legacy tree into every table', POSIX_S
   assert.deepEqual(byKind('review'), ['reviews/06-06-26-history-rework-impl-review.md']);
 });
 
-// ── Task 4.2 — the self-guard (idempotent + no-op on empty/corrupt tree) ─────────
-
-test('a second call is a no-op (idempotent) and does not duplicate rows', () => {
-  const home = worcaHome();
-  mkdirSync(home, { recursive: true });
-  const fx = buildFixture(home);
-  const db = getDb();
-
-  maybeMigrateFromFs(db);
-  const counts1 = tableCounts(db);
-  assert.equal(counts1.projects, 2, 'first run imported');
-
-  // Second call: the row-count self-guard must make it a no-op (no throw, no dupes).
-  assert.doesNotThrow(() => maybeMigrateFromFs(db));
-  const counts2 = tableCounts(db);
-  assert.deepEqual(counts2, counts1, 'no table changed on the second call');
-  void fx;
-});
+// ── Task 4.2 — the self-guard (no-op on empty/corrupt tree; re-run safety is pinned by
+// the getDb() reopen and M3 marker tests below) ───────────────────────────────────
 
 test('no-op when there is no legacy JSON at all', () => {
   const home = worcaHome();
@@ -727,36 +712,35 @@ function markerRow(db) {
   return db.prepare('SELECT kind, data FROM store_meta WHERE key = ?').get(MIGRATION_MARKER_KEY);
 }
 
-test('M3: a successful import stamps the completion marker inside the tx', () => {
+// One import: the marker it stamps is read first, then the re-run is checked against it.
+test('M3: a successful import stamps the _meta completion marker, and re-runs are gated on it, not on row counts', async () => {
   const home = worcaHome();
   mkdirSync(home, { recursive: true });
   buildFixture(home);
   const db = getDb();
   maybeMigrateFromFs(db);
 
-  const m = markerRow(db);
-  assert.ok(m, 'marker row present after a successful import');
-  assert.equal(m.kind, '_meta', 'marker uses the reserved _meta kind');
-  const data = JSON.parse(m.data);
-  assert.equal(data.migrated, true, 'marker payload records completion');
-  assert.ok(typeof data.at === 'string' && data.at.length > 0, 'marker stamps a timestamp');
-});
+  await checkRows([
+    { name: 'M3: a successful import stamps the completion marker inside the tx', run: () => {
+      const m = markerRow(db);
+      assert.ok(m, 'marker row present after a successful import');
+      assert.equal(m.kind, '_meta', 'marker uses the reserved _meta kind');
+      const data = JSON.parse(m.data);
+      assert.equal(data.migrated, true, 'marker payload records completion');
+      assert.ok(typeof data.at === 'string' && data.at.length > 0, 'marker stamps a timestamp');
+    } },
+    { name: 'M3: re-run is gated on the marker, not the row counts', run: () => {
+      assert.ok(markerRow(db), 'marker stamped on first import');
 
-test('M3: re-run is gated on the marker, not the row counts', () => {
-  const home = worcaHome();
-  mkdirSync(home, { recursive: true });
-  buildFixture(home);
-  const db = getDb();
-  maybeMigrateFromFs(db);
-  assert.ok(markerRow(db), 'marker stamped on first import');
-
-  // Wipe the rows the OLD proxy keyed on, but KEEP the marker. The importer must
-  // STILL be a no-op (the marker says "done"), proving it no longer trusts counts.
-  db.exec('DELETE FROM pipelines; DELETE FROM projects;');
-  assert.equal(db.prepare('SELECT count(*) AS n FROM projects').get().n, 0);
-  assert.doesNotThrow(() => maybeMigrateFromFs(db));
-  assert.equal(db.prepare('SELECT count(*) AS n FROM projects').get().n, 0,
-    're-import suppressed by the marker even with zero project rows');
+      // Wipe the rows the OLD proxy keyed on, but KEEP the marker. The importer must
+      // STILL be a no-op (the marker says "done"), proving it no longer trusts counts.
+      db.exec('DELETE FROM pipelines; DELETE FROM projects;');
+      assert.equal(db.prepare('SELECT count(*) AS n FROM projects').get().n, 0);
+      assert.doesNotThrow(() => maybeMigrateFromFs(db));
+      assert.equal(db.prepare('SELECT count(*) AS n FROM projects').get().n, 0,
+        're-import suppressed by the marker even with zero project rows');
+    } },
+  ]);
 });
 
 test('M3: a DB with rows but NO marker still imports (handles a pre-marker DB)', () => {

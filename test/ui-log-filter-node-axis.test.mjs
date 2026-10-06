@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -167,31 +168,33 @@ test('a manual node or cycle pick on the Logs bar clears the execution chip and 
   assert.equal(sec.querySelector('.log-f-exec').hidden, false);
 });
 
-test('a pre-P6 filter literal (no node/execution keys) does not force a repaint on every paint', async () => {
+test('node-axis repaint rules: a pre-P6 filter literal does not force a repaint every paint; a not-yet-produced node pick keeps the axis across paints', async () => {
   const ctx = await boot();
-  const { np, r, sec } = await liveRun(ctx);
-  r.logFilter = { source: '', level: '', step: '', cycle: '', search: '' };
-  assert.equal(np.paintLogFilters(r, sec), false);
-});
+  await checkRows([
+    { name: 'a pre-P6 filter literal (no node/execution keys) does not force a repaint on every paint', run: async () => {
+      const { np, r, sec } = await liveRun(ctx);
+      r.logFilter = { source: '', level: '', step: '', cycle: '', search: '' };
+      assert.equal(np.paintLogFilters(r, sec), false);
+    } },
+    // P6a seam (found by the merged-tree CDP run): the footer rows a click comes from
+    // are painted from the LEDGER, while facets.nodes comes from r.logLines. A pick on
+    // a node that has not logged yet must keep the node axis and offer its own option,
+    // or readLogFilterFrom reads `node: ''` back and the reconcile wipes the pick.
+    { name: 'a node pick that the log has not produced yet keeps the node axis and survives the next paint', run: async () => {
+      const { np, r, sec } = await liveRun(ctx, { id: 'r9', withLines: false });
+      assert.deepEqual(r.logLines, [], 'no line has arrived: facets.nodes is empty');
 
-// P6a seam (found by the merged-tree CDP run): the footer rows a click comes from
-// are painted from the LEDGER, while facets.nodes comes from r.logLines. A pick on
-// a node that has not logged yet must keep the node axis and offer its own option,
-// or readLogFilterFrom reads `node: ''` back and the reconcile wipes the pick.
-test('a node pick that the log has not produced yet keeps the node axis and survives the next paint', async () => {
-  const ctx = await boot();
-  const { np, r, sec } = await liveRun(ctx, { id: 'r9', withLines: false });
-  assert.deepEqual(r.logLines, [], 'no line has arrived: facets.nodes is empty');
-
-  np.applyRunLogFilter(r, { node: 'n_a' });
-  const sel = sec.querySelector('.log-f-step');
-  assert.equal(sel.dataset.axis, 'node', 'the axis stays on nodes for a pending pick');
-  assert.deepEqual([...sel.options].map((o) => o.textContent), ['all nodes', 'Planner'],
-    'the picked node is injected as its own option (same honesty as History __setLogFilter)');
-  assert.equal(sel.value, 'n_a');
-  assert.equal(np.readLogFilterFrom(sec).node, 'n_a', 'so the DOM can represent the model value');
-  np.paintLogFilters(r, sec);
-  assert.equal(r.logFilter.node, 'n_a', 'a second paint does not wipe the pick');
+      np.applyRunLogFilter(r, { node: 'n_a' });
+      const sel = sec.querySelector('.log-f-step');
+      assert.equal(sel.dataset.axis, 'node', 'the axis stays on nodes for a pending pick');
+      assert.deepEqual([...sel.options].map((o) => o.textContent), ['all nodes', 'Planner'],
+        'the picked node is injected as its own option (same honesty as History __setLogFilter)');
+      assert.equal(sel.value, 'n_a');
+      assert.equal(np.readLogFilterFrom(sec).node, 'n_a', 'so the DOM can represent the model value');
+      np.paintLogFilters(r, sec);
+      assert.equal(r.logFilter.node, 'n_a', 'a second paint does not wipe the pick');
+    } },
+  ]);
 });
 
 // ── the History detail ──────────────────────────────────────────────────────
@@ -237,48 +240,52 @@ async function openLogsTab(window) {
   return $(window, '#hist-detail .hd-sec[data-sec="logs"]');
 }
 
-test('History Logs: manifest labels on the node select; __setLogFilter drives node + chip; chip click and a manual pick clear it', async () => {
-  const { window } = await openHistory();
-  const sec = await openLogsTab(window);
-  const sel = sec.querySelector('.log-f-step');
-  assert.equal(sel.dataset.axis, 'node');
-  assert.deepEqual([...sel.options].map((o) => o.textContent), ['all nodes', 'Planner', 'Implementer']);
-  assert.equal(lines(sec).length, 4);
-  sec.__setLogFilter({ node: 'n_a' });
-  assert.equal(sel.value, 'n_a');
-  assert.equal(lines(sec).length, 2);
-  sec.__setLogFilter({ execution: 'x:n_a:2' });
-  const chip = sec.querySelector('.log-f-exec');
-  assert.equal(chip.hidden, false);
-  assert.equal(chip.querySelector('.lfe-text').textContent, 'Planner #2', 'the chip reads the saved ledger');
-  assert.deepEqual(lines(sec).map((t) => /second pass/.test(t)), [true]);
-  click(window, chip.querySelector('.lfe-x'));
-  assert.equal(chip.hidden, true);
-  assert.equal(lines(sec).length, 2, 'the node axis survives the chip clear');
-  sec.__setLogFilter({ execution: 'x:n_a:2' });
-  sel.value = 'n_b';
-  change(window, sel);
-  assert.equal(chip.hidden, true, 'a manual node pick clears the chip');
-  assert.equal(sel.value, 'n_b', 'and the pick survives');
-  assert.deepEqual(lines(sec).map((t) => /building/.test(t)), [true]);
-  // A node the run never logged under is offered (once) so the empty pane reads honestly.
-  sec.__setLogFilter({ node: 'n_end' });
-  sec.__setLogFilter({ node: 'n_end' });
-  assert.equal([...sel.options].filter((o) => o.value === 'n_end').length, 1);
-  assert.equal(sel.value, 'n_end');
-  assert.equal(sec.querySelector('.log').textContent, '(no lines match the filter)');
-});
-
-test('History Logs: a filter intent parked before the fetch is drained after the first paint, exactly once', async () => {
-  const { window } = await openHistory();
-  const sec = $(window, '#hist-detail .hd-sec[data-sec="logs"]');
-  assert.equal(sec.dataset.loaded, undefined, 'the Logs tab starts unbuilt');
-  sec.__pendingLogFilter = { node: 'n_b' };
-  click(window, $(window, '#hist-detail .hd-tab[data-sec="logs"]'));
-  await settle(4);
-  assert.equal(sec.querySelector('.log-f-step').value, 'n_b');
-  assert.deepEqual(lines(sec).map((t) => /building/.test(t)), [true]);
-  assert.equal(sec.__pendingLogFilter, null);
+// Each row opens its own History boot: the parked-intent row needs a Logs tab nobody built yet.
+test('History Logs: manifest labels on the node select, __setLogFilter drives node + chip (cleared by chip/manual pick), and an intent parked before the fetch drains exactly once', async () => {
+  await checkRows([
+    { name: 'History Logs: manifest labels on the node select; __setLogFilter drives node + chip; chip click and a manual pick clear it', run: async () => {
+      const { window } = await openHistory();
+      const sec = await openLogsTab(window);
+      const sel = sec.querySelector('.log-f-step');
+      assert.equal(sel.dataset.axis, 'node');
+      assert.deepEqual([...sel.options].map((o) => o.textContent), ['all nodes', 'Planner', 'Implementer']);
+      assert.equal(lines(sec).length, 4);
+      sec.__setLogFilter({ node: 'n_a' });
+      assert.equal(sel.value, 'n_a');
+      assert.equal(lines(sec).length, 2);
+      sec.__setLogFilter({ execution: 'x:n_a:2' });
+      const chip = sec.querySelector('.log-f-exec');
+      assert.equal(chip.hidden, false);
+      assert.equal(chip.querySelector('.lfe-text').textContent, 'Planner #2', 'the chip reads the saved ledger');
+      assert.deepEqual(lines(sec).map((t) => /second pass/.test(t)), [true]);
+      click(window, chip.querySelector('.lfe-x'));
+      assert.equal(chip.hidden, true);
+      assert.equal(lines(sec).length, 2, 'the node axis survives the chip clear');
+      sec.__setLogFilter({ execution: 'x:n_a:2' });
+      sel.value = 'n_b';
+      change(window, sel);
+      assert.equal(chip.hidden, true, 'a manual node pick clears the chip');
+      assert.equal(sel.value, 'n_b', 'and the pick survives');
+      assert.deepEqual(lines(sec).map((t) => /building/.test(t)), [true]);
+      // A node the run never logged under is offered (once) so the empty pane reads honestly.
+      sec.__setLogFilter({ node: 'n_end' });
+      sec.__setLogFilter({ node: 'n_end' });
+      assert.equal([...sel.options].filter((o) => o.value === 'n_end').length, 1);
+      assert.equal(sel.value, 'n_end');
+      assert.equal(sec.querySelector('.log').textContent, '(no lines match the filter)');
+    } },
+    { name: 'History Logs: a filter intent parked before the fetch is drained after the first paint, exactly once', run: async () => {
+      const { window } = await openHistory();
+      const sec = $(window, '#hist-detail .hd-sec[data-sec="logs"]');
+      assert.equal(sec.dataset.loaded, undefined, 'the Logs tab starts unbuilt');
+      sec.__pendingLogFilter = { node: 'n_b' };
+      click(window, $(window, '#hist-detail .hd-tab[data-sec="logs"]'));
+      await settle(4);
+      assert.equal(sec.querySelector('.log-f-step').value, 'n_b');
+      assert.deepEqual(lines(sec).map((t) => /building/.test(t)), [true]);
+      assert.equal(sec.__pendingLogFilter, null);
+    } },
+  ]);
 });
 
 test('History graph: a v2 card (.node[data-node-id]) is a labelled link whose click opens the Logs tab on that node', async () => {

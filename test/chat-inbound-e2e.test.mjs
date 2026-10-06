@@ -15,6 +15,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { writePluginsLock, pluginCurrentDir } from '../src/core/plugins-lock.mjs';
 import { writePluginConfig } from '../src/core/plugin-config.mjs';
 import { mockSentMessages, clearMockSentMessages } from '../src/core/chat/channel-host.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 process.env.WORCA_MOCK = '1';
 useTempHome(after);
@@ -84,23 +85,6 @@ test('mock channel is connected; /help round-trips through the full pipeline', a
   assert.equal(sent.chatId, '42', 'reply goes to the originating chat');
 });
 
-test('allowlist enforced at the server seam: unlisted chat gets NO reply', async () => {
-  clearMockSentMessages();
-  await inject('/help', '666');
-  assert.equal(mockSentMessages().length, 0);
-});
-
-test('/api/chat/status reports the allow-list size and the last refused command', async () => {
-  await inject('/approve *zz', '666');
-  const body = await (await fetch(`${base}/api/chat/status`)).json();
-  const row = body.channels.find((c) => c.plugin === NAME && c.channelId === 'main');
-  assert.equal(row.commands.allowed, 1, 'allowedChatIds = "42"');
-  assert.equal(row.commands.lastRefused.chatId, '666');
-  assert.equal(row.commands.lastRefused.command, 'approve');
-  assert.ok(!Number.isNaN(Date.parse(row.commands.lastRefused.at)));
-  assert.equal(mockSentMessages().filter((m) => m.chatId === '666').length, 0, '666 is not a notify chat: still silent');
-});
-
 test('a live run is visible and a gate answered from chat clears pendingQuestion', async () => {
   const answered = [];
   runs.set('run-e2e-77', {
@@ -135,22 +119,41 @@ test('a live run is visible and a gate answered from chat clears pendingQuestion
   }
 });
 
-test('GET /api/chat/status lists channels; POST /api/chat/test needs notifyChatIds', async () => {
-  const status = await (await fetch(`${base}/api/chat/status`)).json();
-  assert.equal(status.channels.length, 1);
-  assert.equal(status.channels[0].plugin, NAME);
-  assert.equal(status.channels[0].state, 'connected');
+test('/api/chat/status: channels, allow-list size, last refused command; /api/chat/test needs notifyChatIds', async () => {
+  await checkRows([
+    { name: '/api/chat/status reports the allow-list size and the last refused command', run: async () => {
+      // allowlist enforced at the server seam: unlisted chat gets NO reply
+      clearMockSentMessages();
+      await inject('/help', '666');
+      assert.equal(mockSentMessages().length, 0);
 
-  // no notifyChatIds configured on the fixture -> caller error 400
-  const bad = await fetch(`${base}/api/chat/test`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ plugin: NAME, channelId: 'main' }),
-  });
-  assert.equal(bad.status, 400);
-  const missing = await fetch(`${base}/api/chat/test`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-  });
-  assert.equal(missing.status, 400);
+      await inject('/approve *zz', '666');
+      const body = await (await fetch(`${base}/api/chat/status`)).json();
+      const row = body.channels.find((c) => c.plugin === NAME && c.channelId === 'main');
+      assert.equal(row.commands.allowed, 1, 'allowedChatIds = "42"');
+      assert.equal(row.commands.lastRefused.chatId, '666');
+      assert.equal(row.commands.lastRefused.command, 'approve');
+      assert.ok(!Number.isNaN(Date.parse(row.commands.lastRefused.at)));
+      assert.equal(mockSentMessages().filter((m) => m.chatId === '666').length, 0, '666 is not a notify chat: still silent');
+    } },
+    { name: 'GET /api/chat/status lists channels; POST /api/chat/test needs notifyChatIds', run: async () => {
+      const status = await (await fetch(`${base}/api/chat/status`)).json();
+      assert.equal(status.channels.length, 1);
+      assert.equal(status.channels[0].plugin, NAME);
+      assert.equal(status.channels[0].state, 'connected');
+
+      // no notifyChatIds configured on the fixture -> caller error 400
+      const bad = await fetch(`${base}/api/chat/test`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plugin: NAME, channelId: 'main' }),
+      });
+      assert.equal(bad.status, 400);
+      const missing = await fetch(`${base}/api/chat/test`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      assert.equal(missing.status, 400);
+    } },
+  ]);
 });
 
 test('settings round-trip: chat prefs ride GET/POST /api/settings without clearing root', async () => {

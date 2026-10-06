@@ -5,6 +5,7 @@
 // No store, no bench child, no python probe, no claude.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import {
   defaultScriptDeps, trimBenchResult, scriptHostRuntimes, askScriptPromptInput, SCRIPT_ERRORS,
 } from '../src/core/ask/script-deps.mjs';
@@ -68,18 +69,34 @@ function fakeIo(over = {}, { signal = null } = {}) {
   return { io, calls, rows, s: defaultScriptDeps({ threadId: 'ask_0000beef', signal, io }).scripts };
 }
 
-test('save: a fresh key creates on the user layer, stamped ask:<threadId>, computed meta fields stripped', async () => {
-  const { s, calls } = fakeIo();
-  const out = await s.save({ key: 'runTests', meta: META({ origin: 'builtin', scriptPath: '/evil', file: '../../etc/passwd', createdBy: 'ui', portSummary: 'x' }), source: 'npm test\n' });
-  assert.deepEqual(out, { ok: true, key: 'runTests', created: true, path: '/h/.worca-cc/scripts/runTests.sh', link: '#scripts/runTests' });
-  const [, meta, source, , by] = calls.find((c) => c[0] === 'createScript');
-  assert.equal(by, 'ask:ask_0000beef');
-  assert.equal(source, 'npm test\n');
-  assert.equal(meta.metaVersion, 2);
-  assert.equal(meta.key, 'runTests');
-  for (const k of ['origin', 'scriptPath', 'file', 'createdBy', 'updatedBy', 'commandResolved', 'scriptsDir', 'portSummary', 'caseCount']) {
-    assert.equal(Object.prototype.hasOwnProperty.call(meta, k), false, `${k} never rides into a write`);
-  }
+test('save: a fresh key on the user layer (ask: stamp, computed fields stripped), cases normalised before the write', async () => {
+  await checkRows([
+    { name: 'save: a fresh key creates on the user layer, stamped ask:<threadId>, computed meta fields stripped', run: async () => {
+      const { s, calls } = fakeIo();
+      const out = await s.save({ key: 'runTests', meta: META({ origin: 'builtin', scriptPath: '/evil', file: '../../etc/passwd', createdBy: 'ui', portSummary: 'x' }), source: 'npm test\n' });
+      assert.deepEqual(out, { ok: true, key: 'runTests', created: true, path: '/h/.worca-cc/scripts/runTests.sh', link: '#scripts/runTests' });
+      const [, meta, source, , by] = calls.find((c) => c[0] === 'createScript');
+      assert.equal(by, 'ask:ask_0000beef');
+      assert.equal(source, 'npm test\n');
+      assert.equal(meta.metaVersion, 2);
+      assert.equal(meta.key, 'runTests');
+      for (const k of ['origin', 'scriptPath', 'file', 'createdBy', 'updatedBy', 'commandResolved', 'scriptsDir', 'portSummary', 'caseCount']) {
+        assert.equal(Object.prototype.hasOwnProperty.call(meta, k), false, `${k} never rides into a write`);
+      }
+    } },
+    { name: 'save: cases are normalized BEFORE the write and saved after it', run: async () => {
+      const bad = fakeIo();
+      assert.deepEqual(await bad.s.save({ key: 'runTests', meta: META(), source: 'npm test\n', cases: [{ id: 'c1' }] }),
+        { ok: false, errors: ['case 1: name is required'] });
+      assert.equal(bad.calls.some((c) => c[0] === 'createScript'), false, 'a bad case never leaves a saved script behind');
+      const ok = fakeIo();
+      const out = await ok.s.save({ key: 'runTests', meta: META(), source: 'npm test\n', cases: [{ id: 'c1', name: 'red' }] });
+      assert.equal(out.cases, 1);
+      assert.deepEqual(ok.calls.map((c) => c[0]), ['normalizeCases', 'createScript', 'writeCases']);
+      assert.deepEqual(await ok.s.save({ key: 'runTests', meta: META(), source: 'x', cases: 'nope', overwrite: true }),
+        { ok: false, errors: ['cases must be an array of case objects'] });
+    } },
+  ]);
 });
 
 test('save: an existing user key needs overwrite: true; built-in and plugin keys are always refused, and nothing is written', async () => {
@@ -114,19 +131,6 @@ test('save: bad input and coded store refusals come back as errors; an uncoded f
   assert.deepEqual((await dup.s.save({ key: 'planner', meta: META({ key: 'planner' }), source: 'x' })).errors, ['"planner" is an agent key — scripts and agents share one namespace']);
   const broken = fakeIo({ createScript: async () => { throw new Error('EACCES: permission denied'); } });
   await assert.rejects(() => broken.s.save({ key: 'x', meta: META({ key: 'x' }), source: 'x' }), /EACCES/);
-});
-
-test('save: cases are normalized BEFORE the write and saved after it', async () => {
-  const bad = fakeIo();
-  assert.deepEqual(await bad.s.save({ key: 'runTests', meta: META(), source: 'npm test\n', cases: [{ id: 'c1' }] }),
-    { ok: false, errors: ['case 1: name is required'] });
-  assert.equal(bad.calls.some((c) => c[0] === 'createScript'), false, 'a bad case never leaves a saved script behind');
-  const ok = fakeIo();
-  const out = await ok.s.save({ key: 'runTests', meta: META(), source: 'npm test\n', cases: [{ id: 'c1', name: 'red' }] });
-  assert.equal(out.cases, 1);
-  assert.deepEqual(ok.calls.map((c) => c[0]), ['normalizeCases', 'createScript', 'writeCases']);
-  assert.deepEqual(await ok.s.save({ key: 'runTests', meta: META(), source: 'x', cases: 'nope', overwrite: true }),
-    { ok: false, errors: ['cases must be an array of case objects'] });
 });
 
 test('test: the bench request, the collected lines, and a refusal that names what to fix', async () => {
@@ -217,58 +221,61 @@ test('test: caseId runs the CASE as saved — its folder must be scratch or the 
     { ok: false, errors: [SCRIPT_ERRORS.notFound('nothere')] });
 });
 
-test('trimBenchResult: the verdict is capped (50 issues, 2 000 chars a field), and so are warnings, diffs and the error tail', () => {
-  const issues = Array.from({ length: 60 }, (_, i) => ({ severity: 'major', title: `t${i}`, detail: 'D'.repeat(5000), location: '' }));
-  const r = trimBenchResult({ ...BENCH_RESULT, verdict: { summary: 'S'.repeat(3000), issues }, warnings: Array.from({ length: 70 }, (_, i) => `w${i}`),
-    expect: { pass: false, diffs: Array.from({ length: 70 }, () => 'x'.repeat(3000)) }, error: { message: 'm'.repeat(3000), tail: Array.from({ length: 70 }, (_, i) => `l${i}`) } }, []);
-  assert.equal(r.verdict.issues.length, ASK_LIMITS.scriptVerdictMaxIssues);
-  assert.equal(r.verdict.issueCount, 60, 'the real count is still reported');
-  assert.equal(r.verdict.truncated, true);
-  assert.equal(r.verdict.issues[0].detail.length, ASK_LIMITS.scriptResultFieldMaxChars + 1, 'clipped, with a mark');
-  assert.ok(r.verdict.issues[0].detail.endsWith('…'));
-  assert.equal(r.verdict.summary.length, ASK_LIMITS.scriptResultFieldMaxChars + 1);
-  assert.equal(r.warnings.length, ASK_LIMITS.scriptVerdictMaxIssues);
-  assert.equal(r.expect.diffs.length, ASK_LIMITS.scriptVerdictMaxIssues);
-  assert.equal(r.expect.diffs[0].length, ASK_LIMITS.scriptResultFieldMaxChars + 1);
-  assert.equal(r.error.message.length, ASK_LIMITS.scriptResultFieldMaxChars + 1);
-  assert.equal(r.error.tail.length, ASK_LIMITS.scriptVerdictMaxIssues);
-  assert.equal(r.error.tail.at(-1), 'l69', 'the error tail keeps its LAST lines');
-  assert.ok(Buffer.byteLength(JSON.stringify(r), 'utf8') < 600_000, `bounded: ${Buffer.byteLength(JSON.stringify(r), 'utf8')} bytes`);
-  const small = trimBenchResult(BENCH_RESULT, []);
-  assert.deepEqual(small.verdict, { summary: 'suite red', issues: [{ severity: 'major', title: '3 tests failed', detail: '', location: '' }], issueCount: 1 }, 'a small verdict is whole, no truncated flag');
-});
-
-test('trimBenchResult: 200 lines / 16 KiB of log tail, 16 KiB of output head, no host paths', () => {
-  const lines = Array.from({ length: 260 }, (_, i) => `line ${i}`);
-  const big = { ...BENCH_RESULT, outputs: { log: { type: 'md', path: '/tmp/x.md', bytes: 40000, text: 'A'.repeat(40000), truncated: false } } };
-  const r = trimBenchResult(big, lines);
-  assert.equal(r.log.lines, ASK_LIMITS.scriptLogMaxLines);
-  assert.equal(r.log.truncated, true);
-  assert.ok(r.log.text.startsWith('line 60'), 'the TAIL is kept — a failure ends the log');
-  assert.ok(r.log.text.endsWith('line 259'));
-  assert.equal(r.outputs.log.text.length, ASK_LIMITS.scriptOutputMaxBytes);
-  assert.equal(r.outputs.log.truncated, true);
-  assert.equal(r.outputs.log.bytes, 40000, 'the real size is still reported');
-  assert.equal('path' in r.outputs.log, false);
-  for (const k of ['envelopePath', 'benchDir']) assert.equal(k in r, false, `${k} is this machine's business`);
-  // The byte cap on a multi-byte log never cuts inside a character.
-  const wide = trimBenchResult(BENCH_RESULT, ['é'.repeat(9000)]);
-  assert.ok(Buffer.byteLength(wide.log.text, 'utf8') <= ASK_LIMITS.scriptLogMaxBytes);
-  assert.equal(wide.log.text.includes('�'), false);
-  const clean = trimBenchResult(BENCH_RESULT, ['one']);
-  assert.deepEqual(clean.outputs.pass, { type: 'void' });
-  assert.deepEqual(clean.log, { text: 'one', lines: 1, truncated: false });
-  assert.deepEqual(trimBenchResult(null, []).outputs, {});
-  // A case passes only when its run FINISHES: the engine's evaluateExpect is satisfied by { fired: [] }
-  // on a timeout, a stop or an execution error (probed: status 'timeout' beside expect.pass true).
-  for (const status of ['timeout', 'stopped', 'error']) {
-    const cut = trimBenchResult({ ...BENCH_RESULT, status, expect: { pass: true, diffs: [] } }, []);
-    assert.equal(cut.expect.pass, false, `${status} cannot pass`);
-    assert.deepEqual(cut.expect.diffs, [`the run ended ${status} — a case passes only when its run finishes`]);
-  }
-  assert.deepEqual(trimBenchResult({ ...BENCH_RESULT, status: 'clean', expect: { pass: true, diffs: [] } }, []).expect, { pass: true, diffs: [] });
-  assert.deepEqual(trimBenchResult({ ...BENCH_RESULT, expect: { pass: false, diffs: ['verdict: expected blocking, got clean'] } }, []).expect,
-    { pass: false, diffs: ['verdict: expected blocking, got clean'] }, 'a finished run keeps the engine\'s judgement');
+test('trimBenchResult caps the verdict, warnings, diffs, error tail, log tail and output head, with no host paths', async () => {
+  await checkRows([
+    { name: 'trimBenchResult: the verdict is capped (50 issues, 2 000 chars a field), and so are warnings, diffs and the error tail', run: () => {
+      const issues = Array.from({ length: 60 }, (_, i) => ({ severity: 'major', title: `t${i}`, detail: 'D'.repeat(5000), location: '' }));
+      const r = trimBenchResult({ ...BENCH_RESULT, verdict: { summary: 'S'.repeat(3000), issues }, warnings: Array.from({ length: 70 }, (_, i) => `w${i}`),
+        expect: { pass: false, diffs: Array.from({ length: 70 }, () => 'x'.repeat(3000)) }, error: { message: 'm'.repeat(3000), tail: Array.from({ length: 70 }, (_, i) => `l${i}`) } }, []);
+      assert.equal(r.verdict.issues.length, ASK_LIMITS.scriptVerdictMaxIssues);
+      assert.equal(r.verdict.issueCount, 60, 'the real count is still reported');
+      assert.equal(r.verdict.truncated, true);
+      assert.equal(r.verdict.issues[0].detail.length, ASK_LIMITS.scriptResultFieldMaxChars + 1, 'clipped, with a mark');
+      assert.ok(r.verdict.issues[0].detail.endsWith('…'));
+      assert.equal(r.verdict.summary.length, ASK_LIMITS.scriptResultFieldMaxChars + 1);
+      assert.equal(r.warnings.length, ASK_LIMITS.scriptVerdictMaxIssues);
+      assert.equal(r.expect.diffs.length, ASK_LIMITS.scriptVerdictMaxIssues);
+      assert.equal(r.expect.diffs[0].length, ASK_LIMITS.scriptResultFieldMaxChars + 1);
+      assert.equal(r.error.message.length, ASK_LIMITS.scriptResultFieldMaxChars + 1);
+      assert.equal(r.error.tail.length, ASK_LIMITS.scriptVerdictMaxIssues);
+      assert.equal(r.error.tail.at(-1), 'l69', 'the error tail keeps its LAST lines');
+      assert.ok(Buffer.byteLength(JSON.stringify(r), 'utf8') < 600_000, `bounded: ${Buffer.byteLength(JSON.stringify(r), 'utf8')} bytes`);
+      const small = trimBenchResult(BENCH_RESULT, []);
+      assert.deepEqual(small.verdict, { summary: 'suite red', issues: [{ severity: 'major', title: '3 tests failed', detail: '', location: '' }], issueCount: 1 }, 'a small verdict is whole, no truncated flag');
+    } },
+    { name: 'trimBenchResult: 200 lines / 16 KiB of log tail, 16 KiB of output head, no host paths', run: () => {
+      const lines = Array.from({ length: 260 }, (_, i) => `line ${i}`);
+      const big = { ...BENCH_RESULT, outputs: { log: { type: 'md', path: '/tmp/x.md', bytes: 40000, text: 'A'.repeat(40000), truncated: false } } };
+      const r = trimBenchResult(big, lines);
+      assert.equal(r.log.lines, ASK_LIMITS.scriptLogMaxLines);
+      assert.equal(r.log.truncated, true);
+      assert.ok(r.log.text.startsWith('line 60'), 'the TAIL is kept — a failure ends the log');
+      assert.ok(r.log.text.endsWith('line 259'));
+      assert.equal(r.outputs.log.text.length, ASK_LIMITS.scriptOutputMaxBytes);
+      assert.equal(r.outputs.log.truncated, true);
+      assert.equal(r.outputs.log.bytes, 40000, 'the real size is still reported');
+      assert.equal('path' in r.outputs.log, false);
+      for (const k of ['envelopePath', 'benchDir']) assert.equal(k in r, false, `${k} is this machine's business`);
+      // The byte cap on a multi-byte log never cuts inside a character.
+      const wide = trimBenchResult(BENCH_RESULT, ['é'.repeat(9000)]);
+      assert.ok(Buffer.byteLength(wide.log.text, 'utf8') <= ASK_LIMITS.scriptLogMaxBytes);
+      assert.equal(wide.log.text.includes('�'), false);
+      const clean = trimBenchResult(BENCH_RESULT, ['one']);
+      assert.deepEqual(clean.outputs.pass, { type: 'void' });
+      assert.deepEqual(clean.log, { text: 'one', lines: 1, truncated: false });
+      assert.deepEqual(trimBenchResult(null, []).outputs, {});
+      // A case passes only when its run FINISHES: the engine's evaluateExpect is satisfied by { fired: [] }
+      // on a timeout, a stop or an execution error (probed: status 'timeout' beside expect.pass true).
+      for (const status of ['timeout', 'stopped', 'error']) {
+        const cut = trimBenchResult({ ...BENCH_RESULT, status, expect: { pass: true, diffs: [] } }, []);
+        assert.equal(cut.expect.pass, false, `${status} cannot pass`);
+        assert.deepEqual(cut.expect.diffs, [`the run ended ${status} — a case passes only when its run finishes`]);
+      }
+      assert.deepEqual(trimBenchResult({ ...BENCH_RESULT, status: 'clean', expect: { pass: true, diffs: [] } }, []).expect, { pass: true, diffs: [] });
+      assert.deepEqual(trimBenchResult({ ...BENCH_RESULT, expect: { pass: false, diffs: ['verdict: expected blocking, got clean'] } }, []).expect,
+        { pass: false, diffs: ['verdict: expected blocking, got clean'] }, 'a finished run keeps the engine\'s judgement');
+    } },
+  ]);
 });
 
 test('list / read: the model-facing shape, no host paths; W20 off ⇒ enabled is false', async () => {

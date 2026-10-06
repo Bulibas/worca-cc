@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeWorkspace, runDetector, keysOf, assertEvidence } from './helpers/wsmap-fixtures.mjs';
 import detector from '../src/core/workspace-map/detectors/pkg-python.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const PEP621 = `[project]
 name = "Billing_Client"
@@ -66,44 +67,52 @@ before(async () => {
 after(() => ws.cleanup());
 const member = (k) => ws.members.find((m) => m.key === k);
 
-test('pkg-python (PEP 621): provides the name (PEP 503 via normKey), alias, role, stack', async () => {
+test('pkg-python (PEP 621, member billing-client): provides and every dependency form', async () => {
   const r = await runDetector(detector, member('billing-client'), ws.members);
-  assert.deepEqual(keysOf(r, 'pkg', 'provides'), ['pypi:Billing_Client']);
-  assert.equal(r.facts.find((f) => f.dir === 'provides').norm, 'pkg:pypi:billing-client');
-  assert.deepEqual(r.aliases.map((a) => a.value), ['Billing_Client']);
-  assert.equal(r.role.text, 'Typed client for the billing API');
-  assert.deepEqual(r.stack, ['python']);
-  assertEvidence(member('billing-client'), r);
+  await checkRows([
+    { name: 'pkg-python (PEP 621): provides the name (PEP 503 via normKey), alias, role, stack', run: () => {
+      assert.deepEqual(keysOf(r, 'pkg', 'provides'), ['pypi:Billing_Client']);
+      assert.equal(r.facts.find((f) => f.dir === 'provides').norm, 'pkg:pypi:billing-client');
+      assert.deepEqual(r.aliases.map((a) => a.value), ['Billing_Client']);
+      assert.equal(r.role.text, 'Typed client for the billing API');
+      assert.deepEqual(r.stack, ['python']);
+      assertEvidence(member('billing-client'), r);
+    } },
+    { name: 'pkg-python (PEP 621): dependencies, extras, dependency-groups, file: and uv path sources', run: () => {
+      assert.deepEqual(keysOf(r, 'pkg', 'consumes'), ['pypi:Acme.Money', 'pypi:pytest', 'pypi:requests', 'pypi:ruff', 'pypi:shared-lib']);
+      const money = r.facts.find((f) => f.key === 'pypi:Acme.Money');
+      assert.equal(money.norm, 'pkg:pypi:acme-money');
+      assert.equal(money.line, 6);
+      assert.equal(r.facts.find((f) => f.key === 'pypi:shared-lib').target, 'shared-lib');
+      assert.equal(r.facts.find((f) => f.key === 'pypi:pytest').detail, 'extra dev');
+      assert.ok(!r.facts.some((f) => f.key === 'pypi:sub'), '`sub @ file:./sub` stays inside the member: not a consume');
+    } },
+  ]);
 });
 
-test('pkg-python (PEP 621): dependencies, extras, dependency-groups, file: and uv path sources', async () => {
-  const r = await runDetector(detector, member('billing-client'), ws.members);
-  assert.deepEqual(keysOf(r, 'pkg', 'consumes'), ['pypi:Acme.Money', 'pypi:pytest', 'pypi:requests', 'pypi:ruff', 'pypi:shared-lib']);
-  const money = r.facts.find((f) => f.key === 'pypi:Acme.Money');
-  assert.equal(money.norm, 'pkg:pypi:acme-money');
-  assert.equal(money.line, 6);
-  assert.equal(r.facts.find((f) => f.key === 'pypi:shared-lib').target, 'shared-lib');
-  assert.equal(r.facts.find((f) => f.key === 'pypi:pytest').detail, 'extra dev');
-  assert.ok(!r.facts.some((f) => f.key === 'pypi:sub'), '`sub @ file:./sub` stays inside the member: not a consume');
-});
-
-test('pkg-python (poetry): name, deps without python, path dep targets the member, groups', async () => {
+test('pkg-python (member orders): poetry, requirements forms, test-path requirements', async () => {
   const r = await runDetector(detector, member('orders'), ws.members);
-  assert.deepEqual(keysOf(r, 'pkg', 'provides'), ['pypi:orders']);
-  const toml = r.facts.filter((f) => f.file === 'pyproject.toml' && f.dir === 'consumes');
-  assert.deepEqual(toml.map((f) => f.key).sort(), ['pypi:billing-client', 'pypi:fastapi', 'pypi:pytest']);
-  const bc = toml.find((f) => f.key === 'pypi:billing-client');
-  assert.deepEqual([bc.target, bc.line, bc.detail], ['billing-client', 8, 'path ../billing-client']);
-  assertEvidence(member('orders'), r);
-});
-
-test('pkg-python (requirements, CRLF): names, -e ../dir, #egg=, ./path, markers; skips options and -e .', async () => {
-  const r = await runDetector(detector, member('orders'), ws.members);
-  const req = r.facts.filter((f) => f.file === 'requirements/prod.txt');
-  assert.deepEqual(req.map((f) => f.key), ['pypi:Django', 'pypi:billing-client', 'pypi:acme_tools', 'pypi:celery', 'pypi:psycopg'], './vendored/… stays inside the member: not a consume');
-  const local = req.find((f) => f.key === 'pypi:billing-client');
-  assert.deepEqual([local.target, local.confidence, local.line], ['billing-client', 'heuristic', 5]);
-  assert.equal(req.find((f) => f.key === 'pypi:acme_tools').norm, 'pkg:pypi:acme-tools');
+  await checkRows([
+    { name: 'pkg-python (poetry): name, deps without python, path dep targets the member, groups', run: () => {
+      assert.deepEqual(keysOf(r, 'pkg', 'provides'), ['pypi:orders']);
+      const toml = r.facts.filter((f) => f.file === 'pyproject.toml' && f.dir === 'consumes');
+      assert.deepEqual(toml.map((f) => f.key).sort(), ['pypi:billing-client', 'pypi:fastapi', 'pypi:pytest']);
+      const bc = toml.find((f) => f.key === 'pypi:billing-client');
+      assert.deepEqual([bc.target, bc.line, bc.detail], ['billing-client', 8, 'path ../billing-client']);
+      assertEvidence(member('orders'), r);
+    } },
+    { name: 'pkg-python (requirements, CRLF): names, -e ../dir, #egg=, ./path, markers; skips options and -e .', run: () => {
+      const req = r.facts.filter((f) => f.file === 'requirements/prod.txt');
+      assert.deepEqual(req.map((f) => f.key), ['pypi:Django', 'pypi:billing-client', 'pypi:acme_tools', 'pypi:celery', 'pypi:psycopg'], './vendored/… stays inside the member: not a consume');
+      const local = req.find((f) => f.key === 'pypi:billing-client');
+      assert.deepEqual([local.target, local.confidence, local.line], ['billing-client', 'heuristic', 5]);
+      assert.equal(req.find((f) => f.key === 'pypi:acme_tools').norm, 'pkg:pypi:acme-tools');
+    } },
+    { name: 'pkg-python: requirements under a test path are facts marked test', run: () => {
+      const t = r.facts.find((f) => f.file === 'tests/requirements-test.txt');
+      assert.deepEqual([t.key, t.test], ['pypi:pytest', true]);
+    } },
+  ]);
 });
 
 test('pkg-python: only the root pyproject names the member (a nested one needs a multi-word name); a fixture sets no role', async () => {
@@ -113,12 +122,6 @@ test('pkg-python: only the root pyproject names the member (a nested one needs a
   assert.equal(r.role, null, 'a test-path pyproject says nothing about the member\'s role');
   const only = await runDetector(detector, member('pyfixture'), ws.members);
   assert.deepEqual([only.aliases, only.stack], [[], []], 'test-path manifests alone set no stack');
-});
-
-test('pkg-python: requirements under a test path are facts marked test', async () => {
-  const r = await runDetector(detector, member('orders'), ws.members);
-  const t = r.facts.find((f) => f.file === 'tests/requirements-test.txt');
-  assert.deepEqual([t.key, t.test], ['pypi:pytest', true]);
 });
 
 test('pkg-python: malformed pyproject → heuristic provide + unresolved, never throws', async () => {

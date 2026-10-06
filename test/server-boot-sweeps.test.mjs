@@ -13,10 +13,9 @@
 // process.env.WORCA_RUN_ROOT itself and restores it in `finally`.
 import { test, after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, mkdir, realpath } from 'node:fs/promises';
-import { existsSync, rmSync } from 'node:fs';
+import { rm, mkdir } from 'node:fs/promises';
+import { existsSync, realpathSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createWorktree, listLocalBranches } from '../src/core/worktree.mjs';
@@ -25,6 +24,7 @@ import { addProject, worcaHome } from '../src/core/projects.mjs';
 import { getDb } from '../src/core/db.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 useTempHome(after);
 
@@ -38,15 +38,8 @@ after(() => Promise.all(created.map((d) => rm(d, { recursive: true, force: true 
 
 /** A fresh git repo with one commit (realpath'd: git reports canonical paths). */
 async function freshRepo(prefix = 'worca-cc-boot-repo-') {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), prefix)));
+  const dir = realpathSync(templateRepo('boot-repo', { branch: 'main', user: true, files: { 'seed.txt': 'seed\n' }, prefix }));
   created.push(dir);
-  const g = (args) => spawnSync('git', args, { cwd: dir });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 't@t']);
-  g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'seed.txt'), 'seed\n');
-  g(['add', '-A']);
-  g(['commit', '-qm', 'init']);
   return dir;
 }
 

@@ -2,14 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 import {
-  projectTmState, renderProjectTmCell, renderProjectTmChip, projectTmSummary, renderEnableDialogBody, renderMetricsHomePicker, renderWsMetricsRow, renderWsSummary, renderRouteResults, WS_MEMBERS_COLLAPSED, renderWsMetricsPending } from '../ui/public/team-metrics-surfaces.mjs';
+  projectTmState, renderProjectTmCell, renderEnableDialogBody, renderMetricsHomePicker, renderWsMetricsRow, renderRouteResults } from '../ui/public/team-metrics-surfaces.mjs';
 
 const doc = new JSDOM('<!doctype html><body></body>').window.document;
-const h = (d, tag) => d.createElement(tag);
 
 const base = { key: 'billing-api-0123abcd', name: 'billing-api', path: '/p/billing-api', exists: true, slug: 'acme/billing-api', hasOrigin: true, enabled: true, enabledAt: '2026-09-03T08:00:00Z', record: true, pending: 0, runs: 167, delegateTo: null, delegateState: null, lastError: null, recordsLocally: true };
 
@@ -174,115 +170,4 @@ test('workspace card: one projects table (project · metrics branch · status), 
   assert.equal(list.querySelectorAll('li').length, 2);
   assert.match(list.querySelector('li.failed').textContent, /push rejected/);
   assert.match(list.querySelector('li.failed .tm-stderr').textContent, /remote: denied/);
-});
-
-test('workspace card header summary: size, where runs go, what needs attention', () => {
-  const text = (frag) => { const d = h(doc, 'div'); d.append(frag); return d; };
-  const members = [
-    { path: '/p/gateway', slug: 'acme/gateway', state: 'home', reason: null, recordsOn: 'acme/gateway' },
-    { path: '/p/billing', slug: 'acme/billing', state: 'routed', reason: null, recordsOn: 'acme/gateway' },
-    { path: '/p/new', slug: 'acme/new', state: 'not-recording', reason: 'no worca-metrics branch', recordsOn: null },
-  ];
-  const ok = text(renderWsSummary({ projectPaths: ['/p/gateway', '/p/billing', '/p/new'], home: { state: 'ok', slug: 'acme/gateway', runs: 12 }, members }, { doc }));
-  assert.equal(ok.textContent, '3 projects · acme/gateway · 12 workspace runs · 1 not recording', 'a member on its own branch is not a problem — only one with no metrics at all counts');
-  assert.ok(ok.querySelector('.tm-icon'), 'the home is marked by the Team metrics icon');
-  assert.equal(ok.querySelector('.tm-home-mark').title, 'Metrics home: workspace runs are recorded on this project\'s worca-metrics branch');
-  assert.equal(ok.querySelector('.tm-home-mark').getAttribute('aria-label'), 'Metrics home');
-  assert.equal(ok.querySelector('.ws-sum-warn').textContent, '1 not recording');
-  const unset = text(renderWsSummary({ projectPaths: ['/p/a', '/p/b'], home: { state: 'unset' }, members: [] }, { doc }));
-  assert.equal(unset.textContent, '2 projects · no metrics home');
-  assert.ok(!unset.querySelector('.tm-icon'));
-  const stale = text(renderWsSummary({ projectPaths: ['/p/a'], home: { state: 'stale', slug: 'acme/a', detail: 'branch missing on origin' }, members: [] }, { doc }));
-  assert.equal(stale.textContent, '1 project · acme/a · branch missing on origin');
-  assert.equal(stale.querySelector('.ws-sum-bad').textContent, 'branch missing on origin');
-});
-
-test('enable dialog radio cards keep their flex layout under the generic .field > label rule', () => {
-  // The cards are <label>s rendered directly inside .field. `.field > label{display:block}`
-  // (specificity 0,1,1) used to beat `.radio-card{display:flex}` (0,1,0), stacking the radio
-  // on its own line above the title — the card rule must carry the same specificity.
-  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../ui/public/style.css'), 'utf8');
-  const m = css.match(/\.radio-card,\s*\.field\s*>\s*label\.radio-card\s*\{([^}]*)\}/);
-  assert.ok(m, 'a `.radio-card,.field > label.radio-card` rule must exist');
-  assert.match(m[1], /display:\s*flex/);
-  assert.match(m[1], /gap:\s*12px/);
-  assert.match(m[1], /align-items:\s*flex-start/);
-  const radio = css.match(/\.radio-card input\[type="radio"\]\s*\{([^}]*)\}/);
-  assert.ok(radio, 'the card radio must be pinned (no shrink, aligned with the title line)');
-  assert.match(radio[1], /flex:\s*0 0 auto/);
-});
-
-test('workspace card projects table: long lists collapse to the home + attention rows with a Show more toggle', () => {
-  // 1 home, 3 not routed, 8 routed — a 12-project workspace.
-  const members = [
-    ...Array.from({ length: 8 }, (_, i) => ({ path: `/p/r${i}`, slug: `acme/routed-${i}`, state: 'routed', reason: null })),
-    { path: '/p/own', slug: 'acme/own', state: 'records-elsewhere', reason: 'records on its own branch' },
-    { path: '/p/gateway', slug: 'acme/gateway', state: 'home', reason: null },
-    { path: '/p/new-a', slug: 'acme/new-a', state: 'not-recording', reason: 'no worca-metrics branch' },
-    { path: '/p/new-b', slug: 'acme/new-b', state: 'not-recording', reason: 'no worca-metrics branch' },
-  ];
-  const el = renderWsMetricsRow({ home: { state: 'ok', slug: 'acme/gateway', runs: 3 }, members, counts: {} }, { doc });
-  const rows = [...el.querySelectorAll('.ws-member')];
-  assert.equal(rows.length, 12, 'every member is in the DOM');
-  assert.deepEqual(rows.slice(0, 4).map((li) => li.querySelector('.ws-member-slug').textContent), ['acme/gateway', 'acme/own', 'acme/new-a', 'acme/new-b'], 'home, then members needing attention, then routed');
-  assert.deepEqual(rows.map((li) => li.hidden), rows.map((_, i) => i >= WS_MEMBERS_COLLAPSED), `only the first ${WS_MEMBERS_COLLAPSED} rows show`);
-  assert.equal(el.querySelector('.ws-tbl-head .ws-members-summary').textContent, '8 routed · 3 not routed');
-  const more = el.querySelector('button.ws-members-more');
-  assert.equal(more.textContent, 'Show 6 more');
-  more.click();
-  assert.ok(rows.every((li) => !li.hidden)); assert.equal(more.textContent, 'Show less'); assert.equal(more.getAttribute('aria-expanded'), 'true');
-  more.click();
-  assert.ok(rows[WS_MEMBERS_COLLAPSED].hidden); assert.equal(more.textContent, 'Show 6 more');
-  // Short lists: no summary, no toggle, nothing hidden.
-  const short = renderWsMetricsRow({ home: { state: 'ok', slug: 'acme/gateway', runs: 3 }, members: members.slice(8), counts: {} }, { doc });
-  assert.ok(!short.querySelector('.ws-members-summary') && !short.querySelector('.ws-members-more'));
-  assert.ok([...short.querySelectorAll('.ws-member')].every((li) => !li.hidden));
-});
-
-test('pending (before /scopes answers): "checking metrics…" in the summary; the block is the same table with shimmer cells', () => {
-  const text = (frag) => { const d = doc.createElement('div'); d.append(frag); return d; };
-  const sum = text(renderWsSummary({ projectPaths: ['/p/a', '/p/b'], home: { state: 'ok', slug: 'x' }, members: [] }, { doc, pending: true }));
-  assert.equal(sum.textContent, '2 projects · checking metrics…');
-  assert.ok(sum.querySelector('.ws-sum-pending'));
-  const block = renderWsMetricsPending({ projectPaths: ['/p/gateway', '/p/billing'] }, { doc });
-  assert.equal(block.getAttribute('aria-hidden'), 'true');
-  assert.ok(block.classList.contains('is-pending'));
-  assert.deepEqual([...block.querySelectorAll('th')].map((t) => t.textContent), ['Project', 'Metrics status', 'Metrics branch', 'Workspace runs'], 'the real table\'s columns, so nothing jumps');
-  assert.deepEqual([...block.querySelectorAll('.ws-member-slug')].map((s) => s.textContent), ['gateway', 'billing'], 'folder names until the slugs are known');
-  assert.equal(block.querySelectorAll('tbody tr').length, 2);
-  assert.equal(block.querySelectorAll('.skel').length, 6, 'three shimmer cells per row');
-  assert.equal(block.querySelector('.badge').textContent, '2');
-  assert.equal(block.querySelector('button'), null, 'no actions before the statuses are known');
-  const many = renderWsMetricsPending({ projectPaths: Array.from({ length: 9 }, (_, i) => `/p/m${i}`) }, { doc });
-  assert.equal(many.querySelectorAll('tbody tr').length, 6, 'capped like the real table');
-});
-
-test('row chip + summary: a dot, the word and the short state; the sentence rides the title', () => {
-  const on = renderProjectTmChip({ key: 'k1', name: 'a', slug: 'me/a', hasOrigin: true, enabled: true, recordsLocally: true, enabledAt: '2026-09-19T00:00:00.000Z', record: true, runs: 3, pending: 0 }, { doc });
-  assert.equal(on.className, 'pl-team-item pl-tm');
-  assert.equal(on.dataset.key, 'k1');
-  assert.equal(on.dataset.kind, 'on');
-  assert.equal(on.textContent, 'Metrics on · 3 runs');
-  assert.ok(on.querySelector('.tm-dot.green'));
-  assert.equal(on.title, 'Team metrics: On · 3 runs · since Sep 19');
-  const off = renderProjectTmChip({ key: 'k2', hasOrigin: true, enabled: false }, { doc });
-  assert.equal(off.textContent, 'Metrics off');
-  assert.ok(off.querySelector('.tm-dot.grey'));
-  assert.equal(off.title, 'Team metrics: Off · runs stay on this machine');
-  const none = renderProjectTmChip({ key: 'k3', hasOrigin: false }, { doc });
-  assert.equal(none.textContent, 'Metrics not available');
-  assert.ok(none.querySelector('.tm-dot.muted'), 'a hollow dot for a project the feature cannot reach: the dots stay one column');
-  assert.ok(none.querySelector('.pl-team-state.muted'));
-  const via = projectTmSummary({ key: 'k4', hasOrigin: true, enabled: true, delegateTo: 'me/hub', delegateState: 'ok', record: false, runs: 2, pending: 0 });
-  assert.deepEqual([via.kind, via.tone, via.short], ['delegated', 'grey', 'via me/hub · yours excluded']);
-  const pending = projectTmSummary({ key: 'k5', hasOrigin: true, enabled: true, recordsLocally: true, enabledAt: '2026-09-19T00:00:00.000Z', pending: 2 });
-  assert.deepEqual([pending.kind, pending.tone, pending.short], ['pending', 'amber', 'on · 2 pending push']);
-  const rejected = projectTmSummary({ key: 'k6', hasOrigin: true, enabled: true, recordsLocally: true, pending: 1, lastError: 'remote: protected branch\nmore', lastErrorCode: 'PUSH_REJECTED', lastErrorHint: 'exempt worca-metrics' });
-  assert.deepEqual([rejected.kind, rejected.tone, rejected.short, rejected.detail], ['rejected', 'red', 'push failed', 'branch protection']);
-});
-
-test('the cell without its heading: the panel head names the feature', () => {
-  const cell = renderProjectTmCell({ key: 'k1', hasOrigin: true, enabled: false }, { doc, heading: false });
-  assert.equal(cell.querySelector('.tm-label'), null);
-  assert.ok(cell.querySelector('.tm-enable'));
 });

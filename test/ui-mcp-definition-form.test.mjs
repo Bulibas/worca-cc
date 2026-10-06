@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
+import { checkRows } from './helpers/rows.mjs';
 import {
   compileDefinition, formFromDefinition, blankDefinitionForm, placeholderStartsSecret, createDefinitionForm,
 } from '../ui/public/mcp-definition-form.mjs';
@@ -65,63 +66,66 @@ test('http: one Bearer tick = a secret OAuth token behind Authorization: Bearer;
   assert.equal(compileDefinition(form({ type: 'sse', url: 'https://x/sse' })).def.url, 'https://x/sse');
 });
 
-test('Edit round trip: a definition the form made reads back into the same definition', () => {
-  for (const f of [
-    form({ name: 'pg', command: '/usr/bin/pg-mcp', args: '--db\n{database}', rows: [{ key: 'PGPASSWORD', value: '', perSet: true, secret: true }], description: 'd' }),
-    form({ name: 'lin', type: 'http', url: 'https://x/{org}/mcp', bearer: true, rows: [{ key: 'X-Team', value: 'a', perSet: true, secret: false }, { key: 'X-Fixed', value: 'b', perSet: false, secret: false }] }),
-  ]) {
-    const { def } = compileDefinition(f);
-    assert.deepEqual(compileDefinition(formFromDefinition(f.name, def)).def, def);
-  }
-});
-
-test('Edit round trip: any stored definition the server accepts saves back unchanged (labels, required, oauth, affixes, shared fields)', async () => {
-  const { validateMcpDefinition } = await import('../src/core/mcp/definitions.mjs');
-  const norm = (def) => validateMcpDefinition(JSON.parse(JSON.stringify(def)), { name: 'srv', source: 'manual' });
-  const F = (key, extra = {}) => ({ key, label: key, required: true, ...extra });
-  for (const raw of [
-    // spec §4.1's manual example: labels the form has no column for
-    { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-postgres', { field: 'database' }], env: { PGPASSWORD: { field: 'password' } },
-      fields: [F('database', { label: 'Database URL' }), F('password', { label: 'Password', secret: true })], description: 'Read-only replica' },
-    // spec §4.1's sentry shape: token declared first, labelled
-    { type: 'http', url: 'https://mcp.sentry.dev/mcp', headers: { Authorization: { field: 'token', prefix: 'Bearer ' }, 'X-Sentry-Org': { field: 'org' } },
-      fields: [F('token', { label: 'Sentry token', secret: true, oauth: true }), F('org', { label: 'Organization' })], description: '' },
-    { type: 'stdio', command: 'pg-mcp', args: [], env: { DATABASE_URL: { field: 'pw', prefix: 'postgres://app:', suffix: '@db/app' } }, fields: [F('pw', { secret: true })], description: '' },
-    { type: 'http', url: 'https://x.example.com/mcp', headers: { Authorization: { field: 'token', prefix: 'Bearer ' } }, fields: [F('token', { secret: true })], description: '' },
-    { type: 'http', url: 'https://x.example.com/mcp', headers: { Authorization: { field: 'key', prefix: 'Token ' } }, fields: [F('key', { secret: true })], description: '' },
-    { type: 'stdio', command: 'x', args: [], env: { API_KEY: { field: 'API_KEY' }, REGION: { field: 'REGION' }, ZONE: { field: 'ZONE' } },
-      fields: [F('API_KEY', { secret: true, required: false }), F('REGION', { default: 'eu' }), F('ZONE', { required: false })], description: '' },
-    { type: 'stdio', command: 'x', args: [{ field: 'db', prefix: '--db=' }], env: {}, fields: [F('db', { required: false, default: 'main' })], description: '' },
-    { type: 'stdio', command: 'x', args: [{ field: 'db', prefix: '--db=' }], env: { DB: { field: 'db' } }, fields: [F('db')], description: '' },
-    { type: 'http', url: ['https://x.example.com/', { field: 'team' }, '/mcp'], headers: { 'X-Team': { field: 'team' } }, fields: [F('team')], description: '' },
-    // a url that starts with a field (the field supplies scheme and host) keeps its affixes on that leading ref
-    { type: 'http', url: [{ field: 'host', prefix: 'https://' }, '/mcp'], headers: {}, fields: [F('host')], description: '' },
-    { type: 'http', url: [{ field: 'host', prefix: 'https://', suffix: ':8443' }, '/', { field: 'team' }, '/mcp'], headers: {}, fields: [F('host'), F('team')], description: '' },
-    { type: 'sse', url: { field: 'host', prefix: 'https://', suffix: '/sse' }, headers: {}, fields: [F('host')], description: '' },
-  ]) {
-    const before = norm(raw);
-    assert.ok(before.def, before.errors.join('; '));
-    const out = compileDefinition(formFromDefinition('srv', JSON.parse(JSON.stringify(before.def))));
-    assert.deepEqual(out.errors, [], JSON.stringify(raw));
-    assert.deepEqual(norm(out.def).def, before.def, JSON.stringify(raw));
-  }
-  // …so a host:port value still resolves to the same URL after a no-op Edit (a field moved off index 0 is percent-encoded).
-  const { materializeCopy } = await import('../src/core/mcp/registry.mjs');
-  const resolved = (def) => {
-    const r = materializeCopy({ entry: { id: 'manual:srv', source: 'manual', name: 'srv', dir: null, def }, values: { host: 'mcp.acme.io:8443' }, copy: 'srv', name: 'srv' },
-      { platform: 'linux', execPath: '/usr/bin/node', worcaRoot: '/opt/worca' });
-    return r.reason || r.server.url;
-  };
-  const stored = norm({ type: 'http', url: [{ field: 'host', prefix: 'https://' }, '/mcp'], fields: [F('host')], description: '' }).def;
-  assert.equal(resolved(stored), 'https://mcp.acme.io:8443/mcp');
-  assert.equal(resolved(norm(compileDefinition(formFromDefinition('srv', JSON.parse(JSON.stringify(stored)))).def).def), 'https://mcp.acme.io:8443/mcp');
-  // Edited so it no longer starts with the stored ref's text, the URL is read afresh.
-  const edited = formFromDefinition('srv', JSON.parse(JSON.stringify(stored)));
-  edited.url = 'https://mcp.acme.io/{host}/mcp';
-  assert.deepEqual(compileDefinition(edited).def.url, ['https://mcp.acme.io/', { field: 'host' }, '/mcp']);
-  // A URL ref's prefix/suffix reads back as URL text (never dropped).
-  assert.equal(formFromDefinition('srv', { type: 'http', url: ['https://x.example.com/', { field: 'team', suffix: '/mcp' }], fields: [F('team')] }).url,
-    'https://x.example.com/{team}/mcp');
+test('Edit round trip: a form-made definition and any server-accepted stored definition save back unchanged', async () => {
+  await checkRows([
+    { name: 'Edit round trip: a definition the form made reads back into the same definition', run: () => {
+      for (const f of [
+        form({ name: 'pg', command: '/usr/bin/pg-mcp', args: '--db\n{database}', rows: [{ key: 'PGPASSWORD', value: '', perSet: true, secret: true }], description: 'd' }),
+        form({ name: 'lin', type: 'http', url: 'https://x/{org}/mcp', bearer: true, rows: [{ key: 'X-Team', value: 'a', perSet: true, secret: false }, { key: 'X-Fixed', value: 'b', perSet: false, secret: false }] }),
+      ]) {
+        const { def } = compileDefinition(f);
+        assert.deepEqual(compileDefinition(formFromDefinition(f.name, def)).def, def);
+      }
+    } },
+    { name: 'Edit round trip: any stored definition the server accepts saves back unchanged (labels, required, oauth, affixes, shared fields)', run: async () => {
+      const { validateMcpDefinition } = await import('../src/core/mcp/definitions.mjs');
+      const norm = (def) => validateMcpDefinition(JSON.parse(JSON.stringify(def)), { name: 'srv', source: 'manual' });
+      const F = (key, extra = {}) => ({ key, label: key, required: true, ...extra });
+      for (const raw of [
+        // spec §4.1's manual example: labels the form has no column for
+        { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-postgres', { field: 'database' }], env: { PGPASSWORD: { field: 'password' } },
+          fields: [F('database', { label: 'Database URL' }), F('password', { label: 'Password', secret: true })], description: 'Read-only replica' },
+        // spec §4.1's sentry shape: token declared first, labelled
+        { type: 'http', url: 'https://mcp.sentry.dev/mcp', headers: { Authorization: { field: 'token', prefix: 'Bearer ' }, 'X-Sentry-Org': { field: 'org' } },
+          fields: [F('token', { label: 'Sentry token', secret: true, oauth: true }), F('org', { label: 'Organization' })], description: '' },
+        { type: 'stdio', command: 'pg-mcp', args: [], env: { DATABASE_URL: { field: 'pw', prefix: 'postgres://app:', suffix: '@db/app' } }, fields: [F('pw', { secret: true })], description: '' },
+        { type: 'http', url: 'https://x.example.com/mcp', headers: { Authorization: { field: 'token', prefix: 'Bearer ' } }, fields: [F('token', { secret: true })], description: '' },
+        { type: 'http', url: 'https://x.example.com/mcp', headers: { Authorization: { field: 'key', prefix: 'Token ' } }, fields: [F('key', { secret: true })], description: '' },
+        { type: 'stdio', command: 'x', args: [], env: { API_KEY: { field: 'API_KEY' }, REGION: { field: 'REGION' }, ZONE: { field: 'ZONE' } },
+          fields: [F('API_KEY', { secret: true, required: false }), F('REGION', { default: 'eu' }), F('ZONE', { required: false })], description: '' },
+        { type: 'stdio', command: 'x', args: [{ field: 'db', prefix: '--db=' }], env: {}, fields: [F('db', { required: false, default: 'main' })], description: '' },
+        { type: 'stdio', command: 'x', args: [{ field: 'db', prefix: '--db=' }], env: { DB: { field: 'db' } }, fields: [F('db')], description: '' },
+        { type: 'http', url: ['https://x.example.com/', { field: 'team' }, '/mcp'], headers: { 'X-Team': { field: 'team' } }, fields: [F('team')], description: '' },
+        // a url that starts with a field (the field supplies scheme and host) keeps its affixes on that leading ref
+        { type: 'http', url: [{ field: 'host', prefix: 'https://' }, '/mcp'], headers: {}, fields: [F('host')], description: '' },
+        { type: 'http', url: [{ field: 'host', prefix: 'https://', suffix: ':8443' }, '/', { field: 'team' }, '/mcp'], headers: {}, fields: [F('host'), F('team')], description: '' },
+        { type: 'sse', url: { field: 'host', prefix: 'https://', suffix: '/sse' }, headers: {}, fields: [F('host')], description: '' },
+      ]) {
+        const before = norm(raw);
+        assert.ok(before.def, before.errors.join('; '));
+        const out = compileDefinition(formFromDefinition('srv', JSON.parse(JSON.stringify(before.def))));
+        assert.deepEqual(out.errors, [], JSON.stringify(raw));
+        assert.deepEqual(norm(out.def).def, before.def, JSON.stringify(raw));
+      }
+      // …so a host:port value still resolves to the same URL after a no-op Edit (a field moved off index 0 is percent-encoded).
+      const { materializeCopy } = await import('../src/core/mcp/registry.mjs');
+      const resolved = (def) => {
+        const r = materializeCopy({ entry: { id: 'manual:srv', source: 'manual', name: 'srv', dir: null, def }, values: { host: 'mcp.acme.io:8443' }, copy: 'srv', name: 'srv' },
+          { platform: 'linux', execPath: '/usr/bin/node', worcaRoot: '/opt/worca' });
+        return r.reason || r.server.url;
+      };
+      const stored = norm({ type: 'http', url: [{ field: 'host', prefix: 'https://' }, '/mcp'], fields: [F('host')], description: '' }).def;
+      assert.equal(resolved(stored), 'https://mcp.acme.io:8443/mcp');
+      assert.equal(resolved(norm(compileDefinition(formFromDefinition('srv', JSON.parse(JSON.stringify(stored)))).def).def), 'https://mcp.acme.io:8443/mcp');
+      // Edited so it no longer starts with the stored ref's text, the URL is read afresh.
+      const edited = formFromDefinition('srv', JSON.parse(JSON.stringify(stored)));
+      edited.url = 'https://mcp.acme.io/{host}/mcp';
+      assert.deepEqual(compileDefinition(edited).def.url, ['https://mcp.acme.io/', { field: 'host' }, '/mcp']);
+      // A URL ref's prefix/suffix reads back as URL text (never dropped).
+      assert.equal(formFromDefinition('srv', { type: 'http', url: ['https://x.example.com/', { field: 'team', suffix: '/mcp' }], fields: [F('team')] }).url,
+        'https://x.example.com/{team}/mcp');
+    } },
+  ]);
 });
 
 test('the client copy of QUERY_SECRET_RE matches src/core/mcp-secrets.mjs', () => {
@@ -137,23 +141,6 @@ function mount(f, { edit = false, errors = [] } = {}) {
   doc.body.replaceChildren(el);
   return { el, calls };
 }
-
-test('the form: Name read-only in Edit, Type editable, one Bearer tick, the "Each set fills in" list', async () => {
-  const { def } = compileDefinition(form({ name: 'lin', type: 'http', url: 'https://x/{org}?q=1', bearer: true }));
-  const { el } = mount(formFromDefinition('lin', def), { edit: true });
-  const name = el.querySelector('[data-def="name"]');
-  assert.equal(name.readOnly, true);
-  assert.match(el.textContent, /to rename, add a new server/);
-  assert.equal([...el.querySelectorAll('[data-def-type]')].length, 3, 'Type stays editable');
-  const ticks = [...el.querySelectorAll('label.check-row')].map((l) => l.textContent.trim());
-  assert.deepEqual(ticks.filter((t) => /Bearer|OAuth/.test(t)), ['Bearer token'], 'one Bearer tick, no OAuth tick');
-  const fills = [...el.querySelectorAll('.mcp-def-fill')].map((r) => r.textContent.trim());
-  assert.deepEqual(fills, ['org Secret', 'token · secret · OAuth']);
-  assert.ok(el.querySelector('[data-placeholder="org"]'), 'a URL placeholder can be marked secret');
-  el.querySelector('[data-def-type="stdio"]').click();
-  assert.ok(el.querySelector('[data-def="command"]'), 'switching type swaps Command + Arguments in');
-  assert.equal(mount(blankDefinitionForm()).el.querySelector('[data-def="name"]').readOnly, false);
-});
 
 test('the form: an Arguments placeholder "cannot be secret"; a secret row takes no value', () => {
   const { el } = mount(form({ name: 'pg', command: 'npx', args: '{database}', rows: [{ key: 'PGPASSWORD', value: 'x', perSet: false, secret: true }] }));
@@ -173,6 +160,7 @@ test('live checks: the server\'s errors show, and check() answers from them', as
   const [method, path, body] = bad.calls.at(-1);
   assert.deepEqual([method, path, body.name, body.env], ['POST', '/api/mcp/servers/validate', 'pg', { PGAPPNAME: 'sk-live-x' }]);
   const good = mount(form({ name: 'pg', command: 'npx' }), { edit: true });
+  assert.equal(good.el.querySelector('[data-def="name"]').readOnly, true, 'Name is read-only in Edit: a rename-save never creates a second definition');
   assert.equal(await good.el.check(), true);
   assert.equal(good.calls.at(-1)[1], '/api/mcp/servers/validate?edit=1');
   assert.equal(await mount(form({ command: 'npx' })).el.check(), false, 'a name is required');

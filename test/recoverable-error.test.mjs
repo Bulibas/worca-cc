@@ -1,67 +1,69 @@
 // test/recoverable-error.test.mjs — pure classifier unit tests.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyError, isSharedPoolRateLimit, rateLimitHint } from '../src/core/recoverable-error.mjs';
+import { classifyError, isSharedPoolRateLimit } from '../src/core/recoverable-error.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
-test('classifies the reported headless auth failure as auth', () => {
-  const e = new Error('claude exited with code 1: Failed to authenticate. API Error: 401 Invalid authentication credentials');
-  assert.equal(classifyError(e), 'auth');
+test('classifyError: auth / rate_limit / quota / usage_limit over the real CLI strings', async () => {
+  await checkRows([
+    { name: 'classifies the reported headless auth failure as auth', run: () => {
+      const e = new Error('claude exited with code 1: Failed to authenticate. API Error: 401 Invalid authentication credentials');
+      assert.equal(classifyError(e), 'auth');
+    } },
+    { name: 'classifies authentication_error / not-logged-in as auth', run: () => {
+      assert.equal(classifyError(new Error('authentication_error: token expired')), 'auth');
+      assert.equal(classifyError(new Error('Not logged in. Please run claude login')), 'auth');
+    } },
+    { name: 'classifies 429 / 529 / overloaded as rate_limit', run: () => {
+      assert.equal(classifyError(new Error('API Error: 429 rate_limit_error')), 'rate_limit');
+      assert.equal(classifyError(new Error('API Error: 529 Overloaded')), 'rate_limit');
+    } },
+    { name: 'classifies credit/quota/billing as quota', run: () => {
+      assert.equal(classifyError(new Error('Your credit balance is too low to access the API')), 'quota');
+      assert.equal(classifyError(new Error('usage limit reached')), 'quota');
+    } },
+    { name: 'classifies the session/usage cap (resets after a wait) as usage_limit', run: () => {
+      // The exact strings the Claude CLI prints when the 5h session cap is hit.
+      assert.equal(classifyError(new Error("You've hit your session limit · resets 6pm (Europe/Sofia)")), 'usage_limit');
+      assert.equal(classifyError(new Error("You've reached your weekly limit")), 'usage_limit');
+      assert.equal(classifyError(new Error('claude exited with code 1: limit reached · resets 11am')), 'usage_limit');
+      // A bare 429/credit message must NOT be swallowed by usage_limit.
+      assert.equal(classifyError(new Error('API Error: 429 rate_limit_error')), 'rate_limit');
+    } },
+  ]);
 });
 
-test('classifies authentication_error / not-logged-in as auth', () => {
-  assert.equal(classifyError(new Error('authentication_error: token expired')), 'auth');
-  assert.equal(classifyError(new Error('Not logged in. Please run claude login')), 'auth');
-});
-
-test('classifies 429 / 529 / overloaded as rate_limit', () => {
-  assert.equal(classifyError(new Error('API Error: 429 rate_limit_error')), 'rate_limit');
-  assert.equal(classifyError(new Error('API Error: 529 Overloaded')), 'rate_limit');
-});
-
-test('classifies credit/quota/billing as quota', () => {
-  assert.equal(classifyError(new Error('Your credit balance is too low to access the API')), 'quota');
-  assert.equal(classifyError(new Error('usage limit reached')), 'quota');
-});
-
-test('classifies the session/usage cap (resets after a wait) as usage_limit', () => {
-  // The exact strings the Claude CLI prints when the 5h session cap is hit.
-  assert.equal(classifyError(new Error("You've hit your session limit · resets 6pm (Europe/Sofia)")), 'usage_limit');
-  assert.equal(classifyError(new Error("You've reached your weekly limit")), 'usage_limit');
-  assert.equal(classifyError(new Error('claude exited with code 1: limit reached · resets 11am')), 'usage_limit');
-  // A bare 429/credit message must NOT be swallowed by usage_limit.
-  assert.equal(classifyError(new Error('API Error: 429 rate_limit_error')), 'rate_limit');
-});
-
-test('classifies connectivity failures as network', () => {
-  assert.equal(classifyError(new Error('request to https://api.anthropic.com failed, reason: ECONNRESET')), 'network');
-  assert.equal(classifyError(new Error('fetch failed')), 'network');
-  assert.equal(classifyError(new Error('socket hang up')), 'network');
-});
-
-test('classifies the Claude CLI mid-response disconnect as network', () => {
-  // The exact strings the headless CLI folds into its reject when the connection
-  // drops mid-stream (the reported "stopped my internet" repro).
-  assert.equal(
-    classifyError(new Error('claude exited with code 1: API Error: Connection closed mid-response. The response above may be incomplete.')),
-    'network',
-  );
-  assert.equal(classifyError(new Error('API Error: Connection closed mid-response.')), 'network');
-  assert.equal(classifyError(new Error('Connection error.')), 'network');
-});
-
-test('classifies the Claude CLI API timeout as network', () => {
-  // The exact string the headless CLI folds into its reject when an API request
-  // times out (the reported refine-step failure: a ~1h stall, then exit 1).
-  assert.equal(classifyError(new Error('claude exited with code 1: Request timed out')), 'network');
-  assert.equal(classifyError(new Error('Request timed out')), 'network');
-  assert.equal(classifyError(new Error('API Error: Request timeout')), 'network');
-  assert.equal(classifyError(new Error('the request timed-out after 60000ms')), 'network');
-});
-
-test('classifies HTTP 500 errors as network', () => {
-  assert.equal(classifyError(new Error('API Error: 500 Internal Server Error')), 'network');
-  assert.equal(classifyError(new Error('HTTP request failed with status 500')), 'network');
-  assert.equal(classifyError(new Error('Error: Request failed: Internal Server Error')), 'network');
+test('classifyError: network (connectivity, mid-response drop, API timeout, HTTP 500)', async () => {
+  await checkRows([
+    { name: 'classifies connectivity failures as network', run: () => {
+      assert.equal(classifyError(new Error('request to https://api.anthropic.com failed, reason: ECONNRESET')), 'network');
+      assert.equal(classifyError(new Error('fetch failed')), 'network');
+      assert.equal(classifyError(new Error('socket hang up')), 'network');
+    } },
+    { name: 'classifies the Claude CLI mid-response disconnect as network', run: () => {
+      // The exact strings the headless CLI folds into its reject when the connection
+      // drops mid-stream (the reported "stopped my internet" repro).
+      assert.equal(
+        classifyError(new Error('claude exited with code 1: API Error: Connection closed mid-response. The response above may be incomplete.')),
+        'network',
+      );
+      assert.equal(classifyError(new Error('API Error: Connection closed mid-response.')), 'network');
+      assert.equal(classifyError(new Error('Connection error.')), 'network');
+    } },
+    { name: 'classifies the Claude CLI API timeout as network', run: () => {
+      // The exact string the headless CLI folds into its reject when an API request
+      // times out (the reported refine-step failure: a ~1h stall, then exit 1).
+      assert.equal(classifyError(new Error('claude exited with code 1: Request timed out')), 'network');
+      assert.equal(classifyError(new Error('Request timed out')), 'network');
+      assert.equal(classifyError(new Error('API Error: Request timeout')), 'network');
+      assert.equal(classifyError(new Error('the request timed-out after 60000ms')), 'network');
+    } },
+    { name: 'classifies HTTP 500 errors as network', run: () => {
+      assert.equal(classifyError(new Error('API Error: 500 Internal Server Error')), 'network');
+      assert.equal(classifyError(new Error('HTTP request failed with status 500')), 'network');
+      assert.equal(classifyError(new Error('Error: Request failed: Internal Server Error')), 'network');
+    } },
+  ]);
 });
 
 // OpenRouter's `:free` models run on a donated provider pool every OpenRouter user
@@ -76,43 +78,36 @@ test('a shared-pool 429 stays rate_limit and is recognized as the shared pool', 
   assert.equal(isSharedPoolRateLimit(null), false);
 });
 
-test('rateLimitHint names the shared pool (not max-concurrent) only for a shared-pool 429', () => {
-  const hint = rateLimitHint(new Error(POOL_429));
-  assert.match(hint, /shared/i);
-  assert.match(hint, /not worca's max.concurrent/i);
-  assert.match(hint, /paid/i);
-  assert.match(hint, /own key|BYOK/i);
-  assert.match(hint, /fallback/i);
-  assert.equal(rateLimitHint(new Error('API Error: 429 rate_limit_error')), '');
-});
-
-test('classifies the model id itself being refused as model', () => {
-  // The API's refusal when the endpoint does not serve the id, and the CLI's
-  // catalog-miss wording.
-  assert.equal(classifyError(new Error('claude exited with code 1: API Error: 403 No access to this model: claude-opus-5-5')), 'model');
-  assert.equal(
-    classifyError(new Error('"claude-opus-5-5" isn\'t described by this version\'s model catalog; update Claude Code')),
-    'model',
-  );
-  assert.equal(classifyError(new Error('the endpoint replied: model not found')), 'model');
-  // The stderr notice `[claude-code:unrecognized_model]` is a BENIGN notice
-  // (claude-runner BENIGN_STDERR_PATTERNS): it fires on every spawn whose id the
-  // CLI does not know and never states the cause, so alone it stays unclassified.
-  assert.equal(
-    classifyError(new Error('[claude-code:unrecognized_model] {"model":"claude-opus-5-5","query_source":"sdk"}')),
-    null,
-  );
-});
-
-test('model classification does not swallow neighbouring classes or ordinary mentions', () => {
-  // An ordinary message that merely mentions a model stays unclassified.
-  assert.equal(classifyError(new Error('the agent edited model.ts and broke the build')), null);
-  // A 401 credential failure stays auth even though a model may be named.
-  assert.equal(classifyError(new Error('claude exited with code 1: API Error: 401 for model claude-opus-5-5')), 'auth');
-  // A connection drop stays network even when the request named a model.
-  assert.equal(classifyError(new Error('connection error while sending model claude-opus-5-5')), 'network');
-  // A rate limit stays rate_limit.
-  assert.equal(classifyError(new Error('API Error: 429 rate_limit_error')), 'rate_limit');
+test('classifyError: model refusal, without swallowing auth/network/rate_limit or ordinary mentions', async () => {
+  await checkRows([
+    { name: 'classifies the model id itself being refused as model', run: () => {
+      // The API's refusal when the endpoint does not serve the id, and the CLI's
+      // catalog-miss wording.
+      assert.equal(classifyError(new Error('claude exited with code 1: API Error: 403 No access to this model: claude-opus-5-5')), 'model');
+      assert.equal(
+        classifyError(new Error('"claude-opus-5-5" isn\'t described by this version\'s model catalog; update Claude Code')),
+        'model',
+      );
+      assert.equal(classifyError(new Error('the endpoint replied: model not found')), 'model');
+      // The stderr notice `[claude-code:unrecognized_model]` is a BENIGN notice
+      // (claude-runner BENIGN_STDERR_PATTERNS): it fires on every spawn whose id the
+      // CLI does not know and never states the cause, so alone it stays unclassified.
+      assert.equal(
+        classifyError(new Error('[claude-code:unrecognized_model] {"model":"claude-opus-5-5","query_source":"sdk"}')),
+        null,
+      );
+    } },
+    { name: 'model classification does not swallow neighbouring classes or ordinary mentions', run: () => {
+      // An ordinary message that merely mentions a model stays unclassified.
+      assert.equal(classifyError(new Error('the agent edited model.ts and broke the build')), null);
+      // A 401 credential failure stays auth even though a model may be named.
+      assert.equal(classifyError(new Error('claude exited with code 1: API Error: 401 for model claude-opus-5-5')), 'auth');
+      // A connection drop stays network even when the request named a model.
+      assert.equal(classifyError(new Error('connection error while sending model claude-opus-5-5')), 'network');
+      // A rate limit stays rate_limit.
+      assert.equal(classifyError(new Error('API Error: 429 rate_limit_error')), 'rate_limit');
+    } },
+  ]);
 });
 
 test('returns null for a plain bug and accepts a raw string / nullish', () => {

@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -58,56 +59,54 @@ test('skillPillsHtml renders main-agent header pills + per-sub-agent row pills, 
 
 // §7.4: three label kinds must render — skill:<slug>, mcp:<server>[:<tool>],
 // and §7.1's overflow:<n> sentinel (a muted `+N more` pill, never a label pill).
-test('§7.4 three-part MCP labels render "<server> · <tool>" with .is-mcp-tool + a raw-tag tooltip', async () => {
+test('skill pill label kinds: a three-part mcp label renders "<server> · <tool>" with a raw-tag tooltip, the overflow sentinel is a muted last "+N more" pill, and a malformed overflow tag renders nothing', async () => {
   const { window } = await bootLive();
   const { skillPillsHtml } = window.__np;
-  const panel = window.document.createElement('div');
-  const stepSkills = { 'n1|1': [
-    'skill:graphify',
-    'mcp:playwright:browser_navigate',
-    'mcp:playwright:browser_click',   // same server, second tool -> its OWN pill
-    'mcp:echo',                       // legacy two-part shape still renders
-  ] };
-  panel.innerHTML = skillPillsHtml(stepSkills['n1|1']);
+  await checkRows([
+    { name: '§7.4 three-part MCP labels render "<server> · <tool>" with .is-mcp-tool + a raw-tag tooltip', run: async () => {
+      const panel = window.document.createElement('div');
+      const stepSkills = { 'n1|1': [
+        'skill:graphify',
+        'mcp:playwright:browser_navigate',
+        'mcp:playwright:browser_click',   // same server, second tool -> its OWN pill
+        'mcp:echo',                       // legacy two-part shape still renders
+      ] };
+      panel.innerHTML = skillPillsHtml(stepSkills['n1|1']);
 
-  const head = panel.querySelector('.subs-skills');
-  assert.deepEqual([...head.querySelectorAll('.skill-pill')].map((e) => e.textContent),
-    ['graphify', 'playwright · browser_navigate', 'playwright · browser_click', 'echo']);
-  const toolPills = head.querySelectorAll('.skill-pill.is-mcp.is-mcp-tool');
-  assert.equal(toolPills.length, 2, 'both three-part labels carry is-mcp AND is-mcp-tool');
-  assert.equal(toolPills[0].getAttribute('title'), 'playwright:browser_navigate',
-    'the tooltip carries the raw server:tool tag');
-  const legacy = [...head.querySelectorAll('.skill-pill.is-mcp')].find((e) => e.textContent === 'echo');
-  assert.ok(legacy && !legacy.classList.contains('is-mcp-tool'), 'a two-part label is NOT a tool pill');
-  assert.equal(head.querySelector('.skill-pill.is-skill').textContent, 'graphify');
-});
+      const head = panel.querySelector('.subs-skills');
+      assert.deepEqual([...head.querySelectorAll('.skill-pill')].map((e) => e.textContent),
+        ['graphify', 'playwright · browser_navigate', 'playwright · browser_click', 'echo']);
+      const toolPills = head.querySelectorAll('.skill-pill.is-mcp.is-mcp-tool');
+      assert.equal(toolPills.length, 2, 'both three-part labels carry is-mcp AND is-mcp-tool');
+      assert.equal(toolPills[0].getAttribute('title'), 'playwright:browser_navigate',
+        'the tooltip carries the raw server:tool tag');
+      const legacy = [...head.querySelectorAll('.skill-pill.is-mcp')].find((e) => e.textContent === 'echo');
+      assert.ok(legacy && !legacy.classList.contains('is-mcp-tool'), 'a two-part label is NOT a tool pill');
+      assert.equal(head.querySelector('.skill-pill.is-skill').textContent, 'graphify');
+    } },
+    { name: '§7.1/§7.4 the overflow sentinel renders as a muted "+N more" pill, last, with a cap tooltip', run: async () => {
+      const panel = window.document.createElement('div');
+      const labels = Array.from({ length: 64 }, (_, i) => `mcp:srv:tool_${i}`);
+      panel.innerHTML = skillPillsHtml([...labels, 'overflow:6']);
 
-test('§7.1/§7.4 the overflow sentinel renders as a muted "+N more" pill, last, with a cap tooltip', async () => {
-  const { window } = await bootLive();
-  const { skillPillsHtml } = window.__np;
-  const panel = window.document.createElement('div');
-  const labels = Array.from({ length: 64 }, (_, i) => `mcp:srv:tool_${i}`);
-  panel.innerHTML = skillPillsHtml([...labels, 'overflow:6']);
-
-  const head = panel.querySelector('.subs-skills');
-  const pills = [...head.querySelectorAll('.skill-pill')];
-  assert.equal(pills.length, 65, '64 label pills + exactly one overflow pill');
-  assert.equal(pills.at(-1).textContent, '+6 more', 'the sentinel is rendered LAST (renderer never re-sorts)');
-  assert.ok(pills.at(-1).classList.contains('is-overflow'), 'the sentinel pill carries .is-overflow');
-  assert.ok(!pills.at(-1).classList.contains('is-skill'), 'it is not a label pill');
-  assert.match(pills.at(-1).getAttribute('title') || '', /64/, 'the tooltip names the cap');
-  // The per-sub-agent row renders it too (same helper, both call sites).
-  const rowHtml = skillPillsHtml(['skill:x', 'overflow:2']);
-  panel.innerHTML = rowHtml;
-  assert.equal(panel.querySelector('.skill-pill.is-overflow').textContent, '+2 more');
-});
-
-test('§7.4 a malformed overflow tag renders no pill (and no empty pill row)', async () => {
-  const { window } = await bootLive();
-  const { skillPillsHtml } = window.__np;
-  const panel = window.document.createElement('div');
-  panel.innerHTML = skillPillsHtml(['overflow:0', 'overflow:nope']);
-  assert.equal(panel.querySelector('.subs-skills'), null, 'no pills -> no container');
+      const head = panel.querySelector('.subs-skills');
+      const pills = [...head.querySelectorAll('.skill-pill')];
+      assert.equal(pills.length, 65, '64 label pills + exactly one overflow pill');
+      assert.equal(pills.at(-1).textContent, '+6 more', 'the sentinel is rendered LAST (renderer never re-sorts)');
+      assert.ok(pills.at(-1).classList.contains('is-overflow'), 'the sentinel pill carries .is-overflow');
+      assert.ok(!pills.at(-1).classList.contains('is-skill'), 'it is not a label pill');
+      assert.match(pills.at(-1).getAttribute('title') || '', /64/, 'the tooltip names the cap');
+      // The per-sub-agent row renders it too (same helper, both call sites).
+      const rowHtml = skillPillsHtml(['skill:x', 'overflow:2']);
+      panel.innerHTML = rowHtml;
+      assert.equal(panel.querySelector('.skill-pill.is-overflow').textContent, '+2 more');
+    } },
+    { name: '§7.4 a malformed overflow tag renders no pill (and no empty pill row)', run: async () => {
+      const panel = window.document.createElement('div');
+      panel.innerHTML = skillPillsHtml(['overflow:0', 'overflow:nope']);
+      assert.equal(panel.querySelector('.subs-skills'), null, 'no pills -> no container');
+    } },
+  ]);
 });
 
 // §7.5 reload: a persisted step array renders through the exact chain the

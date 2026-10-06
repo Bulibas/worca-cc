@@ -8,6 +8,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, '..', 'src', 'cli', 'worca-cc.mjs');
@@ -49,12 +50,23 @@ function runCli(args) {
   });
 }
 
-test('config list prints the three keys with effective values (tab-separated)', async () => {
-  const r = await runCli(['config']);
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /pipelineCostLimitUsd\t\(unset\)/);
-  assert.match(r.stdout, /totalCostLimitUsd\t\(unset\)/);
-  assert.match(r.stdout, /costLimitResetPeriod\tmonthly/);
+test('config list prints the three keys (tab-separated) and the window line once a total limit is set', async () => {
+  await checkRows([
+    { name: 'config list prints the three keys with effective values (tab-separated)', run: async () => {
+      const r = await runCli(['config']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /pipelineCostLimitUsd\t\(unset\)/);
+      assert.match(r.stdout, /totalCostLimitUsd\t\(unset\)/);
+      assert.match(r.stdout, /costLimitResetPeriod\tmonthly/);
+    } },
+    { name: 'config list shows the window line once a total limit is set', run: async () => {
+      await runCli(['config', 'set', 'totalCostLimitUsd', '100']);
+      const r = await runCli(['config']);
+      assert.match(r.stdout, /window\t\$0\.00 of \$100/);
+      assert.match(r.stdout, /resets .* \(in /);
+      await runCli(['config', 'unset', 'totalCostLimitUsd']);
+    } },
+  ]);
 });
 
 test('config set/get/unset roundtrip incl. kebab aliases', async () => {
@@ -66,14 +78,6 @@ test('config set/get/unset roundtrip incl. kebab aliases', async () => {
   assert.match((await runCli(['config', 'get', 'costLimitResetPeriod'])).stdout, /weekly/);
   assert.equal((await runCli(['config', 'unset', 'total-cost-limit'])).code, 0);
   assert.match((await runCli(['config', 'get', 'totalCostLimitUsd'])).stdout, /\(unset\)/);
-});
-
-test('config list shows the window line once a total limit is set', async () => {
-  await runCli(['config', 'set', 'totalCostLimitUsd', '100']);
-  const r = await runCli(['config']);
-  assert.match(r.stdout, /window\t\$0\.00 of \$100/);
-  assert.match(r.stdout, /resets .* \(in /);
-  await runCli(['config', 'unset', 'totalCostLimitUsd']);
 });
 
 test('validation: NaN and bad enum fail with exit 2; unknown key names the allowed keys', async () => {

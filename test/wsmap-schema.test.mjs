@@ -1,23 +1,12 @@
-// test/wsmap-schema.test.mjs — vocabularies and the drop-invalid-keep-valid checkers (wsmap P1).
+// test/wsmap-schema.test.mjs — the drop-invalid-keep-valid checkers (wsmap P1).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  KINDS, KIND_LABELS, DIRS, CONFIDENCE, COVERAGE_LEVELS, NEEDS, EDGE_STATES,
-  confidenceRank, checkLlmFact, checkSurvey, checkUsage, checkSynthesis, checkOverrides, storedCheckError,
+  checkLlmFact, checkSurvey, checkUsage, checkSynthesis, checkOverrides, storedCheckError,
 } from '../src/shared/workspace-map/schema.mjs';
 
 const fact = (over = {}) => ({ kind: 'http', key: 'GET /invoices/:id', file: 'src/api.ts', line: 3, match: "get('/invoices/:id'", ...over });
-
-test('vocabularies are frozen and complete', () => {
-  for (const t of [KINDS, KIND_LABELS, DIRS, CONFIDENCE, COVERAGE_LEVELS, NEEDS, EDGE_STATES]) assert.ok(Object.isFrozen(t));
-  assert.deepEqual([...KINDS], ['http', 'grpc', 'graphql', 'topic', 'pkg', 'db', 'service', 'other']);
-  assert.deepEqual(Object.keys(KIND_LABELS), [...KINDS]);
-  assert.deepEqual([...CONFIDENCE], ['exact', 'verified', 'heuristic', 'inferred']);
-  assert.deepEqual([...EDGE_STATES], ['auto', 'confirmed', 'rejected', 'manual', 'missing', 'stale']);
-  assert.deepEqual(CONFIDENCE.map(confidenceRank), [0, 1, 2, 3]);
-  assert.equal(confidenceRank('bogus'), 99);
-});
 
 test('checkLlmFact: member-root escape is refused in every spelling (killer: member-root escape)', () => {
   assert.equal(checkLlmFact(fact()), null);

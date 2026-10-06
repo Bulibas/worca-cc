@@ -5,10 +5,12 @@ import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { mkdtemp, rm, writeFile, stat } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { templateWorld } from './helpers/git-dir.mjs';
 
 const home = useTempHome(after, 'worca-cc-sync-api-');
 const saved = {};
@@ -36,6 +38,7 @@ after(async () => {
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   // A stopped mock run may still be writing into a clone's .git: retry ENOTEMPTY.
   await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await Promise.all(worlds.map((d) => rm(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })));
 });
 beforeEach(() => gitSync.reset());
 
@@ -45,27 +48,33 @@ const g = (cwd, ...args) => {
   return r.stdout.trim();
 };
 let n = 0;
-/** bare origin + clone A (the registered project) + clone B (a teammate who pushes). */
+/** bare origin + clone A (the registered project) + clone B (a teammate who pushes), under one root. */
+function buildWorld(dir) {
+  g(dir, 'init', '-q', '--bare', 'origin.git');
+  g(dir, 'clone', '-q', join(dir, 'origin.git'), 'a');
+  const a = join(dir, 'a');
+  writeFileSync(join(a, 'f.txt'), 'one\n');
+  g(a, 'add', '-A'); g(a, 'commit', '-qm', 'init'); g(a, 'push', '-q', 'origin', 'dev');
+  g(dir, 'clone', '-q', join(dir, 'origin.git'), 'b');
+}
+const worlds = [];
 async function world({ register = true } = {}) {
-  const dir = join(root, `w${++n}`);
-  g(root, 'init', '-q', '--bare', `${dir}-origin.git`);
-  g(root, 'clone', '-q', `${dir}-origin.git`, `${dir}-a`);
-  await writeFile(join(`${dir}-a`, 'f.txt'), 'one\n');
-  g(`${dir}-a`, 'add', '-A'); g(`${dir}-a`, 'commit', '-qm', 'init'); g(`${dir}-a`, 'push', '-q', 'origin', 'dev');
-  g(root, 'clone', '-q', `${dir}-origin.git`, `${dir}-b`);
+  n += 1;
+  const dir = templateWorld('sync-api', buildWorld, 'sync-api');
+  worlds.push(dir);
+  const a = join(dir, 'a'), b = join(dir, 'b');
   const push = async (file, msg, branch = 'dev') => {
-    const b = `${dir}-b`;
     g(b, 'fetch', '-q', 'origin');
     g(b, 'checkout', '-q', '-B', branch, 'origin/dev');      // every branch starts from the latest dev
     await writeFile(join(b, file), `${msg}\n`); g(b, 'add', '-A'); g(b, 'commit', '-qm', msg);
     g(b, 'push', '-q', 'origin', branch);
   };
   const localCommit = async (file, msg) => {
-    await writeFile(join(`${dir}-a`, file), `${msg}\n`); g(`${dir}-a`, 'add', '-A'); g(`${dir}-a`, 'commit', '-qm', msg);
+    await writeFile(join(a, file), `${msg}\n`); g(a, 'add', '-A'); g(a, 'commit', '-qm', msg);
   };
   const name = `p${n}`;
-  if (register) await addProject({ name, path: `${dir}-a` });
-  return { a: `${dir}-a`, b: `${dir}-b`, push, localCommit, name, key: projectKey(`${dir}-a`) };
+  if (register) await addProject({ name, path: a });
+  return { a, b, push, localCommit, name, key: projectKey(a) };
 }
 const J = (method, url, body) => fetch(`${base}${url}`, {
   method, headers: { 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),

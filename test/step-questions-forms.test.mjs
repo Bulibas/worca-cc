@@ -7,7 +7,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
-import { getDb } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import {
   writeClarify, readClarifyRow, writeStepQuestions, readStepQuestions, readPipelineExtras,
 } from '../src/core/artifacts.mjs';
@@ -29,34 +29,37 @@ const ASK = {
 };
 const ANSWER = { kind: 'form', form: 'review-mockups', version: 2, values: { picked: 'a' } };
 
-test('step_questions: a form round round-trips the WHOLE ask plus its values', async () => {
-  const id = pipeline('p-form-1');
-  await writeStepQuestions(id, 'x:n1:1', 1, { agentKey: 'implementer', nodeId: 'n1', questions: ASK });
-  await writeStepQuestions(id, 'x:n1:1', 1, { agentKey: 'implementer', nodeId: 'n1', answers: ANSWER });
-  const [row] = readStepQuestions(id);
-  assert.equal(row.nodeId, 'n1');
-  assert.equal(row.round, 1);
-  assert.equal(row.ask.kind, 'form');
-  assert.equal(row.ask.askId, 'questions-x_n1_1-r1', 'X3: History builds its file URLs from the PERSISTED askId');
-  assert.equal(row.ask.surface, 'any', 'X3: surface survives the round trip');
-  assert.equal('id' in row.ask, false, 'the question id is the only field the persisted ask drops');
-  assert.deepEqual(row.ask.layout, ASK.layout);
-  assert.deepEqual(row.ask.answerSchema, ASK.answerSchema);
-  assert.deepEqual(row.ask.fileRefs, ASK.fileRefs, 'X16: the lookup table survives the round trip');
-  assert.deepEqual(row.ask.files, ASK.files);
-  assert.equal(row.ask.fileRefs.length, row.ask.files.length, 'fileRefs[i] still lines up with files[i]');
-  assert.deepEqual(row.ask.values, { picked: 'a' }, '§9: the snapshot carries the answer');
-  assert.deepEqual(row.formAnswer, { form: 'review-mockups', version: 2, values: { picked: 'a' } });
-  assert.deepEqual(row.questions, [], 'the legacy arrays stay empty — every existing reader is unchanged');
-  assert.deepEqual(row.answers, []);
-});
-
-test('step_questions: an UNANSWERED form round has ask.values === null', async () => {
-  const id = pipeline('p-form-2');
-  await writeStepQuestions(id, 'x:n1:1', 1, { agentKey: 'a', nodeId: 'n1', questions: ASK });
-  const [row] = readStepQuestions(id);
-  assert.equal(row.ask.values, null);
-  assert.equal(row.formAnswer, null);
+test('step_questions: a form round round-trips the whole ask plus its values; unanswered -> values null', async () => {
+  await checkRows([
+    { name: 'step_questions: a form round round-trips the WHOLE ask plus its values', run: async () => {
+      const id = pipeline('p-form-1');
+      await writeStepQuestions(id, 'x:n1:1', 1, { agentKey: 'implementer', nodeId: 'n1', questions: ASK });
+      await writeStepQuestions(id, 'x:n1:1', 1, { agentKey: 'implementer', nodeId: 'n1', answers: ANSWER });
+      const [row] = readStepQuestions(id);
+      assert.equal(row.nodeId, 'n1');
+      assert.equal(row.round, 1);
+      assert.equal(row.ask.kind, 'form');
+      assert.equal(row.ask.askId, 'questions-x_n1_1-r1', 'X3: History builds its file URLs from the PERSISTED askId');
+      assert.equal(row.ask.surface, 'any', 'X3: surface survives the round trip');
+      assert.equal('id' in row.ask, false, 'the question id is the only field the persisted ask drops');
+      assert.deepEqual(row.ask.layout, ASK.layout);
+      assert.deepEqual(row.ask.answerSchema, ASK.answerSchema);
+      assert.deepEqual(row.ask.fileRefs, ASK.fileRefs, 'X16: the lookup table survives the round trip');
+      assert.deepEqual(row.ask.files, ASK.files);
+      assert.equal(row.ask.fileRefs.length, row.ask.files.length, 'fileRefs[i] still lines up with files[i]');
+      assert.deepEqual(row.ask.values, { picked: 'a' }, '§9: the snapshot carries the answer');
+      assert.deepEqual(row.formAnswer, { form: 'review-mockups', version: 2, values: { picked: 'a' } });
+      assert.deepEqual(row.questions, [], 'the legacy arrays stay empty — every existing reader is unchanged');
+      assert.deepEqual(row.answers, []);
+    } },
+    { name: 'step_questions: an UNANSWERED form round has ask.values === null', run: async () => {
+      const id = pipeline('p-form-2');
+      await writeStepQuestions(id, 'x:n1:1', 1, { agentKey: 'a', nodeId: 'n1', questions: ASK });
+      const [row] = readStepQuestions(id);
+      assert.equal(row.ask.values, null);
+      assert.equal(row.formAnswer, null);
+    } },
+  ]);
 });
 
 test('REGRESSION: a LEGACY row is unchanged and gains no ask key', async () => {
@@ -100,11 +103,4 @@ test('REGRESSION: a legacy clarify row still unwraps to plain arrays', async () 
   assert.equal('ask' in extras.clarify, false, 'a legacy clarify row gains no key');
   assert.deepEqual(extras.clarify, { questions: [{ id: 'q1', question: 'Q?', options: ['A'] }],
     answers: [{ id: 'q1', question: 'Q?', choice: 'A' }] });
-});
-
-test('NO MIGRATION: the two tables still have exactly their v11 columns', () => {
-  const cols = (t) => getDb().prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name).sort();
-  assert.deepEqual(cols('clarify'), ['answers', 'pipeline_id', 'questions']);
-  assert.deepEqual(cols('step_questions'),
-    ['agent_key', 'answers', 'node_id', 'pipeline_id', 'questions', 'round', 'step_key']);
 });

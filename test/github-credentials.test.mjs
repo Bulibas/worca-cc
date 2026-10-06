@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import {
   GITHUB_CREDENTIAL_KEYS, stripGithubCredentials, readGithubCredentials, credentialEnv,
 } from '../src/core/github-credentials.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const POSIX = { skip: process.platform === 'win32' ? 'the helper is a POSIX shell function' : false };
 
@@ -31,25 +32,28 @@ test('readGithubCredentials: none, single, split, and split falling back to the 
   assert.deepEqual(readGithubCredentials({ GH_TOKEN: '  ' }), { mode: 'none', read: null, write: null });
 });
 
-test('credentialEnv: the role\'s token only, as GH_TOKEN and a github.com helper appended to GIT_CONFIG_*', () => {
-  const base = { PATH: '/bin', WORCA_GH_READ_TOKEN: 'r', WORCA_GH_WRITE_TOKEN: 'w', GITHUB_TOKEN: 'x',
-    GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/nohooks' };
-  const read = credentialEnv('read', base);
-  assert.equal(read.GH_TOKEN, 'r');
-  assert.equal(read.WORCA_GIT_TOKEN, 'r');
-  for (const k of ['WORCA_GH_READ_TOKEN', 'WORCA_GH_WRITE_TOKEN', 'GITHUB_TOKEN']) assert.equal(read[k], undefined, k);
-  assert.equal(read.GIT_CONFIG_COUNT, '3');
-  assert.equal(read.GIT_CONFIG_KEY_0, 'core.hooksPath', 'the caller\'s config is kept');
-  assert.equal(read.GIT_CONFIG_KEY_1, 'credential.https://github.com.helper');
-  assert.equal(read.GIT_CONFIG_VALUE_1, '', 'first clears the user\'s helpers');
-  assert.match(read.GIT_CONFIG_VALUE_2, /WORCA_GIT_TOKEN/);
-  assert.ok(!read.GIT_CONFIG_VALUE_2.includes('r"'), 'the helper reads the variable; the token is not in the config');
-  assert.equal(credentialEnv('write', base).GH_TOKEN, 'w');
-});
-
-test('credentialEnv with no token: credential-free env, git config untouched', () => {
-  const env = credentialEnv('write', { PATH: '/bin', HOME: '/h' });
-  assert.deepEqual(env, { PATH: '/bin', HOME: '/h' });
+test('credentialEnv: role token as GH_TOKEN + github.com helper appended to GIT_CONFIG_*; no token -> credential-free env, config untouched', async () => {
+  await checkRows([
+    { name: 'credentialEnv: the role\'s token only, as GH_TOKEN and a github.com helper appended to GIT_CONFIG_*', run: () => {
+      const base = { PATH: '/bin', WORCA_GH_READ_TOKEN: 'r', WORCA_GH_WRITE_TOKEN: 'w', GITHUB_TOKEN: 'x',
+        GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/nohooks' };
+      const read = credentialEnv('read', base);
+      assert.equal(read.GH_TOKEN, 'r');
+      assert.equal(read.WORCA_GIT_TOKEN, 'r');
+      for (const k of ['WORCA_GH_READ_TOKEN', 'WORCA_GH_WRITE_TOKEN', 'GITHUB_TOKEN']) assert.equal(read[k], undefined, k);
+      assert.equal(read.GIT_CONFIG_COUNT, '3');
+      assert.equal(read.GIT_CONFIG_KEY_0, 'core.hooksPath', 'the caller\'s config is kept');
+      assert.equal(read.GIT_CONFIG_KEY_1, 'credential.https://github.com.helper');
+      assert.equal(read.GIT_CONFIG_VALUE_1, '', 'first clears the user\'s helpers');
+      assert.match(read.GIT_CONFIG_VALUE_2, /WORCA_GIT_TOKEN/);
+      assert.ok(!read.GIT_CONFIG_VALUE_2.includes('r"'), 'the helper reads the variable; the token is not in the config');
+      assert.equal(credentialEnv('write', base).GH_TOKEN, 'w');
+    } },
+    { name: 'credentialEnv with no token: credential-free env, git config untouched', run: () => {
+      const env = credentialEnv('write', { PATH: '/bin', HOME: '/h' });
+      assert.deepEqual(env, { PATH: '/bin', HOME: '/h' });
+    } },
+  ]);
 });
 
 test('git uses the role\'s token over a helper in the user\'s config (real git credential fill)', POSIX, () => {

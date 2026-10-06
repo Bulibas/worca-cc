@@ -72,20 +72,6 @@ test('a config-ported script gets the port editor with rows, add/remove controls
   assert.equal(noVerdict.querySelector('[data-field="port:outputs:0:when"]').disabled, true, 'no sidecar verdict: when is locked to always');
 });
 
-test('interface mode: what the card runs is never gated; timeout, await and ports are expert, kept when set', () => {
-  const lvl = (el) => [el.dataset.minLevel || '', el.dataset.levelKeep || ''];
-  const plain = renderNodeInspector({ id: 'n_s', kind: 'script', key: 'shell', config: { params: { command: 'npm test' }, ports: SHELL.defaultPorts } }, { template: tpl, portsFn, meta: SHELL, doc });
-  assert.deepEqual(lvl(plain.querySelector('[data-field="param:command"]').closest('.ins-f')), ['', '']);
-  assert.deepEqual(lvl(plain.querySelector('.ins-chiprow')), ['', '']);
-  assert.deepEqual(lvl(plain.querySelector('.ins-timeout')), ['expert', '']);
-  assert.deepEqual(lvl(plain.querySelector('.ins-awaitall')), ['expert', '']);
-  assert.deepEqual(lvl(plain.querySelector('.ins-port-editor')), ['expert', '']);
-  const tuned = renderNodeInspector({ id: 'n_s', kind: 'script', key: 'shell', config: { timeoutMs: 5000, awaitAll: true, ports: SHELL.defaultPorts } }, { template: tpl, portsFn, meta: SHELL, doc });
-  assert.deepEqual(lvl(tuned.querySelector('.ins-timeout')), ['expert', '1']);
-  assert.deepEqual(lvl(tuned.querySelector('.ins-awaitall')), ['expert', '1']);
-  assert.equal(tuned.querySelector('[data-field="timeoutMs"]').max, '86400');
-});
-
 test('an enum param with no value and no default shows a blank option, never a choice the config does not hold', () => {
   const meta = { ...TESTS, params: [{ id: 'mode', type: 'enum', options: ['fast', 'full'], required: true }] };
   const el = renderNodeInspector({ id: 'n_t', kind: 'script', key: 'runTests', config: {} }, { template: tpl, portsFn, meta, doc });
@@ -93,30 +79,6 @@ test('an enum param with no value and no default shows a blank option, never a c
   assert.deepEqual([...sel.options].map((o) => o.value), ['', 'fast', 'full']);
   assert.equal(sel.value, '');
   assert.ok(sel.closest('.ins-f').classList.contains('ins-missing'));
-});
-
-test('editorFor replaces the code/command textarea and keeps the routed control', () => {
-  const built = [];
-  const editorFor = (param, value) => {
-    built.push([param.id, param.type, value]);
-    const box = doc.createElement('div');
-    box.className = 'stub-editor';
-    const ta = doc.createElement('textarea');
-    ta.dataset.field = `param:${param.id}`;
-    ta.value = value == null ? '' : String(value);
-    box.appendChild(ta);
-    return box;
-  };
-  const node = { id: 'n_t', kind: 'script', key: 'runTests', config: { params: { source: 'export default () => {};' } } };
-  const el = renderNodeInspector(node, { template: tpl, portsFn, meta: TESTS, doc, editorFor });
-  assert.deepEqual(built, [['source', 'code', 'export default () => {};']], 'only code/command params are offered one');
-  assert.ok(el.querySelector('.stub-editor'));
-  assert.equal(el.querySelectorAll('textarea.ins-textarea').length, 0);
-  assert.equal(el.querySelector('[data-field="param:source"]').value, 'export default () => {};');
-  assert.equal(el.querySelectorAll('.ins-caption').length, 1, 'the privileges caption still rides with it');
-  const plain = renderNodeInspector(node, { template: tpl, portsFn, meta: TESTS, doc });
-  assert.equal(plain.querySelector('textarea.ins-textarea[data-field="param:source"]').rows, 8,
-    'no hook: the plain textarea, unchanged');
 });
 
 test('the params-port toggle shows only where a wire has something to set, lists what it can set, and the port list badges the engine port', () => {

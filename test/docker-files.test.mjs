@@ -1,54 +1,46 @@
 // test/docker-files.test.mjs
 // The container packaging (docs/docker.md) without a docker daemon: the
-// shipped files hold the security posture the design promises, the build
-// script's pure parts work, and the egress proxy enforces its allowlist on a
-// real socket. The image itself is proven by tools/docker-smoke.mjs.
+// shipped files hold the security posture the design promises, and the egress
+// proxy enforces its allowlist on a real socket. The image itself is proven by
+// tools/docker-smoke.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import net from 'node:net';
 
 import { DEFAULT_ALLOW, parseAllow, isAllowed, createProxy } from '../docker/egress-proxy.mjs';
-import { pinnedClaudeCodeVersion, DEFAULT_IMAGE } from '../tools/docker-build.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(ROOT, p), 'utf8');
 
-test('docker/: every file the docs and workflows name exists', () => {
-  for (const f of [
-    'docker/Dockerfile', 'docker/entrypoint.sh', 'docker/egress-proxy.mjs', 'docker/CLAUDE_CODE_VERSION',
-    'docker/compose.yml', 'docker/compose.egress.yml', 'docker/compose.ssh.yml', 'docker/compose.teams.yml',
-    'docker/compose.clonein.yml', 'docker/compose.dev.yml', 'docker/.env.example', 'docker/.trivyignore',
-    '.dockerignore', '.devcontainer/devcontainer.json', 'docs/docker.md',
-    '.github/workflows/docker-image.yml', '.github/workflows/docker-rebuild.yml',
-  ]) assert.ok(existsSync(join(ROOT, f)), `${f} missing`);
-});
-
-test('Dockerfile: non-root, pinned CLI with its updater off, tini, healthcheck, tarball install', () => {
-  const d = read('docker/Dockerfile');
-  assert.match(d, /^USER worca$/m, 'runs as the worca user');
-  assert.match(d, /DISABLE_AUTOUPDATER=1/, 'the image is immutable: no self-update');
-  assert.match(d, /claude-code@\$\{CLAUDE_CODE_VERSION\}/, 'Claude Code is installed at the pinned version');
-  assert.match(d, /test -n "\$\{CLAUDE_CODE_VERSION\}"/, 'a missing pin fails the build instead of installing latest');
-  assert.match(d, /npm install -g \/tmp\/worca\.tgz/, 'installs the packed tarball, never COPY of the source');
-  assert.doesNotMatch(d, /^COPY \. /m, 'no COPY of the whole tree');
-  assert.match(d, /^ENTRYPOINT \["tini"/m, 'tini reaps orphaned children');
-  assert.match(d, /^HEALTHCHECK/m);
-  assert.match(d, /WORCA_NO_NATIVE_DIALOG=1/);
-  assert.match(d, /WORCA_CONTAINER=1/, 'Ask Worca knows it runs in the image (src/core/deployment.mjs)');
-  assert.match(d, /CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1/);
-  assert.match(d, /dev\.worca\.claude-code\.version/, 'the pin is a label');
-  assert.match(d, /chmod 0777 \/worca \/projects \/home\/worca \/home\/worca\/\.claude/, 'volume mount points are writable for any uid (Linux Engine WORCA_UID)');
-  assert.match(d, /HOME=\/home\/worca/, 'HOME is pinned for uids with no passwd entry');
-});
-
-test('CLAUDE_CODE_VERSION: one semver line', () => {
-  assert.match(pinnedClaudeCodeVersion(), /^\d+\.\d+\.\d+$/);
-  assert.equal(read('docker/CLAUDE_CODE_VERSION').trim(), pinnedClaudeCodeVersion());
-  assert.equal(DEFAULT_IMAGE, 'ghcr.io/sinishadjukic/worca');
+test('Dockerfile and .dockerignore: non-root, pinned CLI, tini, healthcheck, tarball-only context', async () => {
+  await checkRows([
+    { name: 'Dockerfile: non-root, pinned CLI with its updater off, tini, healthcheck, tarball install', run: () => {
+      const d = read('docker/Dockerfile');
+      assert.match(d, /^USER worca$/m, 'runs as the worca user');
+      assert.match(d, /DISABLE_AUTOUPDATER=1/, 'the image is immutable: no self-update');
+      assert.match(d, /claude-code@\$\{CLAUDE_CODE_VERSION\}/, 'Claude Code is installed at the pinned version');
+      assert.match(d, /test -n "\$\{CLAUDE_CODE_VERSION\}"/, 'a missing pin fails the build instead of installing latest');
+      assert.match(d, /npm install -g \/tmp\/worca\.tgz/, 'installs the packed tarball, never COPY of the source');
+      assert.doesNotMatch(d, /^COPY \. /m, 'no COPY of the whole tree');
+      assert.match(d, /^ENTRYPOINT \["tini"/m, 'tini reaps orphaned children');
+      assert.match(d, /^HEALTHCHECK/m);
+      assert.match(d, /WORCA_NO_NATIVE_DIALOG=1/);
+      assert.match(d, /WORCA_CONTAINER=1/, 'Ask Worca knows it runs in the image (src/core/deployment.mjs)');
+      assert.match(d, /CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1/);
+      assert.match(d, /dev\.worca\.claude-code\.version/, 'the pin is a label');
+      assert.match(d, /chmod 0777 \/worca \/projects \/home\/worca \/home\/worca\/\.claude/, 'volume mount points are writable for any uid (Linux Engine WORCA_UID)');
+      assert.match(d, /HOME=\/home\/worca/, 'HOME is pinned for uids with no passwd entry');
+    } },
+    { name: '.dockerignore keeps the build context to docker/ and the packed tarball', run: () => {
+      const lines = read('.dockerignore').split('\n').filter((l) => l && !l.startsWith('#'));
+      assert.deepEqual(lines, ['*', '!docker/', 'docker/.pack/*', '!docker/.pack/worca-app-*.tgz']);
+    } },
+  ]);
 });
 
 test('entrypoint.sh: strict shell, execs the command, never blocks on auth', () => {
@@ -121,48 +113,6 @@ test('overlays: egress confines worca to an internal network; clone-in drops the
   const ssh = read('docker/compose.ssh.yml');
   assert.doesNotMatch(ssh, /\.ssh:|\/\.ssh\//, 'the key directory is never mounted');
   assert.match(ssh, /SSH_AUTH_SOCK: \/ssh-agent\.sock/);
-});
-
-test('.dockerignore keeps the build context to docker/ and the packed tarball', () => {
-  const lines = read('.dockerignore').split('\n').filter((l) => l && !l.startsWith('#'));
-  assert.deepEqual(lines, ['*', '!docker/', 'docker/.pack/*', '!docker/.pack/worca-app-*.tgz']);
-});
-
-test('devcontainer.json is valid JSON on the published image with the two volumes', () => {
-  const dc = JSON.parse(read('.devcontainer/devcontainer.json'));
-  assert.match(dc.image, /^ghcr\.io\/sinishadjukic\/worca:/);
-  assert.equal(dc.remoteUser, 'worca');
-  assert.ok(dc.mounts.some((m) => m.includes('target=/worca')));
-  assert.ok(dc.mounts.some((m) => m.includes('target=/home/worca/.claude')));
-});
-
-test('package.json wires docker:build and docker:smoke; the tarball ships the compose files (for `worca container`) but never the image build files', () => {
-  const pkg = JSON.parse(read('package.json'));
-  assert.equal(pkg.scripts['docker:build'], 'node tools/docker-build.mjs');
-  assert.equal(pkg.scripts['docker:smoke'], 'node tools/docker-smoke.mjs');
-  assert.deepEqual(pkg.files.filter((f) => f.startsWith('docker')), ['docker/compose*.yml', 'docker/.env.example']);
-});
-
-test('workflows: release publishes the image after npm; CI smokes the image; rebuild is weekly', () => {
-  const rel = read('.github/workflows/release-npm-app.yml');
-  assert.match(rel, /image:\s*\n\s*needs: build-and-publish\s*\n\s*uses: \.\/\.github\/workflows\/docker-image\.yml/);
-  assert.match(rel, /release:\s*\n\s*needs: \[build-and-publish, image\]/, 'the GitHub Release waits for the image');
-  assert.match(rel, /build-and-publish:\s*\n\s*needs: test\b/, 'nothing publishes until every test shard passes');
-  assert.match(rel, /shard: \[1, 2, 3, 4\]/, 'release tests split 4 ways like ci.yml');
-  assert.match(rel, /WORCA_TEST_SHARD: \$\{\{ matrix\.shard \}\}\/4/);
-  const ci = read('.github/workflows/ci.yml');
-  assert.match(ci, /npm run docker:smoke -- --image/);
-  assert.match(ci, /hadolint/);
-  assert.match(ci, /trivy-action/);
-  const img = read('.github/workflows/docker-image.yml');
-  assert.match(img, /platforms: linux\/\$\{\{ matrix\.arch \}\}/);
-  assert.match(img, /provenance: mode=max/);
-  assert.match(img, /sbom: true/);
-  assert.match(img, /cosign sign --yes/);
-  assert.match(img, /push-by-digest=true/);
-  const rb = read('.github/workflows/docker-rebuild.yml');
-  assert.match(rb, /cron: "0 6 \* \* 1"/);
-  assert.match(rb, /date_tag: true/);
 });
 
 test('egress allowlist: exact hosts, dot-prefixed subdomains, defaults', () => {

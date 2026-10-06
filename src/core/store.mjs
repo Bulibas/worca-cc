@@ -6,16 +6,43 @@
 // a non-repo / missing git degrades to the realpath of the dir, never throwing.
 
 import { execFileSync } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, dirname, basename, isAbsolute } from 'node:path';
 import { worcaHome } from './projects.mjs';
 
 const _keyCache = new Map();
 
-/** Absolute path to the canonical main-repo root for `projectDir`. */
+const _rootCache = new Map(); // resolve(projectDir) -> { root, marker, common }
+
+/** Test seam: forget every cached canonicalProjectRoot() answer. */
+export function _resetCanonicalRootCache() { _rootCache.clear(); }
+
+// The nearest .git at or above dir (the one git discovers first), as a string that changes when
+// that .git is created, removed or replaced (its inode; a worktree's .git FILE also by mtime).
+function gitMarker(dir) {
+  for (let p = dir; ;) {
+    try {
+      const st = statSync(join(p, '.git'));
+      if (st.isFile()) return JSON.stringify([p, st.ino, st.mtimeMs]);
+      // git skips a .git dir it cannot use (no HEAD), so the marker does too: else a later
+      // `git init` in that very dir (same inode) would leave the cached parent answer standing.
+      if (existsSync(join(p, '.git', 'HEAD'))) return JSON.stringify([p, st.ino, 'dir']);
+    } catch { /* not here: one level up */ }
+    const up = dirname(p);
+    if (up === p) return '';
+    p = up;
+  }
+}
+
+/** Absolute path to the canonical main-repo root for `projectDir`. Memoized while the nearest
+ *  .git marker is unchanged (workspaces.mjs assertUniqueSet resolves every member of every
+ *  workspace on each write); the non-git fallback is never cached — a dir can become a repo. */
 export function canonicalProjectRoot(projectDir) {
   const dir = resolve(projectDir);
+  const marker = gitMarker(dir);
+  const hit = _rootCache.get(dir);
+  if (hit && marker && hit.marker === marker && existsSync(hit.common)) return hit.root;
   try {
     const common = execFileSync('git', ['rev-parse', '--git-common-dir'], {
       cwd: dir,
@@ -24,11 +51,16 @@ export function canonicalProjectRoot(projectDir) {
     if (common) {
       const commonAbs = isAbsolute(common) ? common : resolve(dir, common);
       const root = dirname(commonAbs); // parent of the .git dir
-      try { return realpathSync(root); } catch { return resolve(root); }
+      let out;
+      try { out = realpathSync(root); } catch { out = resolve(root); }
+      if (marker) _rootCache.set(dir, { root: out, marker, common: commonAbs });
+      else _rootCache.delete(dir);
+      return out;
     }
   } catch {
     /* not a git repo, or git unavailable — fall through */
   }
+  _rootCache.delete(dir);
   try { return realpathSync(dir); } catch { return dir; }
 }
 

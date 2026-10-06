@@ -2,7 +2,8 @@
 // (before/after summary lines, one line per changed field) and never writes anything.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createAwayChangeValidator, awayEventPrompt, awayNoticeText } from '../src/core/ask/away-proposal.mjs';
+import { createAwayChangeValidator } from '../src/core/ask/away-proposal.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const T15 = Date.parse('2026-09-28T15:00:00Z');
 const mk = ({ user = {}, project = {}, team = {} } = {}) => createAwayChangeValidator({
@@ -19,9 +20,22 @@ test('a user-level change builds a card with before/after summaries', async () =
   assert.match(r.card.after[0], /all runs/);
 });
 
-test('unset returns a field to the layer below and says so', async () => {
-  const r = await mk({ user: { graceMinutes: 30 }, project: { graceMinutes: 45 } })({ level: 'project', projectKey: 'p', unset: ['graceMinutes'] });
-  assert.deepEqual(r.card.changes, [{ field: 'graceMinutes', label: 'Marked runs by day', before: '45 minutes', after: '30 minutes (inherited)' }]);
+test('unset returns a field to the layer below (inherited), incl. the Decided-by model; a bad deciderEffort is refused', async () => {
+  await checkRows([
+    { name: 'unset returns a field to the layer below and says so', run: async () => {
+      const r = await mk({ user: { graceMinutes: 30 }, project: { graceMinutes: 45 } })({ level: 'project', projectKey: 'p', unset: ['graceMinutes'] });
+      assert.deepEqual(r.card.changes, [{ field: 'graceMinutes', label: 'Marked runs by day', before: '45 minutes', after: '30 minutes (inherited)' }]);
+    } },
+    { name: 'the Decided by model and its effort read in words on the card', run: async () => {
+      const r = await mk({ user: { deciderModel: 'claude-opus-5-5' } })({ level: 'user', set: { deciderEffort: 'high' }, unset: ['deciderModel'] });
+      assert.equal(r.ok, true, JSON.stringify(r.errors));
+      assert.deepEqual(r.card.changes, [
+        { field: 'deciderEffort', label: 'Effort', before: 'medium', after: 'high' },
+        { field: 'deciderModel', label: 'Decided by', before: 'claude-opus-5-5', after: 'Same as the run (inherited)' },
+      ]);
+      assert.match((await mk()({ level: 'user', set: { deciderEffort: 'low' } })).errors[0], /deciderEffort/);
+    } },
+  ]);
 });
 
 test('project level refuses the spend cap; bad values and fields are named; unknown project', async () => {
@@ -32,19 +46,4 @@ test('project level refuses the spend cap; bad values and fields are named; unkn
   assert.match((await v({ level: 'user', unset: ['bogus'] })).errors[0], /bogus/);
   assert.match((await v({ level: 'project', projectKey: 'zz', set: { enabled: true } })).errors[0], /unknown project "zz"/);
   assert.match((await v({ level: 'user' })).errors[0], /nothing to change/);
-});
-
-test('event prompt and notice', () => {
-  assert.equal(awayEventPrompt({ cardId: 'c1', state: 'applied', card: { summary: 'Which runs: All runs' } }), '[worca event] away card c1 applied; "Which runs: All runs"');
-  assert.equal(awayNoticeText({ state: 'declined', card: { summary: 'Which runs: All runs' } }), 'Declined — Which runs: All runs');
-});
-
-test('the Decided by model and its effort read in words on the card', async () => {
-  const r = await mk({ user: { deciderModel: 'claude-opus-5-5' } })({ level: 'user', set: { deciderEffort: 'high' }, unset: ['deciderModel'] });
-  assert.equal(r.ok, true, JSON.stringify(r.errors));
-  assert.deepEqual(r.card.changes, [
-    { field: 'deciderEffort', label: 'Effort', before: 'medium', after: 'high' },
-    { field: 'deciderModel', label: 'Decided by', before: 'claude-opus-5-5', after: 'Same as the run (inherited)' },
-  ]);
-  assert.match((await mk()({ level: 'user', set: { deciderEffort: 'low' } })).errors[0], /deciderEffort/);
 });

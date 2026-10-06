@@ -110,18 +110,18 @@ function stripSide(s) {
 
 // Parse ONE section's hunks. Lazy per selected file — never called for the whole
 // patch up front.
-export function parseFileSection(raw) {
+export function parseFileSection(raw, { maxCodeUnits = MAX_FILE_SECTION_CODE_UNITS } = {}) {
   let text = String(raw || '');
   let truncated = false;
-  if (text.length > MAX_FILE_SECTION_CODE_UNITS) {
-    const cut = text.lastIndexOf('\n', MAX_FILE_SECTION_CODE_UNITS);
+  if (text.length > maxCodeUnits) {
+    const cut = text.lastIndexOf('\n', maxCodeUnits);
     if (cut > 0) {
       text = text.slice(0, cut);                    // snapped to a line boundary
     } else {
       // One line longer than the whole cap: there is no newline to snap to, so
       // cut mid-line and drop a trailing LONE HIGH SURROGATE (a '\n' can never
       // sit inside a pair, which is why the snapped path needs no such guard).
-      text = text.slice(0, MAX_FILE_SECTION_CODE_UNITS);
+      text = text.slice(0, maxCodeUnits);
       const last = text.charCodeAt(text.length - 1);
       if (last >= 0xd800 && last <= 0xdbff) text = text.slice(0, -1);
     }

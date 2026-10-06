@@ -6,13 +6,15 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, utimes, realpath, rm } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { clearStaleIndexLock, staleIndexLockNote, STALE_INDEX_LOCK_MS } from '../src/core/git-lock.mjs';
 import { snapshotWorktreePatch } from '../src/core/worktree.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 const created = [];
 after(async () => { for (const d of created) await rm(d, { recursive: true, force: true }); });
@@ -25,14 +27,9 @@ async function tmp() {
 
 const g = (cwd, args) => spawnSync('git', args, { cwd, encoding: 'utf8' });
 
-async function freshRepo() {
-  const dir = await tmp();
-  g(dir, ['init', '-q', '-b', 'main']);
-  g(dir, ['config', 'user.email', 't@t']);
-  g(dir, ['config', 'user.name', 't']);
-  await writeFile(join(dir, 'seed.txt'), 'seed\n');
-  g(dir, ['add', '-A']);
-  g(dir, ['commit', '-qm', 'init']);
+function freshRepo() {
+  const dir = realpathSync(templateRepo('git-lock', { branch: 'main', user: true, files: { 'seed.txt': 'seed\n' } }));
+  created.push(dir);
   return dir;
 }
 
@@ -50,47 +47,46 @@ async function plantLock(path, ageMs) {
   await utimes(path, t, t);
 }
 
-test('removes a stale index.lock in a linked worktree gitdir', async () => {
-  const { wt, lock } = await linkedWorktree();
-  await plantLock(lock, STALE_INDEX_LOCK_MS + 60_000);
-  const cleared = await clearStaleIndexLock(wt);
-  assert.equal(cleared.path, lock);
-  assert.ok(cleared.ageMs >= STALE_INDEX_LOCK_MS);
-  assert.equal(existsSync(lock), false);
-});
-
-test('keeps a fresh index.lock: a live git may still own it', async () => {
+// One repo: nothing to clear before any lock exists, then a fresh lock is planted
+// and must survive.
+test('nothing to clear: no lock, a fresh lock (kept), not a git checkout', async () => {
   const repo = await freshRepo();
-  const lock = join(repo, '.git', 'index.lock');
-  await plantLock(lock, 5_000);
-  assert.equal(await clearStaleIndexLock(repo), null);
-  assert.equal(existsSync(lock), true);
+  await checkRows([
+    { name: 'no lock, or not a git checkout: nothing to clear', run: async () => {
+      assert.equal(await clearStaleIndexLock(repo), null);
+      assert.equal(await clearStaleIndexLock(await tmp()), null);
+    } },
+    { name: 'keeps a fresh index.lock: a live git may still own it', run: async () => {
+      const lock = join(repo, '.git', 'index.lock');
+      await plantLock(lock, 5_000);
+      assert.equal(await clearStaleIndexLock(repo), null);
+      assert.equal(existsSync(lock), true);
+    } },
+  ]);
 });
 
-test('no lock, or not a git checkout: nothing to clear', async () => {
-  assert.equal(await clearStaleIndexLock(await freshRepo()), null);
-  assert.equal(await clearStaleIndexLock(await tmp()), null);
-});
-
-test('snapshotWorktreePatch saves the work past a stale lock (retained-run discard/delete)', async () => {
+// One linked worktree: snapshot with no lock, then plant a stale lock and snapshot
+// again to a second path.
+test('snapshotWorktreePatch: no clearedLock without a lock; past a stale lock it saves the work and reports the removal', async () => {
   const { wt, lock } = await linkedWorktree();
   await writeFile(join(wt, 'feature.mjs'), 'export {};\n');
-  await plantLock(lock, STALE_INDEX_LOCK_MS + 60_000);
-  const out = join(await tmp(), 'retained.patch');
-  const res = await snapshotWorktreePatch(wt, out);
-  assert.equal(res.ok, true, JSON.stringify(res));
-  assert.equal(res.file, out);
-  assert.equal(existsSync(lock), false);
-  // the caller turns this into a run warning / audit line, so the removal leaves a trace
-  assert.equal(res.clearedLock?.path, lock);
-  assert.ok(res.clearedLock.ageMs >= STALE_INDEX_LOCK_MS);
-  assert.match(staleIndexLockNote(res.clearedLock), /removed a stale git index lock \(\d+ min old/);
-});
-
-test('snapshotWorktreePatch reports no clearedLock when there was no lock', async () => {
-  const { wt } = await linkedWorktree();
-  await writeFile(join(wt, 'feature.mjs'), 'export {};\n');
-  const res = await snapshotWorktreePatch(wt, join(await tmp(), 'retained.patch'));
-  assert.equal(res.ok, true, JSON.stringify(res));
-  assert.equal('clearedLock' in res, false);
+  await checkRows([
+    { name: 'snapshotWorktreePatch reports no clearedLock when there was no lock', run: async () => {
+      const res = await snapshotWorktreePatch(wt, join(await tmp(), 'retained.patch'));
+      assert.equal(res.ok, true, JSON.stringify(res));
+      assert.equal('clearedLock' in res, false);
+    } },
+    { name: 'snapshotWorktreePatch saves the work past a stale lock (retained-run discard/delete)', run: async () => {
+      await plantLock(lock, STALE_INDEX_LOCK_MS + 60_000);
+      const out = join(await tmp(), 'retained.patch');
+      const res = await snapshotWorktreePatch(wt, out);
+      assert.equal(res.ok, true, JSON.stringify(res));
+      assert.equal(res.file, out);
+      assert.equal(existsSync(lock), false);
+      // the caller turns this into a run warning / audit line, so the removal leaves a trace
+      assert.equal(res.clearedLock?.path, lock);
+      assert.ok(res.clearedLock.ageMs >= STALE_INDEX_LOCK_MS);
+      assert.match(staleIndexLockNote(res.clearedLock), /removed a stale git index lock \(\d+ min old/);
+    } },
+  ]);
 });

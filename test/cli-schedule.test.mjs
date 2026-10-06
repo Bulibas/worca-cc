@@ -1,5 +1,6 @@
-// test/cli-schedule.test.mjs — `worca … --at/--every/--cron`, the `worca schedule` verbs,
-// and the `--wait` foreground mode (the terminal owns its ticket and starts the run itself).
+// test/cli-schedule.test.mjs — `worca … --at/--every/--cron/--after` and the `worca schedule`
+// verbs. The `--wait` foreground mode runs end to end in test/cli-schedule-wait.test.mjs (slow
+// tier); readScheduleFlags' refusals and waitAndRun are pinned in test/cli-verbs-inproc.test.mjs.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
@@ -9,14 +10,29 @@ import { fileURLToPath } from 'node:url';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { gitDir } from './helpers/git-dir.mjs';
 import { getDb } from '../src/core/db.mjs';
-import { listTickets, listSchedules } from '../src/core/scheduler.mjs';
-import { listNotifications } from '../src/core/notifications.mjs';
+import { projectKey } from '../src/core/store.mjs';
+import { listTickets, listSchedules, createTicket, claimTicket, markTicketFired, getTicket } from '../src/core/scheduler.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, '..', 'src', 'cli', 'worca-cc.mjs');
 const home = useTempHome(after);
 const proj = gitDir('cli-sched');
 writeFileSync(join(proj, 'task.md'), '# Tidy the README\n\nMake it friendlier.\n');
+
+/** What a `--wait` run leaves behind (test/cli-schedule-wait.test.mjs drives one end to end): a
+ *  one-off ticket, fired, whose pipeline finished done. */
+function seedFiredTicket(title) {
+  const t = createTicket({ title, projectDir: proj, runAtMs: Date.now() - 60_000, request: { prompt: title } });
+  const pipelineId = 'feed0001'; // a pipeline's own 8-hex id: reusing the ticket's first 8 would make `--after <8>` ambiguous
+  const ts = new Date().toISOString();
+  getDb().prepare(`
+    INSERT INTO pipelines (id, project_key, target, title, status, phase, cycle, started_at, updated_at)
+    VALUES (?, ?, 'project', ?, 'done', 'done', 1, ?, ?)
+  `).run(pipelineId, projectKey(proj), title, ts, ts);
+  assert.ok(claimTicket(t.id), 'the seed claims its own ticket');
+  markTicketFired(t.id, { pipelineId });
+  return getTicket(t.id);
+}
 
 function run(args) {
   return new Promise((res) => {
@@ -69,19 +85,12 @@ test('--every freezes a --file prompt and creates a repeating schedule', async (
 });
 
 test('bad schedule flags fail with exit 2 and a usable message, before anything is written', async () => {
+  // Every readScheduleFlags message is pinned in-process (test/cli-verbs-inproc.test.mjs). The
+  // spawns left: one of them end to end, and the two guards that live in main() itself.
   const before = listTickets({ all: true }).length + listSchedules().length;
   const bad = async (args, re) => { const r = await run(['--project', proj, '--prompt', 'x', ...args]); assert.equal(r.code, 2, r.stdout); assert.match(r.stderr, re); };
-  await bad(['--at', 'yesterday'], /cannot read "yesterday"/);
-  await bad(['--at', '2020-01-01 02:00'], /in the past/);
-  await bad(['--cron', '*/5 * * * *'], /use --every/);
-  await bad(['--every', 'fortnightly'], /--every/);
+  await bad(['--at', 'yesterday'], /^worca: --at: cannot read "yesterday"/m);
   await bad(['--wait'], /--wait needs --at/);
-  await bad(['--every', 'day 02:00', '--wait'], /--wait needs --at/);
-  await bad(['--at', '02:00', '--every', 'day 02:00'], /use one of --at, --every, --cron/);
-  await bad(['--at', '02:00', '--count', '3'], /only applies to a repeating schedule/);
-  await bad(['--every', 'day 02:00', '--overlap', 'never'], /--overlap must be one of/);
-  await bad(['--at', '02:00', '--tz', 'Mars/Base'], /not a known timezone/);
-  await bad(['--at', '02:00', '--grace', 'soon'], /--grace/);
   await bad(['--at', '02:00', '--workflow', 'wf_nope'], /workflow/i);
   assert.equal(listTickets({ all: true }).length + listSchedules().length, before);
 });
@@ -115,23 +124,7 @@ test('worca schedule: list, show, move, skip, pause, resume, run-now, cancel, lo
   assert.match((await run(['--help'])).stdout, /--at <when>/);
 });
 
-test('--wait owns the ticket, starts the run in this terminal, and reports the outcome', { timeout: 120000 }, async () => {
-  const r = await run(['--project', proj, '--prompt', 'Wait mode demo', '--at', '+2s', '--wait', '--yes', '--mock']);
-  assert.equal(r.code, 0, r.stderr + r.stdout.slice(-600));
-  assert.match(r.stdout, /Waiting here/);
-  assert.match(r.stdout, /Starting the scheduled run/);
-  assert.match(r.stdout, /Pipeline complete/);
-  const t = listTickets({ all: true }).find((x) => x.title === 'Wait mode demo');
-  assert.equal(t.status, 'fired');
-  assert.ok(t.pipelineId, 'the ticket learned its pipeline');
-  const row = getDb().prepare('SELECT status, scheduled_for FROM pipelines WHERE id = ?').get(t.pipelineId);
-  assert.equal(row.status, 'done');
-  assert.equal(row.scheduled_for, t.runAt);
-  assert.ok(listNotifications().some((n) => n.kind === 'completed' && n.ticketId === t.id));
-  assert.match((await run(['schedule', 'log'])).stdout, /completed\s+Wait mode demo finished\./);
-});
-
-test('--after writes a chained ticket; --wait, timed-only flags and a lone --source-from-previous are refused', async () => {
+test('--after writes a chained ticket; Run now on it, a lone --source-from-previous and an empty --after are refused', async () => {
   const seed = await run(['--project', proj, '--prompt', 'Refactor', '--at', 'tomorrow 02:00', '--yes']);
   assert.equal(seed.code, 0, seed.stderr);
   const pred = listTickets().find((t) => t.title === 'Refactor');
@@ -147,35 +140,16 @@ test('--after writes a chained ticket; --wait, timed-only flags and a lone --sou
   const rn = await run(['schedule', 'run-now', t.id.slice(0, 8)]);
   assert.equal(rn.code, 2); assert.match(rn.stderr, /Start ‘Refactor’ first, or change its source branch/);
   assert.equal(listTickets().find((x) => x.id === t.id).forced, false, 'nothing was forced');
-  // A repeating schedule's own id is refused with the pinned sentence, not "no run matches".
-  const ser = await run(['--project', proj, '--prompt', 'x', '--after', 'sch_deadbeef']);
-  assert.equal(ser.code, 2); assert.match(ser.stderr, /a repeating schedule is not supported — give the id of one of its runs/);
-  const w = await run(['--project', proj, '--prompt', 'x', '--after', short, '--wait']);
-  assert.equal(w.code, 2); assert.match(w.stderr, /--wait needs --at: a run after another run is started by the Worca server/);
-  const g = await run(['--project', proj, '--prompt', 'x', '--after', short, '--grace', '2h']);
-  assert.equal(g.code, 2); assert.match(g.stderr, /--grace only applies to a timed schedule/);
-  const s = await run(['--project', proj, '--prompt', 'x', '--source-from-previous', '--at', 'tomorrow 03:00']);
-  assert.equal(s.code, 2); assert.match(s.stderr, /--source-from-previous needs --after/);
-  const aa = await run(['--project', proj, '--prompt', 'x', '--after-any', '--at', 'tomorrow 03:00']);
-  assert.equal(aa.code, 2); assert.match(aa.stderr, /--after-any needs --after/);
-  const b = await run(['--project', proj, '--prompt', 'x', '--after', short, '--source-from-previous', '--source-branch', 'main']);
-  assert.equal(b.code, 2); assert.match(b.stderr, /--source-from-previous and --source-branch cannot both be given/);
-  const n = await run(['--project', proj, '--prompt', 'x', '--after', 'zzzzzzzz']);
-  assert.equal(n.code, 2); assert.match(n.stderr, /no run or scheduled run matches "zzzzzzzz"/);
-  const both = await run(['--project', proj, '--prompt', 'x', '--after', short, '--at', 'tomorrow 03:00']);
-  assert.equal(both.code, 2); assert.match(both.stderr, /use one of --at, --every, --cron, --after/);
+  // readScheduleFlags' --after refusals are pinned in-process (test/cli-verbs-inproc.test.mjs).
   // With NO schedule flag at all readScheduleFlags never runs — the lone flag must still be refused.
   // Keep the stderr match: without the guard the CLI still exits 2 (the stdin/--yes refusal), so the
   // exit code alone proves nothing.
   const lone = await run(['--project', proj, '--prompt', 'x', '--source-from-previous']);
   assert.equal(lone.code, 2); assert.match(lone.stderr, /need --after/);
-  // `--after ""` (an unset shell variable in a chaining script) is scheduling that fails — never a run started now.
+  // `--after ""` (an unset shell variable in a chaining script) is scheduling that fails — never a run
+  // started now. End to end: the empty value must survive parseArgs into wantsSchedule.
   const empty = await run(['--project', proj, '--prompt', 'x', '--after', '']);
   assert.equal(empty.code, 2); assert.match(empty.stderr, /--after needs a run id/);
-  // LIKE metacharacters in the prefix are literal: a lone `_` matches nothing, never every row (which
-  // would read "matches N runs" — there are several tickets by now).
-  const meta = await run(['--project', proj, '--prompt', 'x', '--after', '_']);
-  assert.equal(meta.code, 2); assert.match(meta.stderr, /no run or scheduled run matches "_"/);
 });
 
 test('schedule list / show print the predecessor; move --after re-chains a ticket', async () => {
@@ -207,7 +181,7 @@ test('schedule list / show print the predecessor; move --after re-chains a ticke
   const cyc = await run(['schedule', 'move', pred.id.slice(0, 8), '--after', t.id.slice(0, 8)]);
   assert.equal(cyc.code, 2); assert.match(cyc.stderr, /already waits for this run/);
   // A FIRED one-off ticket is still a valid predecessor: the gate follows it into its pipeline.
-  const done = listTickets({ all: true }).find((x) => x.title === 'Wait mode demo');
+  const done = seedFiredTicket('Wait mode demo');
   const chain = await run(['--project', proj, '--prompt', 'After the wait run', '--after', done.id.slice(0, 8), '--yes']);
   assert.equal(chain.code, 0, chain.stderr);
   assert.match(chain.stdout, /Scheduled [0-9a-f]{8} after ‘Wait mode demo’ \(fired\)/);
@@ -218,13 +192,7 @@ test('schedule list / show print the predecessor; move --after re-chains a ticke
   const onto = await run(['--project', proj, '--prompt', 'Onto parens', '--after', pv.id.slice(0, 8), '--yes']);
   assert.equal(onto.code, 0, onto.stderr);
   assert.match((await run(['schedule', 'list'])).stdout, /after ‘Refactor \(v2\)’  ·  waiting/);
-  // An OCCURRENCE of a repeating schedule is found by its prefix and refused with the pinned sentence.
-  const ser = await run(['--project', proj, '--prompt', 'Nightly occ', '--every', 'weekdays 03:00', '--yes']);
-  assert.equal(ser.code, 0, ser.stderr);
-  const occ = listTickets({ all: true }).find((x) => x.scheduleId && x.title === 'Nightly occ');
-  assert.ok(occ, 'the series minted its first occurrence');
-  const viaOcc = await run(['--project', proj, '--prompt', 'x', '--after', occ.id.slice(0, 8)]);
-  assert.equal(viaOcc.code, 2); assert.match(viaOcc.stderr, /a repeating schedule is not supported — give the id of one of its runs/);
+  // An occurrence of a repeating schedule as --after is refused in-process (test/cli-verbs-inproc.test.mjs).
 });
 
 test('the management verbs find an after-ticket on a busy home: it sits at the 9999 sentinel, past listTickets\' cap', async () => {

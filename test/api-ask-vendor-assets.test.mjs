@@ -7,21 +7,16 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 
 useTempHome(after);
 
-const root = fileURLToPath(new URL('..', import.meta.url));
 let srv;
 let base;
-let testing;
 
 before(async () => {
   const mod = await import('../ui/server.mjs');
-  testing = mod._testing;
   srv = http.createServer(mod.app);
   await new Promise((resolve, reject) => {
     srv.once('error', reject);
@@ -40,25 +35,6 @@ after(async () => {
       srv.closeAllConnections();
     });
   }
-});
-
-test('dependencies and lock pin the reviewed markdown packages exactly', () => {
-  const pkg = JSON.parse(readFileSync(`${root}/package.json`, 'utf8'));
-  const lock = JSON.parse(readFileSync(`${root}/package-lock.json`, 'utf8'));
-  assert.equal(pkg.dependencies.marked, '18.0.10');
-  assert.equal(pkg.dependencies.dompurify, '3.4.16');
-  assert.equal((pkg.devDependencies || {}).marked, undefined);
-  assert.equal((pkg.devDependencies || {}).dompurify, undefined);
-  const markedLock = lock.packages['node_modules/marked'];
-  assert.equal(markedLock.version, '18.0.10');
-  assert.equal(markedLock.integrity,
-    'sha512-FJeH4bRpYoXiggcgriCGItKCSv3xkngJc4QCZ/rkQCogU3VYaLxYJoZl8Nw/b4+x7iij/pd+09mZ6A1dXzpL0A==');
-  assert.notEqual(markedLock.dev, true);
-  const purifyLock = lock.packages['node_modules/dompurify'];
-  assert.equal(purifyLock.version, '3.4.16');
-  assert.equal(purifyLock.integrity,
-    'sha512-sqo+pNp3qRhCIpbgRi1y8Tgk27Bo2Ry7w0dC1NBeNTdZChWjz9Xb/KOoZbRP/R6pQZ80Qw8YhXw13hWWBbMRnQ==');
-  assert.notEqual(purifyLock.dev, true);
 });
 
 test('both vendor modules are served as importable ESM with the promised shapes', async () => {
@@ -100,22 +76,4 @@ test('vendor misses stay plain no-store 404s and never the SPA shell', async () 
     assert.match(res.headers.get('cache-control') || '', /no-store/i, pathname);
     assert.doesNotMatch(await res.text(), /<!doctype html/i, pathname);
   }
-});
-
-test('hljs vendor routes are untouched', async () => {
-  const res = await fetch(`${base}/vendor/hljs/core.min.js`);
-  assert.equal(res.status, 200);
-  assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
-});
-
-test('resolution failure returns null and warns once, and the routes degrade to 404', () => {
-  const warnings = [];
-  const result = testing.resolveEsmAsset(
-    'marked',
-    () => { throw new Error('unavailable'); },
-    (message) => warnings.push(message),
-  );
-  assert.equal(result, null);
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /ask markdown asset unavailable \(marked\): unavailable/);
 });

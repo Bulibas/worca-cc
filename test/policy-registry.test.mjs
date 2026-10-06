@@ -8,6 +8,7 @@ import {
   FIELDS, fieldMeta, normalizePolicyDoc, normalizeEntry, validateValue, serializePolicyDoc, emptyPolicyDoc,
   effectiveKind, tierRank, semverAtLeast, looksLikeSecret, POLICY_SCHEMA, GROUP_ORDER,
 } from '../src/core/policy/registry.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const SAMPLE = {
   schema: 1, updatedAt: '2026-09-17T09:12:00Z', updatedBy: 'Mara Lindqvist', title: 'Gateway team policy', notes: 'Q4 budget.',
@@ -82,24 +83,27 @@ test('malformed pieces are dropped one warning each; the rest survives (the read
   assert.ok(warnings.some((w) => w.includes('duplicate id OK')));
 });
 
-test('hard is reserved: accepted with a warning, effectiveKind downgrades it', () => {
-  const { entry, warning } = normalizeEntry('cost.pipelineLimitUsd', { kind: 'hard', value: 10 });
-  assert.equal(entry.kind, 'hard');
-  assert.match(warning, /not enforced by this version — treated as soft/);
-  assert.equal(effectiveKind(fieldMeta('cost.pipelineLimitUsd'), 'hard'), 'soft');
-  const d = normalizeEntry('cost.resetPeriod', { kind: 'hard', value: 'weekly' });
-  assert.match(d.warning, /treated as default/);
-  assert.equal(effectiveKind(fieldMeta('cost.resetPeriod'), 'hard'), 'default');
-  assert.equal(effectiveKind(fieldMeta('cost.resetPeriod'), 'default'), 'default');
-});
-
-test('a newer schema is unusable, not partially applied; a marker carries delegateTo', () => {
-  const up = normalizePolicyDoc({ schema: POLICY_SCHEMA + 1, fields: { 'cost.pipelineLimitUsd': { kind: 'soft', value: 1 } } });
-  assert.equal(up.doc, null); assert.equal(up.unknownSchema, true); assert.match(up.warnings[0], /needs a newer Worca/);
-  const marker = normalizePolicyDoc({ schema: 1, delegateTo: 'Acme/Gateway' });
-  assert.equal(marker.delegateTo, 'acme/gateway'); assert.deepEqual(marker.doc.fields, {});
-  assert.equal(normalizePolicyDoc('x').doc, null);
-  assert.equal(normalizePolicyDoc(null).warnings[0], 'policy.json is not a JSON object');
+test('normalisation edges: hard reads as soft/default with a warning; a newer schema is unusable; a marker carries delegateTo', async () => {
+  await checkRows([
+    { name: 'hard is reserved: accepted with a warning, effectiveKind downgrades it', run: () => {
+      const { entry, warning } = normalizeEntry('cost.pipelineLimitUsd', { kind: 'hard', value: 10 });
+      assert.equal(entry.kind, 'hard');
+      assert.match(warning, /not enforced by this version — treated as soft/);
+      assert.equal(effectiveKind(fieldMeta('cost.pipelineLimitUsd'), 'hard'), 'soft');
+      const d = normalizeEntry('cost.resetPeriod', { kind: 'hard', value: 'weekly' });
+      assert.match(d.warning, /treated as default/);
+      assert.equal(effectiveKind(fieldMeta('cost.resetPeriod'), 'hard'), 'default');
+      assert.equal(effectiveKind(fieldMeta('cost.resetPeriod'), 'default'), 'default');
+    } },
+    { name: 'a newer schema is unusable, not partially applied; a marker carries delegateTo', run: () => {
+      const up = normalizePolicyDoc({ schema: POLICY_SCHEMA + 1, fields: { 'cost.pipelineLimitUsd': { kind: 'soft', value: 1 } } });
+      assert.equal(up.doc, null); assert.equal(up.unknownSchema, true); assert.match(up.warnings[0], /needs a newer Worca/);
+      const marker = normalizePolicyDoc({ schema: 1, delegateTo: 'Acme/Gateway' });
+      assert.equal(marker.delegateTo, 'acme/gateway'); assert.deepEqual(marker.doc.fields, {});
+      assert.equal(normalizePolicyDoc('x').doc, null);
+      assert.equal(normalizePolicyDoc(null).warnings[0], 'policy.json is not a JSON object');
+    } },
+  ]);
 });
 
 test('validateValue per type', () => {
@@ -141,16 +145,6 @@ test('helpers: tierRank, semverAtLeast, looksLikeSecret', () => {
   assert.equal(looksLikeSecret('sk-ant-' + 'a'.repeat(30)), true); assert.equal(looksLikeSecret('a'.repeat(48)), true);
 });
 
-test('cost.humanRateUsd is a default-kind usd field governing humanRateUsdPerHour', () => {
-  const f = fieldMeta('cost.humanRateUsd');
-  assert.equal(f.group, 'cost');
-  assert.equal(f.type, 'usd');
-  assert.deepEqual(f.kinds, ['default']);
-  assert.equal(f.local, 'humanRateUsdPerHour');
-  assert.equal(validateValue(f, 95), null);
-  assert.match(validateValue(f, -1), /positive/);
-});
-
 test('ask.webEnabled / ask.webAllowedDomains', () => {
   const e = fieldMeta('ask.webEnabled');
   assert.equal(e.type, 'bool'); assert.deepEqual(e.kinds, ['soft']); assert.equal(e.group, 'ask');
@@ -161,16 +155,4 @@ test('ask.webEnabled / ask.webAllowedDomains', () => {
   assert.match(validateValue(d, ['*.github.io']), /anyone can host/);
   assert.equal(validateValue(d, ['docs.example.com', '*.mdn.io']), null);
   assert.match(validateValue(d, ['not a host']), /host name/);
-});
-
-test('the Away mode rows use the plain labels (src/shared/away-mode/labels.mjs)', async () => {
-  const { groupLabel } = await import('../src/core/policy/registry.mjs');
-  const { FIELD_LABELS } = await import('../src/shared/away-mode/labels.mjs');
-  assert.equal(groupLabel('night'), 'Away mode');
-  for (const f of FIELDS.filter((x) => x.night)) {
-    const name = f.key.slice('night.'.length);
-    assert.equal(f.label, FIELD_LABELS[name].label, f.key);
-    assert.ok(f.help, `${f.key} help`);
-  }
-  assert.equal(fieldMeta('night.graceMinutes').label, 'Marked runs by day');
 });

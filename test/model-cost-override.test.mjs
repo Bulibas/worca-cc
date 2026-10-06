@@ -18,6 +18,7 @@ import {
 import { addGlobalModel, updateGlobalModel } from '../src/core/settings.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { getDb, _resetForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const dirs = [];
 const prevEnv = {
@@ -52,53 +53,57 @@ test('modelCostConfig: reads the GLOBAL catalog override, null when none / unkno
   assert.equal(modelCostConfig(''), null);
 });
 
-test('estimateCost: rates are USD per MILLION tokens; missing rates/usage count as 0', () => {
-  // 1M of each class at 1.0/mtok = 1.0 apiece.
-  assert.equal(estimateCost(USAGE, { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 }), 4);
-  assert.equal(estimateCost(USAGE, { output: 2 }), 2, 'only output priced');
-  assert.equal(estimateCost({ input_tokens: 500_000 }, { input: 3 }), 1.5);
-  assert.equal(estimateCost({}, { input: 5 }), 0);
-  assert.equal(estimateCost(USAGE, {}), 0, 'no rates → $0');
-  assert.equal(estimateCost(USAGE, null), 0);
+test('estimateCost: per-Mtok rates, missing rates/usage as 0, 1h/5m cache buckets, Ask usage spelling', async () => {
+  await checkRows([
+    { name: 'estimateCost: rates are USD per MILLION tokens; missing rates/usage count as 0', run: () => {
+      // 1M of each class at 1.0/mtok = 1.0 apiece.
+      assert.equal(estimateCost(USAGE, { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 }), 4);
+      assert.equal(estimateCost(USAGE, { output: 2 }), 2, 'only output priced');
+      assert.equal(estimateCost({ input_tokens: 500_000 }, { input: 3 }), 1.5);
+      assert.equal(estimateCost({}, { input: 5 }), 0);
+      assert.equal(estimateCost(USAGE, {}), 0, 'no rates → $0');
+      assert.equal(estimateCost(USAGE, null), 0);
+    } },
+    { name: 'estimateCost: ephemeral 1h/5m cache buckets price separately, else flat cacheWrite', run: () => {
+      const u = { cache_creation: { ephemeral_5m_input_tokens: 1_000_000, ephemeral_1h_input_tokens: 1_000_000 } };
+      assert.equal(estimateCost(u, { cacheWrite: 1, cacheWrite1h: 2 }), 3, '5m@1 + 1h@2');
+      assert.equal(estimateCost(u, { cacheWrite: 1 }), 2, '1h falls back to cacheWrite when cacheWrite1h absent');
+      // No bucket breakdown → flat cache_creation_input_tokens at cacheWrite.
+      assert.equal(estimateCost({ cache_creation_input_tokens: 2_000_000 }, { cacheWrite: 1 }), 2);
+    } },
+    { name: 'estimateCost also reads Ask Worca\'s normalized usage shape (same tokens, other spelling)', run: () => {
+      const rates = { input: 1, output: 3, cacheRead: 0.1, cacheWrite: 1.25 };
+      const ask = { input: 1_000_000, output: 1_000_000, cacheRead: 1_000_000, cacheCreation: 1_000_000, ctx: 4_000_000 };
+      assert.equal(estimateCost(ask, rates), estimateCost(USAGE, rates), 'both spellings price identically');
+      assert.equal(estimateCost({ input: 500_000 }, { input: 3 }), 1.5);
+      // The raw spelling wins when (impossibly) both are present — it is the source shape.
+      assert.equal(estimateCost({ input_tokens: 1_000_000, input: 9_000_000 }, { input: 1 }), 1);
+      // A raw ZERO is a real count, not a gap: it must not fall through to the camel key.
+      assert.equal(estimateCost({ input_tokens: 0, input: 9_000_000 }, { input: 1 }), 0);
+    } },
+  ]);
 });
 
-test('estimateCost: ephemeral 1h/5m cache buckets price separately, else flat cacheWrite', () => {
-  const u = { cache_creation: { ephemeral_5m_input_tokens: 1_000_000, ephemeral_1h_input_tokens: 1_000_000 } };
-  assert.equal(estimateCost(u, { cacheWrite: 1, cacheWrite1h: 2 }), 3, '5m@1 + 1h@2');
-  assert.equal(estimateCost(u, { cacheWrite: 1 }), 2, '1h falls back to cacheWrite when cacheWrite1h absent');
-  // No bucket breakdown → flat cache_creation_input_tokens at cacheWrite.
-  assert.equal(estimateCost({ cache_creation_input_tokens: 2_000_000 }, { cacheWrite: 1 }), 2);
-});
-
-test('resolveModelCost: no override → CLI value verbatim (incl. NaN passthrough)', async () => {
-  await addGlobalModel({ id: 'plain' });
-  assert.equal(resolveModelCost('plain', 0.4625, USAGE), 0.4625);
-  assert.equal(resolveModelCost('unknown-model', 1.23, USAGE), 1.23);
-  assert.ok(Number.isNaN(resolveModelCost('plain', NaN, USAGE)));
-});
-
-test('resolveModelCost: {free} → $0 regardless of what the CLI reported', async () => {
-  await addGlobalModel({ id: 'onprem', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { free: true } });
-  assert.equal(resolveModelCost('onprem', 0.4625, USAGE), 0, 'the reported 0.46 is discarded');
-  assert.equal(resolveModelCost('ONPREM', 99, USAGE), 0, 'case-insensitive');
-  assert.equal(resolveModelCost('onprem', NaN, USAGE), 0, 'free is 0 even when CLI reported nothing');
-});
-
-test('resolveModelCost: {perMtok} → recomputed from tokens, ignoring the CLI value', async () => {
-  await addGlobalModel({ id: 'priced', cost: { perMtok: { input: 1, output: 3 } } });
-  // 1M input @1 + 1M output @3 = 4, no matter what the CLI said.
-  assert.equal(resolveModelCost('priced', 999, USAGE), 4);
-});
-
-test('estimateCost also reads Ask Worca\'s normalized usage shape (same tokens, other spelling)', () => {
-  const rates = { input: 1, output: 3, cacheRead: 0.1, cacheWrite: 1.25 };
-  const ask = { input: 1_000_000, output: 1_000_000, cacheRead: 1_000_000, cacheCreation: 1_000_000, ctx: 4_000_000 };
-  assert.equal(estimateCost(ask, rates), estimateCost(USAGE, rates), 'both spellings price identically');
-  assert.equal(estimateCost({ input: 500_000 }, { input: 3 }), 1.5);
-  // The raw spelling wins when (impossibly) both are present — it is the source shape.
-  assert.equal(estimateCost({ input_tokens: 1_000_000, input: 9_000_000 }, { input: 1 }), 1);
-  // A raw ZERO is a real count, not a gap: it must not fall through to the camel key.
-  assert.equal(estimateCost({ input_tokens: 0, input: 9_000_000 }, { input: 1 }), 0);
+test('resolveModelCost per override kind: none → CLI value (NaN passes), {free} → $0, {perMtok} → recomputed', async () => {
+  await checkRows([
+    { name: 'resolveModelCost: no override → CLI value verbatim (incl. NaN passthrough)', run: async () => {
+      await addGlobalModel({ id: 'plain' });
+      assert.equal(resolveModelCost('plain', 0.4625, USAGE), 0.4625);
+      assert.equal(resolveModelCost('unknown-model', 1.23, USAGE), 1.23);
+      assert.ok(Number.isNaN(resolveModelCost('plain', NaN, USAGE)));
+    } },
+    { name: 'resolveModelCost: {free} → $0 regardless of what the CLI reported', run: async () => {
+      await addGlobalModel({ id: 'onprem', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { free: true } });
+      assert.equal(resolveModelCost('onprem', 0.4625, USAGE), 0, 'the reported 0.46 is discarded');
+      assert.equal(resolveModelCost('ONPREM', 99, USAGE), 0, 'case-insensitive');
+      assert.equal(resolveModelCost('onprem', NaN, USAGE), 0, 'free is 0 even when CLI reported nothing');
+    } },
+    { name: 'resolveModelCost: {perMtok} → recomputed from tokens, ignoring the CLI value', run: async () => {
+      await addGlobalModel({ id: 'priced', cost: { perMtok: { input: 1, output: 3 } } });
+      // 1M input @1 + 1M output @3 = 4, no matter what the CLI said.
+      assert.equal(resolveModelCost('priced', 999, USAGE), 4);
+    } },
+  ]);
 });
 
 test('isPriceableUsage: an absent usage object is unpriceable; genuine zeroes are priceable', () => {
@@ -153,36 +158,38 @@ test('observeModelCost: a model with an override is never flagged and its stale 
 
 // ── end-to-end through the orchestrator's result-event intake ───────────────────
 
-test('orchestrator: a {free} model records $0 for the step and total, discarding the CLI figure', async () => {
-  await addGlobalModel({ id: 'onprem', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { free: true } });
-  const orch = createOrchestrator({ projectDir: join(tmpdir(), 'mco-proj') });
-  orch._phase('plan', 0, 'start');
-  orch._onAgentEvent('planner',
-    { type: 'result', costUsd: 0.4625, raw: { type: 'result', total_cost_usd: 0.4625, usage: USAGE } },
-    { model: 'onprem', stepKey: 'plan' });
-  const st = orch.getState();
-  assert.equal(st.steps.find((s) => s.key === 'plan').costUsd, 0, 'the fabricated 0.4625 is discarded');
-  assert.equal(st.totalCostUsd, 0);
-});
-
-test('orchestrator: with no override the CLI figure is recorded unchanged', async () => {
-  await addGlobalModel({ id: 'plain', env: { ANTHROPIC_BASE_URL: 'https://p' } });
-  const orch = createOrchestrator({ projectDir: join(tmpdir(), 'mco-proj2') });
-  orch._phase('plan', 0, 'start');
-  orch._onAgentEvent('planner',
-    { type: 'result', costUsd: 0.4625, raw: { type: 'result', usage: USAGE } },
-    { model: 'plain', stepKey: 'plan' });
-  assert.equal(orch.getState().totalCostUsd, 0.4625);
-});
-
-test('orchestrator: a {perMtok} model records the recomputed cost, not the CLI figure', async () => {
-  await addGlobalModel({ id: 'priced', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { perMtok: { input: 1, output: 3 } } });
-  const orch = createOrchestrator({ projectDir: join(tmpdir(), 'mco-proj3') });
-  orch._phase('plan', 0, 'start');
-  orch._onAgentEvent('planner',
-    { type: 'result', costUsd: 999, raw: { type: 'result', usage: USAGE } },
-    { model: 'priced', stepKey: 'plan' });
-  assert.equal(orch.getState().totalCostUsd, 4, '1M input@1 + 1M output@3');
+test('orchestrator records the override-resolved cost per kind: {free} $0, none = CLI figure, {perMtok} recomputed', async () => {
+  await checkRows([
+    { name: 'orchestrator: a {free} model records $0 for the step and total, discarding the CLI figure', run: async () => {
+      await addGlobalModel({ id: 'onprem', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { free: true } });
+      const orch = createOrchestrator({ projectDir: join(tmpdir(), 'mco-proj') });
+      orch._phase('plan', 0, 'start');
+      orch._onAgentEvent('planner',
+        { type: 'result', costUsd: 0.4625, raw: { type: 'result', total_cost_usd: 0.4625, usage: USAGE } },
+        { model: 'onprem', stepKey: 'plan' });
+      const st = orch.getState();
+      assert.equal(st.steps.find((s) => s.key === 'plan').costUsd, 0, 'the fabricated 0.4625 is discarded');
+      assert.equal(st.totalCostUsd, 0);
+    } },
+    { name: 'orchestrator: with no override the CLI figure is recorded unchanged', run: async () => {
+      await addGlobalModel({ id: 'plain', env: { ANTHROPIC_BASE_URL: 'https://p' } });
+      const orch = createOrchestrator({ projectDir: join(tmpdir(), 'mco-proj2') });
+      orch._phase('plan', 0, 'start');
+      orch._onAgentEvent('planner',
+        { type: 'result', costUsd: 0.4625, raw: { type: 'result', usage: USAGE } },
+        { model: 'plain', stepKey: 'plan' });
+      assert.equal(orch.getState().totalCostUsd, 0.4625);
+    } },
+    { name: 'orchestrator: a {perMtok} model records the recomputed cost, not the CLI figure', run: async () => {
+      await addGlobalModel({ id: 'priced', env: { ANTHROPIC_BASE_URL: 'https://p' }, cost: { perMtok: { input: 1, output: 3 } } });
+      const orch = createOrchestrator({ projectDir: join(tmpdir(), 'mco-proj3') });
+      orch._phase('plan', 0, 'start');
+      orch._onAgentEvent('planner',
+        { type: 'result', costUsd: 999, raw: { type: 'result', usage: USAGE } },
+        { model: 'priced', stepKey: 'plan' });
+      assert.equal(orch.getState().totalCostUsd, 4, '1M input@1 + 1M output@3');
+    } },
+  ]);
 });
 
 test('liveCostRates: built-ins price from the list table; [1m]/dated ids share the base row; unknown → null', () => {

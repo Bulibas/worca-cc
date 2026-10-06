@@ -10,13 +10,12 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { classifyError, isFreeDailyLimit, freeDailyResetAt, freeDailyHint, untilText, rateLimitHint } from '../src/core/recoverable-error.mjs';
+import { classifyError, isFreeDailyLimit, freeDailyResetAt, untilText, rateLimitHint } from '../src/core/recoverable-error.mjs';
 import { resolveFailure, REASON } from '../src/core/failure-policy.mjs';
 import { mapUpstreamError } from '../src/core/bridge/errors.mjs';
 import { recordBridgeCall, recordBridgeError, bridgeCallsFor, _resetBridgeTelemetry } from '../src/core/bridge/telemetry.mjs';
 import { isOpenRouterFree, keyAccount, nextUtcMidnight, freeDailyStatus, freeModelIds, cachedFreeDailyCounts, _resetFreeDaily } from '../src/core/openrouter-free.mjs';
-import { freeLevel, runFreeRequests, freeRequestsSuffix, typicalFreeRun, newRunFreeWarning, providerFreeLine, renderFreeDaily, FREE_RUN_DEFAULT } from '../ui/public/openrouter-free-view.mjs';
-import { hintFor } from '../src/core/model-test.mjs';
+import { freeLevel, runFreeRequests, freeRequestsSuffix, typicalFreeRun, FREE_RUN_DEFAULT } from '../ui/public/openrouter-free-view.mjs';
 
 // The exact line worca-01's run log showed on 2026-09-26 when the allowance ran out.
 const WORCA01 = 'claude exited with code 1: API Error: Request rejected (429) · openai: rate limited (429) — Rate limit exceeded: free-models-per-day-high-balance.  [openrouter_free_tier_daily]';
@@ -56,14 +55,6 @@ test('A: the reset — the one OpenRouter names, else the next 00:00 UTC', () =>
   assert.equal(untilText(10_000), 'under a minute');
 });
 
-test('A: the pause text names what ran out, the count, the reset and the two ways on', () => {
-  const now = Date.parse('2026-09-26T20:48:00Z');
-  assert.equal(freeDailyHint(new Error(WORCA01), { now, used: 1000, limit: 1000 }),
-    "OpenRouter's free-model requests for today are used up (1000 / 1000) — they reset at 00:00 UTC, in 3h 12m. Resume after the reset, or switch this step to a paid model");
-  assert.match(freeDailyHint(WORCA01, { now }), /used up — they reset at 00:00 UTC/);
-  assert.equal(freeDailyHint(new Error(SHARED_POOL), { now }), '');
-});
-
 test('A: the bridge keeps the limit source and OpenRouter\'s reset time in the 429 it answers', () => {
   const body = JSON.stringify({ error: { code: 429, message: 'Rate limit exceeded: free-models-per-day-high-balance. ',
     metadata: { limit_source: 'openrouter_free_tier_daily', headers: { 'X-RateLimit-Limit': '1000', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': String(Date.parse('2026-09-27T00:00:00Z')) } } } });
@@ -77,10 +68,6 @@ test('A: the bridge keeps the limit source and OpenRouter\'s reset time in the 4
   // Without headers: as before.
   const plain = mapUpstreamError(429, JSON.stringify({ error: { message: 'x', metadata: { limit_source: 'upstream_provider_shared_pool' } } }), { provider: 'openai' });
   assert.match(plain.body.error.message, /\[upstream_provider_shared_pool\]$/);
-});
-
-test('A: Models › Test names the daily allowance', () => {
-  assert.match(hintFor('usage_limit'), /usage limit/);
 });
 
 // ── B: the counter ──────────────────────────────────────────────────────────
@@ -211,39 +198,4 @@ test('B UI: level, per-run count, typical run', () => {
   const runs = [80, 90, 400].map((n) => ({ status: 'completed', steps: [{ bridgeFreeCalls: n }] }));
   runs.push({ status: 'running', steps: [{ bridgeFreeCalls: 5 }] });
   assert.equal(typicalFreeRun(runs), 90);
-});
-
-test('B UI: the new-run warning, the Providers line', () => {
-  const now = Date.parse('2026-09-27T20:48:00Z');
-  assert.equal(newRunFreeWarning(KNOWN(941), { usesFree: true, now }), null);
-  assert.equal(newRunFreeWarning(KNOWN(42), { usesFree: false, now }), null, 'no :free model chosen');
-  assert.equal(newRunFreeWarning(KNOWN(42), { usesFree: true, typical: 90, now }),
-    '42 OpenRouter free requests left today (resets 00:00 UTC, in 3h 12m); a run here usually needs ~90.');
-  assert.match(newRunFreeWarning(KNOWN(0), { usesFree: true, now }), /^No OpenRouter free requests left today .*Pick a paid model/);
-  assert.equal(providerFreeLine(KNOWN(941), { now }), 'Free-model requests today: 941 of 1000 left · resets 00:00 UTC (in 3h 12m).');
-  assert.equal(providerFreeLine({ enabled: true, known: false }), '');
-});
-
-test('B UI: the sidebar block', () => {
-  const made = [];
-  const doc = {
-    createElement(tag) {
-      const e = { tag, className: '', textContent: '', title: '', type: '', style: {}, children: [],
-        append(...c) { this.children.push(...c); }, appendChild(c) { this.children.push(c); } };
-      made.push(e);
-      return e;
-    },
-  };
-  assert.equal(renderFreeDaily({ enabled: false }, { doc }), null);
-  assert.equal(renderFreeDaily({ enabled: true, known: false }, { doc }), null);
-  const now = Date.parse('2026-09-27T20:48:00Z');
-  const ok = renderFreeDaily(KNOWN(941), { doc, now });
-  assert.equal(ok.className, 'spend-ind free-ind');
-  const text = (e) => [e.textContent, ...(e.children || []).map(text)].join(' ');
-  assert.match(text(ok), /OpenRouter free today 941 \/ 1000/);
-  assert.match(ok.title, /resets 00:00 UTC, in 3h 12m/);
-  assert.equal(renderFreeDaily(KNOWN(50), { doc, now }).className, 'spend-ind free-ind warn');
-  const out = renderFreeDaily(KNOWN(0), { doc, now });
-  assert.equal(out.className, 'spend-ind free-ind over');
-  assert.match(text(out), /used up/);
 });

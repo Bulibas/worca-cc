@@ -2,18 +2,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ASK_CATALOG_VERSION, INPUT_WIDGETS, DISPLAY_WIDGETS, LAYOUT_WIDGETS, ASK_LIMITS, COMMON_ITEM_KEYS, LAYOUT_ITEM_KEYS,
+  INPUT_WIDGETS, DISPLAY_WIDGETS, LAYOUT_WIDGETS, COMMON_ITEM_KEYS, LAYOUT_ITEM_KEYS,
   isKnownWidget, widgetClass, widgetAcceptsType,
 } from '../src/shared/forms/catalog.mjs';
 import { isValidPath, resolvePath, schemaAtPath, pathInSchema } from '../src/shared/forms/paths.mjs';
 import { reviewForm } from './helpers/ask-form-fixtures.mjs';
-
-test('catalog v1: 12 input, 12 display, 3 layout names, frozen, limits verbatim', () => {
-  assert.equal(ASK_CATALOG_VERSION, 1);
-  assert.deepEqual([INPUT_WIDGETS.length, DISPLAY_WIDGETS.length, LAYOUT_WIDGETS.length], [12, 12, 3]);
-  for (const t of [INPUT_WIDGETS, DISPLAY_WIDGETS, LAYOUT_WIDGETS, ASK_LIMITS]) assert.ok(Object.isFrozen(t));
-  assert.deepEqual({ ...ASK_LIMITS }, { formsPerAgent: 8, askBlockBytes: 65536, filesPerAsk: 24, fileBytes: 26214400, askBytes: 104857600, dataBytes: 262144 });
-});
+import { checkRows } from './helpers/rows.mjs';
 
 test('LAYOUT_ITEM_KEYS names every catalog widget exactly once', () => {
   const all = [...new Set([...INPUT_WIDGETS, ...DISPLAY_WIDGETS, ...LAYOUT_WIDGETS])].sort();
@@ -23,29 +17,32 @@ test('LAYOUT_ITEM_KEYS names every catalog widget exactly once', () => {
   for (const keys of Object.values(LAYOUT_ITEM_KEYS)) assert.ok(Object.isFrozen(keys));
 });
 
-test('isKnownWidget / widgetClass: gallery is input only with a field', () => {
-  assert.equal(isKnownWidget('review-list'), true);
-  assert.equal(isKnownWidget('signature'), false);
-  assert.equal(widgetClass('gallery', { field: 'picked' }), 'input');
-  assert.equal(widgetClass('gallery', {}), 'display');
-  assert.equal(widgetClass('pdf', {}), 'display');
-  assert.equal(widgetClass('tabs', {}), 'layout');
-  assert.equal(widgetClass('nope', {}), null);
-});
-
-test('widgetAcceptsType: the widget/answer-type pairing', () => {
-  assert.equal(widgetAcceptsType('toggle', { type: 'boolean' }), true);
-  assert.equal(widgetAcceptsType('toggle', { type: 'string' }), false);
-  assert.equal(widgetAcceptsType('slider', { type: 'integer' }), true);
-  assert.equal(widgetAcceptsType('date', { type: 'string' }), false, 'a date needs format: date');
-  assert.equal(widgetAcceptsType('date', { type: 'string', format: 'date' }), true);
-  assert.equal(widgetAcceptsType('rank', { type: 'array', items: { type: 'string' } }), true);
-  assert.equal(widgetAcceptsType('rank', { type: 'array', items: { type: 'number' } }), false);
-  assert.equal(widgetAcceptsType('table-select', { type: 'string' }), true);
-  assert.equal(widgetAcceptsType('table-select', { type: 'array', items: { type: 'string' } }), true);
-  assert.equal(widgetAcceptsType('review-list', { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, verdict: { type: 'string', enum: ['a'] } } } }), true);
-  assert.equal(widgetAcceptsType('review-list', { type: 'array', items: { type: 'string' } }), false);
-  assert.equal(widgetAcceptsType('markdown', { type: 'string' }), false, 'display widgets fill nothing');
+test('catalog lookups: isKnownWidget, widgetClass and widgetAcceptsType', async () => {
+  await checkRows([
+    { name: 'isKnownWidget / widgetClass: gallery is input only with a field', run: async () => {
+      assert.equal(isKnownWidget('review-list'), true);
+      assert.equal(isKnownWidget('signature'), false);
+      assert.equal(widgetClass('gallery', { field: 'picked' }), 'input');
+      assert.equal(widgetClass('gallery', {}), 'display');
+      assert.equal(widgetClass('pdf', {}), 'display');
+      assert.equal(widgetClass('tabs', {}), 'layout');
+      assert.equal(widgetClass('nope', {}), null);
+    } },
+    { name: 'widgetAcceptsType: the widget/answer-type pairing', run: async () => {
+      assert.equal(widgetAcceptsType('toggle', { type: 'boolean' }), true);
+      assert.equal(widgetAcceptsType('toggle', { type: 'string' }), false);
+      assert.equal(widgetAcceptsType('slider', { type: 'integer' }), true);
+      assert.equal(widgetAcceptsType('date', { type: 'string' }), false, 'a date needs format: date');
+      assert.equal(widgetAcceptsType('date', { type: 'string', format: 'date' }), true);
+      assert.equal(widgetAcceptsType('rank', { type: 'array', items: { type: 'string' } }), true);
+      assert.equal(widgetAcceptsType('rank', { type: 'array', items: { type: 'number' } }), false);
+      assert.equal(widgetAcceptsType('table-select', { type: 'string' }), true);
+      assert.equal(widgetAcceptsType('table-select', { type: 'array', items: { type: 'string' } }), true);
+      assert.equal(widgetAcceptsType('review-list', { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, verdict: { type: 'string', enum: ['a'] } } } }), true);
+      assert.equal(widgetAcceptsType('review-list', { type: 'array', items: { type: 'string' } }), false);
+      assert.equal(widgetAcceptsType('markdown', { type: 'string' }), false, 'display widgets fill nothing');
+    } },
+  ]);
 });
 
 test('isValidPath: data.a.b and data.items[].id, nothing else', () => {

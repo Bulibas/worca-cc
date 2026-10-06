@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -50,125 +51,47 @@ function pickFiles(window, names) {
   input.dispatchEvent(new window.Event('change', { bubbles: true }));
 }
 
+// One boot serves several rows: a row that needs its own file list starts from none.
+function clearPills(window) {
+  for (let x, i = 0; i < 50 && (x = window.document.querySelector('#extrasPills .extra-pill-x')); i++) x.click();
+}
+
 const pillNames = (window) =>
   [...window.document.querySelectorAll('#extrasPills .extra-pill-name')].map((n) => n.textContent);
 
-function typeInPrompt(window, text) {
-  const ta = window.document.querySelector('#prompt');
-  ta.value = text;
-  ta.selectionStart = ta.selectionEnd = text.length;
-  ta.dispatchEvent(new window.Event('input', { bubbles: true }));
-  return ta;
-}
-
-const popupItems = (window) =>
-  [...window.document.querySelectorAll('#mention-popup .mention-item')].map((n) => n.textContent);
-
-const key = (window, ta, k) =>
-  ta.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
-
-test('picking files renders one removable pill per file', async () => {
+test('extra files render as removable pills: picks append, a re-pick never duplicates, (x) removes exactly that file and the empty note returns', async () => {
   const { window } = await boot();
-  pickFiles(window, ['spec.md', 'data.csv']);
+  await checkRows([
+    { name: 'picking files renders one removable pill per file', run: async () => {
+      pickFiles(window, ['spec.md', 'data.csv']);
 
-  assert.deepEqual(pillNames(window), ['spec.md', 'data.csv']);
-  assert.equal(window.document.querySelector('#extrasPills').hidden, false);
-  assert.match(window.document.querySelector('#extrasNote').textContent, /2 file\(s\)/);
+      assert.deepEqual(pillNames(window), ['spec.md', 'data.csv']);
+      assert.equal(window.document.querySelector('#extrasPills').hidden, false);
+      assert.match(window.document.querySelector('#extrasNote').textContent, /2 file\(s\)/);
 
-  // picking more files APPENDS; a re-pick of the same name does not duplicate
-  pickFiles(window, ['notes.txt', 'spec.md']);
-  assert.deepEqual(pillNames(window), ['spec.md', 'data.csv', 'notes.txt']);
-});
+      // picking more files APPENDS; a re-pick of the same name does not duplicate
+      pickFiles(window, ['notes.txt', 'spec.md']);
+      assert.deepEqual(pillNames(window), ['spec.md', 'data.csv', 'notes.txt']);
+    } },
+    { name: 'the pill (x) removes exactly that file; empty state restores the note', run: async () => {
+      clearPills(window);
+      pickFiles(window, ['a.md', 'b.md', 'c.md']);
 
-test('the pill (x) removes exactly that file; empty state restores the note', async () => {
-  const { window } = await boot();
-  pickFiles(window, ['a.md', 'b.md', 'c.md']);
+      const xFor = (name) =>
+        [...window.document.querySelectorAll('.extra-pill')]
+          .find((p) => p.querySelector('.extra-pill-name').textContent === name)
+          .querySelector('.extra-pill-x');
+      xFor('b.md').click();
+      assert.deepEqual(pillNames(window), ['a.md', 'c.md']);
 
-  const xFor = (name) =>
-    [...window.document.querySelectorAll('.extra-pill')]
-      .find((p) => p.querySelector('.extra-pill-name').textContent === name)
-      .querySelector('.extra-pill-x');
-  xFor('b.md').click();
-  assert.deepEqual(pillNames(window), ['a.md', 'c.md']);
-
-  xFor('a.md').click();
-  xFor('c.md').click();
-  assert.deepEqual(pillNames(window), []);
-  assert.equal(window.document.querySelector('#extrasPills').hidden, true);
-  assert.equal(
-    window.document.querySelector('#extrasNote').textContent,
-    'Leave empty and the run gets no extra files.'
-  );
-});
-
-test('typing @ pops up attached files and filters as you type', async () => {
-  const { window } = await boot();
-  pickFiles(window, ['readme.md', 'report.csv', 'notes.txt']);
-
-  typeInPrompt(window, 'Use @');
-  const popup = window.document.querySelector('#mention-popup');
-  assert.equal(popup.hidden, false);
-  assert.deepEqual(popupItems(window), ['readme.md', 'report.csv', 'notes.txt']);
-
-  typeInPrompt(window, 'Use @re');
-  assert.deepEqual(popupItems(window), ['readme.md', 'report.csv']);
-
-  typeInPrompt(window, 'Use @zzz');
-  assert.equal(popup.hidden, true);
-});
-
-test('no popup without attached files, and none mid-word', async () => {
-  const { window } = await boot();
-  typeInPrompt(window, 'Use @');
-  assert.equal(window.document.querySelector('#mention-popup').hidden, true);
-
-  pickFiles(window, ['spec.md']);
-  typeInPrompt(window, 'mail me@'); // "@" inside a word must not trigger
-  assert.equal(window.document.querySelector('#mention-popup').hidden, true);
-});
-
-test('keyboard: arrows move the highlight, Tab inserts, Escape closes', async () => {
-  const { window } = await boot();
-  pickFiles(window, ['alpha.md', 'beta.md']);
-
-  let ta = typeInPrompt(window, 'See @');
-  key(window, ta, 'ArrowDown');
-  assert.equal(window.document.querySelector('#mention-popup .mention-item.sel').textContent, 'beta.md');
-  key(window, ta, 'Tab');
-  assert.equal(ta.value, 'See @beta.md ');
-  assert.equal(ta.selectionStart, 'See @beta.md '.length);
-  assert.equal(window.document.querySelector('#mention-popup').hidden, true);
-
-  ta = typeInPrompt(window, 'See @al');
-  key(window, ta, 'Enter');
-  assert.equal(ta.value, 'See @alpha.md ');
-
-  ta = typeInPrompt(window, 'See @');
-  key(window, ta, 'Escape');
-  assert.equal(window.document.querySelector('#mention-popup').hidden, true);
-});
-
-test('mouse: mousedown on a popup item inserts the mention', async () => {
-  const { window } = await boot();
-  pickFiles(window, ['alpha.md', 'beta.md']);
-
-  const ta = typeInPrompt(window, 'See @');
-  const item = [...window.document.querySelectorAll('#mention-popup .mention-item')]
-    .find((n) => n.textContent === 'beta.md');
-  item.dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-  assert.equal(ta.value, 'See @beta.md ');
-  assert.equal(window.document.querySelector('#mention-popup').hidden, true);
-});
-
-test('the markdown textarea gets the same autocomplete', async () => {
-  const { window } = await boot();
-  pickFiles(window, ['spec.md']);
-
-  const ta = window.document.querySelector('#promptMarkdown');
-  ta.value = '@';
-  ta.selectionStart = ta.selectionEnd = 1;
-  ta.dispatchEvent(new window.Event('input', { bubbles: true }));
-  assert.deepEqual(popupItems(window), ['spec.md']);
-  key(window, ta, 'Enter');
-  assert.equal(ta.value, '@spec.md ');
+      xFor('a.md').click();
+      xFor('c.md').click();
+      assert.deepEqual(pillNames(window), []);
+      assert.equal(window.document.querySelector('#extrasPills').hidden, true);
+      assert.equal(
+        window.document.querySelector('#extrasNote').textContent,
+        'Leave empty and the run gets no extra files.'
+      );
+    } },
+  ]);
 });

@@ -9,6 +9,7 @@ import { resolve } from 'node:path';
 
 import { useTempHome } from './helpers/temp-home.mjs';
 import { RunHarness } from '../src/core/run-harness.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -25,20 +26,23 @@ const self = () => ({
   toolInstructions: new Map([['web-2222', 'use graphify']]),
 });
 
-test('_workspaceChannel names the workspace and each member\'s live project dir', () => {
-  const ch = RunHarness.prototype._workspaceChannel.call(self());
-  assert.equal(ch.kind, 'metadata');
-  assert.equal(ch.workspaceDescription, '# Workspace: Shop\n');
-  assert.equal(ch.workspaceId, 'wks-shop-1234abcd');
-  assert.equal(ch.workspaceName, 'Shop');
-  assert.deepEqual(ch.projects, [
-    { projectKey: 'api-1111', projectName: 'api', projectDir: resolve('/live/api'), worktreeDir: '/wt/api', checkpointRef: 'a1', graphInstruction: '' },
-    { projectKey: 'web-2222', projectName: 'web', projectDir: resolve('/live/web'), worktreeDir: '/wt/web', checkpointRef: 'b2', graphInstruction: 'use graphify' },
+test('_workspaceChannel names the workspace and each member\'s live project dir; a first scan falls back to the workspaceKey', async () => {
+  await checkRows([
+    { name: '_workspaceChannel names the workspace and each member\'s live project dir', run: () => {
+      const ch = RunHarness.prototype._workspaceChannel.call(self());
+      assert.equal(ch.kind, 'metadata');
+      assert.equal(ch.workspaceDescription, '# Workspace: Shop\n');
+      assert.equal(ch.workspaceId, 'wks-shop-1234abcd');
+      assert.equal(ch.workspaceName, 'Shop');
+      assert.deepEqual(ch.projects, [
+        { projectKey: 'api-1111', projectName: 'api', projectDir: resolve('/live/api'), worktreeDir: '/wt/api', checkpointRef: 'a1', graphInstruction: '' },
+        { projectKey: 'web-2222', projectName: 'web', projectDir: resolve('/live/web'), worktreeDir: '/wt/web', checkpointRef: 'b2', graphInstruction: 'use graphify' },
+      ]);
+    } },
+    { name: 'a first scan\'s target has no stored id yet: the channel falls back to the workspaceKey', run: () => {
+      const ch = RunHarness.prototype._workspaceChannel.call({ ...self(), workspace: { name: 'Shop' } });
+      assert.equal(ch.workspaceId, 'wks-shop-1234abcd');
+      assert.equal(ch.workspaceName, 'Shop');
+    } },
   ]);
-});
-
-test('a first scan\'s target has no stored id yet: the channel falls back to the workspaceKey', () => {
-  const ch = RunHarness.prototype._workspaceChannel.call({ ...self(), workspace: { name: 'Shop' } });
-  assert.equal(ch.workspaceId, 'wks-shop-1234abcd');
-  assert.equal(ch.workspaceName, 'Shop');
 });

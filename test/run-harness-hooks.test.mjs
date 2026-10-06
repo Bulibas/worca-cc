@@ -14,6 +14,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { _resetForTests, getDb } from '../src/core/db.mjs';
 import { createPipeline } from '../src/core/artifacts.mjs';
 import { RunHarness } from '../src/core/run-harness.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -71,16 +72,6 @@ const auditOf = (id) => getDb().prepare('SELECT text FROM pipeline_events WHERE 
 
 beforeEach(() => { _resetForTests(); });
 
-test('base hooks throw a named "engine hook not implemented" error', () => {
-  const h = new RunHarness({ projectDir: process.cwd() });
-  assert.throws(() => h._enginePrePausePoint(), /engine hook not implemented: _enginePrePausePoint/);
-  assert.throws(() => h._engineRehydrate({}), /engine hook not implemented: _engineRehydrate/);
-  return Promise.all([
-    assert.rejects(() => h._resolveTopology({}), /engine hook not implemented: _resolveTopology/),
-    assert.rejects(() => h._engineRun({}), /engine hook not implemented: _engineRun/),
-  ]);
-});
-
 test('the base implements _bookend and _initRunners (no engine needed)', () => {
   const h = new RunHarness({ projectDir: process.cwd() });
   const execs = [];
@@ -101,14 +92,41 @@ test('the base implements _bookend and _initRunners (no engine needed)', () => {
   assert.equal(h._runners, undefined, 'the base installs no runner registry');
 });
 
-test('_preflightAgentKeys gates on a key SET, with the §9.4 message', () => {
-  const h = new RunHarness({ projectDir: process.cwd() });
-  h.registry = { planner: {}, reviewer: {} };
-  h._preflightAgentKeys(new Set(['planner', 'reviewer']));           // no throw
-  assert.throws(
-    () => h._preflightAgentKeys(new Set(['planner', 'ghost'])),
-    /Preflight failed: 1 workflow agent key\(s\) do not resolve:\n {2}- agent "ghost" is not installed \(removed plugin\?\)/,
-  );
+test('run(): an unresolved agent key (§9.4 message) or a topology bag missing `workflow` fails before the engine runs', async () => {
+  await checkRows([
+    { name: '_preflightAgentKeys gates on a key SET, with the §9.4 message', run: () => {
+      const h = new RunHarness({ projectDir: process.cwd() });
+      h.registry = { planner: {}, reviewer: {} };
+      h._preflightAgentKeys(new Set(['planner', 'reviewer']));           // no throw
+      assert.throws(
+        () => h._preflightAgentKeys(new Set(['planner', 'ghost'])),
+        /Preflight failed: 1 workflow agent key\(s\) do not resolve:\n {2}- agent "ghost" is not installed \(removed plugin\?\)/,
+      );
+    } },
+    { name: 'run(): a key the registry does not know fails preflight through the hook set', run: async () => {
+      _resetForTests();   // the file's beforeEach, once per former test
+      const dir = await makeRepo();
+      const orch = new StubEngine({
+        projectDir: dir, prompt: 'demo', claude: { mock: true }, auto: true,
+        agentKeys: new Set(['planner', 'ghostAgent']),
+      });
+      const res = await orch.run();
+      assert.equal(res.status, 'error');
+      assert.match(res.error, /agent "ghostAgent" is not installed/);
+      assert.equal(orch.calls.engineRun.length, 0, 'the engine never ran');
+    } },
+    { name: 'run(): a topology bag missing `workflow` fails AT THE SEAM, before the engine runs', run: async () => {
+      _resetForTests();   // the file's beforeEach, once per former test
+      const dir = await makeRepo();
+      const orch = new StubEngine({ projectDir: dir, prompt: 'demo', claude: { mock: true }, auto: true });
+      // Exactly what P4's first draft returned: the spec's two fields, no workflow.
+      orch._resolveTopology = async () => ({ manifest: { version: 99, steps: [], feedbacks: [] }, agentKeys: new Set(['planner']) });
+      const res = await orch.run();
+      assert.equal(res.status, 'error');
+      assert.match(res.error, /engine hook contract: _resolveTopology/);
+      assert.equal(orch.calls.engineRun.length, 0, 'the engine never ran');
+    } },
+  ]);
 });
 
 test('run(): the topology hook stamps state.stepper, feeds the preflight gate and the bookends bracket the engine', async () => {
@@ -128,29 +146,6 @@ test('run(): the topology hook stamps state.stepper, feeds the preflight gate an
   assert.equal(orch.state.steps.at(-1).key, 'x:done:1');
   // The workflow field of the topology bag is what the audit line renders (P1-c).
   assert.match(auditOf(orch.pipeline.id), /Workflow: \*\*Stub\*\* \(wf_stub\)\./, 'the audit line comes from topology.workflow');
-});
-
-test('run(): a key the registry does not know fails preflight through the hook set', async () => {
-  const dir = await makeRepo();
-  const orch = new StubEngine({
-    projectDir: dir, prompt: 'demo', claude: { mock: true }, auto: true,
-    agentKeys: new Set(['planner', 'ghostAgent']),
-  });
-  const res = await orch.run();
-  assert.equal(res.status, 'error');
-  assert.match(res.error, /agent "ghostAgent" is not installed/);
-  assert.equal(orch.calls.engineRun.length, 0, 'the engine never ran');
-});
-
-test('run(): a topology bag missing `workflow` fails AT THE SEAM, before the engine runs', async () => {
-  const dir = await makeRepo();
-  const orch = new StubEngine({ projectDir: dir, prompt: 'demo', claude: { mock: true }, auto: true });
-  // Exactly what P4's first draft returned: the spec's two fields, no workflow.
-  orch._resolveTopology = async () => ({ manifest: { version: 99, steps: [], feedbacks: [] }, agentKeys: new Set(['planner']) });
-  const res = await orch.run();
-  assert.equal(res.status, 'error');
-  assert.match(res.error, /engine hook contract: _resolveTopology/);
-  assert.equal(orch.calls.engineRun.length, 0, 'the engine never ran');
 });
 
 test('run(): a pause requested during preflight lands on _enginePrePausePoint and is what resume() will read back', async () => {
@@ -225,34 +220,38 @@ test('resume(): the shell consumes the _engineRehydrate bag and never reads rp.b
   assert.match(auditOf(p.id), /Pipeline \*\*resumed\*\* \(stub\)\./, 'the resume audit line is the rehydrate bag\'s');
 });
 
-test('resume(): a foreign resume point is rejected BY THE HOOK, not by the shell', async () => {
-  const dir = await makeRepo();
-  const p = await createPipeline(dir, { promptText: 'demo', sourceType: 'prompt' });
-  const orch = new StubEngine({
-    projectDir: dir, claude: { mock: true }, auto: true,
-    resume: {
-      row: { id: p.id, status: 'paused', archived_at: null, title: 't', started_at: null, prompt: '', stepper: null, tools: null, branch: null, base_name: 'b', date_prefix: 'd', workspace_meta: null },
-      resumePoint: { version: 1, kind: 'boundary', pipelineDir: p.dir },
-      steps: [],
-    },
-  });
-  await assert.rejects(() => orch.resume(), /stub: unsupported resume point version 1/);
-});
-
-test('resume(): a rehydrate bag missing `audit` fails AT THE SEAM, before anything is rehydrated', async () => {
-  const dir = await makeRepo();
-  const p = await createPipeline(dir, { promptText: 'demo', sourceType: 'prompt' });
-  const orch = new StubEngine({
-    projectDir: dir, claude: { mock: true }, auto: true,
-    resume: {
-      row: { id: p.id, status: 'paused', archived_at: null, title: 't', started_at: null, prompt: '', stepper: null, tools: null, branch: null, base_name: 'b', date_prefix: 'd', workspace_meta: null },
-      resumePoint: { version: 99, kind: 'stub-boundary', stepIndex: 0, pipelineDir: p.dir },
-      steps: [],
-    },
-  });
-  // Exactly what P4's first draft returned: the spec's §5.1 fields, no audit —
-  // which would otherwise insert an EMPTY pipeline_events row (P1-d).
-  orch._engineRehydrate = () => ({ checkpointRef: null, memberWorktrees: [], plan: null });
-  await assert.rejects(() => orch.resume(), /engine hook contract: _engineRehydrate/);
-  assert.equal(orch.calls.engineRun.length, 0, 'the engine never ran');
+test('resume(): a foreign resume point is rejected by the hook, and a rehydrate bag missing `audit` fails at the seam', async () => {
+  await checkRows([
+    { name: 'resume(): a foreign resume point is rejected BY THE HOOK, not by the shell', run: async () => {
+      const dir = await makeRepo();
+      const p = await createPipeline(dir, { promptText: 'demo', sourceType: 'prompt' });
+      const orch = new StubEngine({
+        projectDir: dir, claude: { mock: true }, auto: true,
+        resume: {
+          row: { id: p.id, status: 'paused', archived_at: null, title: 't', started_at: null, prompt: '', stepper: null, tools: null, branch: null, base_name: 'b', date_prefix: 'd', workspace_meta: null },
+          resumePoint: { version: 1, kind: 'boundary', pipelineDir: p.dir },
+          steps: [],
+        },
+      });
+      await assert.rejects(() => orch.resume(), /stub: unsupported resume point version 1/);
+    } },
+    { name: 'resume(): a rehydrate bag missing `audit` fails AT THE SEAM, before anything is rehydrated', run: async () => {
+      _resetForTests();   // the file's beforeEach, once per former test
+      const dir = await makeRepo();
+      const p = await createPipeline(dir, { promptText: 'demo', sourceType: 'prompt' });
+      const orch = new StubEngine({
+        projectDir: dir, claude: { mock: true }, auto: true,
+        resume: {
+          row: { id: p.id, status: 'paused', archived_at: null, title: 't', started_at: null, prompt: '', stepper: null, tools: null, branch: null, base_name: 'b', date_prefix: 'd', workspace_meta: null },
+          resumePoint: { version: 99, kind: 'stub-boundary', stepIndex: 0, pipelineDir: p.dir },
+          steps: [],
+        },
+      });
+      // Exactly what P4's first draft returned: the spec's §5.1 fields, no audit —
+      // which would otherwise insert an EMPTY pipeline_events row (P1-d).
+      orch._engineRehydrate = () => ({ checkpointRef: null, memberWorktrees: [], plan: null });
+      await assert.rejects(() => orch.resume(), /engine hook contract: _engineRehydrate/);
+      assert.equal(orch.calls.engineRun.length, 0, 'the engine never ran');
+    } },
+  ]);
 });

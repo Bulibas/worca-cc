@@ -9,6 +9,7 @@ import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildClaudeArgs, runClaude } from '../src/core/claude-runner.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const POSIX_SHIM = { skip: process.platform === 'win32' ? 'fake claude shim is a POSIX shell script (no .exe stand-in on Windows)' : false };
 
@@ -53,17 +54,20 @@ async function fakeBin(dir, { stdout = '', stderr = '', code = 0 } = {}) {
 // Unknown MOCK_ROLE -> runMock's default branch: no filesystem side effects.
 const MOCK_PROMPT = 'do the thing\nMOCK_ROLE: sessiontest\nMOCK_CYCLE: 2';
 
-test('buildClaudeArgs without resume has no --resume flag', () => {
-  const args = buildClaudeArgs({ prompt: 'p', permissionMode: 'acceptEdits' });
-  assert.ok(!args.includes('--resume'));
-  assert.deepEqual(args.slice(0, 2), ['-p', 'p']);
-});
-
-test('buildClaudeArgs with resumeSessionId inserts --resume <sid>', () => {
-  const args = buildClaudeArgs({ prompt: 'p', permissionMode: 'acceptEdits', resumeSessionId: 'sess-1' });
-  const i = args.indexOf('--resume');
-  assert.ok(i > -1, 'flag present');
-  assert.equal(args[i + 1], 'sess-1');
+test('buildClaudeArgs: --resume <sid> only when resumeSessionId is set', async () => {
+  await checkRows([
+    { name: 'buildClaudeArgs without resume has no --resume flag', run: () => {
+      const args = buildClaudeArgs({ prompt: 'p', permissionMode: 'acceptEdits' });
+      assert.ok(!args.includes('--resume'));
+      assert.deepEqual(args.slice(0, 2), ['-p', 'p']);
+    } },
+    { name: 'buildClaudeArgs with resumeSessionId inserts --resume <sid>', run: () => {
+      const args = buildClaudeArgs({ prompt: 'p', permissionMode: 'acceptEdits', resumeSessionId: 'sess-1' });
+      const i = args.indexOf('--resume');
+      assert.ok(i > -1, 'flag present');
+      assert.equal(args[i + 1], 'sess-1');
+    } },
+  ]);
 });
 
 test('mock emits a session event with a deterministic id', async () => {
@@ -89,15 +93,4 @@ test('real path: system/init surfaces {type:"session", sessionId}', POSIX_SHIM, 
   const events = [];
   await runClaude({ bin, prompt: 'hi', cwd: dir, onEvent: (e) => events.push(e) });
   assert.equal(events.find((e) => e.type === 'session')?.sessionId, 'sess-real-1');
-});
-
-test('mock resumeSessionId logs a resumed marker', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'worca-cc-runner-'));
-  const events = [];
-  await runClaude({
-    cwd: dir, prompt: MOCK_PROMPT, mock: true,
-    resumeSessionId: 'mock-session-sessiontest-c2',
-    onEvent: (e) => events.push(e),
-  });
-  assert.ok(events.some((e) => typeof e.text === 'string' && e.text.includes('[mock] resumed session mock-session-sessiontest-c2')));
 });

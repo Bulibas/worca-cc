@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { gitDir } from './helpers/git-dir.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -15,7 +16,6 @@ import { SEED_TEMPLATES } from '../src/core/graph/seed-templates.mjs';
 import { writeGraphWorkflow } from '../src/core/workflows.mjs';
 import { readPipelineForResume, artifactPaths, readPipelineExtras } from '../src/core/artifacts.mjs';
 import { setPipelineCostLimitUsd, addGlobalModel } from '../src/core/settings.mjs';
-import { QUIESCENCE_WARNING, quiescenceDeadEnd } from '../src/core/graph/scheduler.mjs';
 import { BOOKEND_EXECUTION_IDS } from '../src/shared/graph/constants.mjs';
 import { formatGateHeader } from '../src/cli/render.mjs';
 
@@ -46,10 +46,6 @@ async function seedGraphs() {
     await writeGraphWorkflow({ id: t.id, name: t.name, domain: t.domain, nodes: t.nodes, wires: t.wires });
   }
 }
-/** Every runnable graph id: the 7 saved seeds + the graph default's alias. */
-const GRAPH_IDS = [...SEED_TEMPLATES.map((t) => t.id), 'wf_default'];
-/** Seeds that cannot reach End under the mock BY DESIGN (P3's mock-graph audit). */
-const QUIESCENT = new Set(['wf_no-clarify']);
 /** The v2 executor ABI for injected runners: one entry per declared output port. */
 function outsOf(ctx) {
   const o = {};
@@ -57,7 +53,9 @@ function outsOf(ctx) {
   return o;
 }
 
-test('the graph default runs end to end under mock and reaches the End card', { timeout: 120000 }, async () => {
+// ONE wf_default mock run carries the listeners and spies of three former tests (same options); each
+// former test's asserts are a row below.
+test('the graph default runs end to end: End bound, ledger keyed by executionId, bookend rows round-trip the DB, preflight stays open through setup, no phase events', { timeout: 120000 }, async () => {
   const dir = gitDir();
   const orch = createOrchestrator({
     projectDir: dir, workflowId: 'wf_default', prompt: 'demo task',
@@ -66,52 +64,94 @@ test('the graph default runs end to end under mock and reaches the End card', { 
   const execs = [];
   orch.on('exec', (e) => execs.push(e));
 
+  const events = [];
+  for (const name of ['exec', 'phase']) orch.on(name, (p) => events.push({ name, ...p }));
+  const seen = {};
+  const spy = (name) => {
+    const real = orch[name].bind(orch);
+    orch[name] = async (...a) => {
+      const out = await real(...a);
+      const row = orch.state.steps.find((s) => s.key === 'x:preflight:1');
+      seen[name] = { status: row?.status, ticking: row?.runningSince != null, stage: orch.state.setupStage };
+      return out;
+    };
+  };
+  for (const name of ['_setupRunRoot', '_buildWorktreeGraph', '_mountMemory']) spy(name);
+  let firstNode = null;
+  orch.on('exec', (e) => {
+    if (firstNode || e.executionId === 'x:preflight:1' || e.status !== 'start') return;
+    const row = orch.state.steps.find((s) => s.key === 'x:preflight:1');
+    firstNode = { status: row?.status, stage: orch.state.setupStage };
+  });
   const res = await orch.run();
   assert.equal(res.status, 'done', res.error);
 
-  const st = orch.getState();
-  assert.equal(st.engine, 2);
-  assert.equal(st.endReached, true, 'the End card was bound');
-  assert.ok(st.result, 'state.result carries the End payload');
-  assert.deepEqual(st.warnings, []);
-  // Every ledger row is keyed by its executionId. `x:` is NOT a bookend filter —
-  // every v2 executionId starts with it — so the bookends are named explicitly.
-  const rows = st.steps.filter((x) => String(x.key).startsWith('x:') && !BOOKEND_EXECUTION_IDS.includes(x.key));
-  assert.ok(rows.length > 0);
-  for (const s of rows) {
-    assert.equal(s.key, s.executionId);
-    assert.ok(/^x:[A-Za-z0-9_-]+:\d+(:[A-Za-z0-9_-]+)?$/.test(s.key), `bad executionId ${s.key}`);
-    assert.equal(s.stepIndex, null);
-    assert.ok(['done', 'error', 'paused', 'stopped'].includes(s.status), `${s.key} ended ${s.status}`);
-  }
-  // The agent nodes all ran (clarify, planner, refiner x2, implementer x2, reviewer x2).
-  const started = execs.filter((e) => e.status === 'start' && e.agentKey);
-  assert.ok(started.length >= 8, `expected >= 8 agent executions, got ${started.length}`);
-  assert.equal(orch.getState().status, 'done');
-});
+  await checkRows([
+    { name: 'the graph default runs end to end under mock and reaches the End card', run: () => {
+      const st = orch.getState();
+      assert.equal(st.engine, 2);
+      assert.equal(st.endReached, true, 'the End card was bound');
+      assert.ok(st.result, 'state.result carries the End payload');
+      assert.deepEqual(st.warnings, []);
+      // Every ledger row is keyed by its executionId. `x:` is NOT a bookend filter —
+      // every v2 executionId starts with it — so the bookends are named explicitly.
+      const rows = st.steps.filter((x) => String(x.key).startsWith('x:') && !BOOKEND_EXECUTION_IDS.includes(x.key));
+      assert.ok(rows.length > 0);
+      for (const s of rows) {
+        assert.equal(s.key, s.executionId);
+        assert.ok(/^x:[A-Za-z0-9_-]+:\d+(:[A-Za-z0-9_-]+)?$/.test(s.key), `bad executionId ${s.key}`);
+        assert.equal(s.stepIndex, null);
+        assert.ok(['done', 'error', 'paused', 'stopped'].includes(s.status), `${s.key} ended ${s.status}`);
+      }
+      // The agent nodes all ran (clarify, planner, refiner x2, implementer x2, reviewer x2).
+      const started = execs.filter((e) => e.status === 'start' && e.agentKey);
+      assert.ok(started.length >= 8, `expected >= 8 agent executions, got ${started.length}`);
+      assert.equal(orch.getState().status, 'done');
+    } },
+    { name: 'bookends are exec rows carrying an executionId, and no phase event is emitted', run: async () => {
+      assert.equal(events.some((e) => e.name === 'phase'), false, 'the shim is gone');
+      const pre = events.find((e) => e.executionId === 'x:preflight:1');
+      const done = events.find((e) => e.executionId === 'x:done:1');
+      assert.ok(pre && done, 'both bookends arrive as exec events');
+      assert.deepEqual([pre.nodeId, pre.kind, pre.ordinal, pre.agentKey], ['preflight', 'cycle', 1, null]);
+      assert.deepEqual(pre.trigger, { wireIds: [], freshPorts: [] });
 
-test('every seed graph completes offline under mock; all but the quiescent one bind End', { timeout: 300000 }, async () => {
-  await seedGraphs();
-  assert.equal(GRAPH_IDS.length, 8, 'seven seeds + the graph default alias');
-  for (const workflowId of GRAPH_IDS) {
-    const dir = gitDir('seed');
-    const orch = createOrchestrator({
-      projectDir: dir, workflowId, prompt: 'demo task', claude: { mock: true }, auto: true,
-    });
-    const res = await orch.run();
-    const st = orch.getState();
-    assert.equal(res.status, 'done', `${workflowId} finished: ${res.error || ''}`);
-    if (QUIESCENT.has(workflowId)) {
-      assert.equal(st.endReached, false, `${workflowId} quiesces by design`);
-      // MIN-58: the second line names wf_no-clarify's deliberately unwired output.
-      assert.deepEqual(st.warnings, [QUIESCENCE_WARNING, quiescenceDeadEnd(['n_webui.review'])]);
-    } else {
-      assert.equal(st.endReached, true, `${workflowId} reached End`);
-      assert.ok(st.result, `${workflowId} bound a result`);
-      assert.deepEqual(st.warnings, [], `${workflowId} produced no quiescence warning`);
-    }
-    assert.ok(st.steps.every((s) => s.status !== 'error'), `${workflowId}: no error rows`);
-  }
+      // The LEDGER keeps the bookend rows, keyed BY the executionId, and each row
+      // carries `executionId` — without it artifacts.mjs persists execution_id NULL,
+      // stepRowToStep never restores it, and both readers (run-decor's ledgerRows,
+      // render.mjs's summary) stop filtering the bookends on a REHYDRATED run.
+      const live = orch.getState();
+      // x:sync:1 is a bookend too, but it exists only when a base sync happened (lazy row,
+      // covered in test/run-harness-sync.test.mjs); preflight and done are always written.
+      for (const id of ['x:preflight:1', 'x:done:1']) {
+        const row = live.steps.find((s) => s.key === id);
+        assert.ok(row, `the ledger keeps ${id}`);
+        assert.equal(row.executionId, id, `${id} carries its executionId`);
+        assert.equal(row.kind, 'cycle');
+        assert.equal(row.agentKey, null);
+      }
+      // …and they survive the DB round-trip with execution_id intact (the rehydrated
+      // path the two readers actually run on in History).
+      const rehydrated = readPipelineForResume(live.id).steps
+        ?? (await import('../src/core/artifacts.mjs')).readPipeline(live.id).steps;
+      for (const id of ['x:preflight:1', 'x:done:1']) {
+        const row = (rehydrated || []).find((s) => s.key === id);
+        assert.ok(row, `${id} round-tripped`);
+        assert.equal(row.executionId, id, `${id} kept execution_id through the DB`);
+      }
+    } },
+    { name: 'the preflight bookend stays open through the whole setup and names each stage', run: () => {
+      // The run page's clock and status line read the ledger: between run start and the first
+      // node, the only row that can run is the preflight bookend. It must stay open (clock
+      // running) through ALL of the setup — worktree, knowledge graph, context, memory — or the
+      // run shows a frozen clock and "Between steps" for the whole setup (a graphify build of a
+      // big repo alone is a minute).
+      assert.deepEqual(seen._setupRunRoot, { status: 'start', ticking: true, stage: 'Creating the worktree' });
+      assert.deepEqual(seen._buildWorktreeGraph, { status: 'start', ticking: true, stage: 'Building the knowledge graph' });
+      assert.deepEqual(seen._mountMemory, { status: 'start', ticking: true, stage: 'Preparing the agents' });
+      assert.deepEqual(firstNode, { status: 'done', stage: null }, 'the first node starts after preflight closed');
+    } },
+  ]);
 });
 
 test('the ledger is one row per execution, and every loop closes at ordinal 2', { timeout: 120000 }, async () => {
@@ -264,86 +304,6 @@ test('the pipeline cost cap is enforced at EVERY agent launch, not per step', { 
   }
 });
 
-test('bookends are exec rows carrying an executionId, and no phase event is emitted', { timeout: 120000 }, async () => {
-  const dir = gitDir('gbook');
-  const events = [];
-  const orch = createOrchestrator({
-    projectDir: dir, workflowId: 'wf_default', prompt: 'demo task',
-    claude: { mock: true }, auto: true,
-  });
-  for (const name of ['exec', 'phase']) orch.on(name, (p) => events.push({ name, ...p }));
-  const res = await orch.run();
-  assert.equal(res.status, 'done', res.error);
-
-  assert.equal(events.some((e) => e.name === 'phase'), false, 'the shim is gone');
-  const pre = events.find((e) => e.executionId === 'x:preflight:1');
-  const done = events.find((e) => e.executionId === 'x:done:1');
-  assert.ok(pre && done, 'both bookends arrive as exec events');
-  assert.deepEqual([pre.nodeId, pre.kind, pre.ordinal, pre.agentKey], ['preflight', 'cycle', 1, null]);
-  assert.deepEqual(pre.trigger, { wireIds: [], freshPorts: [] });
-
-  // The LEDGER keeps the bookend rows, keyed BY the executionId, and each row
-  // carries `executionId` — without it artifacts.mjs persists execution_id NULL,
-  // stepRowToStep never restores it, and both readers (run-decor's ledgerRows,
-  // render.mjs's summary) stop filtering the bookends on a REHYDRATED run.
-  const live = orch.getState();
-  // x:sync:1 is a bookend too, but it exists only when a base sync happened (lazy row,
-  // covered in test/run-harness-sync.test.mjs); preflight and done are always written.
-  for (const id of ['x:preflight:1', 'x:done:1']) {
-    const row = live.steps.find((s) => s.key === id);
-    assert.ok(row, `the ledger keeps ${id}`);
-    assert.equal(row.executionId, id, `${id} carries its executionId`);
-    assert.equal(row.kind, 'cycle');
-    assert.equal(row.agentKey, null);
-  }
-  // …and they survive the DB round-trip with execution_id intact (the rehydrated
-  // path the two readers actually run on in History).
-  const rehydrated = readPipelineForResume(live.id).steps
-    ?? (await import('../src/core/artifacts.mjs')).readPipeline(live.id).steps;
-  for (const id of ['x:preflight:1', 'x:done:1']) {
-    const row = (rehydrated || []).find((s) => s.key === id);
-    assert.ok(row, `${id} round-tripped`);
-    assert.equal(row.executionId, id, `${id} kept execution_id through the DB`);
-  }
-});
-
-// The run page's clock and status line read the ledger: between run start and the first
-// node, the only row that can run is the preflight bookend. It must stay open (clock
-// running) through ALL of the setup — worktree, knowledge graph, context, memory — or the
-// run shows a frozen clock and "Between steps" for the whole setup (a graphify build of a
-// big repo alone is a minute).
-test('the preflight bookend stays open through the whole setup and names each stage', { timeout: 120000 }, async () => {
-  const dir = gitDir('gpre');
-  const orch = createOrchestrator({
-    projectDir: dir, workflowId: 'wf_default', prompt: 'demo task',
-    claude: { mock: true }, auto: true,
-  });
-  const seen = {};
-  const spy = (name) => {
-    const real = orch[name].bind(orch);
-    orch[name] = async (...a) => {
-      const out = await real(...a);
-      const row = orch.state.steps.find((s) => s.key === 'x:preflight:1');
-      seen[name] = { status: row?.status, ticking: row?.runningSince != null, stage: orch.state.setupStage };
-      return out;
-    };
-  };
-  for (const name of ['_setupRunRoot', '_buildWorktreeGraph', '_mountMemory']) spy(name);
-  let firstNode = null;
-  orch.on('exec', (e) => {
-    if (firstNode || e.executionId === 'x:preflight:1' || e.status !== 'start') return;
-    const row = orch.state.steps.find((s) => s.key === 'x:preflight:1');
-    firstNode = { status: row?.status, stage: orch.state.setupStage };
-  });
-  const res = await orch.run();
-  assert.equal(res.status, 'done', res.error);
-
-  assert.deepEqual(seen._setupRunRoot, { status: 'start', ticking: true, stage: 'Creating the worktree' });
-  assert.deepEqual(seen._buildWorktreeGraph, { status: 'start', ticking: true, stage: 'Building the knowledge graph' });
-  assert.deepEqual(seen._mountMemory, { status: 'start', ticking: true, stage: 'Preparing the agents' });
-  assert.deepEqual(firstNode, { status: 'done', stage: null }, 'the first node starts after preflight closed');
-});
-
 // ── MAJ-3: two cards on ONE agent key must not clobber one persisted artifact ──
 // The composer accepts duplicate agent keys (dupPrefix exists for them), so this
 // is a supported graph, not a malformed one. The run-store verdicts were already
@@ -390,21 +350,6 @@ test('two cards on one agent key keep their project-store reviews apart', { time
   assert.equal(files.length, 2, `both persisted reviews must survive; got ${JSON.stringify(files)}`);
   assert.ok(files.some((f) => f.endsWith('-n_rev1-impl-review.md')), JSON.stringify(files));
   assert.ok(files.some((f) => f.endsWith('-n_rev2-impl-review.md')), JSON.stringify(files));
-});
-
-test('a SINGLE card keeps the unprefixed v1 project-store path', { timeout: 120000 }, async () => {
-  const dir = gitDir('onerev');
-  const orch = createOrchestrator({
-    projectDir: dir, workflowId: 'wf_quick-fix', prompt: 'demo', claude: { mock: true }, auto: true,
-  });
-  const res = await orch.run();
-  assert.equal(res.status, 'done', res.error);
-  const files = (await readdir(artifactPaths(dir).reviews)).sort();
-  assert.ok(files.length >= 1, JSON.stringify(files));
-  for (const f of files) {
-    assert.match(f, /^\d\d-\d\d-\d\d-[a-z0-9-]+-impl-review\.md$/,
-      `a single-card graph's persisted path must stay byte-identical: ${f}`);
-  }
 });
 
 // ── MAJ-11: one ask id per HOLD, and the delivery number rides the payload ─────

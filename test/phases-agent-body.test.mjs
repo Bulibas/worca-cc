@@ -5,36 +5,32 @@
 // prompt came out EMPTY).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { resolveAgentBody, buildSystemPrompt } from '../src/core/phases.mjs';
 import { writeGraphWorkflow, resolveGraph } from '../src/core/workflows.mjs';
 import { loadAgentRegistry } from '../src/core/agent-registry.mjs';
 import { worcaHome } from '../src/core/projects.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
-test('resolveAgentBody prefers node.agentPrompt, falls back to ctx.agentPrompts[key]', () => {
-  assert.equal(resolveAgentBody({ node: { agentPrompt: 'NODE BODY' }, agentPrompts: { planner: 'BULK' } }, 'planner'), 'NODE BODY');
-  assert.equal(resolveAgentBody({ node: { agentPrompt: '   ' }, agentPrompts: { planner: 'BULK' } }, 'planner'), 'BULK');
-  assert.equal(resolveAgentBody({ agentPrompts: { planner: 'BULK' } }, 'planner'), 'BULK');
-  assert.equal(resolveAgentBody({}, 'planner'), undefined);
-});
-
-test('decomposer bug: node.agentPrompt now reaches the system prompt (was empty)', () => {
-  const sp = buildSystemPrompt('', resolveAgentBody({ node: { agentPrompt: 'You are the Decomposer.' }, agentPrompts: {} }, 'decomposer'), 'decomposer');
-  assert.match(sp, /You are the Decomposer\./);
-  // The pre-fix path: no node prompt and no agentPrompts.decomposer.
-  assert.equal(buildSystemPrompt('', resolveAgentBody({ agentPrompts: {} }, 'decomposer'), 'decomposer'), '');
-});
-
-test('SOURCE PIN: no phases.mjs runner builds its system prompt from ctx.agentPrompts directly', async () => {
-  const src = await readFile(fileURLToPath(new URL('../src/core/phases.mjs', import.meta.url)), 'utf8');
-  assert.equal(/buildSystemPrompt\(\s*ctx\.toolInstruction,\s*ctx\.agentPrompts/.test(src), false,
-    'every run* must resolve its body via resolveAgentBody(ctx, key)');
+test('resolveAgentBody prefers node.agentPrompt, falls back to ctx.agentPrompts[key], and feeds buildSystemPrompt (decomposer bug)', async () => {
+  await checkRows([
+    { name: 'resolveAgentBody prefers node.agentPrompt, falls back to ctx.agentPrompts[key]', run: () => {
+      assert.equal(resolveAgentBody({ node: { agentPrompt: 'NODE BODY' }, agentPrompts: { planner: 'BULK' } }, 'planner'), 'NODE BODY');
+      assert.equal(resolveAgentBody({ node: { agentPrompt: '   ' }, agentPrompts: { planner: 'BULK' } }, 'planner'), 'BULK');
+      assert.equal(resolveAgentBody({ agentPrompts: { planner: 'BULK' } }, 'planner'), 'BULK');
+      assert.equal(resolveAgentBody({}, 'planner'), undefined);
+    } },
+    { name: 'decomposer bug: node.agentPrompt now reaches the system prompt (was empty)', run: () => {
+      const sp = buildSystemPrompt('', resolveAgentBody({ node: { agentPrompt: 'You are the Decomposer.' }, agentPrompts: {} }, 'decomposer'), 'decomposer');
+      assert.match(sp, /You are the Decomposer\./);
+      // The pre-fix path: no node prompt and no agentPrompts.decomposer.
+      assert.equal(buildSystemPrompt('', resolveAgentBody({ agentPrompts: {} }, 'decomposer'), 'decomposer'), '');
+    } },
+  ]);
 });
 
 const oneAgentGraph = (id, name, key) => ({

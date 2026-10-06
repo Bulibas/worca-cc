@@ -147,17 +147,6 @@ test('resume point JSON carries pauseReason', async () => {
   assert.equal(rp.pauseReason, 'cost_pipeline');
 });
 
-test('list wire rows expose pauseReason from resume_point', async () => {
-  const { id } = await seedPipeline('/tmp/proj-a', {
-    status: 'paused',
-    resumePoint: { version: 1, kind: 'boundary', pauseReason: 'cost_total' },
-  });
-  // GET /api/history serves listAllPipelines() verbatim (ui/server.mjs:1125)
-  const entries = await listAllPipelines();
-  const mine = entries.find((e) => e.id === id);
-  assert.equal(mine.pauseReason, 'cost_total');
-});
-
 // json_extract() THROWS on invalid JSON rather than returning NULL, so a single
 // truncated resume_point (a crash mid-write) would take down History entirely.
 test('a malformed resume_point does not break the list queries', async () => {

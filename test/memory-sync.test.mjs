@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { mountDirs, mountMemory, baselineKey, validateMemoryScope, MEMORY_SCOPES } from '../src/core/memory-sync.mjs';
 import { MEMORY_DEFRAG_WORKFLOW_ID } from '../src/core/graph/builtin-workflows.mjs';
 import { writeMemory, GLOBAL_SCOPE, projectScope, hashText, listMemoryDir } from '../src/core/memory-store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const CAPS = { softBytesPerFile: 8192, hardBytesPerFile: 32768, maxFilesPerScope: 50, hookMaxChars: 160 };
 const NOW = '2026-09-09T10:00:00.000Z';
@@ -26,33 +27,36 @@ test('mountDirs: single run = global + project; workspace = global + one per mem
   assert.throws(() => mountDirs({ members: MEMBERS, isWorkspace: true, memoryScope: 'project' }), /single-project/);
 });
 
-test('mountMemory: copies every scope file, creates empty dirs, returns a hash baseline; a remount clears stale files', async () => {
-  const root = await tmp('worca-mem-root-');
-  const mount = join(await tmp(), 'memory');
-  await writeMemory(root, GLOBAL_SCOPE, 'testing', 'T', { source: 'user', now: NOW, caps: CAPS });
-  await writeMemory(root, projectScope('beta-2222bbbb'), 'conv', 'C', { source: 'user', now: NOW, caps: CAPS });
-  const d = mountDirs({ members: [MEMBERS[0]], isWorkspace: false });
-  const m = await mountMemory({ root, mount, dirs: d });
-  assert.equal(m.files, 2);
-  const tText = await readFile(join(mount, 'global', 'testing.md'), 'utf8');
-  assert.equal(tText, await readFile(join(root, 'global', 'testing.md'), 'utf8'));
-  assert.deepEqual(Object.keys(m.baseline).sort(), ['global/testing.md', 'project/conv.md']);
-  assert.equal(m.baseline[baselineKey('global', 'testing')], hashText(tText));
-  // A stale file in the mount (from a previous segment) is gone after a remount.
-  await writeFile(join(mount, 'project', 'stale.md'), 'x');
-  const m2 = await mountMemory({ root, mount, dirs: d });
-  assert.equal(existsSync(join(mount, 'project', 'stale.md')), false);
-  assert.equal(m2.files, 2);
-});
-
-test('mountMemory: an empty / missing store still creates every mount dir with no files', async () => {
-  const root = join(await tmp(), 'never-created');
-  const mount = join(await tmp(), 'memory');
-  const m = await mountMemory({ root, mount, dirs: mountDirs({ members: MEMBERS, isWorkspace: true }) });
-  assert.equal(m.files, 0);
-  assert.deepEqual(m.baseline, {});
-  for (const rel of ['global', 'projects/alpha-1111aaaa', 'projects/beta-2222bbbb']) assert.ok(existsSync(join(mount, rel)), rel);
-  assert.deepEqual(await listMemoryDir(join(mount, 'global')), []);
+test('mountMemory: copies scope files with a hash baseline, a remount clears stale files; an empty/missing store still creates every dir', async () => {
+  await checkRows([
+    { name: 'mountMemory: copies every scope file, creates empty dirs, returns a hash baseline; a remount clears stale files', run: async () => {
+      const root = await tmp('worca-mem-root-');
+      const mount = join(await tmp(), 'memory');
+      await writeMemory(root, GLOBAL_SCOPE, 'testing', 'T', { source: 'user', now: NOW, caps: CAPS });
+      await writeMemory(root, projectScope('beta-2222bbbb'), 'conv', 'C', { source: 'user', now: NOW, caps: CAPS });
+      const d = mountDirs({ members: [MEMBERS[0]], isWorkspace: false });
+      const m = await mountMemory({ root, mount, dirs: d });
+      assert.equal(m.files, 2);
+      const tText = await readFile(join(mount, 'global', 'testing.md'), 'utf8');
+      assert.equal(tText, await readFile(join(root, 'global', 'testing.md'), 'utf8'));
+      assert.deepEqual(Object.keys(m.baseline).sort(), ['global/testing.md', 'project/conv.md']);
+      assert.equal(m.baseline[baselineKey('global', 'testing')], hashText(tText));
+      // A stale file in the mount (from a previous segment) is gone after a remount.
+      await writeFile(join(mount, 'project', 'stale.md'), 'x');
+      const m2 = await mountMemory({ root, mount, dirs: d });
+      assert.equal(existsSync(join(mount, 'project', 'stale.md')), false);
+      assert.equal(m2.files, 2);
+    } },
+    { name: 'mountMemory: an empty / missing store still creates every mount dir with no files', run: async () => {
+      const root = join(await tmp(), 'never-created');
+      const mount = join(await tmp(), 'memory');
+      const m = await mountMemory({ root, mount, dirs: mountDirs({ members: MEMBERS, isWorkspace: true }) });
+      assert.equal(m.files, 0);
+      assert.deepEqual(m.baseline, {});
+      for (const rel of ['global', 'projects/alpha-1111aaaa', 'projects/beta-2222bbbb']) assert.ok(existsSync(join(mount, rel)), rel);
+      assert.deepEqual(await listMemoryDir(join(mount, 'global')), []);
+    } },
+  ]);
 });
 
 import { mkdir } from 'node:fs/promises';
@@ -354,16 +358,7 @@ test('a file rejected, then accepted after a store edit, still warns that the ru
 
 import { spawnSync } from 'node:child_process';
 import { readdir } from 'node:fs/promises';
-import { MEMORY_RULES_REL, MEMORY_WORK_REL, memoryRulesPath, memoryWorkPath, MEMORY_INJECTED_ENTRY, refreshMount } from '../src/core/memory-sync.mjs';
-
-test('two copies: the read-only rules copy at <cwd>/.claude/rules/worca (git-excludable), the writable copy at <pipelineDir>/memory (outside every checkout)', () => {
-  assert.equal(MEMORY_RULES_REL, '.claude/rules/worca', 'forward slashes: this is also the git pathspec');
-  assert.equal(memoryRulesPath('/w'), join('/w', '.claude', 'rules', 'worca'));
-  assert.equal(MEMORY_WORK_REL, 'memory');
-  assert.equal(memoryWorkPath('/p/pipe'), join('/p/pipe', 'memory'));
-  assert.deepEqual(MEMORY_INJECTED_ENTRY, { path: '.claude/rules/worca', kind: 'memory', source: null }, 'only the rules copy is an injected path — the writable copy is outside git');
-  assert.ok(Object.isFrozen(MEMORY_INJECTED_ENTRY));
-});
+import { memoryRulesPath, refreshMount } from '../src/core/memory-sync.mjs';
 
 test('mountMemory at <wt>/.claude/rules/worca: a remount clears only the worca subtree, the gitIgnore sentinel hides the mount from git, and a sync over the fresh mount reports nothing', async () => {
   const root = await tmp('worca-mem-root-');

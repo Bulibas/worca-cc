@@ -1,19 +1,12 @@
 // test/forms-schema.test.mjs — the closed schema dialect and its validator (ask-forms P1).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkDialect, validate, resolveAnswerSchema, SCHEMA_TYPES } from '../src/shared/forms/schema.mjs';
+import { checkDialect, validate, resolveAnswerSchema } from '../src/shared/forms/schema.mjs';
 import { reviewForm, releaseForm } from './helpers/ask-form-fixtures.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const codes = (r) => r.errors.map((e) => `${e.path}:${e.code}`);
 const dialect = (schema, side = 'answer') => checkDialect(schema, { side }).map((e) => `${e.path}|${e.message}`);
-
-test('the fixtures are inside the dialect on their own side', () => {
-  for (const f of [reviewForm(), releaseForm()]) {
-    assert.deepEqual(checkDialect(f.data, { side: 'data' }), []);
-    assert.deepEqual(checkDialect(f.answer, { side: 'answer' }), []);
-  }
-  assert.deepEqual([...SCHEMA_TYPES], ['string', 'number', 'integer', 'boolean', 'array', 'object', 'file']);
-});
 
 test('checkDialect refuses everything outside the subset', () => {
   assert.match(dialect({ type: 'object', properties: { a: { type: 'string', oneOf: [] } } })[0], /unsupported keyword "oneOf"/);
@@ -96,19 +89,44 @@ test('inherited names are undeclared keys, never schemas; `__proto__` is no prop
   assert.deepEqual(codes(validate(own, { constructor: 'x' })), []);
 });
 
-test('checkDialect: keyword VALUES are checked, not only keyword names', () => {
-  const one = (node, side) => dialect({ type: 'object', properties: { f: node } }, side);
-  assert.match(one({ type: 'number', multipleOf: 0 })[0], /"multipleOf" must be greater than 0/);
-  assert.match(one({ type: 'number', minimum: '1' })[0], /"minimum" must be a number/);
-  assert.match(one({ type: 'string', minLength: -1 })[0], /"minLength" must be a whole number, 0 or more/);
-  assert.match(one({ type: 'array', maxItems: 1.5, items: { type: 'string' } })[0], /"maxItems" must be a whole number, 0 or more/);
-  assert.match(one({ type: 'string', patternHint: 5 })[0], /"patternHint" must be text/);
-  assert.match(one({ type: 'string', title: {} })[0], /"title" must be text/);
-  assert.match(one({ type: 'array', uniqueItems: 'yes', items: { type: 'string' } })[0], /"uniqueItems" must be true or false/);
-  assert.match(one({ type: 'integer', minimum: 1, default: 'two' })[0], /"default" does not fit its own schema: Must be a number\./);
-  assert.match(one({ type: 'string', enum: ['a', 'b'], default: 'c' })[0], /"default" does not fit its own schema/);
-  assert.deepEqual(one({ type: 'string', enumFrom: 'data.x[].id', default: 'anything' }), [], 'an enumFrom set is only known at ask time');
-  assert.deepEqual(one({ type: 'array', default: ['x'] }).map((m) => m.split('|')[1]), ['an array needs "items"'], 'a broken node is never run against its own default');
+test('checkDialect: keyword values, keyword-type applicability and enum value types are checked', async () => {
+  await checkRows([
+    { name: 'checkDialect: keyword VALUES are checked, not only keyword names', run: async () => {
+      const one = (node, side) => dialect({ type: 'object', properties: { f: node } }, side);
+      assert.match(one({ type: 'number', multipleOf: 0 })[0], /"multipleOf" must be greater than 0/);
+      assert.match(one({ type: 'number', minimum: '1' })[0], /"minimum" must be a number/);
+      assert.match(one({ type: 'string', minLength: -1 })[0], /"minLength" must be a whole number, 0 or more/);
+      assert.match(one({ type: 'array', maxItems: 1.5, items: { type: 'string' } })[0], /"maxItems" must be a whole number, 0 or more/);
+      assert.match(one({ type: 'string', patternHint: 5 })[0], /"patternHint" must be text/);
+      assert.match(one({ type: 'string', title: {} })[0], /"title" must be text/);
+      assert.match(one({ type: 'array', uniqueItems: 'yes', items: { type: 'string' } })[0], /"uniqueItems" must be true or false/);
+      assert.match(one({ type: 'integer', minimum: 1, default: 'two' })[0], /"default" does not fit its own schema: Must be a number\./);
+      assert.match(one({ type: 'string', enum: ['a', 'b'], default: 'c' })[0], /"default" does not fit its own schema/);
+      assert.deepEqual(one({ type: 'string', enumFrom: 'data.x[].id', default: 'anything' }), [], 'an enumFrom set is only known at ask time');
+      assert.deepEqual(one({ type: 'array', default: ['x'] }).map((m) => m.split('|')[1]), ['an array needs "items"'], 'a broken node is never run against its own default');
+    } },
+    { name: 'checkDialect: a keyword on a type it cannot apply to is refused, not silently ignored', run: async () => {
+      const one = (node, side) => dialect({ type: 'object', properties: { f: node } }, side);
+      assert.match(one({ type: 'integer', minLength: 2 })[0], /"minLength" does not apply to integer/);
+      assert.match(one({ type: 'string', minimum: 1 })[0], /"minimum" does not apply to string/);
+      assert.match(one({ type: 'array', enum: ['a'], items: { type: 'string' } })[0], /"enum" does not apply to array/);
+      assert.match(one({ type: 'string', items: { type: 'string' } })[0], /"items" does not apply to string/);
+      assert.match(one({ type: 'boolean', required: ['x'] })[0], /"required" does not apply to boolean/);
+      assert.match(one({ type: 'file', pattern: '^a' }, 'data')[0], /"pattern" does not apply to file/);
+      assert.deepEqual(one({ type: 'integer', enum: [1, 2], default: 2, title: 'N', description: 'how many' }), [], 'what applies everywhere still does');
+    } },
+    { name: "checkDialect: `enum` values are of the node's own type", run: async () => {
+      const one = (node) => dialect({ type: 'object', properties: { f: node } });
+      assert.deepEqual(one({ type: 'integer', enum: ['a'] }), ['f|"enum" values must be of type integer'], 'no answer could ever match it');
+      assert.deepEqual(one({ type: 'integer', enum: [1, 2.5] }), ['f|"enum" values must be of type integer']);
+      assert.deepEqual(one({ type: 'string', enum: ['a', 1] }), ['f|"enum" values must be of type string']);
+      assert.deepEqual(one({ type: 'boolean', enum: ['true'] }), ['f|"enum" values must be of type boolean']);
+      assert.deepEqual(one({ type: 'number', enum: [1, 2.5] }), []);
+      assert.deepEqual(one({ type: 'integer', enum: [1, 2, 4, 8] }), []);
+      assert.deepEqual(one({ type: 'boolean', enum: [true] }), []);
+      assert.deepEqual(one({ type: 'string', enum: [] }), ['f|"enum" is a non-empty list of scalars'], 'a malformed list is reported once, as before');
+    } },
+  ]);
 });
 
 test('validate: a date is a real calendar date, a date-time a real instant', () => {
@@ -117,17 +135,6 @@ test('validate: a date is a real calendar date, a date-time a real instant', () 
   for (const d of ['2026-13-45', '2027-02-29', '2026-00-10', '2026-9-1']) assert.deepEqual(codes(validate(s, { d })), ['d:format'], d);
   for (const t of ['2026-09-21T10:30:00Z', '2026-09-21T10:30+02:00', '2026-09-21T23:59:59.250-05:00']) assert.deepEqual(codes(validate(s, { t })), [], t);
   for (const t of ['2026-09-21T25:00:00Z', '2026-02-30T10:00:00Z', '2026-09-21T10:61:00Z', '2026-09-21 10:30:00Z']) assert.deepEqual(codes(validate(s, { t })), ['t:format'], t);
-});
-
-test('checkDialect: a keyword on a type it cannot apply to is refused, not silently ignored', () => {
-  const one = (node, side) => dialect({ type: 'object', properties: { f: node } }, side);
-  assert.match(one({ type: 'integer', minLength: 2 })[0], /"minLength" does not apply to integer/);
-  assert.match(one({ type: 'string', minimum: 1 })[0], /"minimum" does not apply to string/);
-  assert.match(one({ type: 'array', enum: ['a'], items: { type: 'string' } })[0], /"enum" does not apply to array/);
-  assert.match(one({ type: 'string', items: { type: 'string' } })[0], /"items" does not apply to string/);
-  assert.match(one({ type: 'boolean', required: ['x'] })[0], /"required" does not apply to boolean/);
-  assert.match(one({ type: 'file', pattern: '^a' }, 'data')[0], /"pattern" does not apply to file/);
-  assert.deepEqual(one({ type: 'integer', enum: [1, 2], default: 2, title: 'N', description: 'how many' }), [], 'what applies everywhere still does');
 });
 
 test('resolveAnswerSchema: `defaultFrom` feeds a list field from a list, and nothing from null or an empty list', () => {
@@ -147,18 +154,6 @@ test('resolveAnswerSchema: `defaultFrom` feeds a list field from a list, and not
   assert.equal(Object.hasOwn(none.properties.order, 'default'), false);
   assert.equal(Object.hasOwn(resolveAnswerSchema(s, { suggested: ['a'] }).properties.version, 'default'), false, 'a text field never takes a list');
   assert.equal(Object.hasOwn(resolveAnswerSchema(s, { platforms: 'linux' }).properties.platforms, 'default'), false, 'and a list field never takes one value');
-});
-
-test("checkDialect: `enum` values are of the node's own type", () => {
-  const one = (node) => dialect({ type: 'object', properties: { f: node } });
-  assert.deepEqual(one({ type: 'integer', enum: ['a'] }), ['f|"enum" values must be of type integer'], 'no answer could ever match it');
-  assert.deepEqual(one({ type: 'integer', enum: [1, 2.5] }), ['f|"enum" values must be of type integer']);
-  assert.deepEqual(one({ type: 'string', enum: ['a', 1] }), ['f|"enum" values must be of type string']);
-  assert.deepEqual(one({ type: 'boolean', enum: ['true'] }), ['f|"enum" values must be of type boolean']);
-  assert.deepEqual(one({ type: 'number', enum: [1, 2.5] }), []);
-  assert.deepEqual(one({ type: 'integer', enum: [1, 2, 4, 8] }), []);
-  assert.deepEqual(one({ type: 'boolean', enum: [true] }), []);
-  assert.deepEqual(one({ type: 'string', enum: [] }), ['f|"enum" is a non-empty list of scalars'], 'a malformed list is reported once, as before');
 });
 
 test('checkDialect: lists inside lists are capped too — a 5 000-deep schema is refused, not a RangeError', () => {

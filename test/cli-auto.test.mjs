@@ -5,12 +5,13 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 import { getDb } from '../src/core/db.mjs';
 import { listSubAgents } from '../src/core/artifacts.mjs';
 
@@ -20,11 +21,8 @@ const scratch = [];
 after(() => Promise.all(scratch.map((d) => rm(d, { recursive: true, force: true }))));
 
 function freshRepo() {
-  const dir = mkdtempSync(join(tmpdir(), 'worca-cc-cliauto-repo-'));
+  const dir = templateRepo('cliauto-repo', { branch: 'main', user: true, files: { 'seed.txt': 'seed\n' } });
   scratch.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  writeFileSync(join(dir, 'seed.txt'), 'seed\n'); g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 const runCli = (args) => spawnSync(process.execPath, [CLI, ...args], { env: { ...process.env, WORCA_HOME: home, WORCA_MOCK: '1' }, encoding: 'utf8' });

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { effectiveAllowedTools } from '../src/core/phases.mjs';
 import { resolveGraph, writeGraphWorkflow } from '../src/core/workflows.mjs';
 import { _resetForTests } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Declared ONCE for the whole module — both the unit and integration tests reuse it.
 const BASE = ['Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob', 'Skill'];
@@ -14,55 +15,57 @@ const WEBUI_BROWSER_TOOL = 'mcp__plugin_playwright_playwright__browser_navigate'
 
 // ── unit: the pure helper ──────────────────────────────────────────────────────
 
-test('union: declared MCP tools are appended to the base list', () => {
-  const declared = ['Read', 'Bash', WEBUI_BROWSER_TOOL];
-  const out = effectiveAllowedTools(BASE, declared);
-  // Base preserved (so the agent can still Write its verdict JSON)…
-  assert.ok(out.includes('Write'), 'keeps base Write');
-  // …and the browser tool is granted.
-  assert.ok(out.includes(WEBUI_BROWSER_TOOL), 'adds browser tool');
+test('effectiveAllowedTools: union in base order, de-duped, blanks ignored, base never mutated', async () => {
+  await checkRows([
+    { name: 'union: declared MCP tools are appended to the base list', run: async () => {
+      const declared = ['Read', 'Bash', WEBUI_BROWSER_TOOL];
+      const out = effectiveAllowedTools(BASE, declared);
+      // Base preserved (so the agent can still Write its verdict JSON)…
+      assert.ok(out.includes('Write'), 'keeps base Write');
+      // …and the browser tool is granted.
+      assert.ok(out.includes(WEBUI_BROWSER_TOOL), 'adds browser tool');
+    } },
+    { name: 'dedup: a tool in both base and frontmatter appears once, base order first', run: async () => {
+      const out = effectiveAllowedTools(BASE, ['Read', 'mcp__x__y']);
+      assert.deepEqual(out, [...BASE, 'mcp__x__y']);
+      assert.equal(out.filter((t) => t === 'Read').length, 1);
+    } },
+    { name: 'no declared tools (clarify path: ctx.node undefined) -> base unchanged', run: async () => {
+      assert.deepEqual(effectiveAllowedTools(BASE, undefined), BASE);
+      assert.deepEqual(effectiveAllowedTools(BASE, []), BASE);
+    } },
+    { name: 'ignores empty / whitespace-only declared entries', run: async () => {
+      assert.deepEqual(effectiveAllowedTools(BASE, ['', '  ', 'mcp__a__b']), [...BASE, 'mcp__a__b']);
+    } },
+    { name: 'returns a fresh array; never mutates the base constant', run: async () => {
+      const before = [...BASE];
+      const out = effectiveAllowedTools(BASE, ['mcp__a__b']);
+      assert.notEqual(out, BASE, 'fresh array, not the same reference');
+      assert.deepEqual(BASE, before, 'base constant untouched');
+    } },
+  ]);
 });
 
-test('dedup: a tool in both base and frontmatter appears once, base order first', () => {
-  const out = effectiveAllowedTools(BASE, ['Read', 'mcp__x__y']);
-  assert.deepEqual(out, [...BASE, 'mcp__x__y']);
-  assert.equal(out.filter((t) => t === 'Read').length, 1);
-});
-
-test('no declared tools (clarify path: ctx.node undefined) -> base unchanged', () => {
-  assert.deepEqual(effectiveAllowedTools(BASE, undefined), BASE);
-  assert.deepEqual(effectiveAllowedTools(BASE, []), BASE);
-});
-
-test('ignores empty / whitespace-only declared entries', () => {
-  assert.deepEqual(effectiveAllowedTools(BASE, ['', '  ', 'mcp__a__b']), [...BASE, 'mcp__a__b']);
-});
-
-test('returns a fresh array; never mutates the base constant', () => {
-  const before = [...BASE];
-  const out = effectiveAllowedTools(BASE, ['mcp__a__b']);
-  assert.notEqual(out, BASE, 'fresh array, not the same reference');
-  assert.deepEqual(BASE, before, 'base constant untouched');
-});
-
-test('fanOut=true appends Task and Agent to the allow-list', () => {
-  const out = effectiveAllowedTools(BASE, [], true);
-  assert.ok(out.includes('Task'), 'grants Task');
-  assert.ok(out.includes('Agent'), 'grants Agent');
-  assert.equal(out.length, BASE.length + 2);
-});
-
-test('fanOut defaults to false: third arg omitted leaves the base unchanged', () => {
-  assert.deepEqual(effectiveAllowedTools(BASE, []), BASE);
-  assert.deepEqual(effectiveAllowedTools(BASE, [], false), BASE);
-  const out = effectiveAllowedTools(BASE, []);
-  assert.ok(!out.includes('Task') && !out.includes('Agent'));
-});
-
-test('fanOut de-dupes Task/Agent already present', () => {
-  const out = effectiveAllowedTools([...BASE, 'Task'], [], true);
-  assert.equal(out.filter((t) => t === 'Task').length, 1);
-  assert.ok(out.includes('Agent'));
+test('effectiveAllowedTools fanOut: adds Task+Agent once, off by default', async () => {
+  await checkRows([
+    { name: 'fanOut=true appends Task and Agent to the allow-list', run: async () => {
+      const out = effectiveAllowedTools(BASE, [], true);
+      assert.ok(out.includes('Task'), 'grants Task');
+      assert.ok(out.includes('Agent'), 'grants Agent');
+      assert.equal(out.length, BASE.length + 2);
+    } },
+    { name: 'fanOut defaults to false: third arg omitted leaves the base unchanged', run: async () => {
+      assert.deepEqual(effectiveAllowedTools(BASE, []), BASE);
+      assert.deepEqual(effectiveAllowedTools(BASE, [], false), BASE);
+      const out = effectiveAllowedTools(BASE, []);
+      assert.ok(!out.includes('Task') && !out.includes('Agent'));
+    } },
+    { name: 'fanOut de-dupes Task/Agent already present', run: async () => {
+      const out = effectiveAllowedTools([...BASE, 'Task'], [], true);
+      assert.equal(out.filter((t) => t === 'Task').length, 1);
+      assert.ok(out.includes('Agent'));
+    } },
+  ]);
 });
 
 // ── integration: frontmatter → resolveGraph node.tools → effectiveAllowedTools ──

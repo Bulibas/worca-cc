@@ -73,46 +73,9 @@ test('readWorkflow parses a stored row into the template shape', async () => {
 });
 
 test('readWorkflow rejects path-traversal / unsafe ids (returns null)', async () => {
-  for (const bad of ['../foo', 'a/b', 'foo.bar', 'foo bar', '', '.', '..']) {
+  for (const bad of ['../foo', '../../etc/passwd', 'a/b', '..%2f..%2fx', 'foo.bar', 'foo bar', '', '.', '..']) {
     assert.equal(await readWorkflow(bad), null, `must reject "${bad}"`);
   }
-});
-
-test('writeWorkflow stamps id/version/createdAt/updatedAt and roundtrips through readWorkflow', async () => {
-  const saved = await writeWorkflow({
-    name: 'Quick Fix',
-    steps: [[{ id: 's0_0', key: 'planner' }], [{ id: 's1_0', key: 'implementer' }]],
-    feedbacks: [],
-  });
-  assert.match(saved.id, /^wf_quick-fix/);
-  assert.equal(saved.name, 'Quick Fix');
-  assert.equal(saved.version, 1);
-  assert.ok(saved.createdAt && saved.updatedAt, 'timestamps stamped');
-  // Persisted as a row with JSON columns.
-  const row = getDb().prepare('SELECT name, steps FROM workflows WHERE id = ?').get(saved.id);
-  assert.equal(row.name, 'Quick Fix');
-  assert.equal(JSON.parse(row.steps).length, 2);
-  // Roundtrip.
-  const got = await readWorkflow(saved.id);
-  assert.deepEqual(got.steps, saved.steps);
-  assert.deepEqual(got.feedbacks, saved.feedbacks);
-});
-
-test('writeWorkflow derives a wf_<slug> id from the name when id is missing', async () => {
-  const saved = await writeWorkflow({ name: 'My Cool Flow', steps: [[{ id: 's0_0', key: 'planner' }]], feedbacks: [] });
-  assert.match(saved.id, /^wf_my-cool-flow/);
-});
-
-test('writeWorkflow preserves createdAt but bumps updatedAt on re-save', async () => {
-  const first = await writeWorkflow({ id: 'wf_x', name: 'X', steps: [[{ id: 's0_0', key: 'planner' }]], feedbacks: [] });
-  await new Promise((r) => setTimeout(r, 5));
-  const second = await writeWorkflow({ ...first, name: 'X2', updatedAt: undefined });
-  assert.equal(second.createdAt, first.createdAt, 'createdAt preserved on re-save');
-  assert.equal(second.name, 'X2');
-  assert.notEqual(second.updatedAt, first.updatedAt, 'updatedAt advanced');
-  // Still a single row (upsert, not duplicate).
-  const { n } = getDb().prepare('SELECT COUNT(*) AS n FROM workflows WHERE id = ?').get('wf_x');
-  assert.equal(n, 1);
 });
 
 test('deleteWorkflow removes a saved row and returns true; missing id => false', async () => {
@@ -145,4 +108,56 @@ test('a rogue wf_default ROW is hidden by listWorkflows and undeletable', async 
   const list = await listWorkflows();
   assert.ok(!list.some((w) => w.id === 'wf_default'), 'the rogue row is never listed');
   assert.equal((await readWorkflow('wf_default')).name, GRAPH_DEFAULT_WORKFLOW.name, 'the CONSTANT still wins');
+});
+
+test('writeWorkflow persists domain; readWorkflow round-trips; malformed/blank → general', async () => {
+  await freshHome();
+  await writeWorkflow({ id: 'wf_mk', name: 'Campaign', steps: [], feedbacks: [], domain: 'marketing' });
+  const got = await readWorkflow('wf_mk');          // exercises readRaw's OWN SELECT
+  assert.equal(got.domain, 'marketing');
+
+  await writeWorkflow({ id: 'wf_bad', name: 'X', steps: [], feedbacks: [], domain: 'Bad Domain!' });
+  assert.equal((await readWorkflow('wf_bad')).domain, 'general');
+
+  await writeWorkflow({ id: 'wf_none', name: 'Y', steps: [], feedbacks: [] });   // absent
+  assert.equal((await readWorkflow('wf_none')).domain, 'general');
+});
+
+test('pre-migration row reads back as general (COALESCE) via list + read', async () => {
+  await freshHome();
+  const db = getDb();
+  db.exec("INSERT INTO workflows (id,name,version,steps,feedbacks,created_at,updated_at) " +
+          "VALUES ('wf_old','Old',1,'[]','[]','1970-01-01T00:00:00.000Z','1970-01-01T00:00:00.000Z')");
+  const list = await listWorkflows();
+  assert.equal(list.find((w) => w.id === 'wf_old').domain, 'general');   // list path
+  assert.equal((await readWorkflow('wf_old')).domain, 'general');        // readRaw path
+});
+
+// --- Security: unsafe-id guard on workflow ids -----------------------------
+// The id keys the workflows table (no path is built from it anymore). The guard
+// still rejects anything outside ^[A-Za-z0-9_-]+$ (covers wf_default + wf_<slug>),
+// so unsafe ids never read or mutate a row.
+test('deleteWorkflow refuses unsafe ids and deletes nothing real', async () => {
+  await freshHome();
+  const saved = await writeWorkflow({ id: 'wf_keep', name: 'Keep', steps: [[{ id: 's0_0', key: 'planner' }]], feedbacks: [] });
+  assert.equal(await deleteWorkflow('../wf_keep'), false);
+  assert.equal(await deleteWorkflow('a/b'), false);
+  assert.ok(await readWorkflow('wf_keep'), 'a real saved workflow survives an unsafe-id delete');
+  void saved;
+});
+
+test('wf_default IS the graph default; the v1 topology and its alias are gone', async () => {
+  await freshHome();
+  const tpl = await readWorkflow('wf_default');
+  assert.equal(tpl.version, 2);
+  assert.equal(tpl.id, 'wf_default');
+  assert.equal(tpl.name, 'Default');
+  assert.equal(tpl.nodes.length, 7);
+  assert.equal(tpl.wires.length, 10);
+  assert.equal(tpl.steps, undefined, 'no v1 topology on the default any more');
+  assert.equal(GRAPH_DEFAULT_WORKFLOW.id, 'wf_default');
+  // Both retired ids are ordinary unknown ids now: the coexistence alias went in
+  // P8a, the v1 engine's private default went with the engine.
+  assert.equal(await readWorkflow('wf_default_v2'), null, 'the coexistence alias is retired');
+  assert.equal(await readWorkflow('wf_default_v1'), null, 'the v1 engine default died with the engine');
 });

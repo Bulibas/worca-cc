@@ -8,6 +8,7 @@ import {
   readInputFile, MAX_INPUT_BYTES,
 } from '../ui/public/artifact-picker.mjs';
 import { renderBench, createBenchController } from '../ui/public/script-bench-view.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const win = new JSDOM('<!doctype html><body></body>').window;
 const doc = win.document;
@@ -52,12 +53,23 @@ test('artifactMatches: the extension decides, case-insensitively', () => {
   assert.equal(artifactMatches('noext', ['md']), false);
 });
 
-test('runRowLabel: title, id and the local start time; an unparsable date is dropped', () => {
-  const d = new Date('2026-09-17T09:00:00.000Z');
-  const p = (n) => String(n).padStart(2, '0');
-  const when = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-  assert.equal(runRowLabel(PIPELINES[0]), `Ship the gate · b4c2e251 · ${when}`);
-  assert.equal(runRowLabel(PIPELINES[2]), 'Scan · c3c3c3c3');
+test('run row label: title once, id + local start time, unparsable date dropped', async () => {
+  await checkRows([
+    { name: 'runRowLabel: title, id and the local start time; an unparsable date is dropped', run: async () => {
+      const d = new Date('2026-09-17T09:00:00.000Z');
+      const p = (n) => String(n).padStart(2, '0');
+      const when = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+      assert.equal(runRowLabel(PIPELINES[0]), `Ship the gate · b4c2e251 · ${when}`);
+      assert.equal(runRowLabel(PIPELINES[2]), 'Scan · c3c3c3c3');
+    } },
+    { name: 'a run row says its title once', run: async () => {
+      const el = renderRunList(PIPELINES, { doc });
+      const row = el.querySelector('.apick-run');
+      assert.equal(row.querySelector('.apick-run-title').textContent, 'Ship the gate');
+      assert.equal(row.querySelector('.apick-run-meta').textContent.includes('Ship the gate'), false);
+      assert.match(row.querySelector('.apick-run-meta').textContent, /^b4c2e251 · \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    } },
+  ]);
 });
 
 test('renderRunList groups by project, newest first, and names a workspace by its own name', () => {
@@ -113,14 +125,53 @@ test('openArtifactPicker: Back returns to the run list, Cancel resolves null onc
   assert.equal(await picked, null, 'the promise settles exactly once');
 });
 
-test('openArtifactPicker: a failed fetch is shown in place and resolves null on Cancel', async () => {
-  const modal = fakeModal();
-  const api = fakeApi({ history: async () => ({ ok: false, status: 500, data: { error: 'history unavailable' } }) });
-  const picked = openArtifactPicker({ doc, api, types: ['md'], modal });
-  await flush();
-  assert.equal(modal.shell.body.querySelector('.apick-err').textContent, 'history unavailable');
-  modal.click('Cancel');
-  assert.equal(await picked, null);
+test('picker errors stay in place and never dead-end: history 500, artifact over the cap, 404 then Back', async () => {
+  await checkRows([
+    { name: 'openArtifactPicker: a failed fetch is shown in place and resolves null on Cancel', run: async () => {
+      const modal = fakeModal();
+      const api = fakeApi({ history: async () => ({ ok: false, status: 500, data: { error: 'history unavailable' } }) });
+      const picked = openArtifactPicker({ doc, api, types: ['md'], modal });
+      await flush();
+      assert.equal(modal.shell.body.querySelector('.apick-err').textContent, 'history unavailable');
+      modal.click('Cancel');
+      assert.equal(await picked, null);
+    } },
+    { name: 'an artifact over the 256 KiB port cap is refused with the same sentence File… uses, and the list stays on screen', run: async () => {
+      const modal = fakeModal();
+      const big = 'x'.repeat(MAX_INPUT_BYTES + 1);
+      const picked = openArtifactPicker({ doc, api: fakeApi({ runArtifact: async (id, rel) => ok({ rel, text: big }) }), types: ['md'], modal });
+      await flush();
+      modal.shell.body.querySelector('.apick-run').click();
+      await flush();
+      modal.shell.body.querySelector('.apick-art').click();
+      await flush(6);
+      assert.equal(modal.shell.body.querySelector('.apick-err').textContent, '"pipeline/plan.md" is larger than 256 KiB.');
+      assert.ok(modal.shell.body.querySelector('.apick-art'), 'the artifact list is still there to pick another one');
+      assert.equal(modal.shell.closed, 0, 'the picker is still open');
+      modal.shell.closeHook();
+      assert.equal(await picked, null);
+    } },
+    { name: 'a pick that 404s (a pruned file behind a live index row) is not a dead end', run: async () => {
+      const modal = fakeModal();
+      const picked = openArtifactPicker({
+        doc, types: ['md'], modal,
+        api: fakeApi({ runArtifact: async () => ({ ok: false, status: 404, data: { error: 'artifact not found' } }) }),
+      });
+      await flush();
+      modal.shell.body.querySelector('.apick-run').click();
+      await flush();
+      modal.shell.body.querySelector('.apick-art').click();
+      await flush(6);
+      assert.equal(modal.shell.body.querySelector('.apick-err').textContent, 'artifact not found');
+      assert.ok(modal.shell.body.querySelector('.apick-back'), 'Runs is still there to go back with');
+      modal.shell.body.querySelector('.apick-back').click();
+      await flush(4);
+      assert.ok(modal.shell.body.querySelector('.apick-run'), 'and it works');
+      assert.equal(modal.shell.body.querySelector('.apick-err'), null, 'the stale error went with the repaint');
+      modal.shell.closeHook();
+      assert.equal(await picked, null);
+    } },
+  ]);
 });
 
 test('readInputFile: the text, the 256 KiB cap and a reader failure', async () => {
@@ -159,17 +210,6 @@ function mountBench(modal) {
   });
   return { root, ctl, cleanup: () => { ctl.destroy(); root.remove(); } };
 }
-
-test('a non-void input row offers Text, File… and Run…; a void one offers none', () => {
-  const b = mountBench(fakeModal());
-  const plan = b.root.querySelector('.bench-port[data-port="plan"]');
-  assert.deepEqual([...plan.querySelectorAll('[data-in-src]')].map((x) => [x.dataset.inSrc, x.textContent]),
-    [['text', 'Text'], ['file', 'File…'], ['run', 'Run…']]);
-  assert.ok(plan.querySelector('input[type="file"].bench-file'));
-  assert.equal(plan.querySelector('input[type="file"].bench-file').hidden, true);
-  assert.equal(b.root.querySelector('.bench-port[data-port="done"] [data-in-src]'), null);
-  b.cleanup();
-});
 
 test('File… fills the textarea, ticks bound and names the source; an oversize file says so', async () => {
   const b = mountBench(fakeModal());
@@ -218,49 +258,4 @@ test('the modal shell`s OWN Close (header button, Escape) settles the picker, an
   assert.equal(await picked, null);
   assert.equal(modal.shell.unhooked, 1, 'no listener left behind for the next open to stack on');
   assert.equal(modal.shell.closed, 1);
-});
-
-test('a run row says its title once', () => {
-  const el = renderRunList(PIPELINES, { doc });
-  const row = el.querySelector('.apick-run');
-  assert.equal(row.querySelector('.apick-run-title').textContent, 'Ship the gate');
-  assert.equal(row.querySelector('.apick-run-meta').textContent.includes('Ship the gate'), false);
-  assert.match(row.querySelector('.apick-run-meta').textContent, /^b4c2e251 · \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
-});
-
-test('an artifact over the 256 KiB port cap is refused with the same sentence File… uses, and the list stays on screen', async () => {
-  const modal = fakeModal();
-  const big = 'x'.repeat(MAX_INPUT_BYTES + 1);
-  const picked = openArtifactPicker({ doc, api: fakeApi({ runArtifact: async (id, rel) => ok({ rel, text: big }) }), types: ['md'], modal });
-  await flush();
-  modal.shell.body.querySelector('.apick-run').click();
-  await flush();
-  modal.shell.body.querySelector('.apick-art').click();
-  await flush(6);
-  assert.equal(modal.shell.body.querySelector('.apick-err').textContent, '"pipeline/plan.md" is larger than 256 KiB.');
-  assert.ok(modal.shell.body.querySelector('.apick-art'), 'the artifact list is still there to pick another one');
-  assert.equal(modal.shell.closed, 0, 'the picker is still open');
-  modal.shell.closeHook();
-  assert.equal(await picked, null);
-});
-
-test('a pick that 404s (a pruned file behind a live index row) is not a dead end', async () => {
-  const modal = fakeModal();
-  const picked = openArtifactPicker({
-    doc, types: ['md'], modal,
-    api: fakeApi({ runArtifact: async () => ({ ok: false, status: 404, data: { error: 'artifact not found' } }) }),
-  });
-  await flush();
-  modal.shell.body.querySelector('.apick-run').click();
-  await flush();
-  modal.shell.body.querySelector('.apick-art').click();
-  await flush(6);
-  assert.equal(modal.shell.body.querySelector('.apick-err').textContent, 'artifact not found');
-  assert.ok(modal.shell.body.querySelector('.apick-back'), 'Runs is still there to go back with');
-  modal.shell.body.querySelector('.apick-back').click();
-  await flush(4);
-  assert.ok(modal.shell.body.querySelector('.apick-run'), 'and it works');
-  assert.equal(modal.shell.body.querySelector('.apick-err'), null, 'the stale error went with the repaint');
-  modal.shell.closeHook();
-  assert.equal(await picked, null);
 });

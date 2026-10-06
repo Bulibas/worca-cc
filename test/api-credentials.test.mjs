@@ -83,7 +83,7 @@ function call(method, path, email, body) {
   });
 }
 
-test('/api/credentials: the signed-in person\'s own slots, the key page, and never a key', async () => {
+test('/api/credentials: the signed-in person\'s own slots, the key page, the model->slot map, and never a key', async () => {
   const ada = await call('GET', '/api/credentials', 'ada@example.com');
   assert.equal(ada.status, 200);
   assert.equal(ada.body.enabled, true);
@@ -93,6 +93,8 @@ test('/api/credentials: the signed-in person\'s own slots, the key page, and nev
   const slot = ada.body.slots.find((s) => s.id === 'anthropic');
   assert.deepEqual([slot.state, slot.suffix], ['set', '1a2b']);
   assert.ok(!JSON.stringify(ada.body).includes(KEY));
+  // Every catalog model maps to its slot (the picker badges).
+  assert.deepEqual(ada.body.models['claude-sonnet-5'], { slot: 'anthropic' });
   const bob = await call('GET', '/api/credentials', 'bob@example.com');
   assert.equal(bob.body.slots.find((s) => s.id === 'anthropic').state, 'missing');
 });
@@ -104,11 +106,6 @@ test('a run started with an explicit model is refused up front when that model\'
   assert.match(bob.body.error, /You haven't added your Anthropic API key or Claude subscription yet, and claude-sonnet-5 needs it.*https:\/\/worca-01-keys\.example\.com/);
   const ada = await call('POST', '/api/run', 'ada@example.com', { projectDir: '/definitely/not/a/project', prompt: 'do it', model: 'claude-sonnet-5' });
   assert.notEqual(ada.body?.code, 'credential-missing', 'Ada has a key: whatever else happens, it is not this refusal');
-});
-
-test('/api/credentials maps every catalog model to its slot (the picker badges)', async () => {
-  const r = await call('GET', '/api/credentials', 'ada@example.com');
-  assert.deepEqual(r.body.models['claude-sonnet-5'], { slot: 'anthropic' });
 });
 
 test('/api/stats adds spend per person from the broker', async () => {

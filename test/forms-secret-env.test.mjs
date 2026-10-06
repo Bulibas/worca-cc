@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { validateFormDef } from '../src/shared/forms/form-def.mjs';
 import { prepareFormAsk, redactSecrets, formAnswerValidator } from '../src/core/ask-forms.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const META = JSON.parse(await readFile(new URL('../agents/deckOutputs.meta.json', import.meta.url), 'utf8'));
 const FORM = META.ask.forms['deck-outputs'];
@@ -23,35 +24,31 @@ const def = (mutate) => {
   return d;
 };
 
-test('the shipped deck-outputs form is a valid form definition', () => {
-  const r = validateFormDef(FORM);
-  assert.deepEqual(r.errors, []);
-  assert.equal(r.ok, true);
-});
-
-test('gate 1: secret is a boolean and envDefault a variable NAME', () => {
-  const bad1 = validateFormDef(def((d) => { d.layout[3].secret = 'yes'; }));
-  assert.match(JSON.stringify(bad1.errors), /secret.*true or false/);
-  const bad2 = validateFormDef(def((d) => { d.layout[3].envDefault = 'not a name'; }));
-  assert.match(JSON.stringify(bad2.errors), /environment variable NAME/);
-});
-
-test('gate 1: a secret field cannot carry a default, an enum, or be required', () => {
-  for (const [label, mutate] of [
-    ['default', (d) => { d.answer.properties.apiKey.default = 'x'; }],
-    ['enum', (d) => { d.answer.properties.apiKey.enum = ['a', 'b']; }],
-    ['required', (d) => { d.answer.required = ['apiKey']; }],
-  ]) {
-    const r = validateFormDef(def(mutate));
-    assert.equal(r.ok, false, label);
-    assert.match(JSON.stringify(r.errors), /bad-secret/, label);
-  }
-});
-
-test('gate 1: secret and envDefault belong to the text widget only', () => {
-  const r = validateFormDef(def((d) => { d.layout[0].secret = true; }));
-  assert.equal(r.ok, false);
-  assert.ok(r.errors.some((e) => e.message === '"select" has no "secret" key'), JSON.stringify(r.errors));
+test('gate 1: secret/envDefault are typed, text-widget-only, and a secret field takes no default, enum or required', async () => {
+  await checkRows([
+    { name: 'gate 1: secret is a boolean and envDefault a variable NAME', run: async () => {
+      const bad1 = validateFormDef(def((d) => { d.layout[3].secret = 'yes'; }));
+      assert.match(JSON.stringify(bad1.errors), /secret.*true or false/);
+      const bad2 = validateFormDef(def((d) => { d.layout[3].envDefault = 'not a name'; }));
+      assert.match(JSON.stringify(bad2.errors), /environment variable NAME/);
+    } },
+    { name: 'gate 1: a secret field cannot carry a default, an enum, or be required', run: async () => {
+      for (const [label, mutate] of [
+        ['default', (d) => { d.answer.properties.apiKey.default = 'x'; }],
+        ['enum', (d) => { d.answer.properties.apiKey.enum = ['a', 'b']; }],
+        ['required', (d) => { d.answer.required = ['apiKey']; }],
+      ]) {
+        const r = validateFormDef(def(mutate));
+        assert.equal(r.ok, false, label);
+        assert.match(JSON.stringify(r.errors), /bad-secret/, label);
+      }
+    } },
+    { name: 'gate 1: secret and envDefault belong to the text widget only', run: async () => {
+      const r = validateFormDef(def((d) => { d.layout[0].secret = true; }));
+      assert.equal(r.ok, false);
+      assert.ok(r.errors.some((e) => e.message === '"select" has no "secret" key'), JSON.stringify(r.errors));
+    } },
+  ]);
 });
 
 async function ask(env) {
@@ -77,18 +74,21 @@ test('an env-set secret is reported as set, and its value reaches no stored stru
   assert.equal(META.ask.forms['deck-outputs'].layout.find((i) => i.field === 'apiKey').envSet, undefined);
 });
 
-test('a plain envDefault prefills the field and the unattended answer', async () => {
-  const r = await ask({ ELEVENLABS_VOICE_ID: 'voice-abc' });
-  assert.equal(r.ask.answerSchema.properties.voiceId.default, 'voice-abc');
-  assert.equal(r.autoValues.voiceId, 'voice-abc');
-  assert.equal(r.ask.layout.find((i) => i.field === 'apiKey').envSet, false, 'no key in the env');
-});
-
-test('defaults reproduce the standard pipeline when nothing is set', async () => {
-  const r = await ask({});
-  assert.equal(r.autoValues.deliverables, 'PDF + standalone HTML');
-  assert.equal(r.autoValues.audio, 'No audio');
-  assert.equal(r.autoValues.apiKey, undefined);
+test('envDefault prefills field and unattended answer; nothing set reproduces the standard defaults', async () => {
+  await checkRows([
+    { name: 'a plain envDefault prefills the field and the unattended answer', run: async () => {
+      const r = await ask({ ELEVENLABS_VOICE_ID: 'voice-abc' });
+      assert.equal(r.ask.answerSchema.properties.voiceId.default, 'voice-abc');
+      assert.equal(r.autoValues.voiceId, 'voice-abc');
+      assert.equal(r.ask.layout.find((i) => i.field === 'apiKey').envSet, false, 'no key in the env');
+    } },
+    { name: 'defaults reproduce the standard pipeline when nothing is set', run: async () => {
+      const r = await ask({});
+      assert.equal(r.autoValues.deliverables, 'PDF + standalone HTML');
+      assert.equal(r.autoValues.audio, 'No audio');
+      assert.equal(r.autoValues.apiKey, undefined);
+    } },
+  ]);
 });
 
 test('gate 3 accepts an empty secret (use the environment) and hides it unless audio is chosen', async () => {

@@ -7,6 +7,7 @@ import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
 import { createAwayReader } from '../src/core/ask/away-deps.mjs';
 import { resolveNightConfig } from '../src/core/night/config.mjs';
 import { describeAwayMode } from '../src/shared/away-mode/describe.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const T15 = Date.parse('2026-09-28T15:00:00Z');
 const USER = { window: '22:00-07:00', timeZone: 'UTC' };
@@ -16,34 +17,29 @@ const reader = (o = {}) => createAwayReader({
   projects: async () => [{ key: 'shop-1', name: 'Shop', path: '/p/shop' }], ...o,
 });
 
-test('get_away_mode returns the same summary lines the Settings card shows', async () => {
-  const out = await reader()({});
-  const card = describeAwayMode({ config: resolveNightConfig({ user: USER }).config, toggle: 'auto', now: T15 });
-  assert.deepEqual(out.summary, card.lines);
-  assert.equal(out.status, 'here');
-  assert.equal(out.sources.window, 'user');
-});
-
-test('get_away_mode is read in chat: a status button is named where it is, in Settings › Away mode', async () => {
-  const out = await reader({ toggle: () => 'on' })({});
-  assert.equal(out.summary[0], 'Right now you count as away because you said "I\'m away now". worca answers on every run until you click "I\'m back" in Settings › Away mode.');
-  const p = await reader({ toggle: () => 'off' })({ projectKey: 'shop-1' });
-  assert.equal(p.summary[0], 'For Shop: Away mode is paused. worca answers nothing until you turn it back on in Settings › Away mode. (Marked runs wait too.)');
-});
-
-test('get_away_mode reads "I\'m here" said inside the away hours', async () => {
-  const T23 = Date.parse('2026-09-28T23:30:00Z');
-  const out = await reader({ now: () => T23, hereSince: () => T23 - 30 * 60_000 })({});
-  assert.equal(out.status, 'here-now');
-  assert.match(out.summary[0], /You count as here because you said "I'm here"/);
-});
-
-test('a project key reads that project\'s layers and names it', async () => {
-  const out = await reader()({ projectKey: 'shop-1' });
-  assert.match(out.summary[0], /^For Shop: /);
-  assert.equal(out.summary[1], 'From 22:00 to 07:00, worca answers questions on all runs. (this project)');
-  assert.equal(out.config.enabled, true);
-  await assert.rejects(reader()({ projectKey: 'nope' }), /unknown project "nope"/);
+test('get_away_mode: Settings-card summary lines, "I\'m here" inside the hours, a project\'s layers by key', async () => {
+  await checkRows([
+    { name: 'get_away_mode returns the same summary lines the Settings card shows', run: async () => {
+      const out = await reader()({});
+      const card = describeAwayMode({ config: resolveNightConfig({ user: USER }).config, toggle: 'auto', now: T15 });
+      assert.deepEqual(out.summary, card.lines);
+      assert.equal(out.status, 'here');
+      assert.equal(out.sources.window, 'user');
+    } },
+    { name: 'get_away_mode reads "I\'m here" said inside the away hours', run: async () => {
+      const T23 = Date.parse('2026-09-28T23:30:00Z');
+      const out = await reader({ now: () => T23, hereSince: () => T23 - 30 * 60_000 })({});
+      assert.equal(out.status, 'here-now');
+      assert.match(out.summary[0], /You count as here because you said "I'm here"/);
+    } },
+    { name: 'a project key reads that project\'s layers and names it', run: async () => {
+      const out = await reader()({ projectKey: 'shop-1' });
+      assert.match(out.summary[0], /^For Shop: /);
+      assert.equal(out.summary[1], 'From 22:00 to 07:00, worca answers questions on all runs. (this project)');
+      assert.equal(out.config.enabled, true);
+      await assert.rejects(reader()({ projectKey: 'nope' }), /unknown project "nope"/);
+    } },
+  ]);
 });
 
 test('the run line: live, finished, paused, and a live run this process cannot see', async () => {
@@ -72,39 +68,41 @@ test('the tool: validates, resolves the run, prefers the live reader, and is una
   await assert.rejects(createAskTools(base).call('get_away_mode', {}), (e) => e instanceof AskToolError && /get_away_mode: unavailable/.test(e.message));
 });
 
-// Task 10: the two live switches. The child validates only; the parent applies.
-test('set_away_now: away | back | pause map to the toggle; anything else is an AskToolError', async () => {
-  const tools = createAskTools({ limits: ASK_LIMITS });
-  assert.deepEqual(await tools.call('set_away_now', { mode: 'away' }), { ok: true, requested: { kind: 'global', toggle: 'on' } });
-  assert.deepEqual(await tools.call('set_away_now', { mode: 'back' }), { ok: true, requested: { kind: 'global', toggle: 'here' } }, '"back" = here, even inside the away hours');
-  assert.deepEqual(await tools.call('set_away_now', { mode: 'pause' }), { ok: true, requested: { kind: 'global', toggle: 'off' } });
-  await assert.rejects(tools.call('set_away_now', { mode: 'later' }), (e) => e instanceof AskToolError && /"away", "back" or "pause"/.test(e.message));
-});
-
-test('set_run_away_mode: resolves the run, refuses a finished one to the model, passes a live UUID through', async () => {
-  const rows = { aaaa0001: { id: 'aaaa0001', status: 'done' }, dddd0004: { id: 'dddd0004', status: 'paused' } };
-  const tools = createAskTools({ limits: ASK_LIMITS, lookupPipelineRow: (_k, id) => rows[id] || null, findPipelineRowById: (id) => rows[id] || null,
-    readLiveNight: (id) => (id === 'cccc0003' ? { status: 'running', night: null } : null) });
-  assert.deepEqual(await tools.call('set_run_away_mode', { runId: 'aaaa0001', mode: 'on' }),
-    { ok: false, error: 'the run is done', requested: { kind: 'run', runId: 'aaaa0001', status: 'done', mode: 'on' } });
-  assert.deepEqual(await tools.call('set_run_away_mode', { runId: 'dddd0004', mode: 'off' }),
-    { ok: true, requested: { kind: 'run', runId: 'dddd0004', status: 'paused', mode: 'off' } });
-  assert.deepEqual(await tools.call('set_run_away_mode', { runId: 'cccc0003', mode: 'auto' }),
-    { ok: true, requested: { kind: 'run', runId: 'cccc0003', status: 'running', mode: 'auto' } });
-  const uuid = '12345678-1234-1234-1234-123456789abc';
-  assert.deepEqual(await tools.call('set_run_away_mode', { runId: uuid, mode: 'on' }), { ok: true, requested: { kind: 'run', runId: uuid, mode: 'on' } });
-  await assert.rejects(tools.call('set_run_away_mode', { runId: 'eeee0005', mode: 'on' }), /set_run_away_mode: run not found/);
-  await assert.rejects(tools.call('set_run_away_mode', { runId: 'aaaa0001', mode: 'maybe' }), /"auto", "on" or "off"/);
-});
-
-// Task 11: the stored-settings card. The child validates; the parent re-validates and mints the card.
-test('propose_away_mode_change: validates through deps, fills the pinned project, unavailable without deps', async () => {
-  const seen = [];
-  const tools = createAskTools({ limits: ASK_LIMITS, pinnedScope: () => ({ projectKey: 'shop-1' }),
-    away: { validateChange: async (i) => { seen.push(i); return { ok: true, card: { type: 'away' } }; } } });
-  assert.deepEqual(await tools.call('propose_away_mode_change', { level: 'project', set: { enabled: true } }), { ok: true, card: { type: 'away' } });
-  assert.equal(seen[0].projectKey, 'shop-1', 'the pinned project');
-  await tools.call('propose_away_mode_change', { level: 'user', set: { enabled: true } });
-  assert.equal(seen[1].projectKey, undefined, 'user level: no project');
-  await assert.rejects(createAskTools({ limits: ASK_LIMITS }).call('propose_away_mode_change', { level: 'user' }), /propose_away_mode_change: unavailable/);
+test('away writers: set_away_now mapping, set_run_away_mode run resolution/refusal, propose_away_mode_change validation + pin', async () => {
+  await checkRows([
+    // Task 10: the two live switches. The child validates only; the parent applies.
+    { name: 'set_away_now: away | back | pause map to the toggle; anything else is an AskToolError', run: async () => {
+      const tools = createAskTools({ limits: ASK_LIMITS });
+      assert.deepEqual(await tools.call('set_away_now', { mode: 'away' }), { ok: true, requested: { kind: 'global', toggle: 'on' } });
+      assert.deepEqual(await tools.call('set_away_now', { mode: 'back' }), { ok: true, requested: { kind: 'global', toggle: 'here' } }, '"back" = here, even inside the away hours');
+      assert.deepEqual(await tools.call('set_away_now', { mode: 'pause' }), { ok: true, requested: { kind: 'global', toggle: 'off' } });
+      await assert.rejects(tools.call('set_away_now', { mode: 'later' }), (e) => e instanceof AskToolError && /"away", "back" or "pause"/.test(e.message));
+    } },
+    { name: 'set_run_away_mode: resolves the run, refuses a finished one to the model, passes a live UUID through', run: async () => {
+      const rows = { aaaa0001: { id: 'aaaa0001', status: 'done' }, dddd0004: { id: 'dddd0004', status: 'paused' } };
+      const tools = createAskTools({ limits: ASK_LIMITS, lookupPipelineRow: (_k, id) => rows[id] || null, findPipelineRowById: (id) => rows[id] || null,
+        readLiveNight: (id) => (id === 'cccc0003' ? { status: 'running', night: null } : null) });
+      assert.deepEqual(await tools.call('set_run_away_mode', { runId: 'aaaa0001', mode: 'on' }),
+        { ok: false, error: 'the run is done', requested: { kind: 'run', runId: 'aaaa0001', status: 'done', mode: 'on' } });
+      assert.deepEqual(await tools.call('set_run_away_mode', { runId: 'dddd0004', mode: 'off' }),
+        { ok: true, requested: { kind: 'run', runId: 'dddd0004', status: 'paused', mode: 'off' } });
+      assert.deepEqual(await tools.call('set_run_away_mode', { runId: 'cccc0003', mode: 'auto' }),
+        { ok: true, requested: { kind: 'run', runId: 'cccc0003', status: 'running', mode: 'auto' } });
+      const uuid = '12345678-1234-1234-1234-123456789abc';
+      assert.deepEqual(await tools.call('set_run_away_mode', { runId: uuid, mode: 'on' }), { ok: true, requested: { kind: 'run', runId: uuid, mode: 'on' } });
+      await assert.rejects(tools.call('set_run_away_mode', { runId: 'eeee0005', mode: 'on' }), /set_run_away_mode: run not found/);
+      await assert.rejects(tools.call('set_run_away_mode', { runId: 'aaaa0001', mode: 'maybe' }), /"auto", "on" or "off"/);
+    } },
+    // Task 11: the stored-settings card. The child validates; the parent re-validates and mints the card.
+    { name: 'propose_away_mode_change: validates through deps, fills the pinned project, unavailable without deps', run: async () => {
+      const seen = [];
+      const tools = createAskTools({ limits: ASK_LIMITS, pinnedScope: () => ({ projectKey: 'shop-1' }),
+        away: { validateChange: async (i) => { seen.push(i); return { ok: true, card: { type: 'away' } }; } } });
+      assert.deepEqual(await tools.call('propose_away_mode_change', { level: 'project', set: { enabled: true } }), { ok: true, card: { type: 'away' } });
+      assert.equal(seen[0].projectKey, 'shop-1', 'the pinned project');
+      await tools.call('propose_away_mode_change', { level: 'user', set: { enabled: true } });
+      assert.equal(seen[1].projectKey, undefined, 'user level: no project');
+      await assert.rejects(createAskTools({ limits: ASK_LIMITS }).call('propose_away_mode_change', { level: 'user' }), /propose_away_mode_change: unavailable/);
+    } },
+  ]);
 });

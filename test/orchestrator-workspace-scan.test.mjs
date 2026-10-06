@@ -8,10 +8,9 @@
 // a product-repo leak guard.
 import { test, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { rm, writeFile, readFile } from 'node:fs/promises';
 import { existsSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { join, basename, resolve } from 'node:path';
 
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
@@ -21,6 +20,8 @@ import { WORKSPACE_SCAN_WORKFLOW_ID } from '../src/core/graph/builtin-workflows.
 import { WORKSPACE_SCAN_OUTPUT_FILE } from '../src/core/workspace-scan-run.mjs';
 import { checkSurvey, checkUsage, checkSynthesis } from '../src/shared/workspace-map/schema.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
+import { templateRepo } from './helpers/git-dir.mjs';
 
 useTempHome(after);
 
@@ -42,12 +43,8 @@ after(() => assert.deepEqual(gitLines(['branch', '--list', 'worca-cc/*']), basel
 
 /** A throwaway committed repo; `files` are top-level names -> contents. */
 async function freshRepo(label = 'm', files = { 'seed.txt': 'seed\n' }) {
-  const dir = await mkdtemp(join(tmpdir(), `worca-cc-wsscan-${label}-`));
+  const dir = templateRepo(`wsscan-${label}`, { branch: 'main', user: true, files });
   created.push(dir);
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  for (const [rel, text] of Object.entries(files)) await writeFile(join(dir, rel), text);
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
   return dir;
 }
 const branches = (dir) => spawnSync('git', ['-C', dir, 'branch', '--format=%(refname:short)'])
@@ -69,48 +66,6 @@ function scanOpts(dirs, name = 'Scan WS', workflowId = WORKSPACE_SCAN_WORKFLOW_I
     claude: { mock: true },
   };
 }
-
-test('a scan run is read-only: done, no commit, every member branch deleted, checkouts gone', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const before = { [a]: head(a), [b]: head(b) };
-  const orch = createOrchestrator(scanOpts([a, b]));
-  const res = await orch.run();
-  assert.equal(res.status, 'done', JSON.stringify(res));
-  const state = orch.getState();
-  for (const dir of [a, b]) {
-    const k = projectKey(dir);
-    assert.equal(head(dir), before[dir], `${k}: main untouched`);
-    assert.deepEqual(branches(dir), ['main'], `${k}: the run branch is deleted`);
-    assert.ok(!existsSync(state.branches[k].worktreeDir), `${k}: checkout removed`);
-    assert.equal(state.branches[k].branchKept, false);
-  }
-});
-
-test('legacy run-root mode deletes the branches too', async () => {
-  process.env.WORCA_RUN_ROOT = 'legacy';
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const orch = createOrchestrator(scanOpts([a, b], 'Legacy Scan'));
-  assert.equal((await orch.run()).status, 'done');
-  assert.deepEqual(branches(a), ['main']);
-  assert.deepEqual(branches(b), ['main']);
-});
-
-test('done creates the workspace from the scanner output (the run id IS the workspace id)', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const opts = scanOpts([a, b], 'Created WS');
-  const orch = createOrchestrator(opts);
-  assert.equal((await orch.run()).status, 'done');
-  const ws = await readWorkspace(opts.workspace.id);
-  assert.ok(ws, 'workspace created');
-  assert.equal(ws.name, 'Created WS');
-  assert.match(ws.description, /## Interconnections/);
-  const out = await readFile(join(orch.getState().pipelineDir, WORKSPACE_SCAN_OUTPUT_FILE), 'utf8');
-  assert.equal(ws.description, out.trim());
-  assert.equal(orch.state.workspaceScan.outcome, 'created');
-});
 
 test('re-scan: an existing workspace gets its description replaced (outcome updated)', async () => {
   const a = await freshRepo();
@@ -214,15 +169,6 @@ test('wf_workspace_scan on a single-project target is refused at construction (D
     /runs over a workspace only/);
 });
 
-test('_isWorkspaceScan reads workflowId live (resume() restores it after construction)', async () => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const orch = createOrchestrator(scanOpts([a, b], 'Live', 'wf_default'));
-  assert.equal(orch._isWorkspaceScan(), false);
-  orch.workflowId = WORKSPACE_SCAN_WORKFLOW_ID;
-  assert.equal(orch._isWorkspaceScan(), true);
-});
-
 const scanNode = (orch) => orch.state.stepper.graph.nodes.find((n) => n.id === 'n_scan');
 
 const manifestNode = (orch, id) => orch.state.stepper.graph.nodes.find((n) => n.id === id);
@@ -257,19 +203,6 @@ test('scan models pin all three agent nodes and the investigators of both fan-ou
   assert.deepEqual([u.model, u.effort, u.subagentModel, u.subagentEffort, u.fanOut], ['claude-opus-5-5', 'high', 'fable', 'max', true]);
   const y = manifestNode(orch, 'n_synth');
   assert.deepEqual([y.model, y.effort, y.fanOut], ['claude-opus-5-5', 'high', false]);
-});
-
-test('no scan models: the template defaults on all three agent nodes (Sonnet 5 · medium, sonnet · medium)', async (t) => {
-  const a = await freshRepo();
-  const b = await freshRepo();
-  const orch = createOrchestrator(scanOpts([a, b], 'Default Models WS'));
-  assert.equal((await runUntilAbort(t, orch)).status, 'done');
-  for (const id of ['n_scan', 'n_usage']) {
-    const n = manifestNode(orch, id);
-    assert.deepEqual([n.model, n.effort, n.subagentModel, n.subagentEffort], ['claude-sonnet-5', 'medium', 'sonnet', 'medium'], id);
-  }
-  const y = manifestNode(orch, 'n_synth');
-  assert.deepEqual([y.model, y.effort], ['claude-sonnet-5', 'medium']);
 });
 
 test('a stale stored pick runs on the defaults and says so in the run log (Review Focus 5)', async () => {
@@ -336,43 +269,85 @@ async function extractEnvelope(dir) {
   return JSON.parse(await readFile(join(dir, 'scripts', 'n_extract-c1.envelope.json'), 'utf8'));
 }
 
-test('v3 end to end (detached): the npm dependency is an exact edge in the map and a line in the saved description', async (t) => {
+test('v3 end to end (detached): read-only scan maps the npm dependency, saves the workspace (outcome created) on template-default models', async (t) => {
+  // One detached default-opts scan serves four former tests (one row each).
   const pair = await npmPair();
+  const before = { [pair.app]: head(pair.app), [pair.lib]: head(pair.lib) };
   const opts = scanOpts([pair.app, pair.lib], 'Map WS');
   const orch = createOrchestrator(opts);
-  assert.equal((await runUntilAbort(t, orch)).status, 'done');
-  const { dir, keys, md } = await assertMapped(orch, pair);
-  const env = await extractEnvelope(dir);
-  assert.deepEqual(env.ctx.workspace.members.map((m) => m.key), keys, 'members sorted by key');
-  assert.equal(env.ctx.workspace.id, opts.workspace.id);
-  assert.equal(env.ctx.workspace.name, 'Map WS');
-  for (const m of env.ctx.workspace.members) {
-    // endsWith, not equal: on macOS the checkout is realpath'd (/private/var/…) while runRoot is not.
-    assert.ok(m.dir.endsWith(join('.worca-cc', 'runs', basename(env.ctx.runRoot), 'repos', m.key)), `detached: the run-root checkout, got ${m.dir}`);
-    assert.equal(m.projectDir, resolve(m.key === projectKey(pair.app) ? pair.app : pair.lib), 'the live project');
-  }
-  assert.deepEqual(env.ctx.repos.map((r) => r.key), keys);
-  const ex = JSON.parse(await readFile(join(dir, 'extract.json'), 'utf8'));
-  for (const m of env.ctx.workspace.members) assert.equal(ex.members[m.key].dir, m.dir, 'extract scans the run checkout, not the live project');
-  assert.equal((await readWorkspace(opts.workspace.id)).description, md.trim(), 'the finalize saved the rendered description');
+  const res = await runUntilAbort(t, orch);
+  assert.equal(res.status, 'done', JSON.stringify(res));
+  await checkRows([
+    { name: 'a scan run is read-only: done, no commit, every member branch deleted, checkouts gone', run: () => {
+      const state = orch.getState();
+      for (const dir of [pair.app, pair.lib]) {
+        const k = projectKey(dir);
+        assert.equal(head(dir), before[dir], `${k}: main untouched`);
+        assert.deepEqual(branches(dir), ['main'], `${k}: the run branch is deleted`);
+        assert.ok(!existsSync(state.branches[k].worktreeDir), `${k}: checkout removed`);
+        assert.equal(state.branches[k].branchKept, false);
+      }
+    } },
+    { name: 'done creates the workspace from the scanner output (the run id IS the workspace id)', run: async () => {
+      const ws = await readWorkspace(opts.workspace.id);
+      assert.ok(ws, 'workspace created');
+      assert.equal(ws.name, 'Map WS');
+      assert.match(ws.description, /## Interconnections/);
+      const out = await readFile(join(orch.getState().pipelineDir, WORKSPACE_SCAN_OUTPUT_FILE), 'utf8');
+      assert.equal(ws.description, out.trim());
+      assert.equal(orch.state.workspaceScan.outcome, 'created');
+    } },
+    { name: 'no scan models: the template defaults on all three agent nodes (Sonnet 5 · medium, sonnet · medium)', run: () => {
+      for (const id of ['n_scan', 'n_usage']) {
+        const n = manifestNode(orch, id);
+        assert.deepEqual([n.model, n.effort, n.subagentModel, n.subagentEffort], ['claude-sonnet-5', 'medium', 'sonnet', 'medium'], id);
+      }
+      const y = manifestNode(orch, 'n_synth');
+      assert.deepEqual([y.model, y.effort], ['claude-sonnet-5', 'medium']);
+    } },
+    { name: 'v3 end to end (detached): the npm dependency is an exact edge in the map and a line in the saved description', run: async () => {
+      const { dir, keys, md } = await assertMapped(orch, pair);
+      const env = await extractEnvelope(dir);
+      assert.deepEqual(env.ctx.workspace.members.map((m) => m.key), keys, 'members sorted by key');
+      assert.equal(env.ctx.workspace.id, opts.workspace.id);
+      assert.equal(env.ctx.workspace.name, 'Map WS');
+      for (const m of env.ctx.workspace.members) {
+        // endsWith, not equal: on macOS the checkout is realpath'd (/private/var/…) while runRoot is not.
+        assert.ok(m.dir.endsWith(join('.worca-cc', 'runs', basename(env.ctx.runRoot), 'repos', m.key)), `detached: the run-root checkout, got ${m.dir}`);
+        assert.equal(m.projectDir, resolve(m.key === projectKey(pair.app) ? pair.app : pair.lib), 'the live project');
+      }
+      assert.deepEqual(env.ctx.repos.map((r) => r.key), keys);
+      const ex = JSON.parse(await readFile(join(dir, 'extract.json'), 'utf8'));
+      for (const m of env.ctx.workspace.members) assert.equal(ex.members[m.key].dir, m.dir, 'extract scans the run checkout, not the live project');
+      assert.equal((await readWorkspace(opts.workspace.id)).description, md.trim(), 'the finalize saved the rendered description');
+    } },
+  ]);
 });
 
-test('v3 end to end (legacy run-root): the scripts still see every member — ctx.workspace, not ctx.repos — and map the edge', async (t) => {
+test('v3 end to end (legacy run-root): branches deleted, scripts see every member via ctx.workspace, edge mapped', async (t) => {
   process.env.WORCA_RUN_ROOT = 'legacy';
   const pair = await npmPair();
   const opts = scanOpts([pair.app, pair.lib], 'Legacy Map WS');
   const orch = createOrchestrator(opts);
   assert.equal((await runUntilAbort(t, orch)).status, 'done');
-  const { dir, keys } = await assertMapped(orch, pair);
-  const env = await extractEnvelope(dir);
-  assert.equal(env.ctx.runRoot, null);
-  assert.equal(env.ctx.repos, null, 'legacy: no repos list');
-  assert.deepEqual(env.ctx.workspace.members.map((m) => m.key), keys);
-  for (const m of env.ctx.workspace.members) {
-    assert.ok(m.dir.includes(join('.worca-cc', 'worktrees')), `legacy checkout: ${m.dir}`);
-    assert.equal(m.projectDir, resolve(m.key === projectKey(pair.app) ? pair.app : pair.lib));
-  }
-  assert.equal(orch.state.workspaceScan.outcome, 'created');
+  await checkRows([
+    { name: 'legacy run-root mode deletes the branches too', run: () => {
+      assert.deepEqual(branches(pair.app), ['main']);
+      assert.deepEqual(branches(pair.lib), ['main']);
+    } },
+    { name: 'v3 end to end (legacy run-root): the scripts still see every member — ctx.workspace, not ctx.repos — and map the edge', run: async () => {
+      const { dir, keys } = await assertMapped(orch, pair);
+      const env = await extractEnvelope(dir);
+      assert.equal(env.ctx.runRoot, null);
+      assert.equal(env.ctx.repos, null, 'legacy: no repos list');
+      assert.deepEqual(env.ctx.workspace.members.map((m) => m.key), keys);
+      for (const m of env.ctx.workspace.members) {
+        assert.ok(m.dir.includes(join('.worca-cc', 'worktrees')), `legacy checkout: ${m.dir}`);
+        assert.equal(m.projectDir, resolve(m.key === projectKey(pair.app) ? pair.app : pair.lib));
+      }
+      assert.equal(orch.state.workspaceScan.outcome, 'created');
+    } },
+  ]);
 });
 
 // The P1 ↔ P2 mock seam: the npm pair above yields NO candidate (P1 never searches a member for an

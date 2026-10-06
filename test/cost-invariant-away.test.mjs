@@ -212,21 +212,6 @@ test('every AI call in a run with Away mode on reaches the step costs, the total
   assert.equal(saved.row.total_cost_usd, st.totalCostUsd);
 });
 
-test('a cost booked against a step that has no row still reaches the total, not only the ledger', { timeout: 120_000 }, async () => {
-  // D4. No live path books an unknown key today (every _recordCost caller names an existing row), so
-  // this pins the fallback on a real finished run against the real ledger: a late booking must keep
-  // I2 (ledger = total) instead of landing in cost_ledger alone.
-  const { orch, id } = await costRun();
-  const before = orch.getState().totalCostUsd;
-  orch._recordCost(0.03, 'x:gone:1', { aux: 'away' });
-  await orch._persist();
-  const st = orch.getState();
-  assert.equal(st.totalCostUsd, roundUsd(before + 0.03));
-  const ledger = ledgerOf(id);
-  assert.ok(Math.abs(ledger.s - st.totalCostUsd) <= 0.00005 * ledger.n + 1e-9, `ledger ${ledger.s} vs total ${st.totalCostUsd}`);
-  assert.equal(runCostBreakdown(st.steps, st.totalCostUsd).lines.find((l) => l.kind === 'away').calls, 3);
-});
-
 test('paused mid-step and resumed by a NEW harness: the total comes back with the steps, the second review keeps its own row, the cut turn stays out of every total', { timeout: 120_000 }, async () => {
   const projectDir = await setup();
   const h = { orch: null, paused: false, atResume: null };

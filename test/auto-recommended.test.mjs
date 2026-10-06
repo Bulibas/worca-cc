@@ -1,6 +1,7 @@
 // test/auto-recommended.test.mjs
 import { test, after, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,19 +31,22 @@ test('--yes answers recommended when present, else the first option', async () =
   assert.deepEqual(out.answers, [{ id: 'a', choice: 'y' }, { id: 'b', choice: 'p' }]);
 });
 
-test('autoChoice ignores a recommendation that is not an option and skips blanks', () => {
-  assert.equal(autoChoice({ options: ['  ', 'p'], recommended: 'z' }), 'p');
-  assert.equal(autoChoice({ options: [] }), 'auto');
-});
-
-test('autoAnswerPayload mirrors the --yes answer per kind', () => {
-  assert.deepEqual(autoAnswerPayload({ kind: 'clarify', questions: [{ id: 'a', options: ['x', 'y'], recommended: 'y' }] }),
-    { answers: [{ id: 'a', choice: 'y' }] });
-  assert.deepEqual(autoAnswerPayload({ kind: 'questions', questions: [{ id: 'b', options: ['p'] }] }),
-    { answers: [{ id: 'b', choice: 'p' }] });
-  assert.deepEqual(autoAnswerPayload({ kind: 'form', form: 'f', version: 2, autoValues: { a: 1 } }),
-    { form: 'f', version: 2, values: { a: 1 } });
-  assert.deepEqual(autoAnswerPayload({ kind: 'recovery' }), { decision: 'pause' });
-  assert.deepEqual(autoAnswerPayload({ kind: 'workflow', workflow: { name: 'wf' } }), { decision: 'accept', name: 'wf', nodes: {} });
-  assert.deepEqual(autoAnswerPayload({ kind: 'gate' }), { decision: 'continue' });
+test('autoChoice/autoAnswerPayload: the --yes answer per kind; a non-option recommendation and blanks are skipped', async () => {
+  await checkRows([
+    { name: 'autoChoice ignores a recommendation that is not an option and skips blanks', run: () => {
+      assert.equal(autoChoice({ options: ['  ', 'p'], recommended: 'z' }), 'p');
+      assert.equal(autoChoice({ options: [] }), 'auto');
+    } },
+    { name: 'autoAnswerPayload mirrors the --yes answer per kind', run: () => {
+      assert.deepEqual(autoAnswerPayload({ kind: 'clarify', questions: [{ id: 'a', options: ['x', 'y'], recommended: 'y' }] }),
+        { answers: [{ id: 'a', choice: 'y' }] });
+      assert.deepEqual(autoAnswerPayload({ kind: 'questions', questions: [{ id: 'b', options: ['p'] }] }),
+        { answers: [{ id: 'b', choice: 'p' }] });
+      assert.deepEqual(autoAnswerPayload({ kind: 'form', form: 'f', version: 2, autoValues: { a: 1 } }),
+        { form: 'f', version: 2, values: { a: 1 } });
+      assert.deepEqual(autoAnswerPayload({ kind: 'recovery' }), { decision: 'pause' });
+      assert.deepEqual(autoAnswerPayload({ kind: 'workflow', workflow: { name: 'wf' } }), { decision: 'accept', name: 'wf', nodes: {} });
+      assert.deepEqual(autoAnswerPayload({ kind: 'gate' }), { decision: 'continue' });
+    } },
+  ]);
 });

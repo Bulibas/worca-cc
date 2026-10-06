@@ -6,6 +6,7 @@ import { mkdtemp, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { projectKey, canonicalProjectRoot, storeRoot, projectStorePath, workspacesStoreRoot, workspaceStorePath } from '../src/core/store.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 function git(cwd, args) { execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'ignore'] }); }
 
@@ -33,33 +34,36 @@ test('non-git dir falls back to a realpath-based key (no throw)', async () => {
   assert.match(k, /-[0-9a-f]{8}$/);
 });
 
-test('store paths are rooted under WORCA_HOME/.worca-cc/store', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'worca-cc-home-'));
-  const prev = process.env.WORCA_HOME;
-  process.env.WORCA_HOME = home;
-  try {
-    assert.equal(storeRoot(), join(home, '.worca-cc', 'store'));
-    assert.equal(projectStorePath('abc-12345678'), join(home, '.worca-cc', 'store', 'abc-12345678'));
-    assert.ok(canonicalProjectRoot(home).length > 0);
-  } finally {
-    if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
-  }
-});
-
-test('workspace store paths nest under store/workspaces/<workspaceKey>', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'worca-cc-home-'));
-  const prev = process.env.WORCA_HOME;
-  process.env.WORCA_HOME = home;
-  try {
-    const store = join(home, '.worca-cc', 'store');
-    assert.equal(workspacesStoreRoot(), join(store, 'workspaces'));
-    assert.equal(
-      workspaceStorePath('wks-demo-12345678'),
-      join(store, 'workspaces', 'wks-demo-12345678'),
-    );
-    // The container is the literal "workspaces" segment under the shared store root.
-    assert.equal(workspacesStoreRoot(), projectStorePath('workspaces'));
-  } finally {
-    if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
-  }
+test('store paths: project under WORCA_HOME/.worca-cc/store, workspaces under store/workspaces/<key>', async () => {
+  await checkRows([
+    { name: 'store paths are rooted under WORCA_HOME/.worca-cc/store', run: async () => {
+      const home = await mkdtemp(join(tmpdir(), 'worca-cc-home-'));
+      const prev = process.env.WORCA_HOME;
+      process.env.WORCA_HOME = home;
+      try {
+        assert.equal(storeRoot(), join(home, '.worca-cc', 'store'));
+        assert.equal(projectStorePath('abc-12345678'), join(home, '.worca-cc', 'store', 'abc-12345678'));
+        assert.ok(canonicalProjectRoot(home).length > 0);
+      } finally {
+        if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
+      }
+    } },
+    { name: 'workspace store paths nest under store/workspaces/<workspaceKey>', run: async () => {
+      const home = await mkdtemp(join(tmpdir(), 'worca-cc-home-'));
+      const prev = process.env.WORCA_HOME;
+      process.env.WORCA_HOME = home;
+      try {
+        const store = join(home, '.worca-cc', 'store');
+        assert.equal(workspacesStoreRoot(), join(store, 'workspaces'));
+        assert.equal(
+          workspaceStorePath('wks-demo-12345678'),
+          join(store, 'workspaces', 'wks-demo-12345678'),
+        );
+        // The container is the literal "workspaces" segment under the shared store root.
+        assert.equal(workspacesStoreRoot(), projectStorePath('workspaces'));
+      } finally {
+        if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
+      }
+    } },
+  ]);
 });

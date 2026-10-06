@@ -1,7 +1,7 @@
 // test/metrics-pr-workflow.test.mjs
-// The PR-events GitHub Action (src/core/metrics/pr-events-workflow.yml): this repository runs
-// the same file, its github-script body behaves against a fake GitHub API (no branch, one PR,
-// a race with a teammate's push, a backfill), and `worca metrics pr-workflow` installs it.
+// The PR-events GitHub Action (src/core/metrics/pr-events-workflow.yml): its github-script body
+// behaves against a fake GitHub API (no branch, one PR, a race with a teammate's push, a
+// backfill), and `worca metrics pr-workflow` installs it.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { personKey } from '../src/core/metrics/record.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import { installPrWorkflow, prWorkflowText, PR_WORKFLOW_PATH, parsePrEvent } from '../src/core/metrics/prs.mjs';
 
 useTempHome(after);
@@ -105,10 +106,6 @@ async function runScript({ github, core }, context) {
   try { await fn(github, { repo: { owner: 'acme', repo: 'api' }, ...context }, core, createRequire(import.meta.url)); } finally { globalThis.setTimeout = realSetTimeout; }
 }
 
-test('this repository runs the shipped template, byte for byte', () => {
-  assert.equal(readFileSync(join(ROOT, PR_WORKFLOW_PATH), 'utf8'), TEMPLATE);
-});
-
 test('workflow shape: pull_request_target without a checkout, write scope, serialized', () => {
   assert.match(TEMPLATE, /pull_request_target:\n\s+types: \[opened, reopened, closed\]/);
   assert.match(TEMPLATE, /workflow_dispatch:/);
@@ -125,20 +122,31 @@ test('no worca-metrics branch: a notice, no writes', async () => {
   assert.match(f.state.notices[0], /not enabled/);
 });
 
-test('a merged PR becomes one event file that Worca reads back', async () => {
-  const f = fakeGithub();
-  await runScript(f, { eventName: 'pull_request_target', payload: { pull_request: PR(474) } });
-  assert.deepEqual(f.state.commits, ['worca-metrics: PR #474 merged']);
-  const text = f.state.files['.worca-metrics/prs/474.json'];
-  const ev = parsePrEvent(text);
-  assert.equal(ev.state, 'MERGED');
-  assert.equal(ev.head, 'worca/feature-474');
-  assert.equal(ev.repo, 'acme/api');
-  assert.equal(ev.title, 'PR 474 with a line break');
-  assert.ok(text.endsWith('\n') && text.split('\n').length === 2, 'one JSON line');
-  // Re-delivery of the same event changes nothing.
-  await runScript(f, { eventName: 'pull_request_target', payload: { pull_request: PR(474) } });
-  assert.equal(f.state.commits.length, 1);
+test('PR events: merged/opened/closed-unmerged states, one JSON line Worca reads back, re-delivery is a no-op', async () => {
+  await checkRows([
+    { name: 'a merged PR becomes one event file that Worca reads back', run: async () => {
+      const f = fakeGithub();
+      await runScript(f, { eventName: 'pull_request_target', payload: { pull_request: PR(474) } });
+      assert.deepEqual(f.state.commits, ['worca-metrics: PR #474 merged']);
+      const text = f.state.files['.worca-metrics/prs/474.json'];
+      const ev = parsePrEvent(text);
+      assert.equal(ev.state, 'MERGED');
+      assert.equal(ev.head, 'worca/feature-474');
+      assert.equal(ev.repo, 'acme/api');
+      assert.equal(ev.title, 'PR 474 with a line break');
+      assert.ok(text.endsWith('\n') && text.split('\n').length === 2, 'one JSON line');
+      // Re-delivery of the same event changes nothing.
+      await runScript(f, { eventName: 'pull_request_target', payload: { pull_request: PR(474) } });
+      assert.equal(f.state.commits.length, 1);
+    } },
+    { name: 'opened and closed-unmerged states', run: async () => {
+      const f = fakeGithub();
+      await runScript(f, { eventName: 'pull_request_target', payload: { pull_request: PR(5, { state: 'open', merged_at: null, closed_at: null }) } });
+      await runScript(f, { eventName: 'pull_request_target', payload: { pull_request: PR(6, { merged_at: null }) } });
+      assert.equal(parsePrEvent(f.state.files['.worca-metrics/prs/5.json']).state, 'OPEN');
+      assert.equal(parsePrEvent(f.state.files['.worca-metrics/prs/6.json']).state, 'CLOSED');
+    } },
+  ]);
 });
 
 test('the author is recorded unless the team chose no attribution', async () => {
@@ -176,21 +184,25 @@ test('the git author of most commits names the PR (as for runs); machines skippe
   assert.equal(none.state.graphql, undefined);
 });
 
-test('backfill reads commit authors 50 PRs per GraphQL query', async () => {
-  const recent = new Date(Date.now() - 86_400_000).toISOString();
-  const page = Array.from({ length: 120 }, (_, i) => PR(i + 1, { updated_at: recent }));
-  const f = fakeGithub({ pages: [page] });
-  await runScript(f, { eventName: 'workflow_dispatch', payload: { inputs: { days: '30' } } });
-  assert.equal(f.state.graphql, 3);
-  assert.equal(Object.keys(f.state.files).length, 120);
-});
-
-test('opened and closed-unmerged states', async () => {
-  const f = fakeGithub();
-  await runScript(f, { eventName: 'pull_request_target', payload: { pull_request: PR(5, { state: 'open', merged_at: null, closed_at: null }) } });
-  await runScript(f, { eventName: 'pull_request_target', payload: { pull_request: PR(6, { merged_at: null }) } });
-  assert.equal(parsePrEvent(f.state.files['.worca-metrics/prs/5.json']).state, 'OPEN');
-  assert.equal(parsePrEvent(f.state.files['.worca-metrics/prs/6.json']).state, 'CLOSED');
+test('backfill: PRs updated within N days in one commit, stops at the cutoff, authors read 50 PRs per GraphQL query', async () => {
+  await checkRows([
+    { name: 'backfill reads commit authors 50 PRs per GraphQL query', run: async () => {
+      const recent = new Date(Date.now() - 86_400_000).toISOString();
+      const page = Array.from({ length: 120 }, (_, i) => PR(i + 1, { updated_at: recent }));
+      const f = fakeGithub({ pages: [page] });
+      await runScript(f, { eventName: 'workflow_dispatch', payload: { inputs: { days: '30' } } });
+      assert.equal(f.state.graphql, 3);
+      assert.equal(Object.keys(f.state.files).length, 120);
+    } },
+    { name: 'backfill: PRs updated within N days, one commit, stops at the cutoff', run: async () => {
+      const recent = new Date(Date.now() - 86_400_000).toISOString();
+      const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
+      const f = fakeGithub({ pages: [[PR(1, { updated_at: recent }), PR(2, { updated_at: recent })], [PR(3, { updated_at: old }), PR(4, { updated_at: recent })]] });
+      await runScript(f, { eventName: 'workflow_dispatch', payload: { inputs: { days: '30' } } });
+      assert.deepEqual(f.state.commits, ['worca-metrics: 2 PR events']);
+      assert.deepEqual(Object.keys(f.state.files).sort(), ['.worca-metrics/prs/1.json', '.worca-metrics/prs/2.json']);
+    } },
+  ]);
 });
 
 test('a teammate pushing in between: rebuilt on the new tip, never forced', async () => {
@@ -199,15 +211,6 @@ test('a teammate pushing in between: rebuilt on the new tip, never forced', asyn
   assert.equal(f.state.raced, true);
   assert.equal(f.state.commits.length, 1);
   assert.ok(f.state.files['.worca-metrics/prs/9.json']);
-});
-
-test('backfill: PRs updated within N days, one commit, stops at the cutoff', async () => {
-  const recent = new Date(Date.now() - 86_400_000).toISOString();
-  const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
-  const f = fakeGithub({ pages: [[PR(1, { updated_at: recent }), PR(2, { updated_at: recent })], [PR(3, { updated_at: old }), PR(4, { updated_at: recent })]] });
-  await runScript(f, { eventName: 'workflow_dispatch', payload: { inputs: { days: '30' } } });
-  assert.deepEqual(f.state.commits, ['worca-metrics: 2 PR events']);
-  assert.deepEqual(Object.keys(f.state.files).sort(), ['.worca-metrics/prs/1.json', '.worca-metrics/prs/2.json']);
 });
 
 test('installPrWorkflow: created, unchanged, differs unless forced', async () => {

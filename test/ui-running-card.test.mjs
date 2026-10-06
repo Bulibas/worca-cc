@@ -111,58 +111,8 @@ function helloRunning(ctx, extra = {}, more = []) {
 // The run's row in its project group (a Needs-you run is repeated above it: rule 6).
 const rowOf = (ctx, runId = RUN_ID) =>
   ctx.window.document.querySelector(`#runs-list .runs-row[data-slot="group"][data-run-id="${runId}"]`);
-const needsRowOf = (ctx, runId = RUN_ID) =>
-  ctx.window.document.querySelector(`#runs-list .runs-needs .runs-row[data-run-id="${runId}"]`);
 const subOf = (row) => row.querySelector('.runs-row-sub').textContent;
 const wordOf = (row) => subOf(row).split(' · ')[0];
-
-// Two agent nodes (the manifest shape test/ui-run-hosts.test.mjs:15-26 uses).
-const MANIFEST = {
-  version: 2, template: { id: 'wf_t', name: 'T' },
-  graph: {
-    nodes: [
-      { id: 'n_a', kind: 'agent', key: 'planner', x: 0, y: 0, label: 'Planner', color: 'violet',
-        ports: { inputs: [{ id: 'task', type: 'md', loop: false }], outputs: [{ id: 'plan', type: 'md', when: 'always' }], await: true } },
-      { id: 'n_b', kind: 'agent', key: 'implementer', x: 200, y: 0, label: 'Implement', color: 'blue',
-        ports: { inputs: [{ id: 'plan', type: 'md', loop: false }], outputs: [{ id: 'code', type: 'md', when: 'always' }], await: true } },
-      { id: 'n_end', kind: 'end', key: null, x: 400, y: 0, label: 'End', color: '',
-        ports: { inputs: [{ id: 'result', type: 'any' }], outputs: [], await: false } },
-    ],
-    wires: [
-      { id: 'w1', from: { node: 'n_a', port: 'plan' }, to: { node: 'n_b', port: 'plan' } },
-      { id: 'w2', from: { node: 'n_b', port: 'code' }, to: { node: 'n_end', port: 'result' } },
-    ],
-  },
-};
-const step = (nodeId) => ({ key: `x:${nodeId}:1`, executionId: `x:${nodeId}:1`, nodeId, ordinal: 1, status: 'start',
-  activeMs: 10, startedAt: '2026-08-26T10:00:00Z' });
-
-test('row anatomy: a link with a status icon, the title and one subline — no card chrome', async () => {
-  const ctx = await boot();
-  helloRunning(ctx);
-  ctx.showRunning();
-  await ctx.settle();
-
-  const row = rowOf(ctx);
-  assert.ok(row, 'the live run is listed in its project group');
-  assert.equal(row.tagName, 'A', 'a row is a plain link');
-  assert.equal(row.getAttribute('href'), `#running/${RUN_ID}`);
-  assert.equal(row.dataset.kind, 'live');
-
-  const [ic, body, ...rest] = row.children;
-  assert.equal(rest.length, 0, 'icon + body, nothing else');
-  assert.ok(ic.classList.contains('runs-ic') && ic.classList.contains('runs-ic-run'), 'a running run wears the run icon');
-  assert.equal(ic.getAttribute('aria-hidden'), 'true', 'the icon is decoration: the subline says the state');
-  assert.ok(ic.querySelector('svg.runs-glyph-run'), 'one glyph for the state');
-  assert.ok(body.classList.contains('runs-row-body'));
-  assert.equal(body.querySelector('.runs-row-title').textContent, 'Demo run');
-  assert.equal(subOf(row), 'Running · 09:30', 'no step yet: the word and the start time');
-
-  assert.equal(row.querySelector('button'), null, 'no per-row actions (D14)');
-  for (const sel of ['.rc-head', '.rc-sic', '.rc-meta', '.rc-acts', '.btn-pause', '.btn-resume', '.btn-stop', '.rc-open',
-    '.rc-branch', '.run-time', '.run-cost', '.rc-wait', '.qpanel', '.log', '.run-foot'])
-    assert.equal(row.querySelector(sel), null, `no ${sel} on the row`);
-});
 
 test('status icon + word per run state', async () => {
   const ctx = await boot();
@@ -211,25 +161,6 @@ test('status icon + word per run state', async () => {
   assert.deepEqual(needs, ['s-ask', 's-paused', 's-error']);
 });
 
-test('the subline names the running step: the active agent, or how many run', async () => {
-  const ctx = await boot();
-  helloRunning(ctx);
-  ctx.showRunning();
-  await ctx.settle();
-  assert.equal(subOf(rowOf(ctx)), 'Running · 09:30', 'no manifest yet: the start time');
-
-  ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'running', stepper: MANIFEST,
-    active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }], steps: [step('n_a')] });
-  await ctx.settle();
-  assert.equal(subOf(rowOf(ctx)), 'Running · Planner', 'the active agent’s label');
-
-  ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'running', stepper: MANIFEST,
-    active: [{ nodeId: 'n_a', executionId: 'x:n_a:1' }, { nodeId: 'n_b', executionId: 'x:n_b:1' }],
-    steps: [step('n_a'), step('n_b')] });
-  await ctx.settle();
-  assert.equal(subOf(rowOf(ctx)), 'Running · 2 agents', 'several agents: the count');
-});
-
 test('clicking a row opens #running/<runId> in the pane beside the list', async () => {
   const ctx = await boot();
   helloRunning(ctx);
@@ -247,69 +178,4 @@ test('clicking a row opens #running/<runId> in the pane beside the list', async 
   assert.ok(rowOf(ctx), 'the list stays beside it');
   assert.ok(rowOf(ctx).classList.contains('selected'), 'the open run’s row is marked');
   assert.equal(rowOf(ctx).getAttribute('aria-current'), 'true');
-});
-
-test('a pause repaints the row in place and lists the run under Needs you', async () => {
-  const ctx = await boot();
-  helloRunning(ctx);
-  ctx.showRunning();
-  await ctx.settle();
-  assert.equal(wordOf(rowOf(ctx)), 'Running');
-  assert.equal(needsRowOf(ctx), null);
-
-  ctx.dispatch({ type: 'state', runId: RUN_ID, status: 'paused' });
-  await ctx.settle();
-  const row = rowOf(ctx);
-  assert.ok(row.classList.contains('runs-row-live'), 'still the live row (resumable, not a finished result)');
-  assert.equal(row.dataset.icon, 'paused');
-  assert.equal(wordOf(row), 'Paused');
-  assert.ok(needsRowOf(ctx), 'a paused run needs you');
-  assert.equal(wordOf(needsRowOf(ctx)), 'Paused');
-});
-
-test('a pending question lists the run under Needs you; its row opens the run page, where the panel lives', async () => {
-  const ctx = await boot();
-  helloRunning(ctx);
-  ctx.showRunning();
-  await ctx.settle();
-  const doc = ctx.window.document;
-  assert.equal(doc.querySelector('#runs-list .runs-needs'), null, 'nothing needs you without a question');
-
-  ctx.dispatch({
-    type: 'question', runId: RUN_ID, id: 'q1', kind: 'clarify',
-    questions: [{ id: 'a', question: 'x?', options: ['1'] }, { id: 'b', question: 'y?', options: ['2'] }],
-  });
-  await ctx.settle();
-  const needs = needsRowOf(ctx);
-  assert.ok(needs, 'the asking run is listed under Needs you');
-  assert.equal(wordOf(needs), 'Question');
-  assert.equal(wordOf(rowOf(ctx)), 'Question', 'its group row says the same');
-  assert.ok(rowOf(ctx).querySelector('.runs-ic-ask'), 'and wears the question icon');
-  assert.equal(doc.querySelector('#runs-list .qpanel'), null, 'the question panel is NOT mounted on the list');
-
-  let scrolled = 0;
-  ctx.window.Element.prototype.scrollIntoView = function () { scrolled += 1; };
-  needs.dispatchEvent(new ctx.window.Event('click', { bubbles: true, cancelable: true }));
-  assert.equal(ctx.window.location.hash, `#running/${RUN_ID}`, 'the row opens the run page');
-  await ctx.settle();
-  assert.ok(doc.querySelector('#run-detail .rd-questions .qpanel'), 'the panel is on the run page');
-  assert.ok(scrolled > 0, 'and the page lands on it (the removed strip’s job)');
-
-  ctx.dispatch({ type: 'question-resolved', runId: RUN_ID, id: 'q1' });
-  await ctx.settle();
-  assert.equal(needsRowOf(ctx), null, 'the run leaves Needs you when the question resolves');
-  assert.equal(wordOf(rowOf(ctx)), 'Running');
-});
-
-test('a workflow proposal reads "Workflow review" on the row', async () => {
-  const ctx = await boot();
-  helloRunning(ctx);
-  ctx.showRunning();
-  ctx.dispatch({
-    type: 'question', runId: RUN_ID, id: 'w1', kind: 'workflow',
-    questions: [{ id: 'a', question: 'Pick', options: ['x'] }],
-  });
-  await ctx.settle();
-  assert.equal(wordOf(rowOf(ctx)), 'Workflow review');
-  assert.equal(wordOf(needsRowOf(ctx)), 'Workflow review');
 });

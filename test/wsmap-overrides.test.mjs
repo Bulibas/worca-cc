@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { emptyOverrides, effectiveEdges, setEdgeState, addManualEdge, removeManualEdge } from '../src/shared/workspace-map/overrides.mjs';
 import { mapSummary } from '../src/shared/workspace-map/summary.mjs';
 import { edgeId } from '../src/shared/workspace-map/ids.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const edge = (from, to, kind, norm, display, over = {}) => ({ id: edgeId(from, to, kind, norm), from, to, kind, norm, display,
   label: null, detail: null, confidence: 'exact', sources: ['static'], evidence: { from: [{ file: 'a.ts', line: 1, match: 'x' }], to: [] }, ...over });
@@ -86,11 +87,24 @@ test('effectiveEdges: states + sort by from, to, kind, display; garbage override
   assert.equal(effectiveEdges(mapOf([a]), { version: 9, edges: 'x' }).length, 1);
 });
 
-test('a corrupt map_json never makes effectiveEdges / mapSummary throw or count a prototype key (v3)', () => {
-  const bad = JSON.parse('{"toString":null,"valueOf":null}');
-  const map = { edges: [{ id: 'x_000000000001', from: bad, to: 'a', kind: 'http' }, { id: 'x_000000000002', from: 'a', to: 'b', kind: 'constructor' }] };
-  assert.deepEqual(effectiveEdges(map, null).map((e) => e.id), ['x_000000000002']);
-  assert.deepEqual(mapSummary(map, null).byKind, { constructor: 1 });
+test('a corrupt map_json (prototype keys, object-valued display) never makes effectiveEdges / mapSummary / setEdgeState throw', async () => {
+  await checkRows([
+    { name: 'a corrupt map_json never makes effectiveEdges / mapSummary throw or count a prototype key (v3)', run: () => {
+      const bad = JSON.parse('{"toString":null,"valueOf":null}');
+      const map = { edges: [{ id: 'x_000000000001', from: bad, to: 'a', kind: 'http' }, { id: 'x_000000000002', from: 'a', to: 'b', kind: 'constructor' }] };
+      assert.deepEqual(effectiveEdges(map, null).map((e) => e.id), ['x_000000000002']);
+      assert.deepEqual(mapSummary(map, null).byKind, { constructor: 1 });
+    } },
+    { name: 'an object-valued display never makes effectiveEdges / mapSummary / setEdgeState throw; a prototype-named edge id is auto (v4)', run: () => {
+      const map = JSON.parse('{"members":[{"key":"a"},{"key":"b"}],"edges":['
+        + '{"id":"x_000000000001","from":"a","to":"b","kind":"http","display":{"toString":null}},'
+        + '{"id":"x_000000000002","from":"a","to":"b","kind":"http","display":"GET /x"},'
+        + '{"id":"toString","from":"a","to":"b","kind":"pkg","display":"p"}]}');
+      assert.deepEqual(effectiveEdges(map, null).map((e) => [e.id, e.state]), [['x_000000000001', 'auto'], ['x_000000000002', 'auto'], ['toString', 'auto']]);
+      assert.equal(mapSummary(map, null).edges, 3);
+      assert.equal(setEdgeState(emptyOverrides(), map.edges[0], 'confirmed', AT).edges.x_000000000001.display, '');
+    } },
+  ]);
 });
 
 test('mapSummary: counts effective edges, states, gaps and kinds', () => {
@@ -103,16 +117,6 @@ test('mapSummary: counts effective edges, states, gaps and kinds', () => {
   assert.deepEqual(mapSummary(mapOf([a, b]), ov), {
     scannedAt: AT, members: 3, edges: 2, gaps: 2, confirmed: 0, rejected: 1, manual: 1, missing: 1, stale: 0, byKind: { http: 1, db: 1 } });
   assert.equal(mapSummary(null, ov), null);
-});
-
-test('an object-valued display never makes effectiveEdges / mapSummary / setEdgeState throw; a prototype-named edge id is auto (v4)', () => {
-  const map = JSON.parse('{"members":[{"key":"a"},{"key":"b"}],"edges":['
-    + '{"id":"x_000000000001","from":"a","to":"b","kind":"http","display":{"toString":null}},'
-    + '{"id":"x_000000000002","from":"a","to":"b","kind":"http","display":"GET /x"},'
-    + '{"id":"toString","from":"a","to":"b","kind":"pkg","display":"p"}]}');
-  assert.deepEqual(effectiveEdges(map, null).map((e) => [e.id, e.state]), [['x_000000000001', 'auto'], ['x_000000000002', 'auto'], ['toString', 'auto']]);
-  assert.equal(mapSummary(map, null).edges, 3);
-  assert.equal(setEdgeState(emptyOverrides(), map.edges[0], 'confirmed', AT).edges.x_000000000001.display, '');
 });
 
 test('setEdgeState takes x_ ids only; addManualEdge refuses what the next read would drop (v4)', () => {

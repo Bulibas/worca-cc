@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -39,34 +40,36 @@ const META = {
 };
 const MD = '# Agent: Docs Writer\n\nYou write docs.\n';
 
-test('GET /api/agents carries origin + mockWriterRoles and EXCLUDES markdown', async () => {
-  const r = await get('/api/agents');
-  assert.equal(r.status, 200);
-  const data = await r.json();
-  assert.ok(Array.isArray(data.agents) && data.agents.length >= 9);
-  assert.ok(data.agents.every((a) => a.origin === 'builtin' || a.origin === 'user'));
-  assert.ok(data.agents.every((a) => !('markdown' in a)));
-  // mockWriterRoles is a CLOSED list (the mock switch in claude-runner.mjs),
-  // unlike the open channel vocabulary it will replace in Task 12.
-  assert.equal(data.channels, undefined, 'the channel vocabulary is gone from this payload');
-  assert.ok(Array.isArray(data.mockWriterRoles));
-  assert.ok(data.mockWriterRoles.includes('generic-verifier') && data.mockWriterRoles.includes('clarify'));
-  assert.ok(!data.agents.some((a) => a.key === 'workspaceScanner'), 'workspace-only excluded by default');
-  const all = await (await get('/api/agents?all=1')).json();
-  assert.ok(all.agents.some((a) => a.key === 'workspaceScanner'), '?all=1 includes workspace-only');
-});
-
-// NOTE: this one is GREEN before the change — the 11 builtin sidecars already
-// carry v2 ports (P1 seeded them). It is a REGRESSION PIN on that seed data, not
-// a red-to-green test for this task. Keep it; do not "fix" it into failing.
-test('GET /api/agents carries the v2 port fields the composer and the editor need', async () => {
-  const { agents } = await (await get('/api/agents')).json();
-  const planner = agents.find((a) => a.key === 'planner');
-  assert.equal(planner.metaVersion, 2);
-  assert.ok(Array.isArray(planner.inputs) && planner.inputs.some((p) => p.id === 'task'));
-  assert.ok(Array.isArray(planner.outputs) && planner.outputs.some((p) => p.id === 'plan'));
-  assert.equal(typeof planner.portSummary, 'string');
-  assert.ok(planner.portSummary.length > 0);
+test('GET /api/agents: origin, mockWriterRoles, v2 port fields, no markdown, workspace-only gated', async () => {
+  await checkRows([
+    { name: 'GET /api/agents carries origin + mockWriterRoles and EXCLUDES markdown', run: async () => {
+      const r = await get('/api/agents');
+      assert.equal(r.status, 200);
+      const data = await r.json();
+      assert.ok(Array.isArray(data.agents) && data.agents.length >= 9);
+      assert.ok(data.agents.every((a) => a.origin === 'builtin' || a.origin === 'user'));
+      assert.ok(data.agents.every((a) => !('markdown' in a)));
+      // mockWriterRoles is a CLOSED list (the mock switch in claude-runner.mjs),
+      // unlike the open channel vocabulary it will replace in Task 12.
+      assert.equal(data.channels, undefined, 'the channel vocabulary is gone from this payload');
+      assert.ok(Array.isArray(data.mockWriterRoles));
+      assert.ok(data.mockWriterRoles.includes('generic-verifier') && data.mockWriterRoles.includes('clarify'));
+      assert.ok(!data.agents.some((a) => a.key === 'workspaceScanner'), 'workspace-only excluded by default');
+      const all = await (await get('/api/agents?all=1')).json();
+      assert.ok(all.agents.some((a) => a.key === 'workspaceScanner'), '?all=1 includes workspace-only');
+    } },
+    // A REGRESSION PIN on the seed data: the builtin sidecars carry v2 ports
+    // (P1 seeded them).
+    { name: 'GET /api/agents carries the v2 port fields the composer and the editor need', run: async () => {
+      const { agents } = await (await get('/api/agents')).json();
+      const planner = agents.find((a) => a.key === 'planner');
+      assert.equal(planner.metaVersion, 2);
+      assert.ok(Array.isArray(planner.inputs) && planner.inputs.some((p) => p.id === 'task'));
+      assert.ok(Array.isArray(planner.outputs) && planner.outputs.some((p) => p.id === 'plan'));
+      assert.equal(typeof planner.portSummary, 'string');
+      assert.ok(planner.portSummary.length > 0);
+    } },
+  ]);
 });
 
 test('POST -> 201, GET :key (full incl. markdown), PUT, DELETE round-trip', async () => {

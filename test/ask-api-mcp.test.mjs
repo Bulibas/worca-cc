@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { withGw } from './helpers/with-env.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -82,48 +83,32 @@ test('the preview equals the turn\'s resolution: General\'s copy in both, the pr
   assert.equal(typeof turn.deps.mcpJoinNotice, 'function', 'the turn-end notice is wired');
 });
 
-test('per-chat choices: a { mcpOff } PATCH applies from the next turn and the preview (threadId); a body mcpOff overrides the stored one', async () => {
-  await idle();
-  const { thread } = await (await post('/api/ask/threads', {})).json();
-  assert.equal((await patch(`/api/ask/threads/${thread.id}`, { mcpOff: { sets: ['general'] } })).status, 200);
-  const off = await (await preview({ threadId: thread.id })).json();
-  assert.equal(off.started, 0);
-  assert.deepEqual(off.skipped.map((s) => [s.copy, s.reason]), [['docs', 'chat-off'], ['tickets', 'chat-off']]);
-  assert.equal((await (await preview({ threadId: thread.id, mcpOff: null })).json()).started, 1, 'a thread-less choice set overrides');
-  const r = await post(`/api/ask/threads/${thread.id}/messages`, { text: 'hi', ...MODEL, context: { view: 'new', pinned: false } });
-  assert.equal(r.status, 202);
-  const turn = await turnOf(thread.id);
-  assert.equal(turn.mcp, null, 'no copies this turn');
-  assert.ok(!turn.systemPrompt.includes('## MCP servers'), 'the prompt is byte-identical to a chat without servers');
-});
-
-test('a message body mcpOff decides that very turn, over the stored choices (the thread row is read before the write)', async () => {
-  await idle();
-  const { thread } = await (await post('/api/ask/threads', {})).json();
-  assert.equal((await patch(`/api/ask/threads/${thread.id}`, { mcpOff: { sets: ['general'] } })).status, 200);
-  const r = await post(`/api/ask/threads/${thread.id}/messages`, { text: 'hi', ...MODEL, context: { view: 'new', pinned: false }, mcpOff: null });
-  assert.equal(r.status, 202, await r.text());
-  const turn = await turnOf(thread.id);
-  assert.deepEqual(turn.mcp && turn.mcp.copies.map((c) => c.name), ['docs'], 'the body choices (all on), not the stored ones (General off)');
-});
-
-test('a card-event turn recomputes from the stored context and choices', async () => {
-  await idle();
-  const { appendMessage } = await import('../src/core/ask/store.mjs');
-  const { thread } = await (await post('/api/ask/threads', {})).json();
-  appendMessage(thread.id, { role: 'user', text: 'hi' });
-  appendMessage(thread.id, { role: 'assistant', text: 'ok', status: 'done', blocks: [{ kind: 'card', id: 'card_0000abcd', state: 'proposed', card: { type: 'model', summary: 'Add a model' } }] });
-  assert.equal((await patch(`/api/ask/threads/${thread.id}`, { mcpOff: { members: ['general|manual:docs'] } })).status, 200);
-  const r = await post(`/api/ask/threads/${thread.id}/cards/card_0000abcd`, { state: 'declined' });
-  assert.equal(r.status, 200, await r.text());
-  const turn = await turnOf(thread.id);
-  assert.equal(turn.mcp, null, 'the stored choice switched the only copy off');
-  assert.equal((await patch(`/api/ask/threads/${thread.id}`, { mcpOff: null })).status, 200);
-  await idle();
-  appendMessage(thread.id, { role: 'assistant', text: 'ok', status: 'done', blocks: [{ kind: 'card', id: 'card_0000abce', state: 'proposed', card: { type: 'model', summary: 'Another' } }] });
-  assert.equal((await post(`/api/ask/threads/${thread.id}/cards/card_0000abce`, { state: 'declined' })).status, 200);
-  for (let i = 0; i < 500 && mod._testing.askJobs.get(thread.id)?.turn === turn; i++) await new Promise((res) => setTimeout(res, 10));
-  assert.deepEqual(mod._testing.askJobs.get(thread.id).turn.mcp.copies.map((c) => c.name), ['docs'], 'recomputed, not the first turn\'s result');
+test('mcpOff precedence: a PATCH applies from the next turn and the preview; a body mcpOff overrides the stored one and decides that very turn', async () => {
+  await checkRows([
+    { name: 'per-chat choices: a { mcpOff } PATCH applies from the next turn and the preview (threadId); a body mcpOff overrides the stored one', run: async () => {
+      await idle();
+      const { thread } = await (await post('/api/ask/threads', {})).json();
+      assert.equal((await patch(`/api/ask/threads/${thread.id}`, { mcpOff: { sets: ['general'] } })).status, 200);
+      const off = await (await preview({ threadId: thread.id })).json();
+      assert.equal(off.started, 0);
+      assert.deepEqual(off.skipped.map((s) => [s.copy, s.reason]), [['docs', 'chat-off'], ['tickets', 'chat-off']]);
+      assert.equal((await (await preview({ threadId: thread.id, mcpOff: null })).json()).started, 1, 'a thread-less choice set overrides');
+      const r = await post(`/api/ask/threads/${thread.id}/messages`, { text: 'hi', ...MODEL, context: { view: 'new', pinned: false } });
+      assert.equal(r.status, 202);
+      const turn = await turnOf(thread.id);
+      assert.equal(turn.mcp, null, 'no copies this turn');
+      assert.ok(!turn.systemPrompt.includes('## MCP servers'), 'the prompt is byte-identical to a chat without servers');
+    } },
+    { name: 'a message body mcpOff decides that very turn, over the stored choices (the thread row is read before the write)', run: async () => {
+      await idle();
+      const { thread } = await (await post('/api/ask/threads', {})).json();
+      assert.equal((await patch(`/api/ask/threads/${thread.id}`, { mcpOff: { sets: ['general'] } })).status, 200);
+      const r = await post(`/api/ask/threads/${thread.id}/messages`, { text: 'hi', ...MODEL, context: { view: 'new', pinned: false }, mcpOff: null });
+      assert.equal(r.status, 202, await r.text());
+      const turn = await turnOf(thread.id);
+      assert.deepEqual(turn.mcp && turn.mcp.copies.map((c) => c.name), ['docs'], 'the body choices (all on), not the stored ones (General off)');
+    } },
+  ]);
 });
 
 test('the composer model sets the §5.6 tool-name limit: a translated model skips the never-tested copy', async () => {
@@ -134,28 +119,50 @@ test('the composer model sets the §5.6 tool-name limit: a translated model skip
   assert.equal((await (await preview({})).json()).started, 1, 'a first-party model keeps the 128 limit');
 });
 
-test('the server wiring reads the thread\'s open worktrees: the turn-end join notice and the preview (threadId)', async () => {
-  await idle();
-  const { addProject } = await import('../src/core/projects.mjs');
-  const { gitDir } = await import('./helpers/git-dir.mjs');
-  const shop = (await addProject({ name: 'shop', path: gitDir('askmcp-shop') })).find((p) => p.name === 'shop');
-  const { addManualServer, createSet, putMember, setProjectAssignment } = await import('../src/core/mcp/store.mjs');
-  const def = await addManualServer('tracker', { type: 'http', url: 'https://tracker.example.com/mcp', fields: [] });
-  const set = await createSet('Shop');
-  await putMember(set.id, 'manual:tracker', { enabled: true, values: {} }, { def });
-  await setProjectAssignment(shop.key, { sets: [set.id], includeGeneral: true });
-  const { thread } = await (await post('/api/ask/threads', {})).json();
-  const r = await post(`/api/ask/threads/${thread.id}/messages`, { text: 'hi', ...MODEL, context: { view: 'settings', pinned: false } });
-  assert.equal(r.status, 202, await r.text());
-  const turn = await turnOf(thread.id);
-  assert.ok(!turn.mcp.copies.some((c) => c.name === 'tracker_shop'), 'precondition: shop is not in play at turn start');
-  // the model opens a worktree on shop during the turn (open_worktree → openAskWorktree)
-  const { openAskWorktree } = await import('../src/core/ask/worktrees.mjs');
-  await openAskWorktree({ threadId: thread.id, projectKey: shop.key, ref: 'HEAD' });
-  assert.equal(await turn.deps.mcpJoinNotice(), "shop's MCP servers (tracker_shop) join from the next message");
-  assert.equal((await patch(`/api/ask/threads/${thread.id}`, { mcpOff: { sets: [set.id] } })).status, 200);
-  assert.equal(await turn.deps.mcpJoinNotice(), null, 'the stored choices at turn end: a set switched off in this chat joins nothing');
-  assert.equal((await patch(`/api/ask/threads/${thread.id}`, { mcpOff: null })).status, 200);
-  const p = await (await preview({ threadId: thread.id })).json();
-  assert.ok(p.copies.some((c) => c.name === 'tracker_shop'), 'the preview adds the thread\'s open worktrees');
+test('server wiring: a card-event turn recomputes from stored context/choices; the thread\'s open worktrees feed the join notice and the preview', async () => {
+  await checkRows([
+    { name: 'a card-event turn recomputes from the stored context and choices', run: async () => {
+      await idle();
+      const { appendMessage } = await import('../src/core/ask/store.mjs');
+      const { thread } = await (await post('/api/ask/threads', {})).json();
+      appendMessage(thread.id, { role: 'user', text: 'hi' });
+      appendMessage(thread.id, { role: 'assistant', text: 'ok', status: 'done', blocks: [{ kind: 'card', id: 'card_0000abcd', state: 'proposed', card: { type: 'model', summary: 'Add a model' } }] });
+      assert.equal((await patch(`/api/ask/threads/${thread.id}`, { mcpOff: { members: ['general|manual:docs'] } })).status, 200);
+      const r = await post(`/api/ask/threads/${thread.id}/cards/card_0000abcd`, { state: 'declined' });
+      assert.equal(r.status, 200, await r.text());
+      const turn = await turnOf(thread.id);
+      assert.equal(turn.mcp, null, 'the stored choice switched the only copy off');
+      assert.equal((await patch(`/api/ask/threads/${thread.id}`, { mcpOff: null })).status, 200);
+      await idle();
+      appendMessage(thread.id, { role: 'assistant', text: 'ok', status: 'done', blocks: [{ kind: 'card', id: 'card_0000abce', state: 'proposed', card: { type: 'model', summary: 'Another' } }] });
+      assert.equal((await post(`/api/ask/threads/${thread.id}/cards/card_0000abce`, { state: 'declined' })).status, 200);
+      for (let i = 0; i < 500 && mod._testing.askJobs.get(thread.id)?.turn === turn; i++) await new Promise((res) => setTimeout(res, 10));
+      assert.deepEqual(mod._testing.askJobs.get(thread.id).turn.mcp.copies.map((c) => c.name), ['docs'], 'recomputed, not the first turn\'s result');
+    } },
+    { name: 'the server wiring reads the thread\'s open worktrees: the turn-end join notice and the preview (threadId)', run: async () => {
+      await idle();
+      const { addProject } = await import('../src/core/projects.mjs');
+      const { gitDir } = await import('./helpers/git-dir.mjs');
+      const shop = (await addProject({ name: 'shop', path: gitDir('askmcp-shop') })).find((p) => p.name === 'shop');
+      const { addManualServer, createSet, putMember, setProjectAssignment } = await import('../src/core/mcp/store.mjs');
+      const def = await addManualServer('tracker', { type: 'http', url: 'https://tracker.example.com/mcp', fields: [] });
+      const set = await createSet('Shop');
+      await putMember(set.id, 'manual:tracker', { enabled: true, values: {} }, { def });
+      await setProjectAssignment(shop.key, { sets: [set.id], includeGeneral: true });
+      const { thread } = await (await post('/api/ask/threads', {})).json();
+      const r = await post(`/api/ask/threads/${thread.id}/messages`, { text: 'hi', ...MODEL, context: { view: 'settings', pinned: false } });
+      assert.equal(r.status, 202, await r.text());
+      const turn = await turnOf(thread.id);
+      assert.ok(!turn.mcp.copies.some((c) => c.name === 'tracker_shop'), 'precondition: shop is not in play at turn start');
+      // the model opens a worktree on shop during the turn (open_worktree → openAskWorktree)
+      const { openAskWorktree } = await import('../src/core/ask/worktrees.mjs');
+      await openAskWorktree({ threadId: thread.id, projectKey: shop.key, ref: 'HEAD' });
+      assert.equal(await turn.deps.mcpJoinNotice(), "shop's MCP servers (tracker_shop) join from the next message");
+      assert.equal((await patch(`/api/ask/threads/${thread.id}`, { mcpOff: { sets: [set.id] } })).status, 200);
+      assert.equal(await turn.deps.mcpJoinNotice(), null, 'the stored choices at turn end: a set switched off in this chat joins nothing');
+      assert.equal((await patch(`/api/ask/threads/${thread.id}`, { mcpOff: null })).status, 200);
+      const p = await (await preview({ threadId: thread.id })).json();
+      assert.ok(p.copies.some((c) => c.name === 'tracker_shop'), 'the preview adds the thread\'s open worktrees');
+    } },
+  ]);
 });

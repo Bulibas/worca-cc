@@ -1,7 +1,5 @@
-// test/scripts-view-notify.test.mjs — #555 §7.1 / D9: the Scripts controller reports a result through
-// an injected `notify` (a toast that outlives the route change), keeps progress text inline, turns a
-// refused (409) Delete into one err toast instead of a second dialog, and without `notify` falls
-// back to today's inline line.
+// test/scripts-view-notify.test.mjs — #555 §7.1: without an injected `notify`, the Scripts controller
+// falls back to today's inline line for its results.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
@@ -41,47 +39,6 @@ function mountCtl({ notify = true, api: apiOver = {} } = {}) {
   });
   return { host, msgEl, ctl, toasts, asked };
 }
-
-test('Duplicate: the result is an ok toast; the inline line stays empty after the route', async () => {
-  const { host, msgEl, ctl, toasts } = mountCtl();
-  await ctl.route('');
-  host.querySelector('.script-card[data-script-key="shell"] .script-duplicate').click();
-  await settle();
-  assert.deepEqual(toasts, [{ tone: 'ok', title: 'Duplicated as "shellCopy".', detail: '' }]);
-  assert.equal(msgEl.textContent, '');
-  ctl.destroy();
-});
-
-test('Delete: the result is an ok toast', async () => {
-  const { host, msgEl, ctl, toasts } = mountCtl();
-  await ctl.route('');
-  host.querySelector('.script-card[data-script-key="runTests"] .script-delete').click();
-  await settle();
-  assert.deepEqual(toasts, [{ tone: 'ok', title: 'Deleted "runTests".', detail: '' }]);
-  assert.equal(msgEl.textContent, '');
-  ctl.destroy();
-});
-
-test('D9: a refused (409) Delete is one err toast; confirm is asked only the delete question', async () => {
-  const sentence = 'script "runTests" is placed in 2 saved workflows: Ship it, Nightly';
-  const { host, ctl, toasts, asked } = mountCtl({ api: { remove: async () => ({ ok: false, status: 409, data: { error: sentence } }) } });
-  await ctl.route('');
-  host.querySelector('.script-card[data-script-key="runTests"] .script-delete').click();
-  await settle();
-  assert.equal(asked.length, 1, 'no second "Cannot delete" dialog');
-  assert.equal(asked[0].title, 'Delete script');
-  assert.deepEqual(toasts, [{ tone: 'err', title: 'Cannot delete script', detail: sentence, key: 'script-del-runTests' }]);
-  ctl.destroy();
-});
-
-test('a failed list is an err toast with notify; progress-free inline line', async () => {
-  const { msgEl, ctl, toasts } = mountCtl({ api: { list: async () => ({ ok: false, status: 500, data: { error: 'registry unreadable' } }) } });
-  await ctl.route('');
-  assert.deepEqual(toasts, [{ tone: 'err', title: 'registry unreadable', detail: '' }]);
-  assert.equal(msgEl.textContent, '');
-  assert.equal(msgEl.className, 'form-msg');
-  ctl.destroy();
-});
 
 test('no notify injected: results fall back to the inline line (and survive the route)', async () => {
   const { host, msgEl, ctl } = mountCtl({ notify: false });

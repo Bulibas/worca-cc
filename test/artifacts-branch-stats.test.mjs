@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { _resetForTests } from '../src/core/db.mjs';
 import { seedPipeline } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let home, prevHome, repo;
 let pp1Id; // minted id of the surviving-branch pipeline (test 1), reused by test 3
@@ -36,63 +37,69 @@ after(async () => {
   await rm(repo, { recursive: true, force: true });
 });
 
-test('rowToHistoryEntry adds survived + sourceBranch + added/removed for a live branch', async () => {
-  const { listPipelines } = await import('../src/core/artifacts.mjs');
-  // Seed a pipeline row whose branch points at the repo's feature branch.
-  const { id } = await seedPipeline(repo, {
-    title: 'Feat', status: 'stopped', startedAt: '2026-06-01T00:00:00Z',
-    branch: { source: 'main', feature: 'worca-cc/feat-1', branchKept: true },
-  });
-  pp1Id = id; // reused by the machine-wide test below
-  const rows = await listPipelines(repo);
-  const row = rows.find((r) => r.id === id);
-  assert.equal(row.branch, 'worca-cc/feat-1');
-  assert.equal(row.sourceBranch, 'main');
-  assert.equal(row.survived, true);
-  assert.equal(row.added, 1);
-  assert.equal(row.removed, 0);
+test('rowToHistoryEntry: a live branch reports survived/sourceBranch/added/removed; a gone one survived=false', async () => {
+  await checkRows([
+    { name: 'rowToHistoryEntry adds survived + sourceBranch + added/removed for a live branch', run: async () => {
+      const { listPipelines } = await import('../src/core/artifacts.mjs');
+      // Seed a pipeline row whose branch points at the repo's feature branch.
+      const { id } = await seedPipeline(repo, {
+        title: 'Feat', status: 'stopped', startedAt: '2026-06-01T00:00:00Z',
+        branch: { source: 'main', feature: 'worca-cc/feat-1', branchKept: true },
+      });
+      pp1Id = id; // reused by the machine-wide test below
+      const rows = await listPipelines(repo);
+      const row = rows.find((r) => r.id === id);
+      assert.equal(row.branch, 'worca-cc/feat-1');
+      assert.equal(row.sourceBranch, 'main');
+      assert.equal(row.survived, true);
+      assert.equal(row.added, 1);
+      assert.equal(row.removed, 0);
+    } },
+    { name: 'rowToHistoryEntry reports survived=false when the branch is gone', run: async () => {
+      const { listPipelines } = await import('../src/core/artifacts.mjs');
+      const { id } = await seedPipeline(repo, {
+        title: 'Gone', status: 'done', startedAt: '2026-06-01T00:00:00Z',
+        branch: { source: 'main', feature: 'worca-cc/deleted', branchKept: true },
+      });
+      const row = (await listPipelines(repo)).find((r) => r.id === id);
+      assert.equal(row.survived, false);
+      assert.equal(row.added, 0);
+      assert.equal(row.removed, 0);
+    } },
+  ]);
 });
 
-test('rowToHistoryEntry reports survived=false when the branch is gone', async () => {
-  const { listPipelines } = await import('../src/core/artifacts.mjs');
-  const { id } = await seedPipeline(repo, {
-    title: 'Gone', status: 'done', startedAt: '2026-06-01T00:00:00Z',
-    branch: { source: 'main', feature: 'worca-cc/deleted', branchKept: true },
-  });
-  const row = (await listPipelines(repo)).find((r) => r.id === id);
-  assert.equal(row.survived, false);
-  assert.equal(row.added, 0);
-  assert.equal(row.removed, 0);
-});
+test('listAllPipelines enriches machine-wide via store_meta.path; lite skips enrichment', async () => {
+  await checkRows([
+    { name: 'listAllPipelines threads store_meta.path so survived/added are computed machine-wide', run: async () => {
+      const { listAllPipelines, writeStoreMeta } = await import('../src/core/artifacts.mjs');
+      const { projectKey } = await import('../src/core/store.mjs');
+      const key = projectKey(repo);
+      // Pin the repo's store_meta path to the literal `repo` (createPipeline's ensureMeta
+      // wrote a realpath'd path) so listAllPipelines hands meta.path into rowToHistoryEntry
+      // as the git repo root AND row.projectDir === repo holds.
+      writeStoreMeta(key, 'project', { key, name: 'Repo', path: repo });
 
-test('listAllPipelines threads store_meta.path so survived/added are computed machine-wide', async () => {
-  const { listAllPipelines, writeStoreMeta } = await import('../src/core/artifacts.mjs');
-  const { projectKey } = await import('../src/core/store.mjs');
-  const key = projectKey(repo);
-  // Pin the repo's store_meta path to the literal `repo` (createPipeline's ensureMeta
-  // wrote a realpath'd path) so listAllPipelines hands meta.path into rowToHistoryEntry
-  // as the git repo root AND row.projectDir === repo holds.
-  writeStoreMeta(key, 'project', { key, name: 'Repo', path: repo });
-
-  const rows = await listAllPipelines();
-  const row = rows.find((r) => r.id === pp1Id);
-  assert.ok(row, 'the surviving-branch pipeline is present in machine-wide history');
-  assert.equal(row.projectDir, repo);
-  assert.equal(row.survived, true);
-  assert.equal(row.added, 1);
-  assert.equal(row.removed, 0);
-});
-
-test('lite skips git enrichment on a row that would otherwise be enriched', async () => {
-  // These fixtures are the only ones where enrichment is REAL (a live git repo whose
-  // feature branch exists), so this is where `lite` can be proven to skip it.
-  const { listAllPipelines } = await import('../src/core/artifacts.mjs');
-  const full = await listAllPipelines();
-  assert.equal(full.find((r) => r.id === pp1Id).survived, true, 'fixture sanity: enrichment is real here');
-  const lite = await listAllPipelines({ lite: true });
-  const r = lite.find((x) => x.id === pp1Id);
-  assert.equal(r.survived, false);
-  assert.equal(r.added, 0);
+      const rows = await listAllPipelines();
+      const row = rows.find((r) => r.id === pp1Id);
+      assert.ok(row, 'the surviving-branch pipeline is present in machine-wide history');
+      assert.equal(row.projectDir, repo);
+      assert.equal(row.survived, true);
+      assert.equal(row.added, 1);
+      assert.equal(row.removed, 0);
+    } },
+    { name: 'lite skips git enrichment on a row that would otherwise be enriched', run: async () => {
+      // These fixtures are the only ones where enrichment is REAL (a live git repo whose
+      // feature branch exists), so this is where `lite` can be proven to skip it.
+      const { listAllPipelines } = await import('../src/core/artifacts.mjs');
+      const full = await listAllPipelines();
+      assert.equal(full.find((r) => r.id === pp1Id).survived, true, 'fixture sanity: enrichment is real here');
+      const lite = await listAllPipelines({ lite: true });
+      const r = lite.find((x) => x.id === pp1Id);
+      assert.equal(r.survived, false);
+      assert.equal(r.added, 0);
+    } },
+  ]);
 });
 
 // A finished run's results.json summary is the frozen truth: once the feature branch

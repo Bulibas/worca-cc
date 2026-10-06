@@ -2,8 +2,9 @@
 // Pure jsdom: the module imports nothing, so no /vendor route and no hljs are involved.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { JSDOM } from 'jsdom';
-import { createCodeEditor, escapeHtml, HIGHLIGHT_DEBOUNCE_MS, TAB_SPACES } from '../ui/public/code-editor.mjs';
+import { createCodeEditor, escapeHtml, HIGHLIGHT_DEBOUNCE_MS } from '../ui/public/code-editor.mjs';
 
 const dom = new JSDOM('<!doctype html><body></body>');
 const doc = dom.window.document;
@@ -19,73 +20,80 @@ const key = (ta, { shift = false } = {}) => ta.dispatchEvent(
   new win.KeyboardEvent('keydown', { key: 'Tab', shiftKey: shift, bubbles: true, cancelable: true }),
 );
 
-test('escapeHtml covers the five metacharacters', () => {
-  assert.equal(escapeHtml(`<a href="x">&'</a>`), '&lt;a href=&quot;x&quot;&gt;&amp;&#39;&lt;/a&gt;');
-  assert.equal(escapeHtml(null), '');
-  assert.equal(TAB_SPACES, '  ');
-  assert.equal(HIGHLIGHT_DEBOUNCE_MS, 60);
+test('escapeHtml covers the five metacharacters and the DEFAULT highlighter escapes, so a source can never inject markup', async () => {
+  await checkRows([
+    { name: 'escapeHtml covers the five metacharacters', run: () => {
+      assert.equal(escapeHtml(`<a href="x">&'</a>`), '&lt;a href=&quot;x&quot;&gt;&amp;&#39;&lt;/a&gt;');
+      assert.equal(escapeHtml(null), '');
+    } },
+    { name: 'the DEFAULT highlighter escapes, so a script source can never inject markup', run: async () => {
+      const ed = createCodeEditor({ doc, value: '<img src=x onerror=alert(1)>' });
+      await tick();
+      const { code } = parts(ed);
+      assert.equal(code.querySelector('img'), null);
+      assert.equal(code.textContent, '<img src=x onerror=alert(1)>\n');
+      ed.destroy();
+    } },
+  ]);
 });
 
-test('the structure: a textarea over an aria-hidden highlighted pre, named for the host form', async () => {
-  const ed = createCodeEditor({ doc, value: 'const a = 1;\n', language: 'javascript', rows: 6, name: 'param:source' });
-  const { pre, code, ta } = parts(ed);
-  assert.ok(ed.el.classList.contains('code-editor'));
-  assert.equal(ed.el.dataset.language, 'javascript');
-  assert.equal(pre.getAttribute('aria-hidden'), 'true');
-  assert.ok(code, 'the pre holds a <code>');
-  assert.equal(ta.rows, 6);
-  assert.equal(ta.spellcheck, false);
-  assert.equal(ta.dataset.field, 'param:source');
-  assert.ok(ta.classList.contains('mono'));
-  assert.equal(ed.getValue(), 'const a = 1;\n');
-  assert.equal(ta.readOnly, false);
-  await tick();
-  assert.equal(code.innerHTML, 'const a = 1;\n\n', 'the default highlighter escapes, plus the trailing row newline');
-  ed.destroy();
+test('structure: textarea over an aria-hidden pre, data-field only when named', async () => {
+  await checkRows([
+    { name: 'the structure: a textarea over an aria-hidden highlighted pre, named for the host form', run: async () => {
+      const ed = createCodeEditor({ doc, value: 'const a = 1;\n', language: 'javascript', rows: 6, name: 'param:source' });
+      const { pre, code, ta } = parts(ed);
+      assert.ok(ed.el.classList.contains('code-editor'));
+      assert.equal(ed.el.dataset.language, 'javascript');
+      assert.equal(pre.getAttribute('aria-hidden'), 'true');
+      assert.ok(code, 'the pre holds a <code>');
+      assert.equal(ta.rows, 6);
+      assert.equal(ta.spellcheck, false);
+      assert.equal(ta.dataset.field, 'param:source');
+      assert.ok(ta.classList.contains('mono'));
+      assert.equal(ed.getValue(), 'const a = 1;\n');
+      assert.equal(ta.readOnly, false);
+      await tick();
+      assert.equal(code.innerHTML, 'const a = 1;\n\n', 'the default highlighter escapes, plus the trailing row newline');
+      ed.destroy();
+    } },
+    { name: 'an unnamed editor carries no data-field (nothing routes to the composer)', run: () => {
+      const ed = createCodeEditor({ doc, value: '' });
+      assert.equal(parts(ed).ta.dataset.field, undefined);
+      ed.destroy();
+    } },
+  ]);
 });
 
-test('an unnamed editor carries no data-field (nothing routes to the composer)', () => {
-  const ed = createCodeEditor({ doc, value: '' });
-  assert.equal(parts(ed).ta.dataset.field, undefined);
-  ed.destroy();
-});
-
-test('the DEFAULT highlighter escapes, so a script source can never inject markup', async () => {
-  const ed = createCodeEditor({ doc, value: '<img src=x onerror=alert(1)>' });
-  await tick();
-  const { code } = parts(ed);
-  assert.equal(code.querySelector('img'), null);
-  assert.equal(code.textContent, '<img src=x onerror=alert(1)>\n');
-  ed.destroy();
-});
-
-test('typing repaints on a 60 ms trailing debounce; the injected highlighter sees the language', async () => {
-  const calls = [];
-  const ed = createCodeEditor({
-    doc, value: 'a', language: 'bash',
-    highlight: async (text, lang) => { calls.push([text, lang]); return `<span class="hljs-string">${escapeHtml(text)}</span>`; },
-  });
-  await tick();
-  assert.deepEqual(calls, [['a', 'bash']], 'one paint on construction');
-  const { ta, code } = parts(ed);
-  for (const v of ['ab', 'abc', 'abcd']) {
-    ta.value = v;
-    ta.dispatchEvent(new win.Event('input', { bubbles: true }));
-  }
-  assert.equal(calls.length, 1, 'nothing repaints while the keystrokes are still coming');
-  await sleep(HIGHLIGHT_DEBOUNCE_MS * 4);
-  assert.deepEqual(calls, [['a', 'bash'], ['abcd', 'bash']], 'three keystrokes collapse into ONE repaint');
-  assert.equal(code.innerHTML, '<span class="hljs-string">abcd</span>\n');
-  ed.destroy();
-});
-
-test('onInput fires on every keystroke (the dirty marker cannot wait for the debounce)', async () => {
-  const seen = [];
-  const ed = createCodeEditor({ doc, value: '', onInput: (v) => seen.push(v) });
-  const { ta } = parts(ed);
-  for (const v of ['x', 'xy']) { ta.value = v; ta.dispatchEvent(new win.Event('input', { bubbles: true })); }
-  assert.deepEqual(seen, ['x', 'xy']);
-  ed.destroy();
+test('typing: onInput on every keystroke, repaint on one 60 ms trailing debounce with the language', async () => {
+  await checkRows([
+    { name: 'typing repaints on a 60 ms trailing debounce; the injected highlighter sees the language', run: async () => {
+      const calls = [];
+      const ed = createCodeEditor({
+        doc, value: 'a', language: 'bash',
+        highlight: async (text, lang) => { calls.push([text, lang]); return `<span class="hljs-string">${escapeHtml(text)}</span>`; },
+      });
+      await tick();
+      assert.deepEqual(calls, [['a', 'bash']], 'one paint on construction');
+      const { ta, code } = parts(ed);
+      for (const v of ['ab', 'abc', 'abcd']) {
+        ta.value = v;
+        ta.dispatchEvent(new win.Event('input', { bubbles: true }));
+      }
+      assert.equal(calls.length, 1, 'nothing repaints while the keystrokes are still coming');
+      await sleep(HIGHLIGHT_DEBOUNCE_MS * 4);
+      assert.deepEqual(calls, [['a', 'bash'], ['abcd', 'bash']], 'three keystrokes collapse into ONE repaint');
+      assert.equal(code.innerHTML, '<span class="hljs-string">abcd</span>\n');
+      ed.destroy();
+    } },
+    { name: 'onInput fires on every keystroke (the dirty marker cannot wait for the debounce)', run: async () => {
+      const seen = [];
+      const ed = createCodeEditor({ doc, value: '', onInput: (v) => seen.push(v) });
+      const { ta } = parts(ed);
+      for (const v of ['x', 'xy']) { ta.value = v; ta.dispatchEvent(new win.Event('input', { bubbles: true })); }
+      assert.deepEqual(seen, ['x', 'xy']);
+      ed.destroy();
+    } },
+  ]);
 });
 
 test('a stale highlight result is dropped: the newest text always wins', async () => {
@@ -131,31 +139,34 @@ test('Tab inserts two spaces at the caret and fires input', () => {
   ed.destroy();
 });
 
-test('Tab over a multi-line selection indents every touched line; Shift+Tab outdents', () => {
-  const ed = createCodeEditor({ doc, value: 'one\ntwo\nthree' });
-  const { ta } = parts(ed);
-  ta.selectionStart = 1;              // inside "one"
-  ta.selectionEnd = 5;                // inside "two"
-  key(ta);
-  assert.equal(ed.getValue(), '  one\n  two\nthree');
-  assert.equal(ta.selectionStart, 3, 'the caret keeps its column');
-  assert.equal(ta.selectionEnd, 9);
-  key(ta, { shift: true });
-  assert.equal(ed.getValue(), 'one\ntwo\nthree');
-  key(ta, { shift: true });
-  assert.equal(ed.getValue(), 'one\ntwo\nthree', 'outdenting an unindented block is a no-op');
-  ed.destroy();
-});
-
-test('Shift+Tab on one line removes up to two leading spaces', () => {
-  const ed = createCodeEditor({ doc, value: 'x\n   y' });
-  const { ta } = parts(ed);
-  ta.selectionStart = ta.selectionEnd = 5;
-  key(ta, { shift: true });
-  assert.equal(ed.getValue(), 'x\n y');
-  key(ta, { shift: true });
-  assert.equal(ed.getValue(), 'x\ny');
-  ed.destroy();
+test('Tab/Shift+Tab indent and outdent single and multi-line selections', async () => {
+  await checkRows([
+    { name: 'Tab over a multi-line selection indents every touched line; Shift+Tab outdents', run: () => {
+      const ed = createCodeEditor({ doc, value: 'one\ntwo\nthree' });
+      const { ta } = parts(ed);
+      ta.selectionStart = 1;              // inside "one"
+      ta.selectionEnd = 5;                // inside "two"
+      key(ta);
+      assert.equal(ed.getValue(), '  one\n  two\nthree');
+      assert.equal(ta.selectionStart, 3, 'the caret keeps its column');
+      assert.equal(ta.selectionEnd, 9);
+      key(ta, { shift: true });
+      assert.equal(ed.getValue(), 'one\ntwo\nthree');
+      key(ta, { shift: true });
+      assert.equal(ed.getValue(), 'one\ntwo\nthree', 'outdenting an unindented block is a no-op');
+      ed.destroy();
+    } },
+    { name: 'Shift+Tab on one line removes up to two leading spaces', run: () => {
+      const ed = createCodeEditor({ doc, value: 'x\n   y' });
+      const { ta } = parts(ed);
+      ta.selectionStart = ta.selectionEnd = 5;
+      key(ta, { shift: true });
+      assert.equal(ed.getValue(), 'x\n y');
+      key(ta, { shift: true });
+      assert.equal(ed.getValue(), 'x\ny');
+      ed.destroy();
+    } },
+  ]);
 });
 
 test('Escape then Tab leaves the editor: the accessible control is not a keyboard trap', () => {

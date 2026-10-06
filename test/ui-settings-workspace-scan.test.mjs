@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { lastToast, edit } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -70,29 +71,30 @@ async function boot({ configOk = true } = {}) {
 
 const vals = (doc) => ['wsScanModel', 'wsScanEffort', 'wsAgentModel', 'wsAgentEffort'].map((id) => doc.getElementById(id).value);
 
-test('the Workspaces card sits on the Runs tab between Scheduled runs and Chat notifications and shows the defaults', async () => {
-  const { window, openSettings } = await boot(); await openSettings();
-  const doc = window.document;
-  const runsIds = [...doc.querySelectorAll('.settings-pane[data-tab="runs"] section.card.settings-card')].map((c) => c.id);
-  assert.deepEqual(runsIds, ['budget-settings-card', 'night-settings-card', 'sync-settings-card', 'schedule-settings-card', 'actions-settings-card', 'ws-scan-models-card', 'chat-settings-card']);
-  assert.equal(doc.querySelector('#ws-scan-models-card h2').textContent.trim(), 'Workspaces');
-  assert.equal(doc.getElementById('ws-scan-models-card').dataset.minLevel, 'advanced');
-  assert.deepEqual(vals(doc), ['claude-sonnet-5', 'medium', 'sonnet', 'medium']);
-});
-
-test('Save posts the four picks; Use default posts null; changing the scan model repaints its efforts', async () => {
+test('the Workspaces card (Runs tab) shows the defaults; Save posts the four picks, Use default posts null, a scan model change repaints its efforts', async () => {
   const { window, openSettings, posts, tick } = await boot(); await openSettings();
   const doc = window.document;
-  assert.equal(doc.getElementById('wsScanModelsSave').disabled, true, 'Save starts disabled');
-  edit(window, doc.getElementById('wsScanModel'), 'claude-opus-5-5');
-  edit(window, doc.getElementById('wsScanEffort'), 'xhigh');
-  edit(window, doc.getElementById('wsAgentModel'), 'fable');
-  edit(window, doc.getElementById('wsAgentEffort'), 'high');
-  doc.getElementById('wsScanModelsSave').click(); await tick(); await tick();
-  assert.deepEqual(posts.at(-1), { workspaceScan: { scanModel: 'claude-opus-5-5', scanEffort: 'xhigh', agentModel: 'fable', agentEffort: 'high' } });
-  assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Saved', detail: 'Applies to the next scan.', action: '' });
-  doc.getElementById('wsScanModelsReset').click(); await tick(); await tick();
-  assert.deepEqual(posts.at(-1), { workspaceScan: null });
+  await checkRows([
+    { name: 'the Workspaces card sits on the Runs tab between Scheduled runs and Chat notifications and shows the defaults', run: async () => {
+      const runsIds = [...doc.querySelectorAll('.settings-pane[data-tab="runs"] section.card.settings-card')].map((c) => c.id);
+      assert.deepEqual(runsIds, ['budget-settings-card', 'night-settings-card', 'sync-settings-card', 'schedule-settings-card', 'actions-settings-card', 'ws-scan-models-card', 'chat-settings-card']);
+      assert.equal(doc.querySelector('#ws-scan-models-card h2').textContent.trim(), 'Workspaces');
+      assert.equal(doc.getElementById('ws-scan-models-card').dataset.minLevel, 'advanced');
+      assert.deepEqual(vals(doc), ['claude-sonnet-5', 'medium', 'sonnet', 'medium']);
+    } },
+    { name: 'Save posts the four picks; Use default posts null; changing the scan model repaints its efforts', run: async () => {
+      assert.equal(doc.getElementById('wsScanModelsSave').disabled, true, 'Save starts disabled');
+      edit(window, doc.getElementById('wsScanModel'), 'claude-opus-5-5');
+      edit(window, doc.getElementById('wsScanEffort'), 'xhigh');
+      edit(window, doc.getElementById('wsAgentModel'), 'fable');
+      edit(window, doc.getElementById('wsAgentEffort'), 'high');
+      doc.getElementById('wsScanModelsSave').click(); await tick(); await tick();
+      assert.deepEqual(posts.at(-1), { workspaceScan: { scanModel: 'claude-opus-5-5', scanEffort: 'xhigh', agentModel: 'fable', agentEffort: 'high' } });
+      assert.deepEqual(lastToast(doc), { tone: 'ok', title: 'Saved', detail: 'Applies to the next scan.', action: '' });
+      doc.getElementById('wsScanModelsReset').click(); await tick(); await tick();
+      assert.deepEqual(posts.at(-1), { workspaceScan: null });
+    } },
+  ]);
 });
 
 test('a stored scan model that left the catalog is shown as not installed and Save refuses it', async () => {

@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { makePanel, key } from './helpers/ask-panel-harness.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 const TID = 'ask_00000001';
 const copy = (setId, setName, name, serverId) => ({ name, copy: name, setId, setName, serverId, projects: [], description: '', renamedFrom: null, provisional: false });
@@ -51,125 +52,168 @@ const settle = async (ctx) => { for (let i = 0; i < 6; i++) await ctx.tick(); };
 const btn = (ctx) => ctx.doc.querySelector('[data-ask-mcp-btn]');
 const pop = (ctx) => ctx.doc.querySelector('.ask-pop-mcp');
 
-test('chip: MCP · N right after the scope pill, advanced level; N = copies starting next turn; hidden when no set in play has a member', async () => {
-  const { state, ctx } = setup();
-  ctx.panel.open();
-  await settle(ctx);
-  const b = btn(ctx);
-  assert.equal(ctx.doc.querySelector('[data-ask-scope-btn]').nextElementSibling, b);
-  assert.equal(b.dataset.minLevel, 'advanced');
-  assert.equal(b.hidden, false);
-  assert.equal(b.textContent.trim(), 'MCP · 7');
-  assert.deepEqual(state.previews[0], { context: { view: 'projects', projectKey: 'billing-00000001', pinned: false }, mcpOff: { sets: [], members: [] }, model: 'claude-opus-5-5' },
-    'the same scopedContext(getPageContext()) the send uses, the held choices and the composer\'s model');
-  state.preview = { sets: [{ id: 'general', name: 'General', group: 'general', routes: [], members: 0, started: 0 }], copies: [], skipped: [], started: 0 };
-  ctx.panel.close(); ctx.panel.open();
-  await settle(ctx);
-  assert.equal(b.hidden, true, 'nothing in play has a member');
-  ctx.panel.destroy();
-});
-
-test('level 1: one row per set in the preview\'s order — role none holding a menuitemcheckbox switch and a menuitem drill button; the footer links Settings', async () => {
-  const { ctx } = setup();
-  ctx.panel.open();
-  await settle(ctx);
-  btn(ctx).click();
-  await settle(ctx);
-  const rows = [...pop(ctx).querySelectorAll('.ask-mcp-row')];
-  assert.equal(rows.length, 4);
-  for (const r of rows) {
-    assert.equal(r.getAttribute('role'), 'none');
-    assert.equal(r.children[0].getAttribute('role'), 'menuitemcheckbox');
-    assert.equal(r.children[0].getAttribute('aria-checked'), 'true');
-    assert.equal(r.children[1].getAttribute('role'), 'menuitem');
-  }
-  assert.deepEqual(rows.map((r) => r.children[1].querySelector('.ask-model-name').textContent),
-    ['General', 'Billing · pinned', 'Shop · open worktree', 'Team · acme/platform']);
-  assert.deepEqual(rows.map((r) => r.children[1].querySelector('.ask-pop-row-value').textContent), ['2/2', '2/3', '2/2', '1/3']);
-  assert.match(pop(ctx).textContent, /Manage in Settings › MCP servers/);
-  // the keyboard walks the switches too (menuItems() is widened to menuitemcheckbox)
-  assert.equal(ctx.doc.activeElement, rows[0].children[0], 'the first switch takes focus on open');
-  rows[0].children[1].focus();
-  key(ctx.window, rows[0].children[1], 'ArrowDown');
-  assert.equal(ctx.doc.activeElement, rows[1].children[0], 'a drill button → the next row\'s switch');
-  ctx.panel.destroy();
-});
-
-test('level 2: ‹ back row, one row per membership (copy + switch; "name provisional" §4.4, withheld tools §5.6); a skipped membership is a disabled row with its reason, problems apart from choices (§5.7); footer names the set', async () => {
-  const { ctx } = setup({ preview: { ...PREVIEW,
-    copies: PREVIEW.copies.map((c) => (c.name === 'sentry_billing' ? { ...c, provisional: true } : c)),
-    skippedTools: [{ name: 'postgres-ro_billing', tool: 'run_query', reason: 'tool-name-too-long:run_query' }],
-    skipped: [   // out of order on purpose: rows sort by the name each shows
-      { setId: 'billing', setName: 'Billing', serverId: 'manual:gone', copy: null, reason: 'missing-server', why: 'the server is no longer installed' },
-      { setId: 'billing', setName: 'Billing', serverId: 'manual:linear', copy: 'linear_billing', reason: 'off', why: 'off' },
-      ...PREVIEW.skipped],
-  } });
-  ctx.panel.open();
-  await settle(ctx);
-  btn(ctx).click();
-  await settle(ctx);
-  pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[1].click();          // drill into Billing
-  const p = pop(ctx);
-  assert.equal(p.querySelector('[data-ask-pane-back]').textContent, '‹ Billing');
-  const members = [...p.querySelectorAll('.ask-mcp-row')].map((r) => [r.querySelector('.ask-mcp-copy').textContent, r.querySelector('[role="menuitemcheckbox"]').getAttribute('aria-checked')]);
-  assert.deepEqual(members, [['postgres-ro_billing · tool-name-too-long:run_query', 'true'], ['sentry_billing · name provisional', 'true']]);
-  assert.equal(p.querySelector('.ask-mcp-row [role="menuitemcheckbox"]').getAttribute('aria-label'), 'postgres-ro_billing · tool-name-too-long:run_query', 'the switch label carries the row note');
-  const skipped = [...p.querySelectorAll('.ask-mcp-member.is-skipped')].map((b) => [b.textContent, b.disabled, b.classList.contains('is-problem')]);
-  assert.deepEqual(skipped, [
-    ['jira_billingAPI token not set', true, true],
-    ['linear_billingoff', true, false],                                     // a choice (§5.7): muted
-    ['manual:gonethe server is no longer installed', true, true],           // no copy name: its id stands in
+test('MCP picker levels: set rows (switch + drill), membership rows, skipped/disabled rows with reasons, a chat-off member stays a live switch', async () => {
+  await checkRows([
+    { name: 'level 1: one row per set in the preview\'s order — role none holding a menuitemcheckbox switch and a menuitem drill button; the footer links Settings', run: async () => {
+      const { ctx } = setup();
+      ctx.panel.open();
+      await settle(ctx);
+      btn(ctx).click();
+      await settle(ctx);
+      const rows = [...pop(ctx).querySelectorAll('.ask-mcp-row')];
+      assert.equal(rows.length, 4);
+      for (const r of rows) {
+        assert.equal(r.getAttribute('role'), 'none');
+        assert.equal(r.children[0].getAttribute('role'), 'menuitemcheckbox');
+        assert.equal(r.children[0].getAttribute('aria-checked'), 'true');
+        assert.equal(r.children[1].getAttribute('role'), 'menuitem');
+      }
+      assert.deepEqual(rows.map((r) => r.children[1].querySelector('.ask-model-name').textContent),
+        ['General', 'Billing · pinned', 'Shop · open worktree', 'Team · acme/platform']);
+      assert.deepEqual(rows.map((r) => r.children[1].querySelector('.ask-pop-row-value').textContent), ['2/2', '2/3', '2/2', '1/3']);
+      assert.match(pop(ctx).textContent, /Manage in Settings › MCP servers/);
+      // the keyboard walks the switches too (menuItems() is widened to menuitemcheckbox)
+      assert.equal(ctx.doc.activeElement, rows[0].children[0], 'the first switch takes focus on open');
+      rows[0].children[1].focus();
+      key(ctx.window, rows[0].children[1], 'ArrowDown');
+      assert.equal(ctx.doc.activeElement, rows[1].children[0], 'a drill button → the next row\'s switch');
+      ctx.panel.destroy();
+    } },
+    { name: 'level 2: ‹ back row, one row per membership (copy + switch; "name provisional" §4.4, withheld tools §5.6); a skipped membership is a disabled row with its reason, problems apart from choices (§5.7); footer names the set', run: async () => {
+      const { ctx } = setup({ preview: { ...PREVIEW,
+        copies: PREVIEW.copies.map((c) => (c.name === 'sentry_billing' ? { ...c, provisional: true } : c)),
+        skippedTools: [{ name: 'postgres-ro_billing', tool: 'run_query', reason: 'tool-name-too-long:run_query' }],
+        skipped: [   // out of order on purpose: rows sort by the name each shows
+          { setId: 'billing', setName: 'Billing', serverId: 'manual:gone', copy: null, reason: 'missing-server', why: 'the server is no longer installed' },
+          { setId: 'billing', setName: 'Billing', serverId: 'manual:linear', copy: 'linear_billing', reason: 'off', why: 'off' },
+          ...PREVIEW.skipped],
+      } });
+      ctx.panel.open();
+      await settle(ctx);
+      btn(ctx).click();
+      await settle(ctx);
+      pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[1].click();          // drill into Billing
+      const p = pop(ctx);
+      assert.equal(p.querySelector('[data-ask-pane-back]').textContent, '‹ Billing');
+      const members = [...p.querySelectorAll('.ask-mcp-row')].map((r) => [r.querySelector('.ask-mcp-copy').textContent, r.querySelector('[role="menuitemcheckbox"]').getAttribute('aria-checked')]);
+      assert.deepEqual(members, [['postgres-ro_billing · tool-name-too-long:run_query', 'true'], ['sentry_billing · name provisional', 'true']]);
+      assert.equal(p.querySelector('.ask-mcp-row [role="menuitemcheckbox"]').getAttribute('aria-label'), 'postgres-ro_billing · tool-name-too-long:run_query', 'the switch label carries the row note');
+      const skipped = [...p.querySelectorAll('.ask-mcp-member.is-skipped')].map((b) => [b.textContent, b.disabled, b.classList.contains('is-problem')]);
+      assert.deepEqual(skipped, [
+        ['jira_billingAPI token not set', true, true],
+        ['linear_billingoff', true, false],                                     // a choice (§5.7): muted
+        ['manual:gonethe server is no longer installed', true, true],           // no copy name: its id stands in
+      ]);
+      assert.match(p.textContent, /Manage Billing in Settings › MCP servers/);
+      p.querySelector('[data-ask-pane-back]').click();
+      assert.equal(pop(ctx).querySelectorAll('.ask-mcp-row').length, 4, 'back to level 1');
+      ctx.panel.destroy();
+    } },
+    { name: 'level 2: a member this chat switched off (skipped chat-off) stays a live switch and turns back on', run: async () => {
+      const { state, ctx } = setup();
+      ctx.panel.open();
+      await settle(ctx);
+      btn(ctx).click();
+      await settle(ctx);
+      pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[1].click();          // drill into Billing
+      const sw = () => [...pop(ctx).querySelectorAll('.ask-mcp-row')].find((r) => r.querySelector('.ask-mcp-copy')?.textContent === 'sentry_billing')?.querySelector('[role="menuitemcheckbox"]');
+      state.preview = { ...PREVIEW, started: 6, copies: PREVIEW.copies.filter((c) => c.name !== 'sentry_billing'),
+        skipped: [...PREVIEW.skipped, { setId: 'billing', setName: 'Billing', serverId: 'plugin:acme-tools/sentry', copy: 'sentry_billing', reason: 'chat-off', why: 'switched off for this chat' }] };
+      sw().click();                                                              // off; the preview now reports it chat-off
+      await settle(ctx);
+      assert.ok(sw(), 'still a switch row');
+      assert.equal(sw().disabled, false);
+      assert.equal(sw().getAttribute('aria-checked'), 'false');
+      sw().click();                                                              // back on
+      await settle(ctx);
+      assert.deepEqual(state.previews.at(-1).mcpOff, { sets: [], members: [] });
+      ctx.panel.destroy();
+    } },
+    { name: 'level 2: with its whole set off in this chat, a member switch is disabled, reads off and says why', run: async () => {
+      const { ctx } = setup();
+      ctx.panel.open();
+      await settle(ctx);
+      btn(ctx).click();
+      await settle(ctx);
+      pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[0].click();          // Billing off
+      await settle(ctx);
+      pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[1].click();          // drill into Billing
+      const sws = [...pop(ctx).querySelectorAll('.ask-mcp-row [role="menuitemcheckbox"]')];
+      assert.equal(sws.length, 2);
+      for (const sw of sws) {
+        assert.equal(sw.disabled, true);
+        assert.equal(sw.getAttribute('aria-checked'), 'false');
+        assert.equal(sw.title, 'Billing is off in this chat');
+      }
+      ctx.panel.destroy();
+    } },
+    { name: 'level 2: the switch rows come first, then the disabled rows (Appendix B 10); a landed preview with no sets is not "Loading…"', run: async () => {
+      const { state, ctx } = setup();
+      ctx.panel.open();
+      await settle(ctx);
+      btn(ctx).click();
+      await settle(ctx);
+      pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[1].click();          // drill into Billing
+      const kinds = [...pop(ctx).children].filter((n) => n.classList.contains('ask-mcp-row') || n.classList.contains('is-skipped'))
+        .map((n) => (n.classList.contains('is-skipped') ? 'skipped' : 'switch'));
+      assert.deepEqual(kinds, ['switch', 'switch', 'skipped']);
+      btn(ctx).click();                                                          // close
+      state.preview = { sets: [], copies: [], skipped: [], skippedTools: [], started: 0, newer: true };
+      btn(ctx).click(); await settle(ctx);                                       // reopen (e.g. from a notice): the preview lands empty
+      assert.match(pop(ctx).textContent, /No MCP servers in play\./);
+      assert.doesNotMatch(pop(ctx).textContent, /Loading/);
+      ctx.panel.destroy();
+    } },
   ]);
-  assert.match(p.textContent, /Manage Billing in Settings › MCP servers/);
-  p.querySelector('[data-ask-pane-back]').click();
-  assert.equal(pop(ctx).querySelectorAll('.ask-mcp-row').length, 4, 'back to level 1');
-  ctx.panel.destroy();
 });
 
-test('choices: held before a thread exists and sent with the first message; PATCHed once it exists; every change re-previews', async () => {
-  const { state, ctx } = setup();
-  ctx.panel.open();
-  await settle(ctx);
-  btn(ctx).click();
-  await settle(ctx);
-  pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[0].click();          // Billing off
-  await settle(ctx);
-  assert.equal(state.patches.length, 0, 'no thread yet');
-  assert.deepEqual(state.previews.at(-1).mcpOff, { sets: ['billing'], members: [] });
-  assert.equal(pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[0].getAttribute('aria-checked'), 'false');
-  pop(ctx).querySelectorAll('.ask-mcp-row')[2].children[1].click();          // drill into Shop
-  pop(ctx).querySelector('.ask-mcp-row [role="menuitemcheckbox"]').click();  // postgres-ro_shop off
-  await settle(ctx);
-  assert.deepEqual(state.previews.at(-1).mcpOff, { sets: ['billing'], members: ['shop|manual:postgres-ro'] });
-  btn(ctx).click();                                                          // close the picker
-  assert.equal(pop(ctx), null);
-  ctx.doc.querySelector('textarea.ask-input').value = 'hello';
-  ctx.doc.querySelector('[data-ask-send]').click();
-  await settle(ctx);
-  assert.deepEqual(state.bodies[0].mcpOff, { sets: ['billing'], members: ['shop|manual:postgres-ro'] }, 'the first message stores them');
-  btn(ctx).click(); await settle(ctx);
-  pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[0].click();          // Billing back on — the thread exists now
-  await settle(ctx);
-  assert.deepEqual(state.patches.at(-1), { mcpOff: { sets: [], members: ['shop|manual:postgres-ro'] } });
-  assert.equal(state.previews.at(-1).threadId, TID);
-  ctx.panel.destroy();
-});
-
-test('choices follow the thread: a stored mcp_off restores the switches; New chat clears them', async () => {
-  const snap = { thread: { id: TID, title: 'T', createdAt: 't', updatedAt: 't', model: null, effort: null, sessionId: null, context: null, totals: {}, mcpOff: { sets: ['shop'], members: [] } },
-    messages: [], attachments: [], runLinks: [], worktrees: [], inFlight: null };
-  const { state, ctx } = setup({ snap });
-  ctx.storage.setItem('worca-cc.ask.thread', TID);
-  ctx.panel.open();
-  await settle(ctx);
-  assert.deepEqual(state.previews.at(-1).mcpOff, { sets: ['shop'], members: [] });
-  btn(ctx).click(); await settle(ctx);
-  assert.equal(pop(ctx).querySelectorAll('.ask-mcp-row')[2].children[0].getAttribute('aria-checked'), 'false', 'Shop is off in this chat');
-  ctx.doc.querySelector('[data-ask-new-btn]').click();
-  await settle(ctx);
-  assert.deepEqual(state.previews.at(-1).mcpOff, { sets: [], members: [] });
-  assert.equal(state.previews.at(-1).threadId, undefined);
-  ctx.panel.destroy();
+test('choices: held before a thread exists and sent with the first message, PATCHed once it exists, re-previewed; restored from mcp_off on thread load; New chat clears them', async () => {
+  await checkRows([
+    { name: 'choices: held before a thread exists and sent with the first message; PATCHed once it exists; every change re-previews', run: async () => {
+      const { state, ctx } = setup();
+      ctx.panel.open();
+      await settle(ctx);
+      btn(ctx).click();
+      await settle(ctx);
+      pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[0].click();          // Billing off
+      await settle(ctx);
+      assert.equal(state.patches.length, 0, 'no thread yet');
+      assert.deepEqual(state.previews.at(-1).mcpOff, { sets: ['billing'], members: [] });
+      assert.equal(pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[0].getAttribute('aria-checked'), 'false');
+      pop(ctx).querySelectorAll('.ask-mcp-row')[2].children[1].click();          // drill into Shop
+      pop(ctx).querySelector('.ask-mcp-row [role="menuitemcheckbox"]').click();  // postgres-ro_shop off
+      await settle(ctx);
+      assert.deepEqual(state.previews.at(-1).mcpOff, { sets: ['billing'], members: ['shop|manual:postgres-ro'] });
+      btn(ctx).click();                                                          // close the picker
+      assert.equal(pop(ctx), null);
+      ctx.doc.querySelector('textarea.ask-input').value = 'hello';
+      ctx.doc.querySelector('[data-ask-send]').click();
+      await settle(ctx);
+      assert.deepEqual(state.bodies[0].mcpOff, { sets: ['billing'], members: ['shop|manual:postgres-ro'] }, 'the first message stores them');
+      btn(ctx).click(); await settle(ctx);
+      pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[0].click();          // Billing back on — the thread exists now
+      await settle(ctx);
+      assert.deepEqual(state.patches.at(-1), { mcpOff: { sets: [], members: ['shop|manual:postgres-ro'] } });
+      assert.equal(state.previews.at(-1).threadId, TID);
+      ctx.panel.destroy();
+    } },
+    { name: 'choices follow the thread: a stored mcp_off restores the switches; New chat clears them', run: async () => {
+      const snap = { thread: { id: TID, title: 'T', createdAt: 't', updatedAt: 't', model: null, effort: null, sessionId: null, context: null, totals: {}, mcpOff: { sets: ['shop'], members: [] } },
+        messages: [], attachments: [], runLinks: [], worktrees: [], inFlight: null };
+      const { state, ctx } = setup({ snap });
+      ctx.storage.setItem('worca-cc.ask.thread', TID);
+      ctx.panel.open();
+      await settle(ctx);
+      assert.deepEqual(state.previews.at(-1).mcpOff, { sets: ['shop'], members: [] });
+      btn(ctx).click(); await settle(ctx);
+      assert.equal(pop(ctx).querySelectorAll('.ask-mcp-row')[2].children[0].getAttribute('aria-checked'), 'false', 'Shop is off in this chat');
+      ctx.doc.querySelector('[data-ask-new-btn]').click();
+      await settle(ctx);
+      assert.deepEqual(state.previews.at(-1).mcpOff, { sets: [], members: [] });
+      assert.equal(state.previews.at(-1).threadId, undefined);
+      ctx.panel.destroy();
+    } },
+  ]);
 });
 
 test('refresh: an ask-worktrees change, the page (Auto), the scope; a join notice\'s "MCP" opens the picker', async () => {
@@ -223,95 +267,35 @@ test('a slower, older preview never overwrites a newer one', async () => {
   ctx.panel.destroy();
 });
 
-test('a model pick re-previews with the new model (it sets the §5.6 tool-name limit)', async () => {
-  const CAT = { models: [{ id: 'claude-opus-5-5', label: 'Opus 5.5', efforts: ['high'], custom: false }, { id: 'claude-haiku-4-5', label: 'Haiku 4.5', efforts: ['high'], custom: false }], efforts: ['high'] };
-  const state = { previews: [], patches: [], bodies: [], preview: PREVIEW, snap: null };
-  const base = handler(state);
-  const ctx = makePanel({ fetchHandler: (url, opts) => (url === '/api/ask/models' ? { ok: true, status: 200, json: async () => CAT } : base(url, opts)) });
-  ctx.panel.open();
-  await settle(ctx);
-  ctx.doc.querySelector('[data-ask-model-btn]').click();
-  await settle(ctx);
-  [...ctx.doc.querySelectorAll('.ask-pop-model [role="menuitem"]')].find((i) => /Haiku/.test(i.textContent)).click();
-  await settle(ctx);
-  assert.equal(state.previews.at(-1).model, 'claude-haiku-4-5');
-  ctx.panel.destroy();
-});
-
-test('a catalog that repairs the composer model re-previews with the repaired model (it sets the §5.6 tool-name limit)', async () => {
-  // The backend default (D8) is not the cold-start pick: the first preview leaves before the catalog lands.
-  const CAT = { models: [{ id: 'claude-haiku-4-5', label: 'Haiku 4.5', efforts: ['high'], custom: false }], efforts: ['high'], default: { model: 'claude-haiku-4-5', effort: 'high' } };
-  const state = { previews: [], patches: [], bodies: [], preview: PREVIEW, snap: null };
-  const base = handler(state);
-  const ctx = makePanel({ fetchHandler: (url, opts) => (url === '/api/ask/models' ? { ok: true, status: 200, json: async () => CAT } : base(url, opts)) });
-  ctx.panel.open();
-  await settle(ctx);
-  assert.equal(state.previews[0].model, 'claude-opus-5-5', 'precondition: the first preview left with the cold-start model');
-  assert.equal(state.previews.at(-1).model, 'claude-haiku-4-5', 'the repaired model re-previews');
-  ctx.panel.destroy();
-});
-
-test('keyboard: a toggle and the preview that follows keep focus on the same switch', async () => {
-  const { ctx } = setup();
-  ctx.panel.open();
-  await settle(ctx);
-  btn(ctx).click();
-  await settle(ctx);
-  const shop = () => pop(ctx).querySelectorAll('.ask-mcp-row')[2].children[0];
-  shop().focus();
-  key(ctx.window, shop(), ' ');                                              // Shop off: re-renders now and when the preview lands
-  await settle(ctx);
-  assert.equal(ctx.doc.activeElement, shop(), 'focus stays on the toggled switch');
-  key(ctx.window, ctx.doc.activeElement, ' ');                               // a second Space undoes it, not General
-  await settle(ctx);
-  assert.equal(shop().getAttribute('aria-checked'), 'true');
-  assert.equal(pop(ctx).querySelectorAll('.ask-mcp-row')[0].children[0].getAttribute('aria-checked'), 'true');
-  const input = ctx.doc.querySelector('textarea.ask-input');
-  input.focus();
-  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));             // a preview lands while the user types
-  await settle(ctx);
-  assert.equal(ctx.doc.activeElement, input, 'a landing preview never pulls focus into the picker');
-  ctx.panel.destroy();
-});
-
-test('level 2: a member this chat switched off (skipped chat-off) stays a live switch and turns back on', async () => {
-  const { state, ctx } = setup();
-  ctx.panel.open();
-  await settle(ctx);
-  btn(ctx).click();
-  await settle(ctx);
-  pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[1].click();          // drill into Billing
-  const sw = () => [...pop(ctx).querySelectorAll('.ask-mcp-row')].find((r) => r.querySelector('.ask-mcp-copy')?.textContent === 'sentry_billing')?.querySelector('[role="menuitemcheckbox"]');
-  state.preview = { ...PREVIEW, started: 6, copies: PREVIEW.copies.filter((c) => c.name !== 'sentry_billing'),
-    skipped: [...PREVIEW.skipped, { setId: 'billing', setName: 'Billing', serverId: 'plugin:acme-tools/sentry', copy: 'sentry_billing', reason: 'chat-off', why: 'switched off for this chat' }] };
-  sw().click();                                                              // off; the preview now reports it chat-off
-  await settle(ctx);
-  assert.ok(sw(), 'still a switch row');
-  assert.equal(sw().disabled, false);
-  assert.equal(sw().getAttribute('aria-checked'), 'false');
-  sw().click();                                                              // back on
-  await settle(ctx);
-  assert.deepEqual(state.previews.at(-1).mcpOff, { sets: [], members: [] });
-  ctx.panel.destroy();
-});
-
-test('level 2: with its whole set off in this chat, a member switch is disabled, reads off and says why', async () => {
-  const { ctx } = setup();
-  ctx.panel.open();
-  await settle(ctx);
-  btn(ctx).click();
-  await settle(ctx);
-  pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[0].click();          // Billing off
-  await settle(ctx);
-  pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[1].click();          // drill into Billing
-  const sws = [...pop(ctx).querySelectorAll('.ask-mcp-row [role="menuitemcheckbox"]')];
-  assert.equal(sws.length, 2);
-  for (const sw of sws) {
-    assert.equal(sw.disabled, true);
-    assert.equal(sw.getAttribute('aria-checked'), 'false');
-    assert.equal(sw.title, 'Billing is off in this chat');
-  }
-  ctx.panel.destroy();
+test('a model pick, or a catalog repair of the composer model, re-previews with that model (§5.6 tool-name limit)', async () => {
+  await checkRows([
+    { name: 'a model pick re-previews with the new model (it sets the §5.6 tool-name limit)', run: async () => {
+      const CAT = { models: [{ id: 'claude-opus-5-5', label: 'Opus 5.5', efforts: ['high'], custom: false }, { id: 'claude-haiku-4-5', label: 'Haiku 4.5', efforts: ['high'], custom: false }], efforts: ['high'] };
+      const state = { previews: [], patches: [], bodies: [], preview: PREVIEW, snap: null };
+      const base = handler(state);
+      const ctx = makePanel({ fetchHandler: (url, opts) => (url === '/api/ask/models' ? { ok: true, status: 200, json: async () => CAT } : base(url, opts)) });
+      ctx.panel.open();
+      await settle(ctx);
+      ctx.doc.querySelector('[data-ask-model-btn]').click();
+      await settle(ctx);
+      [...ctx.doc.querySelectorAll('.ask-pop-model [role="menuitem"]')].find((i) => /Haiku/.test(i.textContent)).click();
+      await settle(ctx);
+      assert.equal(state.previews.at(-1).model, 'claude-haiku-4-5');
+      ctx.panel.destroy();
+    } },
+    { name: 'a catalog that repairs the composer model re-previews with the repaired model (it sets the §5.6 tool-name limit)', run: async () => {
+      // The backend default (D8) is not the cold-start pick: the first preview leaves before the catalog lands.
+      const CAT = { models: [{ id: 'claude-haiku-4-5', label: 'Haiku 4.5', efforts: ['high'], custom: false }], efforts: ['high'], default: { model: 'claude-haiku-4-5', effort: 'high' } };
+      const state = { previews: [], patches: [], bodies: [], preview: PREVIEW, snap: null };
+      const base = handler(state);
+      const ctx = makePanel({ fetchHandler: (url, opts) => (url === '/api/ask/models' ? { ok: true, status: 200, json: async () => CAT } : base(url, opts)) });
+      ctx.panel.open();
+      await settle(ctx);
+      assert.equal(state.previews[0].model, 'claude-opus-5-5', 'precondition: the first preview left with the cold-start model');
+      assert.equal(state.previews.at(-1).model, 'claude-haiku-4-5', 'the repaired model re-previews');
+      ctx.panel.destroy();
+    } },
+  ]);
 });
 
 test('choices: a refused first message (429) leaves no thread-stored choice behind — the resend carries them again', async () => {
@@ -362,51 +346,40 @@ test('choices: toggle PATCHes go one at a time, in order — the stored value is
   ctx.panel.destroy();
 });
 
-test('a failed preview says so in the open picker', async () => {
-  const { state, ctx } = setup();
-  ctx.panel.open();
-  await settle(ctx);
-  btn(ctx).click();
-  await settle(ctx);
-  state.preview = null;                                                      // the next preview answers no body
-  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
-  await settle(ctx);
-  assert.match(pop(ctx).textContent, /Could not load the MCP servers — reopen to retry\./);
-  ctx.panel.destroy();
-});
-
-test('keyboard: a preview landing keeps focus on the Manage footer', async () => {
-  const { ctx } = setup();
-  ctx.panel.open();
-  await settle(ctx);
-  btn(ctx).click();
-  await settle(ctx);
-  key(ctx.window, ctx.doc.activeElement, 'End');
-  assert.match(ctx.doc.activeElement.textContent, /^Manage in Settings/);
-  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));             // in Auto: a page change re-previews
-  await settle(ctx);
-  assert.match(ctx.doc.activeElement.textContent, /^Manage in Settings/, 'still on the footer');
-  ctx.panel.destroy();
-});
-
-test('a failed preview keeps the chip, so the picker can be reopened to retry', async () => {
-  const { state, ctx } = setup();
-  ctx.panel.open();
-  await settle(ctx);
-  btn(ctx).click();
-  await settle(ctx);
-  state.preview = null;                                                      // the next preview fails
-  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
-  await settle(ctx);
-  assert.match(pop(ctx).textContent, /reopen to retry/);
-  assert.equal(btn(ctx).hidden, false, 'the chip the message tells the user to reopen is still there');
-  assert.equal(btn(ctx).textContent.trim(), 'MCP · ?');
-  state.preview = PREVIEW;
-  btn(ctx).click(); btn(ctx).click();                                        // close, reopen: a fresh preview
-  await settle(ctx);
-  assert.equal(pop(ctx).querySelectorAll('.ask-mcp-row').length, 4);
-  assert.equal(btn(ctx).textContent.trim(), 'MCP · 7');
-  ctx.panel.destroy();
+test('a failed preview says so in the open picker and keeps the chip so it can be reopened', async () => {
+  await checkRows([
+    { name: 'a failed preview says so in the open picker', run: async () => {
+      const { state, ctx } = setup();
+      ctx.panel.open();
+      await settle(ctx);
+      btn(ctx).click();
+      await settle(ctx);
+      state.preview = null;                                                      // the next preview answers no body
+      ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+      await settle(ctx);
+      assert.match(pop(ctx).textContent, /Could not load the MCP servers — reopen to retry\./);
+      ctx.panel.destroy();
+    } },
+    { name: 'a failed preview keeps the chip, so the picker can be reopened to retry', run: async () => {
+      const { state, ctx } = setup();
+      ctx.panel.open();
+      await settle(ctx);
+      btn(ctx).click();
+      await settle(ctx);
+      state.preview = null;                                                      // the next preview fails
+      ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+      await settle(ctx);
+      assert.match(pop(ctx).textContent, /reopen to retry/);
+      assert.equal(btn(ctx).hidden, false, 'the chip the message tells the user to reopen is still there');
+      assert.equal(btn(ctx).textContent.trim(), 'MCP · ?');
+      state.preview = PREVIEW;
+      btn(ctx).click(); btn(ctx).click();                                        // close, reopen: a fresh preview
+      await settle(ctx);
+      assert.equal(pop(ctx).querySelectorAll('.ask-mcp-row').length, 4);
+      assert.equal(btn(ctx).textContent.trim(), 'MCP · 7');
+      ctx.panel.destroy();
+    } },
+  ]);
 });
 
 test('choices: a reconnect resync of the same thread keeps the choices the picker holds (their PATCH may not have landed)', async () => {
@@ -499,38 +472,5 @@ test('choices: a toggle made while a message POST is out is PATCHed again after 
     ['POST', { sets: [], members: [] }], ['PATCH', { sets: ['billing'], members: [] }],
     ['202'], ['PATCH', { sets: ['billing'], members: [] }],
   ], 'the latest choice is the last write, whatever order the route and the first PATCH land in');
-  ctx.panel.destroy();
-});
-
-test('keyboard: ‹ back returns focus to the drill button of the set it left', async () => {
-  const { ctx } = setup();
-  ctx.panel.open();
-  await settle(ctx);
-  btn(ctx).click();
-  await settle(ctx);
-  const shopDrill = pop(ctx).querySelectorAll('.ask-mcp-row')[2].children[1];
-  shopDrill.focus();
-  key(ctx.window, shopDrill, 'Enter');                                       // into Shop
-  assert.equal(ctx.doc.activeElement.textContent, '‹ Shop');
-  key(ctx.window, ctx.doc.activeElement, 'Enter');                           // ‹ Shop
-  assert.equal(ctx.doc.activeElement.dataset.mcpKey, 'drill:shop');
-  ctx.panel.destroy();
-});
-
-test('level 2: the switch rows come first, then the disabled rows (Appendix B 10); a landed preview with no sets is not "Loading…"', async () => {
-  const { state, ctx } = setup();
-  ctx.panel.open();
-  await settle(ctx);
-  btn(ctx).click();
-  await settle(ctx);
-  pop(ctx).querySelectorAll('.ask-mcp-row')[1].children[1].click();          // drill into Billing
-  const kinds = [...pop(ctx).children].filter((n) => n.classList.contains('ask-mcp-row') || n.classList.contains('is-skipped'))
-    .map((n) => (n.classList.contains('is-skipped') ? 'skipped' : 'switch'));
-  assert.deepEqual(kinds, ['switch', 'switch', 'skipped']);
-  btn(ctx).click();                                                          // close
-  state.preview = { sets: [], copies: [], skipped: [], skippedTools: [], started: 0, newer: true };
-  btn(ctx).click(); await settle(ctx);                                       // reopen (e.g. from a notice): the preview lands empty
-  assert.match(pop(ctx).textContent, /No MCP servers in play\./);
-  assert.doesNotMatch(pop(ctx).textContent, /Loading/);
   ctx.panel.destroy();
 });

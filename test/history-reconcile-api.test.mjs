@@ -9,6 +9,7 @@ import { app, runs } from '../ui/server.mjs';
 import { writeStoreMeta } from '../src/core/artifacts.mjs';
 import { _resetForTests } from '../src/core/db.mjs';
 import { seedPipelineRow } from './helpers/db-seed.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 let srv, base, home, prevHome;
 const KEY = 'beta-00000002';
@@ -33,19 +34,22 @@ after(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-test('GET /api/history reconciles a stale running row to interrupted', async () => {
-  const res = await fetch(`${base}/api/history`);
-  assert.equal(res.status, 200);
-  const { pipelines } = await res.json();
-  const row = pipelines.find((p) => p.id === 'pp');
-  assert.ok(row, 'the seeded row is listed');
-  assert.equal(row.status, 'interrupted'); // was 'running'
-});
-
-test('the reconciled record is now deletable (200, not 409)', async () => {
-  // Self-contained: trigger the reconcile here too (idempotent) so this test passes
-  // even if run in isolation, then delete.
-  await fetch(`${base}/api/history`);
-  const res = await fetch(`${base}/api/runs/pp?projectKey=${KEY}`, { method: 'DELETE' });
-  assert.equal(res.status, 200); // previously 409 RUNNING
+test('GET /api/history reconciles a stale running row to interrupted, which then deletes with 200', async () => {
+  await checkRows([
+    { name: 'GET /api/history reconciles a stale running row to interrupted', run: async () => {
+      const res = await fetch(`${base}/api/history`);
+      assert.equal(res.status, 200);
+      const { pipelines } = await res.json();
+      const row = pipelines.find((p) => p.id === 'pp');
+      assert.ok(row, 'the seeded row is listed');
+      assert.equal(row.status, 'interrupted'); // was 'running'
+    } },
+    { name: 'the reconciled record is now deletable (200, not 409)', run: async () => {
+      // Self-contained: trigger the reconcile here too (idempotent) so this test passes
+      // even if run in isolation, then delete.
+      await fetch(`${base}/api/history`);
+      const res = await fetch(`${base}/api/runs/pp?projectKey=${KEY}`, { method: 'DELETE' });
+      assert.equal(res.status, 200); // previously 409 RUNNING
+    } },
+  ]);
 });

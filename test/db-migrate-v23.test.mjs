@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { getDb, migrate, SCHEMA_VERSION } from '../src/core/db.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 useTempHome(after);
 
@@ -16,28 +17,31 @@ const MINIMAL_SEED = `
   CREATE TABLE workflows (id TEXT PRIMARY KEY, name TEXT);
 `;
 
-test('V23 is the current schema version and a fresh DB carries every new column', () => {
-  const db = getDb();
-  assert.ok(SCHEMA_VERSION >= 23, 'the v23 step is in the ladder');
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
-  for (const c of ['graph', 'archived_at']) assert.ok(cols(db, 'workflows').includes(c), `workflows.${c}`);
-  for (const c of ['execution_id', 'exec_kind', 'agent_key', 'ended_at', 'exec_trigger', 'exec_result', 'exec_meta']) {
-    assert.ok(cols(db, 'pipeline_steps').includes(c), `pipeline_steps.${c}`);
-  }
-  assert.ok(cols(db, 'pipelines').includes('outcome'));
-  assert.ok(tableNames(db).includes('config_workflow_wires'));
-  assert.deepEqual(pkOrder(db, 'config_workflow_wires'), ['project_key', 'workflow_id', 'wire_id']);
-});
-
-test('ladder: a v22 DB is stamped 23 and gets the columns + the wires table', () => {
-  const db = new DatabaseSync(':memory:');
-  db.exec(MINIMAL_SEED);
-  db.exec('PRAGMA user_version = 22');
-  migrate(db);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
-  assert.ok(cols(db, 'workflows').includes('archived_at'));
-  assert.ok(cols(db, 'pipeline_steps').includes('exec_meta'));
-  assert.ok(tableNames(db).includes('config_workflow_wires'));
+test('V23: a fresh DB and a v22 DB stamped through the ladder both carry every new column + the wires table (PK order)', async () => {
+  // The same column/table asserts on the fresh getDb() handle and on the migrated :memory: one.
+  const carriesV23 = (db) => {
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
+    for (const c of ['graph', 'archived_at']) assert.ok(cols(db, 'workflows').includes(c), `workflows.${c}`);
+    for (const c of ['execution_id', 'exec_kind', 'agent_key', 'ended_at', 'exec_trigger', 'exec_result', 'exec_meta']) {
+      assert.ok(cols(db, 'pipeline_steps').includes(c), `pipeline_steps.${c}`);
+    }
+    assert.ok(cols(db, 'pipelines').includes('outcome'));
+    assert.ok(tableNames(db).includes('config_workflow_wires'));
+    assert.deepEqual(pkOrder(db, 'config_workflow_wires'), ['project_key', 'workflow_id', 'wire_id']);
+  };
+  await checkRows([
+    { name: 'V23 is the current schema version and a fresh DB carries every new column', run: () => {
+      assert.ok(SCHEMA_VERSION >= 23, 'the v23 step is in the ladder');
+      carriesV23(getDb());
+    } },
+    { name: 'ladder: a v22 DB is stamped 23 and gets the columns + the wires table', run: () => {
+      const db = new DatabaseSync(':memory:');
+      db.exec(MINIMAL_SEED);
+      db.exec('PRAGMA user_version = 22');
+      migrate(db);
+      carriesV23(db);
+    } },
+  ]);
 });
 
 // The user's live DB shape: old-branch residue already present, stamped 22, with

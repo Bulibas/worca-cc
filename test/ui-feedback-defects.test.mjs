@@ -9,6 +9,7 @@ import { JSDOM } from 'jsdom';
 import { useDomRelease } from './helpers/jsdom-release.mjs';
 import { confirmDialog } from './helpers/confirm-modal.mjs';
 import { lastToast } from './helpers/feedback.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 // Release each booted window after its test (see test/helpers/jsdom-release.mjs).
 const trackDom = useDomRelease(afterEach);
@@ -59,51 +60,53 @@ async function boot({ routes = {} } = {}) {
   return { window, go };
 }
 
-test('#555 D1: "Marketplace removed." survives the reload as a toast', async () => {
-  const { window, go } = await boot({ routes: {
-    'DELETE /api/marketplaces/acme': { status: 200, body: {} },
-    'POST /api/marketplaces/refresh': { status: 200, body: { marketplaces: [{ id: 'acme', name: 'acme', plugins: [] }] } },
-    'GET /api/marketplaces': { status: 200, body: { marketplaces: [{ id: 'acme', name: 'acme', plugins: [] }] } },
-    'GET /api/plugins': { status: 200, body: { plugins: [], orphans: [] } },
-    'GET /api/chat/status': { status: 200, body: { channels: [] } },
-  } });
-  await go('settings/plugins');
-  window.document.querySelector('.pl-mkt-remove[data-id="acme"]').click();
-  await confirmDialog(window);
-  for (let i = 0; i < 10; i++) await tick();
-  assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Marketplace removed. Installed plugins remain.', detail: '', action: '' });
-  assert.equal(window.document.getElementById('plugins-msg').textContent, '');
-});
-
-test('#555 D1: Guardrails "Deleted." survives the reload as a toast', async () => {
-  const sets = [{ id: 'gr_acme', name: 'ACME Policy', origin: null,
-    settings: { honorProjectSettings: true, envScrub: false, envAllowlist: [], protectedPaths: [], deny: [] } }];
-  const { window, go } = await boot({ routes: {
-    'DELETE /api/guardrails/gr_acme': { status: 200, body: { ok: true } },
-    'GET /api/guardrails': { status: 200, body: { guardrails: sets } },
-  } });
-  await go('settings/guardrails');
-  window.document.querySelector('#guardrails-list .grv-delete[data-id="gr_acme"]')
-    .dispatchEvent(new window.Event('click', { bubbles: true }));
-  await confirmDialog(window);
-  for (let i = 0; i < 10; i++) await tick();
-  assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Deleted.', detail: '', action: '' });
-  assert.equal(window.document.getElementById('guardrails-msg').textContent, '');
-});
-
-test('#555 D1: Models "Deleted." survives the reload as a toast', async () => {
-  const { window, go } = await boot({ routes: {
-    'GET /api/models/acme-fast/refs': { status: 200, body: {} },
-    'DELETE /api/models/acme-fast': { status: 200, body: { ok: true } },
-    'GET /api/models': { status: 200, body: { models: [{ id: 'acme-fast', label: 'ACME Fast' }], predefined: [], efforts: [] } },
-  } });
-  await go('settings/models');
-  window.document.querySelector('.mv-delete[data-id="acme-fast"]')
-    .dispatchEvent(new window.Event('click', { bubbles: true }));
-  await confirmDialog(window);
-  for (let i = 0; i < 10; i++) await tick();
-  assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Deleted.', detail: '', action: '' });
-  assert.equal(window.document.getElementById('models-msg').textContent, '');
+test('#555 D1: a delete success (marketplace / guardrail set / model) survives the view reload as a toast', async () => {
+  await checkRows([
+    { name: '#555 D1: "Marketplace removed." survives the reload as a toast', run: async () => {
+      const { window, go } = await boot({ routes: {
+        'DELETE /api/marketplaces/acme': { status: 200, body: {} },
+        'POST /api/marketplaces/refresh': { status: 200, body: { marketplaces: [{ id: 'acme', name: 'acme', plugins: [] }] } },
+        'GET /api/marketplaces': { status: 200, body: { marketplaces: [{ id: 'acme', name: 'acme', plugins: [] }] } },
+        'GET /api/plugins': { status: 200, body: { plugins: [], orphans: [] } },
+        'GET /api/chat/status': { status: 200, body: { channels: [] } },
+      } });
+      await go('settings/plugins');
+      window.document.querySelector('.pl-mkt-remove[data-id="acme"]').click();
+      await confirmDialog(window);
+      for (let i = 0; i < 10; i++) await tick();
+      assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Marketplace removed. Installed plugins remain.', detail: '', action: '' });
+      assert.equal(window.document.getElementById('plugins-msg').textContent, '');
+    } },
+    { name: '#555 D1: Guardrails "Deleted." survives the reload as a toast', run: async () => {
+      const sets = [{ id: 'gr_acme', name: 'ACME Policy', origin: null,
+        settings: { honorProjectSettings: true, envScrub: false, envAllowlist: [], protectedPaths: [], deny: [] } }];
+      const { window, go } = await boot({ routes: {
+        'DELETE /api/guardrails/gr_acme': { status: 200, body: { ok: true } },
+        'GET /api/guardrails': { status: 200, body: { guardrails: sets } },
+      } });
+      await go('settings/guardrails');
+      window.document.querySelector('#guardrails-list .grv-delete[data-id="gr_acme"]')
+        .dispatchEvent(new window.Event('click', { bubbles: true }));
+      await confirmDialog(window);
+      for (let i = 0; i < 10; i++) await tick();
+      assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Deleted.', detail: '', action: '' });
+      assert.equal(window.document.getElementById('guardrails-msg').textContent, '');
+    } },
+    { name: '#555 D1: Models "Deleted." survives the reload as a toast', run: async () => {
+      const { window, go } = await boot({ routes: {
+        'GET /api/models/acme-fast/refs': { status: 200, body: {} },
+        'DELETE /api/models/acme-fast': { status: 200, body: { ok: true } },
+        'GET /api/models': { status: 200, body: { models: [{ id: 'acme-fast', label: 'ACME Fast' }], predefined: [], efforts: [] } },
+      } });
+      await go('settings/models');
+      window.document.querySelector('.mv-delete[data-id="acme-fast"]')
+        .dispatchEvent(new window.Event('click', { bubbles: true }));
+      await confirmDialog(window);
+      for (let i = 0; i < 10; i++) await tick();
+      assert.deepEqual(lastToast(window.document), { tone: 'ok', title: 'Deleted.', detail: '', action: '' });
+      assert.equal(window.document.getElementById('models-msg').textContent, '');
+    } },
+  ]);
 });
 
 test('#555: a load failure stays on the inline line and raises no toast', async () => {
@@ -134,23 +137,6 @@ test('#555: a plugin uninstall refused with 409 is an error toast whose Details 
   window.document.querySelector('#toasts .toast-act').click();
   assert.equal(window.document.getElementById('plugin-modal').classList.contains('hidden'), false);
   assert.match(window.document.getElementById('plugin-modal-body').textContent, /Docs Flow/);
-});
-
-test('#555: a guardrail set delete refused with 409 is an error toast titled with the set', async () => {
-  const sets = [{ id: 'gr_acme', name: 'ACME Policy', origin: null,
-    settings: { honorProjectSettings: true, envScrub: false, envAllowlist: [], protectedPaths: [], deny: [] } }];
-  const { window, go } = await boot({ routes: {
-    'DELETE /api/guardrails/gr_acme': { status: 409, body: { error: 'pinned by paused runs', references: [{ runId: 'r-1' }] } },
-    'GET /api/guardrails': { status: 200, body: { guardrails: sets } },
-  } });
-  await go('settings/guardrails');
-  window.document.querySelector('#guardrails-list .grv-delete[data-id="gr_acme"]')
-    .dispatchEvent(new window.Event('click', { bubbles: true }));
-  await confirmDialog(window);
-  for (let i = 0; i < 10; i++) await tick();
-  assert.deepEqual(lastToast(window.document), { tone: 'err', title: 'Cannot delete ACME Policy', detail: 'pinned by paused runs', action: 'Details' });
-  window.document.querySelector('#toasts .toast-act').click();
-  assert.equal(window.document.getElementById('plugin-modal').classList.contains('hidden'), false);
 });
 
 test('#555: the model editor Save — a missing id is a field error, a refusal a card alert, success a toast', async () => {
@@ -201,33 +187,36 @@ const D3_PROJECTS = [
 const syncBlock = (over = {}) => ({ base: 'dev', remote: 'origin', state: 'up-to-date', ahead: 0, behind: 0, dirty: false,
   checkedOutHere: true, fetchedAt: new Date().toISOString(), stale: false, settings: { beforeRun: true, onDiverged: 'ask' }, ...over });
 
-test('#555 D3: Sync all refused with 500 is an error toast with Retry', async () => {
-  const { window, go } = await boot({ routes: {
-    'GET /api/sync/projects': { status: 200, body: { projects: { 'alpha-00000001': syncBlock({ state: 'behind', behind: 2 }), 'beta-00000002': syncBlock() } } },
-    'POST /api/sync/all': { status: 500, body: { error: 'origin unreachable' } },
-    'GET /api/projects': { status: 200, body: { projects: D3_PROJECTS } },
-  } });
-  await go('projects');
-  const btn = window.document.getElementById('projects-sync-all');
-  await waitFor(() => !btn.hidden);
-  btn.click();
-  await waitFor(() => lastToast(window.document));
-  assert.deepEqual(lastToast(window.document), { tone: 'err', title: 'Sync all failed', detail: 'origin unreachable', action: 'Retry' });
-  assert.equal(btn.disabled, false);
-});
-
-test('#555 D3: Push now refused with 502 is an error toast', async () => {
-  const { window, go } = await boot({ routes: {
-    'POST /api/team-metrics/flush': { status: 502, body: { error: 'push rejected' } },
-    'GET /api/team-metrics/scopes': { status: 200, body: { projects: [], workspaces: [], scopes: { projects: [], workspaces: [] }, anyEnabled: false } },
-  } });
-  await go('team-metrics');
-  const section = window.document.querySelector('section[data-view="team-metrics"]');
-  const b = Object.assign(window.document.createElement('button'), { type: 'button', className: 'btn-ghost btn-mini tm-push-now', textContent: 'Push now' });
-  section.append(b);
-  b.click();
-  await waitFor(() => lastToast(window.document));
-  assert.deepEqual(lastToast(window.document), { tone: 'err', title: 'Push failed', detail: 'push rejected', action: 'Retry' });
+test('#555 D3: Sync all (500) and Push now (502) refusals are error toasts (Retry where offered)', async () => {
+  await checkRows([
+    { name: '#555 D3: Sync all refused with 500 is an error toast with Retry', run: async () => {
+      const { window, go } = await boot({ routes: {
+        'GET /api/sync/projects': { status: 200, body: { projects: { 'alpha-00000001': syncBlock({ state: 'behind', behind: 2 }), 'beta-00000002': syncBlock() } } },
+        'POST /api/sync/all': { status: 500, body: { error: 'origin unreachable' } },
+        'GET /api/projects': { status: 200, body: { projects: D3_PROJECTS } },
+      } });
+      await go('projects');
+      const btn = window.document.getElementById('projects-sync-all');
+      await waitFor(() => !btn.hidden);
+      btn.click();
+      await waitFor(() => lastToast(window.document));
+      assert.deepEqual(lastToast(window.document), { tone: 'err', title: 'Sync all failed', detail: 'origin unreachable', action: 'Retry' });
+      assert.equal(btn.disabled, false);
+    } },
+    { name: '#555 D3: Push now refused with 502 is an error toast', run: async () => {
+      const { window, go } = await boot({ routes: {
+        'POST /api/team-metrics/flush': { status: 502, body: { error: 'push rejected' } },
+        'GET /api/team-metrics/scopes': { status: 200, body: { projects: [], workspaces: [], scopes: { projects: [], workspaces: [] }, anyEnabled: false } },
+      } });
+      await go('team-metrics');
+      const section = window.document.querySelector('section[data-view="team-metrics"]');
+      const b = Object.assign(window.document.createElement('button'), { type: 'button', className: 'btn-ghost btn-mini tm-push-now', textContent: 'Push now' });
+      section.append(b);
+      b.click();
+      await waitFor(() => lastToast(window.document));
+      assert.deepEqual(lastToast(window.document), { tone: 'err', title: 'Push failed', detail: 'push rejected', action: 'Retry' });
+    } },
+  ]);
 });
 
 test('#555 D3: "Include my runs" refused with 500 reverts the switch and raises an error toast', async () => {

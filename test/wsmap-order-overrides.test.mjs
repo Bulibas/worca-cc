@@ -13,11 +13,12 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 
+import { templateRepo } from './helpers/git-dir.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { renderWorkspaceDescription, countLines } from '../src/shared/workspace-map/render.mjs';
 import { changeOrder } from '../src/shared/workspace-map/order.mjs';
 import { edgeId, entryId } from '../src/shared/workspace-map/ids.mjs';
-import { normKey } from '../src/shared/workspace-map/keys.mjs';
+import { normKey, normPkg } from '../src/shared/workspace-map/keys.mjs';
 import { emptyOverrides, setEdgeState, addManualEdge } from '../src/shared/workspace-map/overrides.mjs';
 import { joinMap, synthBrief } from '../src/core/workspace-map/join.mjs';
 import {
@@ -166,12 +167,9 @@ test('render: a 1 MiB member name in an emptied pair never makes it throw — no
 });
 
 // ── D8: a review change re-renders the stored description (workspaces.mjs renderFor) ──────────────────
-async function freshRepo() {
-  const dir = await tmp('worca-cc-order-repo-');
-  const g = (a) => spawnSync('git', a, { cwd: dir });
-  g(['init', '-q', '-b', 'main']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
-  await writeFile(join(dir, 'README.md'), '# repo\n');
-  g(['add', '-A']); g(['commit', '-qm', 'init']);
+function freshRepo() {
+  const dir = templateRepo('order-repo', { branch: 'main', user: true, files: { 'README.md': '# repo\n' } });
+  dirs.push(dir);
   return dir;
 }
 
@@ -319,6 +317,8 @@ test('the join card applies the overrides its envelope carries; without them it 
     assert.deepEqual(map.order, order, JSON.stringify(overrides));
     const brief = (await readFile(ctx.outputs.brief.path, 'utf8')).split('\n');
     assert.equal(brief.some((l) => l.startsWith('- billing -> web: ')), rejectedPair);
+    const envelope = JSON.parse(await readFile(join(pipelineDir, 'scripts', 'n_join-c1.envelope.json'), 'utf8'));
+    assert.equal('overrides' in envelope.ctx.workspace, overrides !== null, 'the envelope carries overrides only when its channel does');
   }
 });
 
@@ -414,16 +414,20 @@ test('run harness: a re-scan hands the join the overrides stored at run start (r
   const app = await pkgRepo('app', { 'package.json': APP_PKG });
   const lib = await pkgRepo('lib', { 'package.json': LIB_PKG });
   const [appKey, libKey] = [projectKey(app), projectKey(lib)];
-  const first = await runScan(t, scanOpts(checkNewWorkspace({ name: 'Order Scan', projectPaths: [app, lib] })));
-  assert.equal(first.envelope.ctx.workspace.overrides, undefined, 'a first scan: no workspace, no overrides');
-  const dep = first.map.edges.find((e) => e.from === appKey && e.to === libKey && e.kind === 'pkg');
-  assert.ok(dep, JSON.stringify(first.map.edges));
-  assert.deepEqual(first.map.order, [[libKey], [appKey]]);
-  const ws = await readWorkspace(first.envelope.ctx.workspace.id);
-  assert.ok(ws, 'the first scan saved the workspace');
+  // A first scan runs before its workspace row exists: the harness reads no overrides, and a channel
+  // without them builds an envelope without them (the join card test above).
+  const firstScan = { _isWorkspaceScan: () => true, workspace: { id: checkNewWorkspace({ name: 'Order Scan', projectPaths: [app, lib] }).id } };
+  assert.equal(await RunHarness.prototype._scanOverrides.call(firstScan), null, 'a first scan: no workspace, no overrides');
+  // Seeded with createWorkspace, not a first scan: the review rejects the dependency before any scan,
+  // by the id a scan gives app -> lib (@wsmap/lib), recomputed here.
+  const ws = await createWorkspace({ name: 'Order Scan', projectPaths: [app, lib] });
+  const dep = edge(appKey, libKey, 'pkg', normPkg('npm', '@wsmap/lib'), '@wsmap/lib');
   await updateWorkspaceOverrides(ws.id, setEdgeState(emptyOverrides(), dep, 'rejected', AT));
   const stored = (await readWorkspaceMap(ws.id)).overrides;
   const rescan = await runScan(t, scanOpts(ws));
+  const scanned = rescan.map.edges.find((e) => e.from === appKey && e.to === libKey && e.kind === 'pkg');
+  assert.equal(scanned?.id, dep.id, JSON.stringify(rescan.map.edges));
+  assert.deepEqual(changeOrder([appKey, libKey], rescan.map.edges).order, [[libKey], [appKey]], 'unreviewed, the scanned dependency orders lib first');
   assert.deepEqual(rescan.envelope.ctx.workspace.overrides, stored, 'the overrides stored when the re-scan started');
   assert.deepEqual(rescan.map.order, [[appKey, libKey].sort()], 'the rejected dependency orders nothing');
   assert.equal(rescan.brief.includes(`- ${appKey} -> ${libKey}`), false, 'the synth brief leaves the rejected pair out');

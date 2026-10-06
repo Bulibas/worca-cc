@@ -12,6 +12,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { writePluginsLock, pluginCurrentDir } from '../src/core/plugins-lock.mjs';
 import { writePluginConfig, readPluginState } from '../src/core/plugin-config.mjs';
 import { PluginOpError } from '../src/core/plugin-shim.mjs';
+import { checkRows } from './helpers/rows.mjs';
 import {
   createChannelHost, discoverChannels,
   setMockChannelBehavior, mockSentMessages, clearMockSentMessages,
@@ -184,6 +185,14 @@ test('full worker lifecycle: hello -> ready -> send RPC -> errors -> state -> in
   const withDeliveries = host.status()[0];
   assert.ok(withDeliveries.deliveries.some((d) => d.ok === false && d.errorKind === 'rate-limit'));
 
+  // an oversize state-delta warns instead of vanishing (and stays unpersisted)
+  await host.sendMessage({ plugin: NAME, channelId: 'main', chatId: 'BIGSTATE', message: MSG });
+  await waitFor(
+    () => seen.logs.some((l) => l.level === 'warn' && /exceeds the 1 MiB frame cap/.test(l.msg)),
+    { label: 'oversize state-delta warning' },
+  );
+  assert.equal(readPluginState(NAME).big, undefined, 'the oversize delta must stay unpersisted');
+
   await host.stop();
   assert.equal(host.status().length, 0);
 });
@@ -343,28 +352,31 @@ const MSG = { title: null, body: [], severity: 'info' }; // minimal valid Normal
 // Worker frames go in via p.stdout.write(line) — the host wraps it in readline.
 const frameLine = (obj) => JSON.stringify(obj) + '\n';
 
-test('ready after a worker "disconnected" status keeps the channel disconnected', async () => {
-  const { host, spawned } = makeFakeHost();
-  host.start();
-  const p = spawned[0];
-  p.stdout.write(frameLine({ type: 'status', state: 'disconnected', detail: 'auth failed — check botToken' }));
-  p.stdout.write(frameLine({ type: 'ready', identity: null }));
-  await new Promise((r) => setTimeout(r, 20));
-  const row = host.status()[0];
-  assert.equal(row.state, 'disconnected');
-  assert.match(row.detail, /auth failed/);
-  endWorkers(spawned);
-  await host.stop();
-});
-
-test('ready alone still flips a fresh worker to connected', async () => {
-  const { host, spawned } = makeFakeHost();
-  host.start();
-  spawned[0].stdout.write(frameLine({ type: 'ready', identity: '@bot' }));
-  await new Promise((r) => setTimeout(r, 20));
-  assert.equal(host.status()[0].state, 'connected');
-  endWorkers(spawned);
-  await host.stop();
+test('ready frame: flips a fresh worker to connected, but not one that reported "disconnected"', async () => {
+  await checkRows([
+    { name: 'ready after a worker "disconnected" status keeps the channel disconnected', run: async () => {
+      const { host, spawned } = makeFakeHost();
+      host.start();
+      const p = spawned[0];
+      p.stdout.write(frameLine({ type: 'status', state: 'disconnected', detail: 'auth failed — check botToken' }));
+      p.stdout.write(frameLine({ type: 'ready', identity: null }));
+      await new Promise((r) => setTimeout(r, 20));
+      const row = host.status()[0];
+      assert.equal(row.state, 'disconnected');
+      assert.match(row.detail, /auth failed/);
+      endWorkers(spawned);
+      await host.stop();
+    } },
+    { name: 'ready alone still flips a fresh worker to connected', run: async () => {
+      const { host, spawned } = makeFakeHost();
+      host.start();
+      spawned[0].stdout.write(frameLine({ type: 'ready', identity: '@bot' }));
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(host.status()[0].state, 'connected');
+      endWorkers(spawned);
+      await host.stop();
+    } },
+  ]);
 });
 
 test('a connect-then-crash worker escalates backoff instead of looping at the floor', async () => {
@@ -444,22 +456,6 @@ test('a timed-out RPC frame is dequeued — a later drain cannot deliver it', as
   await host.stop();
 });
 
-test('an oversize state-delta warns instead of vanishing', async () => {
-  installFixture();
-  const { host, seen } = collectingHost();
-  host.start();
-  after(() => host.stop());
-  await waitFor(() => host.status()[0]?.state === 'connected', { label: 'worker connected' });
-
-  await host.sendMessage({ plugin: NAME, channelId: 'main', chatId: 'BIGSTATE', message: MSG });
-  await waitFor(
-    () => seen.logs.some((l) => l.level === 'warn' && /exceeds the 1 MiB frame cap/.test(l.msg)),
-    { label: 'oversize state-delta warning' },
-  );
-  assert.equal(readPluginState(NAME).big, undefined, 'the oversize delta must stay unpersisted');
-  await host.stop();
-});
-
 // Two channels on the SAME plugin: writePluginsLock OVERWRITES, so a second
 // plugin would evict the first. Both channels share SCHEMA, so installFixture's
 // single config write leaves neither row `unconfigured`.
@@ -476,31 +472,34 @@ function installFixtureTwoChannels() {
   }));
 }
 
-test('start({plugin, channelId}) spawns only the requested channel', async () => {
-  installFixtureTwoChannels();
-  process.env.WORCA_MOCK = '1';
-  try {
-    assert.equal(discoverChannels().length, 2, 'fixture must offer two channels');
-    const host = createChannelHost({ logger: () => {} });
-    host.start({ plugin: NAME, channelId: 'main' });
-    const rows = host.status();
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].channelId, 'main');
-    await host.stop();
-  } finally {
-    delete process.env.WORCA_MOCK;
-  }
-});
-
-test('start() with no filter still starts every channel', async () => {
-  installFixtureTwoChannels();
-  process.env.WORCA_MOCK = '1';
-  try {
-    const host = createChannelHost({ logger: () => {} });
-    host.start();
-    assert.deepEqual(host.status().map((r) => r.channelId).sort(), ['alt', 'main']);
-    await host.stop();
-  } finally {
-    delete process.env.WORCA_MOCK;
-  }
+test('start(): a {plugin, channelId} filter spawns only that channel; no filter starts every channel', async () => {
+  await checkRows([
+    { name: 'start({plugin, channelId}) spawns only the requested channel', run: async () => {
+      installFixtureTwoChannels();
+      process.env.WORCA_MOCK = '1';
+      try {
+        assert.equal(discoverChannels().length, 2, 'fixture must offer two channels');
+        const host = createChannelHost({ logger: () => {} });
+        host.start({ plugin: NAME, channelId: 'main' });
+        const rows = host.status();
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].channelId, 'main');
+        await host.stop();
+      } finally {
+        delete process.env.WORCA_MOCK;
+      }
+    } },
+    { name: 'start() with no filter still starts every channel', run: async () => {
+      installFixtureTwoChannels();
+      process.env.WORCA_MOCK = '1';
+      try {
+        const host = createChannelHost({ logger: () => {} });
+        host.start();
+        assert.deepEqual(host.status().map((r) => r.channelId).sort(), ['alt', 'main']);
+        await host.stop();
+      } finally {
+        delete process.env.WORCA_MOCK;
+      }
+    } },
+  ]);
 });

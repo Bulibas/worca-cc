@@ -2,30 +2,31 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { extractResultCost, runClaude } from '../src/core/claude-runner.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
-test('extractResultCost reads total_cost_usd from a result event', () => {
-  assert.equal(extractResultCost({ type: 'result', total_cost_usd: 0.1234 }), 0.1234);
-});
-
-test('extractResultCost accepts the legacy cost_usd spelling', () => {
-  assert.equal(extractResultCost({ type: 'result', cost_usd: 0.5 }), 0.5);
-});
-
-test('extractResultCost reads a truthful zero (does not treat 0 as absent)', () => {
-  assert.equal(extractResultCost({ type: 'result', total_cost_usd: 0 }), 0);
-});
-
-test('extractResultCost returns null for non-result / costless events', () => {
-  assert.equal(extractResultCost({ type: 'assistant', message: {} }), null);
-  assert.equal(extractResultCost({ type: 'result' }), null); // no cost field present
-  assert.equal(extractResultCost({ type: 'result', total_cost_usd: 'NaN' }), null);
-  assert.equal(extractResultCost(null), null);
-});
-
-test('extractResultCost rejects a negative cost (treats it as no cost)', () => {
-  assert.equal(extractResultCost({ type: 'result', total_cost_usd: -5 }), null);
-  assert.equal(extractResultCost({ type: 'result', total_cost_usd: 0 }), 0, 'genuine zero still kept');
-  assert.equal(extractResultCost({ type: 'result', total_cost_usd: 0.07 }), 0.07);
+test('extractResultCost: total_cost_usd / legacy cost_usd, truthful zero, null for non-result/costless/NaN, negative rejected', async () => {
+  await checkRows([
+    { name: 'extractResultCost reads total_cost_usd from a result event', run: () => {
+      assert.equal(extractResultCost({ type: 'result', total_cost_usd: 0.1234 }), 0.1234);
+    } },
+    { name: 'extractResultCost accepts the legacy cost_usd spelling', run: () => {
+      assert.equal(extractResultCost({ type: 'result', cost_usd: 0.5 }), 0.5);
+    } },
+    { name: 'extractResultCost reads a truthful zero (does not treat 0 as absent)', run: () => {
+      assert.equal(extractResultCost({ type: 'result', total_cost_usd: 0 }), 0);
+    } },
+    { name: 'extractResultCost returns null for non-result / costless events', run: () => {
+      assert.equal(extractResultCost({ type: 'assistant', message: {} }), null);
+      assert.equal(extractResultCost({ type: 'result' }), null); // no cost field present
+      assert.equal(extractResultCost({ type: 'result', total_cost_usd: 'NaN' }), null);
+      assert.equal(extractResultCost(null), null);
+    } },
+    { name: 'extractResultCost rejects a negative cost (treats it as no cost)', run: () => {
+      assert.equal(extractResultCost({ type: 'result', total_cost_usd: -5 }), null);
+      assert.equal(extractResultCost({ type: 'result', total_cost_usd: 0 }), 0, 'genuine zero still kept');
+      assert.equal(extractResultCost({ type: 'result', total_cost_usd: 0.07 }), 0.07);
+    } },
+  ]);
 });
 
 test('mock runClaude emits a single zero-cost result event', async () => {

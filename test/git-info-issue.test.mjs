@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createIssue, _testing as gitInfo } from '../src/core/git-info.mjs';
+import { checkRows } from './helpers/rows.mjs';
 
 afterEach(() => gitInfo.reset());
 
@@ -66,51 +67,57 @@ test('a repo without the labels still gets the issue, unlabelled', async () => {
   assert.equal(attempt, 2, 'exactly one retry, and only after a label failure');
 });
 
-test('a non-label failure is NOT retried', async () => {
-  let attempt = 0;
-  runner(async (cmd, args) => {
-    if (args[0] !== 'issue') return ok('');
-    attempt += 1;
-    return fail('HTTP 503: the service is unavailable');
-  });
+test('create failures: a non-label failure is not retried (kind failed); a logged-out gh is kind auth', async () => {
+  await checkRows([
+    { name: 'a non-label failure is NOT retried', run: async () => {
+      let attempt = 0;
+      runner(async (cmd, args) => {
+        if (args[0] !== 'issue') return ok('');
+        attempt += 1;
+        return fail('HTTP 503: the service is unavailable');
+      });
 
-  const r = await createIssue({ ...ARGS, body: 'report' });
+      const r = await createIssue({ ...ARGS, body: 'report' });
 
-  assert.equal(r.ok, false);
-  assert.equal(r.kind, 'failed');
-  assert.match(r.error, /503/);
-  assert.equal(attempt, 1, 'retrying a 503 would file the issue twice when it eventually lands');
+      assert.equal(r.ok, false);
+      assert.equal(r.kind, 'failed');
+      assert.match(r.error, /503/);
+      assert.equal(attempt, 1, 'retrying a 503 would file the issue twice when it eventually lands');
+    } },
+    { name: 'a logged-out gh is reported as an auth problem, not a generic failure', run: async () => {
+      runner(async (cmd, args) => (args[0] === 'issue'
+        ? fail('gh: To get started with GitHub CLI, please run: gh auth login')
+        : ok('')));
+
+      const r = await createIssue({ ...ARGS, body: 'report' });
+
+      assert.equal(r.ok, false);
+      assert.equal(r.kind, 'auth', 'the UI tells the reporter to run `gh auth login`');
+    } },
+  ]);
 });
 
-test('a logged-out gh is reported as an auth problem, not a generic failure', async () => {
-  runner(async (cmd, args) => (args[0] === 'issue'
-    ? fail('gh: To get started with GitHub CLI, please run: gh auth login')
-    : ok('')));
+test('pre-flight refusals: an unknown repo spawns nothing; no gh stops after --version', async () => {
+  await checkRows([
+    { name: 'no gh on PATH is reported before anything is written', run: async () => {
+      const calls = [];
+      gitInfo.setRunner(async (cmd, args) => {
+        calls.push(args[0]);
+        return fail('spawn gh ENOENT', -1);
+      });
 
-  const r = await createIssue({ ...ARGS, body: 'report' });
+      const r = await createIssue({ ...ARGS, body: 'report' });
 
-  assert.equal(r.ok, false);
-  assert.equal(r.kind, 'auth', 'the UI tells the reporter to run `gh auth login`');
-});
-
-test('no gh on PATH is reported before anything is written', async () => {
-  const calls = [];
-  gitInfo.setRunner(async (cmd, args) => {
-    calls.push(args[0]);
-    return fail('spawn gh ENOENT', -1);
-  });
-
-  const r = await createIssue({ ...ARGS, body: 'report' });
-
-  assert.equal(r.ok, false);
-  assert.equal(r.kind, 'no-gh');
-  assert.deepEqual(calls, ['--version'], 'no `issue create` is attempted');
-});
-
-test('an unknown repo is refused without spawning gh', async () => {
-  const calls = runner(async () => ok(ISSUE_URL));
-  const r = await createIssue({ repo: '', title: 'x', body: 'y' });
-  assert.equal(r.ok, false);
-  assert.equal(r.kind, 'no-repo');
-  assert.deepEqual(calls, [], 'a missing bugs.url must never fall back to the cwd remote');
+      assert.equal(r.ok, false);
+      assert.equal(r.kind, 'no-gh');
+      assert.deepEqual(calls, ['--version'], 'no `issue create` is attempted');
+    } },
+    { name: 'an unknown repo is refused without spawning gh', run: async () => {
+      const calls = runner(async () => ok(ISSUE_URL));
+      const r = await createIssue({ repo: '', title: 'x', body: 'y' });
+      assert.equal(r.ok, false);
+      assert.equal(r.kind, 'no-repo');
+      assert.deepEqual(calls, [], 'a missing bugs.url must never fall back to the cwd remote');
+    } },
+  ]);
 });

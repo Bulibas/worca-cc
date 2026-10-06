@@ -3,6 +3,7 @@
 // stage rect and `raf` queues frames so "60 moves ⇒ 1 frame" is observable.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { checkRows } from './helpers/rows.mjs';
 import { JSDOM } from 'jsdom';
 // From the HELPER, never from ui-graph-view.test.mjs: importing a *.test.mjs file
 // evaluates it, which re-registers and re-runs all 17 view tests inside THIS
@@ -97,23 +98,38 @@ const down = (s, x, y, extra = {}) => s.c.view.stage.dispatchEvent(new s.win.Poi
 const move = (s, x, y) => s.c.view.stage.dispatchEvent(new s.win.PointerEvent('pointermove', { pointerId: 1, clientX: x, clientY: y, bubbles: true }));
 const up = (s, x, y) => s.c.view.stage.dispatchEvent(new s.win.PointerEvent('pointerup', { pointerId: 1, button: 0, clientX: x, clientY: y, bubbles: true }));
 
-test('60 pointermoves coalesce into ONE frame and ONE ghost d write', async () => {
-  const s = await open();
-  s.c.view.setTransform({ x: 0, y: 0, z: 1 });
-  down(s, 620, 193);                                     // n_agent.plan output anchor
-  assert.equal(s.c.gesture().type, 'wire');
-  const g0 = s.c.view.stats.ghostUpdates;
-  for (let i = 0; i < 60; i += 1) move(s, 200 + i, 480 + (i % 7));
-  assert.equal(s.frames(), 1, '60 moves => exactly one queued frame');
-  assert.equal(s.c.view.stats.ghostUpdates - g0, 0, 'no DOM write before the frame runs');
-  s.flush();
-  assert.equal(s.c.view.stats.ghostUpdates - g0, 1, 'the frame writes d exactly once');
-  assert.equal(s.c.stats.rectReads, 2, 'one read at mount + one at gesture start; ZERO on the move path');
-  up(s, 259, 486);
-  s.flush();
-  assert.equal(s.c.gesture(), null);
-  assert.equal(s.c.template().wires.length, 2, 'a drop on empty canvas commits nothing');
-  assert.equal(s.c.view.ghostEl.getAttribute('class'), 'wire ghost');
+test('perf invariants: 60 pointermoves coalesce into one frame/one ghost write, validation runs once per commit', async () => {
+  await checkRows([
+    { name: '60 pointermoves coalesce into ONE frame and ONE ghost d write', run: async () => {
+      const s = await open();
+      s.c.view.setTransform({ x: 0, y: 0, z: 1 });
+      down(s, 620, 193);                                     // n_agent.plan output anchor
+      assert.equal(s.c.gesture().type, 'wire');
+      const g0 = s.c.view.stats.ghostUpdates;
+      for (let i = 0; i < 60; i += 1) move(s, 200 + i, 480 + (i % 7));
+      assert.equal(s.frames(), 1, '60 moves => exactly one queued frame');
+      assert.equal(s.c.view.stats.ghostUpdates - g0, 0, 'no DOM write before the frame runs');
+      s.flush();
+      assert.equal(s.c.view.stats.ghostUpdates - g0, 1, 'the frame writes d exactly once');
+      assert.equal(s.c.stats.rectReads, 2, 'one read at mount + one at gesture start; ZERO on the move path');
+      up(s, 259, 486);
+      s.flush();
+      assert.equal(s.c.gesture(), null);
+      assert.equal(s.c.template().wires.length, 2, 'a drop on empty canvas commits nothing');
+      assert.equal(s.c.view.ghostEl.getAttribute('class'), 'wire ghost');
+    } },
+    { name: 'validation runs ONCE per commit, never per frame', run: async () => {
+      const s = await open();
+      await new Promise((r) => setTimeout(r, 0));
+      const v0 = s.c.stats.validations;
+      down(s, 400, 80);
+      for (let i = 0; i < 30; i += 1) { move(s, 400 + i, 80 + i); s.flush(); }
+      assert.equal(s.c.stats.validations, v0, 'zero validations during the drag');
+      up(s, 430, 110); s.flush();
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(s.c.stats.validations, v0 + 1, 'exactly one after the commit');
+    } },
+  ]);
 });
 
 test('a drag from an INPUT port mirrors the tangent, snaps to a legal anchor and commits', async () => {
@@ -198,59 +214,13 @@ test('destroy() unbinds everything; pointercancel and window blur end a gesture'
   assert.equal(JSON.stringify(s.c.template()), before, 'nothing mutated after destroy()');
 });
 
-const wheel = (s, o) => s.c.view.stage.dispatchEvent(new s.win.WheelEvent('wheel', { bubbles: true, cancelable: true, ...o }));
 const key = (s, k, o = {}) => s.doc.dispatchEvent(new s.win.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...o }));
-
-test('ctrl+wheel zooms about the cursor (world point invariant) and clamps 0.4..1.6', async () => {
-  const s = await open();
-  s.c.view.setTransform({ x: 0, y: 0, z: 1 });
-  const before = s.c._internal.toWorld(600, 300);
-  wheel(s, { deltaY: -120, ctrlKey: true, clientX: 600, clientY: 300 });
-  const after = s.c._internal.toWorld(600, 300);
-  assert.ok(Math.abs(after.x - before.x) < 1e-6 && Math.abs(after.y - before.y) < 1e-6);
-  assert.ok(Math.abs(s.c.view.getTransform().z - Math.exp(0.24)) < 1e-9);
-  for (let i = 0; i < 12; i += 1) wheel(s, { deltaY: -240, ctrlKey: true, clientX: 600, clientY: 300 });
-  assert.ok(s.c.view.getTransform().z <= 1.6 + 1e-12);
-  for (let i = 0; i < 30; i += 1) wheel(s, { deltaY: 240, ctrlKey: true, clientX: 600, clientY: 300 });
-  assert.ok(s.c.view.getTransform().z >= 0.4 - 1e-12);
-});
 
 const click = (s, el) => el.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
 // RECT is 1280x560 and INSET_OPEN is 340, so the open-rail band centre is the
 // stage-local (470, 280) — and RECT.left/top are 0, so it is also the client point.
 const BAND_CX = (1280 - 340) / 2;
 const BAND_CY = 560 / 2;
-
-test('the zoom buttons step by 1.2 about the band centre, clamp 0.4..1.6 and disable at the stops', async () => {
-  const s = await open();
-  s.c.view.setTransform({ x: 0, y: 0, z: 1 });
-  const before = s.c._internal.toWorld(BAND_CX, BAND_CY);
-  click(s, s.el.zoomIn);
-  assert.ok(Math.abs(s.c.view.getTransform().z - 1.2) < 1e-12, 'z x 1.2');
-  const after = s.c._internal.toWorld(BAND_CX, BAND_CY);
-  assert.ok(Math.abs(after.x - before.x) < 1e-6 && Math.abs(after.y - before.y) < 1e-6,
-    'the world point under the band centre never moves');
-  for (let i = 0; i < 6; i += 1) click(s, s.el.zoomIn);
-  assert.ok(Math.abs(s.c.view.getTransform().z - 1.6) < 1e-12, 'clamped at ZOOM_MAX');
-  assert.equal(s.el.zoomIn.disabled, true, 'a button that cannot move is disabled');
-  assert.equal(s.el.zoomOut.disabled, false);
-  for (let i = 0; i < 12; i += 1) click(s, s.el.zoomOut);
-  assert.ok(Math.abs(s.c.view.getTransform().z - 0.4) < 1e-12, 'clamped at ZOOM_MIN');
-  assert.equal(s.el.zoomOut.disabled, true);
-  assert.equal(s.el.zoomIn.disabled, false);
-  s.c.fit();
-  assert.equal(s.el.zoomOut.disabled, false, 'fit() repaints the cluster too');
-});
-
-test('plain wheel pans by exactly −delta; deltaMode 1 scales by 16', async () => {
-  const s = await open();
-  s.c.view.setTransform({ x: 0, y: 0, z: 1 });
-  wheel(s, { deltaX: 40, deltaY: -25 });
-  assert.deepEqual(s.c.view.getTransform(), { x: -40, y: 25, z: 1 });
-  s.c.view.setTransform({ x: 0, y: 0, z: 1 });
-  wheel(s, { deltaX: 1, deltaY: 0, deltaMode: 1 });
-  assert.equal(s.c.view.getTransform().x, -16);
-});
 
 test('keyboard: nudge, delete, undo/redo, Escape — all skipped while typing', async () => {
   const s = await open();
@@ -277,14 +247,30 @@ test('keyboard: nudge, delete, undo/redo, Escape — all skipped while typing', 
   assert.equal(s.c.selection(), null);
 });
 
-test('fit centres the model in the band left of the inspector and never magnifies', async () => {
-  const s = await open();
-  s.c.fit();                                   // rail open => insetRight 340 => vw 940
-  const T = s.c.view.getTransform();
-  assert.ok(Math.abs(T.z - 940 / 1040) < 1e-12, 'z = vw / bounds.w');
-  assert.ok(Math.abs(T.x - 0) < 1e-9, 'exactly centred: (940 - 1040*z)/2 - 0*z = 0');
-  s.c.fit({ insetRight: 28 });                 // rail collapsed => vw 1252
-  assert.equal(s.c.view.getTransform().z, 1, 'fit never magnifies past 1x');
+test('fit/Center: zoom-to-fit into the band left of the inspector, centred, never past 1x', async () => {
+  await checkRows([
+    { name: 'fit centres the model in the band left of the inspector and never magnifies', run: async () => {
+      const s = await open();
+      s.c.fit();                                   // rail open => insetRight 340 => vw 940
+      const T = s.c.view.getTransform();
+      assert.ok(Math.abs(T.z - 940 / 1040) < 1e-12, 'z = vw / bounds.w');
+      assert.ok(Math.abs(T.x - 0) < 1e-9, 'exactly centred: (940 - 1040*z)/2 - 0*z = 0');
+      s.c.fit({ insetRight: 28 });                 // rail collapsed => vw 1252
+      assert.equal(s.c.view.getTransform().z, 1, 'fit never magnifies past 1x');
+    } },
+    { name: 'Center is a zoom-to-FIT: it scales the graph into the band, never past 1x, and lands its centre on the band centre', run: async () => {
+      const s = await open();
+      s.c.view.setTransform({ x: 0, y: 0, z: 1.3 });
+      click(s, s.el.center);
+      const b = s.c.view.bounds(60);                       // fit() pads by 60
+      const expect = Math.max(0.4, Math.min(1, Math.min(BAND_CX * 2 / b.w, 560 / b.h)));
+      assert.ok(Math.abs(s.c.view.getTransform().z - expect) < 1e-9, 'the zoom is the fit zoom, clamped 0.4..1');
+      const c = s.c._internal.toWorld(BAND_CX, BAND_CY);
+      assert.ok(Math.abs(c.x - (b.x + b.w / 2)) < 1e-6, 'the padded bounds centre sits under the band centre');
+      assert.ok(Math.abs(c.y - (b.y + b.h / 2)) < 1e-6);
+      assert.equal(s.el.zoomIn.disabled, false, 'and the cluster repaints off the fit');
+    } },
+  ]);
 });
 
 test('a whole drag is ONE undo entry and the ring caps at 50', async () => {
@@ -303,89 +289,80 @@ test('a whole drag is ONE undo entry and the ring caps at 50', async () => {
   assert.equal(s.c.undoDepth(), 50, 'ring capped at UNDO_LIMIT');
 });
 
-test('errors disable Save, show the chip, pip the node, and centre it on click', async () => {
-  const s = await open({ template: { id: '', name: '', version: 2, domain: '', nodes: [], wires: [] } });
-  await new Promise((r) => setTimeout(r, 0));            // let scheduleValidate run
-  assert.ok(s.el.save.disabled, 'Save disabled while the graph has errors');
-  assert.equal(s.el.errors.hidden, false);
-  assert.match(s.el.errors.textContent, /^\d+ errors?$/);
-  const s2 = await open();
-  // Drop the End node and ONLY the wire that fed it. Clearing EVERY wire (the
-  // first draft did) also unwires n_agent.task and n_task.task, so V9 + V20 stay
-  // red after the repair below and the recovery half of this test can never pass.
-  // Verified 2026-08-27: end removed + w1 kept => exactly [V21]; + n_end2 + w9 => ok.
-  s2.c.commit('rm-end', () => {
-    const t = s2.c.template();
-    t.nodes = t.nodes.filter((n) => n.kind !== 'end');
-    t.wires = t.wires.filter((w) => w.id === 'w1');
-  });
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(s2.el.save.disabled, true, 'V21: exactly one End node');
-  s2.c.view.setTransform({ x: 0, y: 0, z: 1 });
-  const pip = s2.c.view.world.querySelector('.npip');
-  if (pip) { pip.dispatchEvent(new s2.win.MouseEvent('click', { bubbles: true })); assert.notDeepEqual(s2.c.view.getTransform(), { x: 0, y: 0, z: 1 }, 'pip click centres the offender'); }
-  s2.c.commit('fix', () => { s2.c.template().nodes.push({ id: 'n_end2', kind: 'end', x: 900, y: 200, config: {} }); s2.c.template().wires.push({ id: 'w9', from: { node: 'n_agent', port: 'plan' }, to: { node: 'n_end2', port: 'result' } }); });
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(s2.el.errors.hidden, true);
-  assert.equal(s2.el.save.disabled, false);
-});
+test('errors disable Save, show the chip, pip and centre the node; a pristine canvas shows no error chip', async () => {
+  await checkRows([
+    { name: 'errors disable Save, show the chip, pip the node, and centre it on click', run: async () => {
+      const s = await open({ template: { id: '', name: '', version: 2, domain: '', nodes: [], wires: [] } });
+      await new Promise((r) => setTimeout(r, 0));            // let scheduleValidate run
+      assert.ok(s.el.save.disabled, 'Save disabled while the graph has errors');
+      assert.equal(s.el.errors.hidden, false);
+      assert.match(s.el.errors.textContent, /^\d+ errors?$/);
+      const s2 = await open();
+      // Drop the End node and ONLY the wire that fed it. Clearing EVERY wire (the
+      // first draft did) also unwires n_agent.task and n_task.task, so V9 + V20 stay
+      // red after the repair below and the recovery half of this test can never pass.
+      // Verified 2026-08-27: end removed + w1 kept => exactly [V21]; + n_end2 + w9 => ok.
+      s2.c.commit('rm-end', () => {
+        const t = s2.c.template();
+        t.nodes = t.nodes.filter((n) => n.kind !== 'end');
+        t.wires = t.wires.filter((w) => w.id === 'w1');
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(s2.el.save.disabled, true, 'V21: exactly one End node');
+      s2.c.view.setTransform({ x: 0, y: 0, z: 1 });
+      const pip = s2.c.view.world.querySelector('.npip');
+      if (pip) { pip.dispatchEvent(new s2.win.MouseEvent('click', { bubbles: true })); assert.notDeepEqual(s2.c.view.getTransform(), { x: 0, y: 0, z: 1 }, 'pip click centres the offender'); }
+      s2.c.commit('fix', () => { s2.c.template().nodes.push({ id: 'n_end2', kind: 'end', x: 900, y: 200, config: {} }); s2.c.template().wires.push({ id: 'w9', from: { node: 'n_agent', port: 'plan' }, to: { node: 'n_end2', port: 'result' } }); });
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(s2.el.errors.hidden, true);
+      assert.equal(s2.el.save.disabled, false);
+    } },
+    { name: 'a pristine canvas shows no error chip; unfinished wiring is a quiet to-do, not an error', run: async () => {
+      // Unfinished is not wrong: a fresh canvas shows NO chip (Save stays gated, with a
+      // tooltip saying what is missing); once the user starts working, still-unwired
+      // mandatory ports get a quiet "N ports to wire" chip; only real mistakes are red.
+      const s = await open();
+      const tick = () => new Promise((r) => setTimeout(r, 0));
+      s.c.loadTemplate(null);
+      await tick();
+      assert.equal(s.c.report().errors.length, 2, 'precondition: V20 + V21 fire on Task + End alone');
+      assert.ok(s.c.report().errors.every((e) => e.incomplete), 'both are flagged incomplete by the validator');
+      assert.equal(s.el.errors.hidden, true, 'no chip on a canvas nobody has touched');
+      assert.equal(s.el.save.disabled, true, 'Save is still gated');
+      assert.equal(s.el.save.title, 'Wire Task → … → End to save');
 
-// Unfinished is not wrong: a fresh canvas shows NO chip (Save stays gated, with a
-// tooltip saying what is missing); once the user starts working, still-unwired
-// mandatory ports get a quiet "N ports to wire" chip; only real mistakes are red.
-test('a pristine canvas shows no error chip; unfinished wiring is a quiet to-do, not an error', async () => {
-  const s = await open();
-  const tick = () => new Promise((r) => setTimeout(r, 0));
-  s.c.loadTemplate(null);
-  await tick();
-  assert.equal(s.c.report().errors.length, 2, 'precondition: V20 + V21 fire on Task + End alone');
-  assert.ok(s.c.report().errors.every((e) => e.incomplete), 'both are flagged incomplete by the validator');
-  assert.equal(s.el.errors.hidden, true, 'no chip on a canvas nobody has touched');
-  assert.equal(s.el.save.disabled, true, 'Save is still gated');
-  assert.equal(s.el.save.title, 'Wire Task → … → End to save');
+      s.c.spawn({ key: 'planner' });
+      await tick();
+      assert.equal(s.el.errors.hidden, false, 'once the user works, the to-do shows');
+      assert.ok(s.el.errors.classList.contains('is-incomplete'), 'in the quiet dress');
+      assert.match(s.el.errors.textContent, /^\d+ ports to wire$/);
+      assert.equal(s.el.save.disabled, true);
 
-  s.c.spawn({ key: 'planner' });
-  await tick();
-  assert.equal(s.el.errors.hidden, false, 'once the user works, the to-do shows');
-  assert.ok(s.el.errors.classList.contains('is-incomplete'), 'in the quiet dress');
-  assert.match(s.el.errors.textContent, /^\d+ ports to wire$/);
-  assert.equal(s.el.save.disabled, true);
+      // A REAL mistake (a second End) turns the chip red and counts only real errors.
+      s.c.commit('dup-end', () => { s.c.template().nodes.push({ id: 'n_end2', kind: 'end', x: 900, y: 400, config: {} }); });
+      await tick();
+      assert.equal(s.el.errors.classList.contains('is-incomplete'), false);
+      assert.match(s.el.errors.textContent, /^\d+ errors?$/);
+      assert.equal(s.el.save.title, 'Fix the errors to save');
+      s.c.undo();
+      await tick();
 
-  // A REAL mistake (a second End) turns the chip red and counts only real errors.
-  s.c.commit('dup-end', () => { s.c.template().nodes.push({ id: 'n_end2', kind: 'end', x: 900, y: 400, config: {} }); });
-  await tick();
-  assert.equal(s.el.errors.classList.contains('is-incomplete'), false);
-  assert.match(s.el.errors.textContent, /^\d+ errors?$/);
-  assert.equal(s.el.save.title, 'Fix the errors to save');
-  s.c.undo();
-  await tick();
-
-  // Wiring Task → planner → End finishes the drawing: no chip, Save enabled.
-  const t = s.c.template();
-  const task = t.nodes.find((n) => n.kind === 'task'), end = t.nodes.find((n) => n.kind === 'end');
-  const agent = t.nodes.find((n) => n.kind === 'agent');
-  s.c.commit('wire', () => {
-    s.c.template().wires.push(
-      { id: 'w_a', from: { node: task.id, port: 'task' }, to: { node: agent.id, port: 'task' } },
-      { id: 'w_b', from: { node: agent.id, port: 'plan' }, to: { node: end.id, port: 'result' } },
-    );
-  });
-  await tick();
-  assert.equal(s.el.errors.hidden, true, JSON.stringify(s.c.report().errors));
-  assert.equal(s.el.save.disabled, false);
-  assert.equal(s.el.save.title, '');
-});
-
-test('validation runs ONCE per commit, never per frame', async () => {
-  const s = await open();
-  await new Promise((r) => setTimeout(r, 0));
-  const v0 = s.c.stats.validations;
-  down(s, 400, 80);
-  for (let i = 0; i < 30; i += 1) { move(s, 400 + i, 80 + i); s.flush(); }
-  assert.equal(s.c.stats.validations, v0, 'zero validations during the drag');
-  up(s, 430, 110); s.flush();
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(s.c.stats.validations, v0 + 1, 'exactly one after the commit');
+      // Wiring Task → planner → End finishes the drawing: no chip, Save enabled.
+      const t = s.c.template();
+      const task = t.nodes.find((n) => n.kind === 'task'), end = t.nodes.find((n) => n.kind === 'end');
+      const agent = t.nodes.find((n) => n.kind === 'agent');
+      s.c.commit('wire', () => {
+        s.c.template().wires.push(
+          { id: 'w_a', from: { node: task.id, port: 'task' }, to: { node: agent.id, port: 'task' } },
+          { id: 'w_b', from: { node: agent.id, port: 'plan' }, to: { node: end.id, port: 'result' } },
+        );
+      });
+      await tick();
+      assert.equal(s.el.errors.hidden, true, JSON.stringify(s.c.report().errors));
+      assert.equal(s.el.save.disabled, false);
+      assert.equal(s.el.save.title, '');
+    } },
+  ]);
 });
 
 test('palette groups by domain, pins Flow last, hides placeable:false, disables placed bookends', async () => {
@@ -404,21 +381,6 @@ test('palette groups by domain, pins Flow last, hides placeable:false, disables 
   assert.equal(s.el.palette.querySelector('.ap[data-kind="task"]').disabled, true);
   assert.equal(s.el.palette.querySelector('.ap[data-kind="and"]').disabled, false);
   assert.equal(s.el.palette.querySelector('.ap[data-kind="and"] .p').textContent, 'in in1..inN · out out');
-});
-
-test('click spawns at the canvas centre with the 24-try de-stacker', async () => {
-  const s = await open();
-  s.c.view.setTransform({ x: 0, y: 0, z: 1 });
-  const n0 = s.c.template().nodes.length;
-  s.c.spawn({ kind: 'and' });
-  s.c.spawn({ kind: 'and' });
-  const nodes = s.c.template().nodes;
-  assert.equal(nodes.length, n0 + 2);
-  assert.equal(nodes[n0].kind, 'and');
-  assert.equal(nodes[n0].config.arity, 2);
-  assert.notDeepEqual({ x: nodes[n0].x, y: nodes[n0].y }, { x: nodes[n0 + 1].x, y: nodes[n0 + 1].y }, 'second spawn de-stacked');
-  assert.equal(nodes[n0].x % 11, 0, 'snapped to the 11px grid');
-  assert.equal(s.c.undoDepth(), 2, 'each spawn is one undo entry');
 });
 
 test('drag-to-spawn: ghost after 4px, drop inside the stage commits, outside cancels', async () => {
@@ -442,40 +404,43 @@ test('drag-to-spawn: ghost after 4px, drop inside the stage commits, outside can
   assert.equal(s.c.template().nodes.length, n0 + 1, 'a drop under the inspector rail cancels');
 });
 
-test('agent inspector gates rows on meta booleans and commits every change', async () => {
-  const meta = { key: 'planner', displayName: 'Plan', color: 'violet', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false, inputs: [], outputs: [] };
-  const s = await open({ api: { agents: async () => [meta], agentsAll: async () => [meta] } });
-  s.c.setAgents({ planner: meta });
-  s.c.select({ kind: 'node', id: 'n_agent' });
-  const body = s.el.insBody;
-  assert.ok(body.querySelector('[data-field="model"]'), 'model select');
-  assert.ok(body.querySelector('[data-field="fanOut"]'), 'fan-out row exists for a fanOut agent');
-  assert.ok(body.querySelector('[data-field="askQuestions"]'));
-  assert.ok(body.querySelector('[data-field="awaitAll"]'));
-  const sel2 = body.querySelector('[data-field="model"]');
-  sel2.value = 'sonnet';
-  sel2.dispatchEvent(new s.win.Event('change', { bubbles: true }));
-  assert.equal(s.c.template().nodes[1].config.model, 'sonnet');
-  assert.equal(s.c.undoDepth(), 1, 'a field change is one undo entry');
-  const box = body.querySelector('[data-field="awaitAll"]');
-  box.checked = true;
-  box.dispatchEvent(new s.win.Event('change', { bubbles: true }));
-  assert.equal(s.c.template().nodes[1].config.awaitAll, true);
-});
-
-test('locked questions are forced + disabled; a non-asking agent has no row', async () => {
-  const locked = { key: 'planner', displayName: 'Plan', asksQuestions: true, questionsLocked: true, questionsDefault: true, inputs: [], outputs: [] };
-  const s = await open();
-  s.c.setAgents({ planner: locked });
-  s.c.select({ kind: 'node', id: 'n_agent' });
-  const box = s.el.insBody.querySelector('[data-field="askQuestions"]');
-  assert.equal(box.disabled, true);
-  assert.equal(box.checked, true);
-  assert.equal(box.closest('.ins-tog').title, 'Always on for this agent');
-  const mute = { key: 'planner', displayName: 'Plan', asksQuestions: false, inputs: [], outputs: [] };
-  s.c.setAgents({ planner: mute });
-  s.c.select(null); s.c.select({ kind: 'node', id: 'n_agent' });
-  assert.equal(s.el.insBody.querySelector('[data-field="askQuestions"]'), null);
+test('agent inspector gates rows on meta booleans and commits; locked questions forced + disabled, non-asking agent has no row', async () => {
+  await checkRows([
+    { name: 'agent inspector gates rows on meta booleans and commits every change', run: async () => {
+      const meta = { key: 'planner', displayName: 'Plan', color: 'violet', fanOut: true, asksQuestions: true, questionsLocked: false, questionsDefault: false, inputs: [], outputs: [] };
+      const s = await open({ api: { agents: async () => [meta], agentsAll: async () => [meta] } });
+      s.c.setAgents({ planner: meta });
+      s.c.select({ kind: 'node', id: 'n_agent' });
+      const body = s.el.insBody;
+      assert.ok(body.querySelector('[data-field="model"]'), 'model select');
+      assert.ok(body.querySelector('[data-field="fanOut"]'), 'fan-out row exists for a fanOut agent');
+      assert.ok(body.querySelector('[data-field="askQuestions"]'));
+      assert.ok(body.querySelector('[data-field="awaitAll"]'));
+      const sel2 = body.querySelector('[data-field="model"]');
+      sel2.value = 'sonnet';
+      sel2.dispatchEvent(new s.win.Event('change', { bubbles: true }));
+      assert.equal(s.c.template().nodes[1].config.model, 'sonnet');
+      assert.equal(s.c.undoDepth(), 1, 'a field change is one undo entry');
+      const box = body.querySelector('[data-field="awaitAll"]');
+      box.checked = true;
+      box.dispatchEvent(new s.win.Event('change', { bubbles: true }));
+      assert.equal(s.c.template().nodes[1].config.awaitAll, true);
+    } },
+    { name: 'locked questions are forced + disabled; a non-asking agent has no row', run: async () => {
+      const locked = { key: 'planner', displayName: 'Plan', asksQuestions: true, questionsLocked: true, questionsDefault: true, inputs: [], outputs: [] };
+      const s = await open();
+      s.c.setAgents({ planner: locked });
+      s.c.select({ kind: 'node', id: 'n_agent' });
+      const box = s.el.insBody.querySelector('[data-field="askQuestions"]');
+      assert.equal(box.disabled, true);
+      assert.equal(box.checked, true);
+      assert.equal(box.closest('.ins-tog').title, 'Always on for this agent');
+      const mute = { key: 'planner', displayName: 'Plan', asksQuestions: false, inputs: [], outputs: [] };
+      s.c.setAgents({ planner: mute });
+      s.c.select(null); s.c.select({ kind: 'node', id: 'n_agent' });
+      assert.equal(s.el.insBody.querySelector('[data-field="askQuestions"]'), null);
+    } },
+  ]);
 });
 
 test('arity stepper floors at 2; loop wires get maxCycles; Task gets planStoreSeed', async () => {
@@ -494,19 +459,6 @@ test('arity stepper floors at 2; loop wires get maxCycles; Task gets planStoreSe
   assert.equal(s.c.template().nodes[0].config.planStoreSeed, true);
   s.c.select({ kind: 'wire', id: 'w1' });
   assert.equal(s.el.insBody.querySelector('[data-field="maxCycles"]'), null, 'a plain wire has no budget control (V13)');
-});
-
-test('the rail collapse state persists under worca.composer.inspector', async () => {
-  const store = new Map();
-  const storage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, v) };
-  const s = await open({ storage });
-  assert.equal(s.el.insRail.dataset.open, 'open');
-  s.el.insToggle.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  assert.equal(s.el.insRail.dataset.open, 'collapsed');
-  assert.equal(s.el.insToggle.getAttribute('aria-expanded'), 'false');
-  assert.equal(store.get('worca.composer.inspector'), 'collapsed');
-  const s2 = await open({ storage });
-  assert.equal(s2.el.insRail.dataset.open, 'collapsed', 'restored on the next mount');
 });
 
 test('Save posts version 2 with the loaded id; Save-as omits it', async () => {
@@ -532,122 +484,41 @@ test('Save posts version 2 with the loaded id; Save-as omits it', async () => {
   assert.equal(posts[1].name, 'Copy');
 });
 
-test('a 422 renders the validator issues verbatim and keeps the dialog open', async () => {
-  const s = await open({ api: { saveWorkflow: async () => ({ ok: false, status: 422, issues: [
-    { code: 'V21', message: 'exactly one end node is required' },
-    { code: 'V5', message: 'n_agent.task is not wired', nodeId: 'n_agent' },
-  ] }) } });
-  // The canvas must be DIRTY before we assert a failed save leaves it dirty —
-  // a freshly loaded template is clean, so the first draft's final assertion
-  // could never hold. setName is the cheapest legitimate mutation.
-  s.c.setName('Dirty one');
-  assert.equal(s.c.isDirty(), true, 'precondition');
-  s.el.save.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  const dlg = s.el.dialogHost.querySelector('dialog.save-dialog');
-  dlg.querySelector('.sd-name').value = 'X';
-  dlg.querySelector('.sd-confirm').dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  const msg = dlg.querySelector('.sd-msg');
-  assert.match(msg.textContent, /exactly one end node is required/);
-  assert.match(msg.textContent, /n_agent\.task is not wired/);
-  assert.ok(dlg.hasAttribute('open') || dlg.open, 'dialog stays open on 422');
-  assert.equal(s.c.isDirty(), true);
-});
-
-test('an empty name is refused client-side before any POST', async () => {
-  let calls = 0;
-  const s = await open({ api: { saveWorkflow: async () => { calls += 1; return { ok: true, workflow: { id: 'x' } }; } } });
-  s.el.save.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  const dlg = s.el.dialogHost.querySelector('dialog.save-dialog');
-  dlg.querySelector('.sd-name').value = '   ';
-  dlg.querySelector('.sd-confirm').dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(calls, 0);
-  assert.equal(dlg.querySelector('.sd-msg').textContent, 'name is required');
-});
-
-// ---------------------------------------------------------------- rail tabs +
-// palette accordion. The agents card below the canvas is gone: the palette now
-// lives in the rail behind an Agents/Info tab, and each domain is its own
-// disclosure ("dropdown") instead of a row of collapse chips.
-const PAL_AGENTS = [
-  { key: 'planner', displayName: 'Plan', domain: 'coding', order: 1, inputs: [], outputs: [{ id: 'plan', type: 'md' }] },
-  { key: 'docs', displayName: 'Docs', domain: 'writing', order: 2, inputs: [], outputs: [{ id: 'doc', type: 'md' }] },
-];
-const palMod = () => import(new URL('../ui/public/graph/palette.mjs', import.meta.url).href);
-
-test('each palette group is a collapsible header and the chip row is gone', async () => {
-  const s = await open();
-  const { renderPalette } = await palMod();
-  renderPalette(s.el.palette, { agents: PAL_AGENTS, placedKinds: [], collapsed: new Set(), doc: s.doc });
-  assert.equal(s.el.palette.querySelector('.pal-chips'), null, 'the domain chip row is replaced by the headers');
-  const heads = [...s.el.palette.querySelectorAll('.pal-grp')];
-  assert.deepEqual(heads.map((h) => h.dataset.domain), ['coding', 'writing', 'flow'], 'every group, Flow included, is a disclosure');
-  assert.equal(heads[0].tagName, 'BUTTON');
-  assert.equal(heads[0].getAttribute('aria-expanded'), 'true');
-  assert.equal(heads[0].querySelector('.lab').textContent, 'coding');
-  assert.equal(heads[0].querySelector('.chip').textContent, '1');
-  assert.equal(s.el.palette.querySelector('.pal-group[data-domain="coding"] .pills').hidden, false);
-});
-
-test('a collapsed group keeps its header and hides only its pills', async () => {
-  const s = await open();
-  const { renderPalette } = await palMod();
-  renderPalette(s.el.palette, { agents: PAL_AGENTS, placedKinds: [], collapsed: new Set(['coding', 'flow']), doc: s.doc });
-  for (const domain of ['coding', 'flow']) {
-    const sec = s.el.palette.querySelector(`.pal-group[data-domain="${domain}"]`);
-    assert.equal(sec.hidden, false, `${domain} header stays reachable`);
-    assert.equal(sec.querySelector('.pal-grp').getAttribute('aria-expanded'), 'false');
-    assert.equal(sec.querySelector('.pills').hidden, true, `${domain} pills hidden`);
-  }
-  assert.equal(s.el.palette.querySelector('.pal-group[data-domain="writing"] .pills').hidden, false);
-});
-
-test('a live filter force-expands a collapsed group that matches', async () => {
-  const s = await open();
-  const { renderPalette, applyFilter } = await palMod();
-  const collapsed = new Set(['coding']);
-  renderPalette(s.el.palette, { agents: PAL_AGENTS, placedKinds: [], collapsed, doc: s.doc });
-  applyFilter(s.el.palette, 'plan', collapsed);
-  const coding = s.el.palette.querySelector('.pal-group[data-domain="coding"]');
-  assert.equal(coding.querySelector('.pills').hidden, false, 'the query overrides the collapse');
-  assert.equal(coding.querySelector('.pal-grp').getAttribute('aria-expanded'), 'true');
-  assert.equal(s.el.palette.querySelector('.pal-group[data-domain="writing"]').hidden, true, 'a group with no match drops out');
-  applyFilter(s.el.palette, '', collapsed);
-  assert.equal(coding.querySelector('.pills').hidden, true, 'clearing the query restores the collapse');
-});
-
-test('clicking a group header toggles it through the composer', async () => {
-  const s = await open({ api: { agents: async () => PAL_AGENTS, agentsAll: async () => PAL_AGENTS } });
-  s.c.setAgents(Object.fromEntries(PAL_AGENTS.map((a) => [a.key, a])));
-  s.c.paintPalette();
-  const head = s.el.palette.querySelector('.pal-grp[data-domain="coding"]');
-  head.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  assert.equal(s.el.palette.querySelector('.pal-group[data-domain="coding"] .pills').hidden, true);
-  s.el.palette.querySelector('.pal-grp[data-domain="coding"]').dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  assert.equal(s.el.palette.querySelector('.pal-group[data-domain="coding"] .pills').hidden, false);
-});
-
-test('the rail opens on the Agents tab and remembers the last tab', async () => {
-  const store = new Map();
-  const storage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, v) };
-  const s = await open({ storage });
-  assert.equal(s.el.insRail.dataset.tab, 'agents');
-  assert.equal(s.el.insTabs.querySelector('[data-tab="agents"]').getAttribute('aria-selected'), 'true');
-  s.el.insTabs.querySelector('[data-tab="info"]').dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  assert.equal(s.el.insRail.dataset.tab, 'info');
-  assert.equal(s.el.insTabs.querySelector('[data-tab="agents"]').getAttribute('aria-selected'), 'false');
-  assert.equal(store.get('worca.composer.tab'), 'info');
-  const s2 = await open({ storage });
-  assert.equal(s2.el.insRail.dataset.tab, 'info', 'restored on the next mount');
-});
-
-test('selecting a node repaints Info but never switches the tab', async () => {
-  const s = await open();
-  assert.equal(s.el.insRail.dataset.tab, 'agents');
-  s.c.select({ kind: 'node', id: 'n_agent' });
-  assert.equal(s.el.insRail.dataset.tab, 'agents', 'no auto-switch');
-  assert.equal(s.el.insBody.querySelector('.ins-panel').dataset.nodeId, 'n_agent', 'Info is painted anyway');
+test('Save dialog: empty name refused client-side, a 422 renders validator issues verbatim and keeps the dialog', async () => {
+  await checkRows([
+    { name: 'a 422 renders the validator issues verbatim and keeps the dialog open', run: async () => {
+      const s = await open({ api: { saveWorkflow: async () => ({ ok: false, status: 422, issues: [
+        { code: 'V21', message: 'exactly one end node is required' },
+        { code: 'V5', message: 'n_agent.task is not wired', nodeId: 'n_agent' },
+      ] }) } });
+      // The canvas must be DIRTY before we assert a failed save leaves it dirty —
+      // a freshly loaded template is clean, so the first draft's final assertion
+      // could never hold. setName is the cheapest legitimate mutation.
+      s.c.setName('Dirty one');
+      assert.equal(s.c.isDirty(), true, 'precondition');
+      s.el.save.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
+      const dlg = s.el.dialogHost.querySelector('dialog.save-dialog');
+      dlg.querySelector('.sd-name').value = 'X';
+      dlg.querySelector('.sd-confirm').dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      const msg = dlg.querySelector('.sd-msg');
+      assert.match(msg.textContent, /exactly one end node is required/);
+      assert.match(msg.textContent, /n_agent\.task is not wired/);
+      assert.ok(dlg.hasAttribute('open') || dlg.open, 'dialog stays open on 422');
+      assert.equal(s.c.isDirty(), true);
+    } },
+    { name: 'an empty name is refused client-side before any POST', run: async () => {
+      let calls = 0;
+      const s = await open({ api: { saveWorkflow: async () => { calls += 1; return { ok: true, workflow: { id: 'x' } }; } } });
+      s.el.save.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
+      const dlg = s.el.dialogHost.querySelector('dialog.save-dialog');
+      dlg.querySelector('.sd-name').value = '   ';
+      dlg.querySelector('.sd-confirm').dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(calls, 0);
+      assert.equal(dlg.querySelector('.sd-msg').textContent, 'name is required');
+    } },
+  ]);
 });
 
 // -------------------------------------------------------------------- MAJ-19
@@ -675,57 +546,59 @@ function appConfirmModal(s, { open: isOpen = true } = {}) {
   return { host, ok };
 }
 
-test('MAJ-19: Backspace aimed at the save dialog never edits the graph behind it', async () => {
-  const s = await open();
-  s.c.select({ kind: 'node', id: 'n_agent' });
-  const dlg = s.c.openSaveDialog();
-  assert.ok(dlg, 'dialog mounted');
-  const x0 = s.c.template().nodes.find((n) => n.id === 'n_agent').x;
-  keyOn(s, dlg.querySelector('.sd-confirm'), 'Backspace');
-  assert.equal(s.c.template().nodes.some((n) => n.id === 'n_agent'), true, 'the node survives the modal keystroke');
-  keyOn(s, dlg.querySelector('.sd-cancel'), 'ArrowRight');
-  assert.equal(s.c.template().nodes.find((n) => n.id === 'n_agent').x, x0, 'arrows never nudge behind the modal');
-  // Focus outside the dialog (jsdom's showModal fallback focuses nothing): the
-  // `dialog[open]` arm has to catch it too.
-  keyOn(s, s.doc, 'Backspace');
-  assert.equal(s.c.template().nodes.some((n) => n.id === 'n_agent'), true, 'a document-targeted key is guarded too');
-  // typing in the NAME field stays ignored by the pre-existing isTyping guard
-  keyOn(s, dlg.querySelector('.sd-name'), 'Backspace');
-  assert.equal(s.c.template().nodes.some((n) => n.id === 'n_agent'), true);
-});
-
-test("MAJ-19: Backspace aimed at the app's confirm modal never edits the graph", async () => {
-  const s = await open();
-  s.c.select({ kind: 'node', id: 'n_agent' });
-  const m = appConfirmModal(s);
-  keyOn(s, m.ok, 'Backspace');
-  assert.equal(s.c.template().nodes.some((n) => n.id === 'n_agent'), true, 'the × confirm cannot delete a node');
-  keyOn(s, s.doc, 'Backspace');
-  assert.equal(s.c.template().nodes.some((n) => n.id === 'n_agent'), true, 'nor can a stray key while it is up');
-});
-
-test('MAJ-19: the modal guard is not over-broad — closed overlays leave the keyboard live', async () => {
-  const s = await open();
-  appConfirmModal(s, { open: false });                 // .hidden CLASS = closed
-  const sheet = s.doc.createElement('section');        // Ask Worca sheet: hidden ATTRIBUTE
-  sheet.setAttribute('role', 'dialog'); sheet.hidden = true;
-  s.doc.body.appendChild(sheet);
-  s.c.openSaveDialog();
-  const dlg = s.el.dialogHost.querySelector('dialog.save-dialog');
-  dlg.querySelector('.sd-cancel').dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  assert.equal(dlg.hasAttribute('open') || dlg.open, false, 'precondition: the save dialog is closed');
-  s.c.select({ kind: 'node', id: 'n_agent' });
-  keyOn(s, s.doc, 'Backspace');
-  assert.equal(s.c.template().nodes.some((n) => n.id === 'n_agent'), false, 'Backspace still deletes with no modal up');
-  // The Ask Worca sheet is role="dialog" WITHOUT aria-modal and stays open while
-  // the canvas is used (ask-panel.mjs:202-207, :522) — it never owns the keyboard.
-  const ask = s.doc.createElement('section');
-  ask.className = 'ask-sheet'; ask.setAttribute('role', 'dialog'); ask.setAttribute('aria-label', 'Ask Worca');
-  ask.hidden = false;
-  s.doc.body.appendChild(ask);
-  s.c.select({ kind: 'node', id: 'n_task' });
-  keyOn(s, s.doc, 'Backspace');
-  assert.equal(s.c.template().nodes.some((n) => n.id === 'n_task'), false, 'an open non-modal Ask sheet leaves the keyboard live');
+test('MAJ-19: Backspace aimed at the save dialog or confirm modal never edits the graph; closed overlays leave the keyboard live', async () => {
+  await checkRows([
+    { name: 'MAJ-19: Backspace aimed at the save dialog never edits the graph behind it', run: async () => {
+      const s = await open();
+      s.c.select({ kind: 'node', id: 'n_agent' });
+      const dlg = s.c.openSaveDialog();
+      assert.ok(dlg, 'dialog mounted');
+      const x0 = s.c.template().nodes.find((n) => n.id === 'n_agent').x;
+      keyOn(s, dlg.querySelector('.sd-confirm'), 'Backspace');
+      assert.equal(s.c.template().nodes.some((n) => n.id === 'n_agent'), true, 'the node survives the modal keystroke');
+      keyOn(s, dlg.querySelector('.sd-cancel'), 'ArrowRight');
+      assert.equal(s.c.template().nodes.find((n) => n.id === 'n_agent').x, x0, 'arrows never nudge behind the modal');
+      // Focus outside the dialog (jsdom's showModal fallback focuses nothing): the
+      // `dialog[open]` arm has to catch it too.
+      keyOn(s, s.doc, 'Backspace');
+      assert.equal(s.c.template().nodes.some((n) => n.id === 'n_agent'), true, 'a document-targeted key is guarded too');
+      // typing in the NAME field stays ignored by the pre-existing isTyping guard
+      keyOn(s, dlg.querySelector('.sd-name'), 'Backspace');
+      assert.equal(s.c.template().nodes.some((n) => n.id === 'n_agent'), true);
+    } },
+    { name: "MAJ-19: Backspace aimed at the app's confirm modal never edits the graph", run: async () => {
+      const s = await open();
+      s.c.select({ kind: 'node', id: 'n_agent' });
+      const m = appConfirmModal(s);
+      keyOn(s, m.ok, 'Backspace');
+      assert.equal(s.c.template().nodes.some((n) => n.id === 'n_agent'), true, 'the × confirm cannot delete a node');
+      keyOn(s, s.doc, 'Backspace');
+      assert.equal(s.c.template().nodes.some((n) => n.id === 'n_agent'), true, 'nor can a stray key while it is up');
+    } },
+    { name: 'MAJ-19: the modal guard is not over-broad — closed overlays leave the keyboard live', run: async () => {
+      const s = await open();
+      appConfirmModal(s, { open: false });                 // .hidden CLASS = closed
+      const sheet = s.doc.createElement('section');        // Ask Worca sheet: hidden ATTRIBUTE
+      sheet.setAttribute('role', 'dialog'); sheet.hidden = true;
+      s.doc.body.appendChild(sheet);
+      s.c.openSaveDialog();
+      const dlg = s.el.dialogHost.querySelector('dialog.save-dialog');
+      dlg.querySelector('.sd-cancel').dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
+      assert.equal(dlg.hasAttribute('open') || dlg.open, false, 'precondition: the save dialog is closed');
+      s.c.select({ kind: 'node', id: 'n_agent' });
+      keyOn(s, s.doc, 'Backspace');
+      assert.equal(s.c.template().nodes.some((n) => n.id === 'n_agent'), false, 'Backspace still deletes with no modal up');
+      // The Ask Worca sheet is role="dialog" WITHOUT aria-modal and stays open while
+      // the canvas is used (ask-panel.mjs:202-207, :522) — it never owns the keyboard.
+      const ask = s.doc.createElement('section');
+      ask.className = 'ask-sheet'; ask.setAttribute('role', 'dialog'); ask.setAttribute('aria-label', 'Ask Worca');
+      ask.hidden = false;
+      s.doc.body.appendChild(ask);
+      s.c.select({ kind: 'node', id: 'n_task' });
+      keyOn(s, s.doc, 'Backspace');
+      assert.equal(s.c.template().nodes.some((n) => n.id === 'n_task'), false, 'an open non-modal Ask sheet leaves the keyboard live');
+    } },
+  ]);
 });
 
 // --------------------------------------------------------------------- MAJ-6
@@ -733,69 +606,70 @@ test('MAJ-19: the modal guard is not over-broad — closed overlays leave the ke
 // ring, so unsaved work is unrecoverable. Both now ask through the injected
 // `hooks.confirmDiscard` seam; an ABSENT hook proceeds, which is what keeps
 // every headless caller (unit tests, the CDP probe) behaving as before.
-test('MAJ-6: a refused confirmDiscard leaves the canvas, the undo ring and the dirty flag untouched', async () => {
-  const s = await open();
-  let asked = 0;
-  s.c.hooks.confirmDiscard = async () => { asked += 1; return false; };
-  s.c.spawn({ key: 'planner' });
-  const nodes = s.c.template().nodes.length;
-  const depth = s.c.undoDepth();
-  assert.equal(s.c.isDirty(), true, 'precondition: dirty');
-  assert.ok(depth > 0, 'precondition: undo has the spawn');
-  s.hostEls.newBtn.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(asked, 1, 'New canvas asked');
-  assert.equal(s.c.template().nodes.length, nodes, 'canvas untouched');
-  assert.equal(s.c.undoDepth(), depth, 'undo ring untouched');
-  assert.equal(s.c.isDirty(), true, 'still dirty');
-  assert.equal(await s.c.openTemplate({ id: 'wf_x', name: 'X', version: 2, nodes: [], wires: [] }), null,
-    'Open refused returns null');
-  assert.equal(asked, 2, 'Open asked too');
-  assert.equal(s.c.template().nodes.length, nodes, 'canvas still untouched');
-  assert.equal(s.c.undoDepth(), depth);
-});
-
-test('MAJ-6: an accepted confirmDiscard proceeds; a clean canvas never asks; no hook proceeds', async () => {
-  const s = await open();
-  let asked = 0;
-  s.c.hooks.confirmDiscard = async () => { asked += 1; return true; };
-  s.hostEls.newBtn.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(asked, 0, 'a CLEAN canvas is never guarded');
-  s.c.spawn({ key: 'planner' });
-  assert.equal(s.c.isDirty(), true);
-  s.hostEls.newBtn.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(asked, 1);
-  assert.equal(s.c.template().nodes.length, 2, 'back to the bare Task/End canvas');
-  assert.equal(s.c.undoDepth(), 0);
-  assert.equal(s.c.isDirty(), false);
-  // no hook at all => proceed (the headless default)
-  const s2 = await open();
-  s2.c.spawn({ key: 'planner' });
-  assert.equal(s2.c.isDirty(), true);
-  s2.hostEls.newBtn.dispatchEvent(new s2.win.MouseEvent('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(s2.c.template().nodes.length, 2, 'no hook installed => New canvas proceeds');
-});
-
-test('MAJ-6: a confirmDiscard that throws is treated as "no" — the work survives', async () => {
-  const s = await open();
-  s.c.hooks.confirmDiscard = async () => { throw new Error('modal blew up'); };
-  s.c.spawn({ key: 'planner' });
-  const nodes = s.c.template().nodes.length;
-  s.hostEls.newBtn.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(s.c.template().nodes.length, nodes, 'a broken hook never costs the user the canvas');
-});
-
-test('MAJ-6: loadTemplate stays SYNCHRONOUS and unguarded (the programmatic model API)', async () => {
-  const s = await open();
-  s.c.hooks.confirmDiscard = async () => false;
-  s.c.spawn({ key: 'planner' });
-  const t = s.c.loadTemplate({ id: 'wf_p', name: 'P', version: 2, domain: '', nodes: [], wires: [] });
-  assert.equal(t.id, 'wf_p', 'returns the template, not a promise');
-  assert.equal(s.c.template().id, 'wf_p');
+test('MAJ-6: confirmDiscard refused/throwing keeps canvas+undo+dirty, accepted proceeds, clean never asks; loadTemplate stays synchronous', async () => {
+  await checkRows([
+    { name: 'MAJ-6: a refused confirmDiscard leaves the canvas, the undo ring and the dirty flag untouched', run: async () => {
+      const s = await open();
+      let asked = 0;
+      s.c.hooks.confirmDiscard = async () => { asked += 1; return false; };
+      s.c.spawn({ key: 'planner' });
+      const nodes = s.c.template().nodes.length;
+      const depth = s.c.undoDepth();
+      assert.equal(s.c.isDirty(), true, 'precondition: dirty');
+      assert.ok(depth > 0, 'precondition: undo has the spawn');
+      s.hostEls.newBtn.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(asked, 1, 'New canvas asked');
+      assert.equal(s.c.template().nodes.length, nodes, 'canvas untouched');
+      assert.equal(s.c.undoDepth(), depth, 'undo ring untouched');
+      assert.equal(s.c.isDirty(), true, 'still dirty');
+      assert.equal(await s.c.openTemplate({ id: 'wf_x', name: 'X', version: 2, nodes: [], wires: [] }), null,
+        'Open refused returns null');
+      assert.equal(asked, 2, 'Open asked too');
+      assert.equal(s.c.template().nodes.length, nodes, 'canvas still untouched');
+      assert.equal(s.c.undoDepth(), depth);
+    } },
+    { name: 'MAJ-6: an accepted confirmDiscard proceeds; a clean canvas never asks; no hook proceeds', run: async () => {
+      const s = await open();
+      let asked = 0;
+      s.c.hooks.confirmDiscard = async () => { asked += 1; return true; };
+      s.hostEls.newBtn.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(asked, 0, 'a CLEAN canvas is never guarded');
+      s.c.spawn({ key: 'planner' });
+      assert.equal(s.c.isDirty(), true);
+      s.hostEls.newBtn.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(asked, 1);
+      assert.equal(s.c.template().nodes.length, 2, 'back to the bare Task/End canvas');
+      assert.equal(s.c.undoDepth(), 0);
+      assert.equal(s.c.isDirty(), false);
+      // no hook at all => proceed (the headless default)
+      const s2 = await open();
+      s2.c.spawn({ key: 'planner' });
+      assert.equal(s2.c.isDirty(), true);
+      s2.hostEls.newBtn.dispatchEvent(new s2.win.MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(s2.c.template().nodes.length, 2, 'no hook installed => New canvas proceeds');
+    } },
+    { name: 'MAJ-6: a confirmDiscard that throws is treated as "no" — the work survives', run: async () => {
+      const s = await open();
+      s.c.hooks.confirmDiscard = async () => { throw new Error('modal blew up'); };
+      s.c.spawn({ key: 'planner' });
+      const nodes = s.c.template().nodes.length;
+      s.hostEls.newBtn.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(s.c.template().nodes.length, nodes, 'a broken hook never costs the user the canvas');
+    } },
+    { name: 'MAJ-6: loadTemplate stays SYNCHRONOUS and unguarded (the programmatic model API)', run: async () => {
+      const s = await open();
+      s.c.hooks.confirmDiscard = async () => false;
+      s.c.spawn({ key: 'planner' });
+      const t = s.c.loadTemplate({ id: 'wf_p', name: 'P', version: 2, domain: '', nodes: [], wires: [] });
+      assert.equal(t.id, 'wf_p', 'returns the template, not a promise');
+      assert.equal(s.c.template().id, 'wf_p');
+    } },
+  ]);
 });
 
 // ------------------------------------------------------------- MAJ-4 · C-3
@@ -827,57 +701,39 @@ test('C-3: opening the built-in Default and saving prefills "<name> copy" and ne
   assert.equal(s.hostEls.name.value, 'Default copy', 'the header name follows the copy');
 });
 
-test('MAJ-4: a plugin-owned row defaults to Save-a-copy and says why, verbatim', async () => {
-  const posts = [];
-  const s = await open({ api: { saveWorkflow: async (b) => { posts.push(b); return { ok: true, workflow: { id: 'wf_demo-plug-example-flow-copy' } }; } } });
-  s.c.loadTemplate(PLUGIN_ROW());
-  assert.equal(s.c.origin(), 'plugin:demo-plug', 'the composer keeps the row provenance');
-  const dlg = s.c.openSaveDialog();
-  assert.equal(dlg.querySelector('.sd-title').textContent, 'Save a copy');
-  assert.equal(dlg.querySelector('.sd-name').value, 'demo-plug example flow copy');
-  assert.equal(dlg.querySelector('.sd-note').textContent,
-    'This pipeline belongs to plugin "demo-plug" and is replaced on plugin update — saving creates your own copy.');
-  dlg.querySelector('.sd-confirm').dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(posts[0].id, undefined, 'the plugin row id is never overwritten');
-  assert.equal(posts[0].name, 'demo-plug example flow copy');
-  // …and the copy, once saved, is an ordinary user row again.
-  assert.equal(s.c.origin(), '', 'markSaved clears the plugin provenance');
-});
-
-test('MAJ-4: an ordinary user row still saves IN PLACE, with no note', async () => {
-  const posts = [];
-  const s = await open({ api: { saveWorkflow: async (b) => { posts.push(b); return { ok: true, workflow: { id: b.id } }; } } });
-  s.c.loadTemplate({ id: 'wf_mine', name: 'Mine', version: 2, domain: 'coding', origin: null,
-    nodes: fixture().nodes, wires: fixture().wires });
-  const dlg = s.c.openSaveDialog();
-  assert.equal(dlg.querySelector('.sd-title').textContent, 'Save pipeline');
-  assert.equal(dlg.querySelector('.sd-name').value, 'Mine');
-  assert.equal(dlg.querySelector('.sd-note'), null);
-  dlg.querySelector('.sd-confirm').dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(posts[0].id, 'wf_mine');
-});
-
-test('MAJ-4 · C-3: the dialog renders the server 422/409 refusals verbatim', async () => {
-  const s = await open({ api: { saveWorkflow: async () => ({ ok: false, status: 422, error: 'the name "Default" is reserved — choose another name' }) } });
-  s.c.setName('Default');
-  s.el.save.dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  const dlg = s.el.dialogHost.querySelector('dialog.save-dialog');
-  dlg.querySelector('.sd-name').value = 'Default';
-  dlg.querySelector('.sd-confirm').dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(dlg.querySelector('.sd-msg').textContent, 'the name "Default" is reserved — choose another name');
-  assert.equal(dlg.querySelector('.sd-msg').className, 'sd-msg err');
-  assert.ok(dlg.hasAttribute('open') || dlg.open, 'the dialog stays open so the name can be fixed');
-
-  const s2 = await open({ api: { saveWorkflow: async () => ({ ok: false, status: 409, error: 'a pipeline with the id "wf_full" already exists — choose another name', id: 'wf_full' }) } });
-  s2.el.save.dispatchEvent(new s2.win.MouseEvent('click', { bubbles: true }));
-  const dlg2 = s2.el.dialogHost.querySelector('dialog.save-dialog');
-  dlg2.querySelector('.sd-name').value = 'Full';
-  dlg2.querySelector('.sd-confirm').dispatchEvent(new s2.win.MouseEvent('click', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(dlg2.querySelector('.sd-msg').textContent, 'a pipeline with the id "wf_full" already exists — choose another name');
+test('MAJ-4: a plugin-owned row defaults to Save-a-copy with a note; a user row saves in place', async () => {
+  await checkRows([
+    { name: 'MAJ-4: a plugin-owned row defaults to Save-a-copy and says why, verbatim', run: async () => {
+      const posts = [];
+      const s = await open({ api: { saveWorkflow: async (b) => { posts.push(b); return { ok: true, workflow: { id: 'wf_demo-plug-example-flow-copy' } }; } } });
+      s.c.loadTemplate(PLUGIN_ROW());
+      assert.equal(s.c.origin(), 'plugin:demo-plug', 'the composer keeps the row provenance');
+      const dlg = s.c.openSaveDialog();
+      assert.equal(dlg.querySelector('.sd-title').textContent, 'Save a copy');
+      assert.equal(dlg.querySelector('.sd-name').value, 'demo-plug example flow copy');
+      assert.equal(dlg.querySelector('.sd-note').textContent,
+        'This pipeline belongs to plugin "demo-plug" and is replaced on plugin update — saving creates your own copy.');
+      dlg.querySelector('.sd-confirm').dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(posts[0].id, undefined, 'the plugin row id is never overwritten');
+      assert.equal(posts[0].name, 'demo-plug example flow copy');
+      // …and the copy, once saved, is an ordinary user row again.
+      assert.equal(s.c.origin(), '', 'markSaved clears the plugin provenance');
+    } },
+    { name: 'MAJ-4: an ordinary user row still saves IN PLACE, with no note', run: async () => {
+      const posts = [];
+      const s = await open({ api: { saveWorkflow: async (b) => { posts.push(b); return { ok: true, workflow: { id: b.id } }; } } });
+      s.c.loadTemplate({ id: 'wf_mine', name: 'Mine', version: 2, domain: 'coding', origin: null,
+        nodes: fixture().nodes, wires: fixture().wires });
+      const dlg = s.c.openSaveDialog();
+      assert.equal(dlg.querySelector('.sd-title').textContent, 'Save pipeline');
+      assert.equal(dlg.querySelector('.sd-name').value, 'Mine');
+      assert.equal(dlg.querySelector('.sd-note'), null);
+      dlg.querySelector('.sd-confirm').dispatchEvent(new s.win.MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(posts[0].id, 'wf_mine');
+    } },
+  ]);
 });
 
 // -------------------------------------------------------------------- MAJ-18
@@ -926,42 +782,44 @@ function drawn(c, wireId) {
   };
 }
 
-test('MAJ-18: every point ON the drawn route of a long wire and of a loop wire is a hit', async () => {
-  const s = await open({ template: longFixture() });
-  for (const id of ['w1', 'w4']) {
-    const { a, b, loop } = drawn(s.c, id);
-    assert.ok(Math.abs(b.x - a.x) >= 700, `${id}: seed-sized span (${Math.abs(b.x - a.x).toFixed(0)}px)`);
-    const pts = s.c.view.wireRoute(id);
-    assert.ok(pts && pts.length >= 2, `${id} has a painted route`);
-    let dead = 0;
-    for (const p of walk(pts)) {
-      const hit = s.c._internal.hitWireAt(p);
-      if (!hit) { dead += 1; continue; }
-      // A first-match scan may legitimately return another wire — but only one
-      // that genuinely runs through this point too (wires still cross).
-      if (hit.id !== id) {
-        assert.ok(hitRoute(s.c.view.wireRoute(hit.id), p), `${id}: ${hit.id} won a point it does not touch`);
+test('MAJ-18: hit-testing follows the drawn route (long + loop wires), mid-route click selects, off-route selects nothing', async () => {
+  await checkRows([
+    { name: 'MAJ-18: every point ON the drawn route of a long wire and of a loop wire is a hit', run: async () => {
+      const s = await open({ template: longFixture() });
+      for (const id of ['w1', 'w4']) {
+        const { a, b, loop } = drawn(s.c, id);
+        assert.ok(Math.abs(b.x - a.x) >= 700, `${id}: seed-sized span (${Math.abs(b.x - a.x).toFixed(0)}px)`);
+        const pts = s.c.view.wireRoute(id);
+        assert.ok(pts && pts.length >= 2, `${id} has a painted route`);
+        let dead = 0;
+        for (const p of walk(pts)) {
+          const hit = s.c._internal.hitWireAt(p);
+          if (!hit) { dead += 1; continue; }
+          // A first-match scan may legitimately return another wire — but only one
+          // that genuinely runs through this point too (wires still cross).
+          if (hit.id !== id) {
+            assert.ok(hitRoute(s.c.view.wireRoute(hit.id), p), `${id}: ${hit.id} won a point it does not touch`);
+          }
+        }
+        assert.equal(dead, 0, `${id}${loop ? ' (loop)' : ''}: every point ON the drawn line is a hit, none dead`);
       }
-    }
-    assert.equal(dead, 0, `${id}${loop ? ' (loop)' : ''}: every point ON the drawn line is a hit, none dead`);
-  }
-  assert.equal(s.c.view.isLoopWire('w4'), true, 'w4 really is drawn as a loop');
-});
-
-test('MAJ-18: a click on the middle of the drawn route selects the wire', async () => {
-  const s = await open({ template: longFixture() });
-  s.c.view.setTransform({ x: 0, y: 0, z: 1 });
-  const p = routeMid(s.c.view.wireRoute('w1'));
-  down(s, p.x, p.y);
-  assert.deepEqual(s.c.selection(), { kind: 'wire', id: 'w1' });
-  up(s, p.x, p.y);
-});
-
-test('MAJ-18: a point well off the route still selects nothing', async () => {
-  const s = await open({ template: longFixture() });
-  const p = routeMid(s.c.view.wireRoute('w1'));
-  assert.equal(s.c._internal.hitWireAt({ x: p.x, y: p.y - 40 }), null, 'the tolerance did not grow');
-  assert.ok(s.c._internal.hitWireAt({ x: p.x, y: p.y - 4 }), 'but 4px off is still within the 6px tolerance');
+      assert.equal(s.c.view.isLoopWire('w4'), true, 'w4 really is drawn as a loop');
+    } },
+    { name: 'MAJ-18: a click on the middle of the drawn route selects the wire', run: async () => {
+      const s = await open({ template: longFixture() });
+      s.c.view.setTransform({ x: 0, y: 0, z: 1 });
+      const p = routeMid(s.c.view.wireRoute('w1'));
+      down(s, p.x, p.y);
+      assert.deepEqual(s.c.selection(), { kind: 'wire', id: 'w1' });
+      up(s, p.x, p.y);
+    } },
+    { name: 'MAJ-18: a point well off the route still selects nothing', run: async () => {
+      const s = await open({ template: longFixture() });
+      const p = routeMid(s.c.view.wireRoute('w1'));
+      assert.equal(s.c._internal.hitWireAt({ x: p.x, y: p.y - 40 }), null, 'the tolerance did not grow');
+      assert.ok(s.c._internal.hitWireAt({ x: p.x, y: p.y - 4 }), 'but 4px off is still within the 6px tolerance');
+    } },
+  ]);
 });
 
 test('a routed model locks the sub-agent select; a plain model keeps it editable', async () => {
@@ -1001,33 +859,6 @@ test('a routed model locks the sub-agent select; a plain model keeps it editable
   assert.equal(free.disabled, false);
   assert.ok(free.options.length > 1, 'the alias/auto/inherit options are back');
   assert.equal(free.value, 'sonnet', 'the preserved pin is re-selected after unlocking');
-});
-
-test('Center is a zoom-to-FIT: it scales the graph into the band, never past 1x, and lands its centre on the band centre', async () => {
-  const s = await open();
-  s.c.view.setTransform({ x: 0, y: 0, z: 1.3 });
-  click(s, s.el.center);
-  const b = s.c.view.bounds(60);                       // fit() pads by 60
-  const expect = Math.max(0.4, Math.min(1, Math.min(BAND_CX * 2 / b.w, 560 / b.h)));
-  assert.ok(Math.abs(s.c.view.getTransform().z - expect) < 1e-9, 'the zoom is the fit zoom, clamped 0.4..1');
-  const c = s.c._internal.toWorld(BAND_CX, BAND_CY);
-  assert.ok(Math.abs(c.x - (b.x + b.w / 2)) < 1e-6, 'the padded bounds centre sits under the band centre');
-  assert.ok(Math.abs(c.y - (b.y + b.h / 2)) < 1e-6);
-  assert.equal(s.el.zoomIn.disabled, false, 'and the cluster repaints off the fit');
-});
-
-test('Center follows the rail: collapsing it fits into the wider band', async () => {
-  const s = await open();
-  click(s, s.el.center);
-  const withRail = s.c.view.getTransform();
-  s.el.insRail.dataset.open = 'collapsed';
-  click(s, s.el.center);
-  const collapsed = s.c.view.getTransform();
-  const b = s.c.view.bounds(60);
-  const bandW = 1280 - 28;                             // INSET_COLLAPSED
-  assert.ok(collapsed.z >= withRail.z - 1e-12, 'the freed rail can only widen the band');
-  const c = s.c._internal.toWorld(bandW / 2, BAND_CY);
-  assert.ok(Math.abs(c.x - (b.x + b.w / 2)) < 1e-6, 'and the fit centres on the NEW band centre');
 });
 
 // ---- script cards (P1b) ----
@@ -1088,133 +919,138 @@ test('script inspector edits commit params, timeout and ports through the undo r
   assert.ok(body.querySelector('textarea[data-field="param:command"]').closest('.ins-f').classList.contains('ins-missing'));
 });
 
-test('removing or renaming a config port carries its wires: no undrawable wire is left behind', async () => {
-  const s = await open({ portsFn: portsFnFor(AGENTS, SCRIPT_METAS) });
-  s.c.setScripts(SCRIPT_METAS);
-  const node = s.c.spawn({ kind: 'script', key: 'shell' });
-  s.c.commit('wire', () => {
-    s.c.template().wires.push({ id: 'w_in', from: { node: 'n_agent', port: 'plan' }, to: { node: node.id, port: 'in' } },
-      { id: 'w_out', from: { node: node.id, port: 'log' }, to: { node: 'n_end', port: 'result' } });
-    s.c.template().wires = s.c.template().wires.filter((w) => w.id !== 'w2');
-  });
-  s.c.select({ kind: 'node', id: node.id });
-  const body = s.el.insBody;
-  const idBox = body.querySelector('[data-field="port:inputs:0:id"]');
-  idBox.value = 'notes';
-  idBox.dispatchEvent(new s.win.Event('change', { bubbles: true }));
-  assert.equal(s.c.template().wires.find((w) => w.id === 'w_in').to.port, 'notes', 'a rename rewires');
-  // Wires follow a port BY ID, so an id that is blank, reserved or already taken on that side is refused and the
-  // box snaps back: passing through '' would strand the wire on a port that cannot be drawn, and two ports
-  // sharing an id would hand one port's wires to the other on the next rename.
-  const depth0 = s.c.undoDepth();
-  body.querySelector('[data-port-add="inputs"]').dispatchEvent(new s.win.Event('click', { bubbles: true }));
-  const refuse = (field, value, keeps) => {
-    const x = body.querySelector(`[data-field="${field}"]`);
-    x.value = value;
-    x.dispatchEvent(new s.win.Event('change', { bubbles: true }));
-    assert.equal(body.querySelector(`[data-field="${field}"]`).value, keeps, `"${value}" is refused`);
-  };
-  refuse('port:inputs:0:id', '', 'notes');
-  refuse('port:inputs:0:id', 'await', 'notes');
-  refuse('port:inputs:1:id', 'notes', 'in');
-  assert.equal(s.c.template().wires.find((w) => w.id === 'w_in').to.port, 'notes', 'a refused id moves no wire');
-  assert.equal(s.c.undoDepth(), depth0 + 1, 'a refused id is not an undo step (only the added input is)');
-  s.c.undo();
-  body.querySelector('[data-port-remove="outputs:0"]').dispatchEvent(new s.win.Event('click', { bubbles: true }));
-  assert.equal(s.c.template().wires.some((w) => w.id === 'w_out'), false, 'a removed port takes its wires');
-  s.c.undo();
-  assert.equal(s.c.template().wires.some((w) => w.id === 'w_out'), true, 'one undo step restores port and wire together');
+test('config-port edits carry their wires: rename/remove and the params-port toggle never leave an undrawable wire (one undo step)', async () => {
+  await checkRows([
+    { name: 'removing or renaming a config port carries its wires: no undrawable wire is left behind', run: async () => {
+      const s = await open({ portsFn: portsFnFor(AGENTS, SCRIPT_METAS) });
+      s.c.setScripts(SCRIPT_METAS);
+      const node = s.c.spawn({ kind: 'script', key: 'shell' });
+      s.c.commit('wire', () => {
+        s.c.template().wires.push({ id: 'w_in', from: { node: 'n_agent', port: 'plan' }, to: { node: node.id, port: 'in' } },
+          { id: 'w_out', from: { node: node.id, port: 'log' }, to: { node: 'n_end', port: 'result' } });
+        s.c.template().wires = s.c.template().wires.filter((w) => w.id !== 'w2');
+      });
+      s.c.select({ kind: 'node', id: node.id });
+      const body = s.el.insBody;
+      const idBox = body.querySelector('[data-field="port:inputs:0:id"]');
+      idBox.value = 'notes';
+      idBox.dispatchEvent(new s.win.Event('change', { bubbles: true }));
+      assert.equal(s.c.template().wires.find((w) => w.id === 'w_in').to.port, 'notes', 'a rename rewires');
+      // Wires follow a port BY ID, so an id that is blank, reserved or already taken on that side is refused and the
+      // box snaps back: passing through '' would strand the wire on a port that cannot be drawn, and two ports
+      // sharing an id would hand one port's wires to the other on the next rename.
+      const depth0 = s.c.undoDepth();
+      body.querySelector('[data-port-add="inputs"]').dispatchEvent(new s.win.Event('click', { bubbles: true }));
+      const refuse = (field, value, keeps) => {
+        const x = body.querySelector(`[data-field="${field}"]`);
+        x.value = value;
+        x.dispatchEvent(new s.win.Event('change', { bubbles: true }));
+        assert.equal(body.querySelector(`[data-field="${field}"]`).value, keeps, `"${value}" is refused`);
+      };
+      refuse('port:inputs:0:id', '', 'notes');
+      refuse('port:inputs:0:id', 'await', 'notes');
+      refuse('port:inputs:1:id', 'notes', 'in');
+      assert.equal(s.c.template().wires.find((w) => w.id === 'w_in').to.port, 'notes', 'a refused id moves no wire');
+      assert.equal(s.c.undoDepth(), depth0 + 1, 'a refused id is not an undo step (only the added input is)');
+      s.c.undo();
+      body.querySelector('[data-port-remove="outputs:0"]').dispatchEvent(new s.win.Event('click', { bubbles: true }));
+      assert.equal(s.c.template().wires.some((w) => w.id === 'w_out'), false, 'a removed port takes its wires');
+      s.c.undo();
+      assert.equal(s.c.template().wires.some((w) => w.id === 'w_out'), true, 'one undo step restores port and wire together');
+    } },
+    { name: 'the params-port toggle adds the port to the card; un-ticking it takes its wires in the same undo step', run: async () => {
+      const WIRABLE = { ...DIFF, params: [{ id: 'ref', type: 'string' }] };
+      const metas = { shell: SHELL, gitDiff: WIRABLE };
+      const s = await open({ portsFn: portsFnFor(AGENTS, metas) });
+      s.c.setScripts(metas);
+      const node = s.c.spawn({ kind: 'script', key: 'gitDiff' });
+      s.c.select({ kind: 'node', id: node.id });
+      const body = s.el.insBody;
+      const tick = (on) => { const x = body.querySelector('[data-field="paramsPort"]'); x.checked = on; x.dispatchEvent(new s.win.Event('change', { bubbles: true })); };
+      const cfg = () => s.c.template().nodes.find((n) => n.id === node.id).config;
+      tick(true);
+      assert.equal(cfg().paramsPort, true);
+      assert.deepEqual(portsFnFor(AGENTS, metas)(s.c.template().nodes.find((n) => n.id === node.id)).inputs.map((p) => p.id), ['done', 'params', 'await']);
+      assert.deepEqual([...s.c.view.stage.querySelectorAll(`.node[data-node-id="${node.id}"] [data-port]`)].map((r) => r.dataset.port), ['done', 'params', 'diff', 'await'],
+        'the card redraws with the new input row');
+      s.c.commit('wire', () => { s.c.template().wires.push({ id: 'w_p', from: { node: 'n_agent', port: 'plan' }, to: { node: node.id, port: 'params' } },
+        { id: 'w_d', from: { node: 'n_agent', port: 'plan' }, to: { node: node.id, port: 'await' } }); });
+      const depth = s.c.undoDepth();
+      tick(false);
+      assert.equal('paramsPort' in cfg(), false);
+      assert.equal(s.c.template().wires.some((w) => w.id === 'w_p'), false, 'the wire into the vanished port goes with it');
+      assert.equal(s.c.template().wires.some((w) => w.id === 'w_d'), true, 'no other wire is touched');
+      assert.equal(s.c.undoDepth(), depth + 1, 'one undo step');
+      s.c.undo();
+      assert.equal(cfg().paramsPort, true);
+      assert.equal(s.c.template().wires.some((w) => w.id === 'w_p'), true, 'undo restores the toggle and the wire together');
+      // A config-ported card: while the engine owns `params`, no own input can be renamed onto it (like `await`).
+      const WSHELL = { ...SHELL, params: [...SHELL.params, { id: 'target', type: 'string' }] };
+      const s2 = await open({ portsFn: portsFnFor(AGENTS, { shell: WSHELL }) });
+      s2.c.setScripts({ shell: WSHELL });
+      const sh = s2.c.spawn({ kind: 'script', key: 'shell' });
+      s2.c.select({ kind: 'node', id: sh.id });
+      const rename = (value) => { const x = s2.el.insBody.querySelector('[data-field="port:inputs:0:id"]'); x.value = value; x.dispatchEvent(new s2.win.Event('change', { bubbles: true })); };
+      const box = s2.el.insBody.querySelector('[data-field="paramsPort"]'); box.checked = true; box.dispatchEvent(new s2.win.Event('change', { bubbles: true }));
+      rename('params');
+      assert.equal(s2.el.insBody.querySelector('[data-field="port:inputs:0:id"]').value, 'in', '"params" is the engine\'s while the toggle is on');
+      assert.ok(s2.el.insBody.querySelector('[data-field="paramsPort"]'), 'the toggle is still there to un-tick');
+      // A stuck opt-in (the script grew its OWN `params` input under the card): un-ticking clears V22's error and
+      // leaves the wire alone — it feeds the script's own port now, and the user drew it.
+      const OWN = { ...WIRABLE, inputs: [...DIFF.inputs, { id: 'params', type: 'json', required: false }] };
+      const s3 = await open({ portsFn: portsFnFor(AGENTS, { shell: SHELL, gitDiff: OWN }) });
+      s3.c.setScripts({ shell: SHELL, gitDiff: OWN });
+      const own = s3.c.spawn({ kind: 'script', key: 'gitDiff' });
+      s3.c.commit('stuck', () => { s3.c.template().nodes.find((n) => n.id === own.id).config.paramsPort = true;
+        s3.c.template().wires.push({ id: 'w_own', from: { node: 'n_agent', port: 'plan' }, to: { node: own.id, port: 'params' } }); });
+      s3.c.select({ kind: 'node', id: own.id });
+      const stuck = s3.el.insBody.querySelector('[data-field="paramsPort"]'); stuck.checked = false; stuck.dispatchEvent(new s3.win.Event('change', { bubbles: true }));
+      assert.equal('paramsPort' in s3.c.template().nodes.find((n) => n.id === own.id).config, false);
+      assert.equal(s3.c.template().wires.some((w) => w.id === 'w_own'), true, "a wire into the script's OWN `params` input is not the engine's to delete");
+    } },
+  ]);
 });
 
-test('the composer mounts the shared code editor for code/command params and routes its edits', async () => {
-  const s = await open({ highlight: async (t) => t, portsFn: portsFnFor(AGENTS, { shell: SHELL }) });
-  s.c.setScripts({ shell: SHELL });
-  const node = s.c.spawn({ kind: 'script', key: 'shell' });
-  const body = s.el.insBody;
-  const editor = body.querySelector('.code-editor');
-  assert.ok(editor, 'the command param renders through code-editor.mjs');
-  assert.equal(editor.dataset.language, 'bash');
-  const ta = editor.querySelector('textarea[data-field="param:command"]');
-  assert.equal(ta.rows, 3, 'the rows P1b`s textarea had');
-  ta.value = 'npm test';
-  ta.dispatchEvent(new s.win.Event('change', { bubbles: true }));
-  assert.deepEqual(s.c.template().nodes.find((n) => n.id === node.id).config.params, { command: 'npm test' });
-  // The repaint that follows a commit rebuilds the editor; the old one must be
-  // gone from the DOM (and, with it, its debounce).
-  assert.equal(ta.isConnected, false, 'the previous editor left the DOM');
-  const fresh = body.querySelector('textarea[data-field="param:command"]');
-  assert.equal(fresh.value, 'npm test');
-  ta.dispatchEvent(new s.win.Event('change', { bubbles: true }));   // a stale node must not throw
-  s.c.destroy();
-});
-
-test('a code param picks up its declared language and eight rows', async () => {
-  const JS = { ...SHELL, key: 'js', runtime: 'node', params: [{ id: 'source', type: 'code', language: 'js', required: true }] };
-  const s = await open({ highlight: async (t) => t, portsFn: portsFnFor(AGENTS, { js: JS }) });
-  s.c.setScripts({ js: JS });
-  s.c.spawn({ kind: 'script', key: 'js' });
-  const editor = s.el.insBody.querySelector('.code-editor');
-  assert.equal(editor.dataset.language, 'javascript');
-  assert.equal(editor.querySelector('textarea[data-field="param:source"]').rows, 8);
-  s.c.destroy();
-});
-
-test('with no highlight injected the composer keeps the plain textarea', async () => {
-  const s = await open({ portsFn: portsFnFor(AGENTS, { shell: SHELL }) });
-  s.c.setScripts({ shell: SHELL });
-  s.c.spawn({ kind: 'script', key: 'shell' });
-  assert.equal(s.el.insBody.querySelector('.code-editor'), null);
-  assert.ok(s.el.insBody.querySelector('textarea.ins-textarea[data-field="param:command"]'));
-  s.c.destroy();
-});
-
-test('the params-port toggle adds the port to the card; un-ticking it takes its wires in the same undo step', async () => {
-  const WIRABLE = { ...DIFF, params: [{ id: 'ref', type: 'string' }] };
-  const metas = { shell: SHELL, gitDiff: WIRABLE };
-  const s = await open({ portsFn: portsFnFor(AGENTS, metas) });
-  s.c.setScripts(metas);
-  const node = s.c.spawn({ kind: 'script', key: 'gitDiff' });
-  s.c.select({ kind: 'node', id: node.id });
-  const body = s.el.insBody;
-  const tick = (on) => { const x = body.querySelector('[data-field="paramsPort"]'); x.checked = on; x.dispatchEvent(new s.win.Event('change', { bubbles: true })); };
-  const cfg = () => s.c.template().nodes.find((n) => n.id === node.id).config;
-  tick(true);
-  assert.equal(cfg().paramsPort, true);
-  assert.deepEqual(portsFnFor(AGENTS, metas)(s.c.template().nodes.find((n) => n.id === node.id)).inputs.map((p) => p.id), ['done', 'params', 'await']);
-  assert.deepEqual([...s.c.view.stage.querySelectorAll(`.node[data-node-id="${node.id}"] [data-port]`)].map((r) => r.dataset.port), ['done', 'params', 'diff', 'await'],
-    'the card redraws with the new input row');
-  s.c.commit('wire', () => { s.c.template().wires.push({ id: 'w_p', from: { node: 'n_agent', port: 'plan' }, to: { node: node.id, port: 'params' } },
-    { id: 'w_d', from: { node: 'n_agent', port: 'plan' }, to: { node: node.id, port: 'await' } }); });
-  const depth = s.c.undoDepth();
-  tick(false);
-  assert.equal('paramsPort' in cfg(), false);
-  assert.equal(s.c.template().wires.some((w) => w.id === 'w_p'), false, 'the wire into the vanished port goes with it');
-  assert.equal(s.c.template().wires.some((w) => w.id === 'w_d'), true, 'no other wire is touched');
-  assert.equal(s.c.undoDepth(), depth + 1, 'one undo step');
-  s.c.undo();
-  assert.equal(cfg().paramsPort, true);
-  assert.equal(s.c.template().wires.some((w) => w.id === 'w_p'), true, 'undo restores the toggle and the wire together');
-  // A config-ported card: while the engine owns `params`, no own input can be renamed onto it (like `await`).
-  const WSHELL = { ...SHELL, params: [...SHELL.params, { id: 'target', type: 'string' }] };
-  const s2 = await open({ portsFn: portsFnFor(AGENTS, { shell: WSHELL }) });
-  s2.c.setScripts({ shell: WSHELL });
-  const sh = s2.c.spawn({ kind: 'script', key: 'shell' });
-  s2.c.select({ kind: 'node', id: sh.id });
-  const rename = (value) => { const x = s2.el.insBody.querySelector('[data-field="port:inputs:0:id"]'); x.value = value; x.dispatchEvent(new s2.win.Event('change', { bubbles: true })); };
-  const box = s2.el.insBody.querySelector('[data-field="paramsPort"]'); box.checked = true; box.dispatchEvent(new s2.win.Event('change', { bubbles: true }));
-  rename('params');
-  assert.equal(s2.el.insBody.querySelector('[data-field="port:inputs:0:id"]').value, 'in', '"params" is the engine\'s while the toggle is on');
-  assert.ok(s2.el.insBody.querySelector('[data-field="paramsPort"]'), 'the toggle is still there to un-tick');
-  // A stuck opt-in (the script grew its OWN `params` input under the card): un-ticking clears V22's error and
-  // leaves the wire alone — it feeds the script's own port now, and the user drew it.
-  const OWN = { ...WIRABLE, inputs: [...DIFF.inputs, { id: 'params', type: 'json', required: false }] };
-  const s3 = await open({ portsFn: portsFnFor(AGENTS, { shell: SHELL, gitDiff: OWN }) });
-  s3.c.setScripts({ shell: SHELL, gitDiff: OWN });
-  const own = s3.c.spawn({ kind: 'script', key: 'gitDiff' });
-  s3.c.commit('stuck', () => { s3.c.template().nodes.find((n) => n.id === own.id).config.paramsPort = true;
-    s3.c.template().wires.push({ id: 'w_own', from: { node: 'n_agent', port: 'plan' }, to: { node: own.id, port: 'params' } }); });
-  s3.c.select({ kind: 'node', id: own.id });
-  const stuck = s3.el.insBody.querySelector('[data-field="paramsPort"]'); stuck.checked = false; stuck.dispatchEvent(new s3.win.Event('change', { bubbles: true }));
-  assert.equal('paramsPort' in s3.c.template().nodes.find((n) => n.id === own.id).config, false);
-  assert.equal(s3.c.template().wires.some((w) => w.id === 'w_own'), true, "a wire into the script's OWN `params` input is not the engine's to delete");
+test('code/command params mount the shared code editor (declared language, eight rows) and route edits; no highlighter keeps a plain textarea', async () => {
+  await checkRows([
+    { name: 'the composer mounts the shared code editor for code/command params and routes its edits', run: async () => {
+      const s = await open({ highlight: async (t) => t, portsFn: portsFnFor(AGENTS, { shell: SHELL }) });
+      s.c.setScripts({ shell: SHELL });
+      const node = s.c.spawn({ kind: 'script', key: 'shell' });
+      const body = s.el.insBody;
+      const editor = body.querySelector('.code-editor');
+      assert.ok(editor, 'the command param renders through code-editor.mjs');
+      assert.equal(editor.dataset.language, 'bash');
+      const ta = editor.querySelector('textarea[data-field="param:command"]');
+      assert.equal(ta.rows, 3, 'the rows P1b`s textarea had');
+      ta.value = 'npm test';
+      ta.dispatchEvent(new s.win.Event('change', { bubbles: true }));
+      assert.deepEqual(s.c.template().nodes.find((n) => n.id === node.id).config.params, { command: 'npm test' });
+      // The repaint that follows a commit rebuilds the editor; the old one must be
+      // gone from the DOM (and, with it, its debounce).
+      assert.equal(ta.isConnected, false, 'the previous editor left the DOM');
+      const fresh = body.querySelector('textarea[data-field="param:command"]');
+      assert.equal(fresh.value, 'npm test');
+      ta.dispatchEvent(new s.win.Event('change', { bubbles: true }));   // a stale node must not throw
+      s.c.destroy();
+    } },
+    { name: 'a code param picks up its declared language and eight rows', run: async () => {
+      const JS = { ...SHELL, key: 'js', runtime: 'node', params: [{ id: 'source', type: 'code', language: 'js', required: true }] };
+      const s = await open({ highlight: async (t) => t, portsFn: portsFnFor(AGENTS, { js: JS }) });
+      s.c.setScripts({ js: JS });
+      s.c.spawn({ kind: 'script', key: 'js' });
+      const editor = s.el.insBody.querySelector('.code-editor');
+      assert.equal(editor.dataset.language, 'javascript');
+      assert.equal(editor.querySelector('textarea[data-field="param:source"]').rows, 8);
+      s.c.destroy();
+    } },
+    { name: 'with no highlight injected the composer keeps the plain textarea', run: async () => {
+      const s = await open({ portsFn: portsFnFor(AGENTS, { shell: SHELL }) });
+      s.c.setScripts({ shell: SHELL });
+      s.c.spawn({ kind: 'script', key: 'shell' });
+      assert.equal(s.el.insBody.querySelector('.code-editor'), null);
+      assert.ok(s.el.insBody.querySelector('textarea.ins-textarea[data-field="param:command"]'));
+      s.c.destroy();
+    } },
+  ]);
 });
