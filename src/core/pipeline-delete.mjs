@@ -29,7 +29,7 @@ import { staleIndexLockNote } from './git-lock.mjs';
 import {
   rmGuarded, readRunManifest, rescueModifiedMounts, scanStrayEntries, copyRunManifestTo, RETAIN_REASONS,
 } from './run-manifest.mjs';
-import { branchExists, hasGh, findPrForBranch } from './git-info.mjs';
+import { branchExists, anyPrHost, findPrForBranch } from './git-info.mjs';
 import { retainedWorkPatchName } from './results.mjs';
 import { deleteCommentsForRun } from './diff-comments.mjs';
 import { byActor } from './identity.mjs';
@@ -174,7 +174,7 @@ export async function archivePipeline({ projectDir = null, key = null, workspace
   // limitation). A merge after archive is never observed — also accepted.
   try {
     const branch = state?.branch?.feature;
-    if (branch && state?.projectDir && await hasGh()) {
+    if (branch && state?.projectDir && await anyPrHost()) {
       const pr = await findPrForBranch({ projectDir: state.projectDir, head: branch, prUrl: row.pr_url || null });
       if (pr) persistPrState(row.id, pr);
     }

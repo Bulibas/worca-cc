@@ -16,7 +16,7 @@ import { realpathSync, existsSync, statSync, constants as fsConstants } from 'no
 import { hostname } from 'node:os';
 import { projectKey, projectStorePath, canonicalProjectRoot, workspaceStorePath } from './store.mjs';
 import { listProjects } from './projects.mjs';
-import { branchExists, diffShortstat, hasGh, findPrForBranch } from './git-info.mjs';
+import { branchExists, diffShortstat, anyPrHost, findPrForBranch } from './git-info.mjs';
 import { getDb, tx } from './db.mjs';
 import { RUN_LOG_FILE } from './run-log.mjs';
 import { readRunLedger } from './metrics/ledger.mjs';
@@ -2090,12 +2090,12 @@ async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
     totalActiveMs: active,
     mtime: row.updated_at ? (Date.parse(row.updated_at) || 0) : 0,
   };
-  // Live PR state (opt-in; only the UI history endpoints request it). When gh is
-  // unavailable we still set pr:null (the field is present whenever requested), so
+  // Live PR state (opt-in; only the UI history endpoints request it). When no PR host is
+  // available we still set pr:null (the field is present whenever requested), so
   // callers can distinguish "looked, none" from "did not look".
   if (opts.withPr && repoDir && feature) {
     // pr_url first (repo-agnostic view); the branch search only for rows with no PR yet.
-    entry.pr = (await hasGh())
+    entry.pr = (await anyPrHost())
       ? await findPrForBranch({ projectDir: repoDir, head: feature, prUrl: row.pr_url || null })
       : null;
   }
@@ -2271,10 +2271,10 @@ export function countPipelines() {
  * findPrForBranch already distinguishes merged-vs-open. We do NOT compute live
  * mergeability (no prMergeable call). `onBatch(items, isFinal)` is awaited so a
  * caller can broadcast incrementally; the FINAL call always carries isFinal=true
- * (even with no gh / no targets) so a client spinner provably clears.
+ * (even with no PR host / no targets) so a client spinner provably clears.
  */
 export async function enrichPipelinesPr(onBatch, { batchSize = 16 } = {}) {
-  if (!(await hasGh())) { await onBatch([], true); return; } // no gh: one empty final batch
+  if (!(await anyPrHost())) { await onBatch([], true); return; } // no PR host: one empty final batch
   const rows = await listAllPipelines();                     // skeleton (no withPr), parallelized
   const targets = rows.filter((r) => r.projectDir && r.branch);
   if (targets.length === 0) { await onBatch([], true); return; }
