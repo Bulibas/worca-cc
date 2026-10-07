@@ -2506,6 +2506,13 @@
           </div>
           <div class="shipit-desc-err hint err" hidden></div>
         </div>
+        <!-- Draft is opt-in per ship (unchecked on every open). No data-min-level: the
+             controls show wherever the modal does (docs/ui-levels.md, History). The
+             "Will close" line names the run's GitHub issue source (GET /api/pr/remotes `issue`). -->
+        <div class="shipit-draft">
+          <label class="check-row" for="shipit-draft-input"><input id="shipit-draft-input" class="shipit-draft-input" type="checkbox" /> Open as draft</label>
+          <small class="shipit-closes hint" hidden></small>
+        </div>
         <div class="shipit-try" hidden data-min-level="advanced" aria-label="Try it first"></div>
         <div class="shipit-actions" data-card-actions>
           <button type="button" class="shipit-cancel btn-ghost">Cancel</button>

@@ -72,6 +72,14 @@ test('Azure PR provider', async () => {
       await az.createPr({ base: 'm', head: 'h', title: 'T', baseRepo: REPO, workItemId: 77, env: ENV });
       assert.deepEqual(f.calls[0].body.workItemRefs, [{ id: '77' }]);
     } },
+    { name: 'create: isDraft only when draft is true', run: async () => {
+      const f = fakeFetch([{ match: /pullrequests/, method: 'POST', reply: res(201, { pullRequestId: 1 }) }]);
+      az._testing.setFetch(f);
+      await az.createPr({ base: 'm', head: 'h', title: 'T', baseRepo: REPO, draft: true, env: ENV });
+      await az.createPr({ base: 'm', head: 'h', title: 'T', baseRepo: REPO, draft: false, env: ENV });
+      assert.equal(f.calls[0].body.isDraft, true);
+      assert.equal('isDraft' in f.calls[1].body, false);
+    } },
     { name: 'fitDescription: ≤4000, cut at a paragraph, footer kept', run: () => {
       const footer = '\n\n---\nStarted by ann@x.io via worca';
       const long = `${'para one. '.repeat(200)}\n\n${'para two. '.repeat(300)}${footer}`;

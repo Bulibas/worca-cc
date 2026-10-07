@@ -4119,6 +4119,9 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .shipit-desc-preview[hidden]{display:none;}
 .shipit-desc-err{margin-top:8px;}
 .shipit-desc-err[hidden]{display:none;}
+.shipit-draft{margin-top:10px;}
+.shipit-closes{margin-top:4px;}
+.shipit-closes[hidden]{display:none;}
 /* The Generate-with-AI veil over the editor (or its preview) while a draft is in
    flight: a haze over the old text, a violet light band swept left to right across
    it, a breathing violet edge, and a shimmering label. It keeps pointer-events, so

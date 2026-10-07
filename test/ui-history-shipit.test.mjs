@@ -1184,3 +1184,66 @@ test('(f) the Azure PR-host flag survives the history cache', async () => {
   assert.equal(blob.adoAvailable, true);
   assert.equal(blob.ghAvailable, false);
 });
+
+
+// ---------------------------------------------------------------------------
+// Open as draft + the source issue's "Will close" line
+// ---------------------------------------------------------------------------
+const ISSUE_REMOTES = { ...REMOTES, issue: { slug: 'up/repo', number: 42 } };
+const draftBox = (modal) => modal.querySelector('.shipit-draft-input');
+const closesLine = (modal) => modal.querySelector('.shipit-closes');
+
+test('Open as draft: unchecked on every open; ticked sends draft:true, unticked sends no draft field', async () => {
+  const ctx = await bootShip({ remotes: ISSUE_REMOTES, arms: prArm(PR_OK) });
+  let modal = await openModal(ctx);
+  await checkRows([
+    { name: 'the checkbox exists, labelled, and starts unchecked', run: () => {
+      const box = draftBox(modal);
+      assert.ok(box, 'checkbox present');
+      assert.equal(box.type, 'checkbox');
+      assert.equal(box.checked, false);
+      assert.match(box.closest('label').textContent, /Open as draft/);
+    } },
+    { name: 'ticked and cancelled: unchecked again on the next open (D1)', run: async () => {
+      draftBox(modal).checked = true;
+      click(ctx.window, modal.querySelector('.shipit-cancel'));
+      await settle(ctx.window);
+      modal = await openModal(ctx);
+      assert.equal(draftBox(modal).checked, false);
+    } },
+    { name: 'ticked: the POST carries draft:true', run: async () => {
+      draftBox(modal).checked = true;
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      await settle(ctx.window, 6);
+      assert.equal(JSON.parse(prPosts(ctx)[0].opts.body).draft, true);
+    } },
+  ]);
+});
+
+test('Open as draft left unticked: the POST has no draft field (today\'s request)', async () => {
+  const ctx = await bootShip({ arms: prArm(PR_OK) });
+  const modal = await openModal(ctx);
+  click(ctx.window, modal.querySelector('.shipit-ok'));
+  await settle(ctx.window, 6);
+  assert.ok(!('draft' in JSON.parse(prPosts(ctx)[0].opts.body)));
+});
+
+test('"Will close owner/repo#N" shows only for an issue-sourced run', async () => {
+  await checkRows([
+    { name: 'issue source -> one muted line', run: async () => {
+      const ctx = await bootShip({ remotes: ISSUE_REMOTES, arms: prArm(PR_OK) });
+      const modal = await openModal(ctx);
+      assert.equal(closesLine(modal).hidden, false);
+      assert.equal(closesLine(modal).textContent, 'Will close up/repo#42');
+      assert.ok(closesLine(modal).classList.contains('hint'));
+    } },
+    { name: 'no issue source (issue:null or absent) -> nothing', run: async () => {
+      for (const remotes of [REMOTES, { ...REMOTES, issue: null }]) {
+        const ctx = await bootShip({ remotes, arms: prArm(PR_OK) });
+        const modal = await openModal(ctx);
+        assert.equal(closesLine(modal).hidden, true);
+        assert.equal(closesLine(modal).textContent, '');
+      }
+    } },
+  ]);
+});

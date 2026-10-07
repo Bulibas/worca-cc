@@ -288,13 +288,14 @@ export async function pushBranch(projectDir, branch, remote = 'origin', { gcWait
  * head LABEL, so the form must agree with where the branch actually is.
  * On "already exists", recover the open PR's URL via `gh pr view` with the same
  * selector + repo, else from the URL gh prints on the last stderr line.
+ * `draft` adds `--draft` (a new PR only; an existing one is recovered as-is).
  * Returns { ok, url, existed } | { ok:false, error }.
  */
-async function ghCreatePr({ projectDir, base, head, title, body = '', repo = null, headOwner = null }) {
+async function ghCreatePr({ projectDir, base, head, title, body = '', repo = null, headOwner = null, draft = false }) {
   const headRef = prHeadRef(head, headOwner);
   const repoArgs = repo ? ['--repo', repo] : [];
   const args = ['pr', 'create', ...repoArgs, '--base', base, '--head', headRef,
-    '--title', title || head, '--body', body || title || head];
+    '--title', title || head, '--body', body || title || head, ...(draft === true ? ['--draft'] : [])];
   const cred = await githubEnv('write', { repo: ownerRepo(repo) });
   if (cred.error) return { ok: false, error: cred.error };
   const r = await _run('gh', args, { cwd: projectDir, env: cred.env });
@@ -312,6 +313,43 @@ async function ghCreatePr({ projectDir, base, head, title, body = '', repo = nul
     if (m) return { ok: true, url: m[0], existed: true };
   }
   return { ok: false, error: (r.stderr || '').trim() || `gh exited ${r.code}` };
+}
+
+// ── Closing the source issue from a PR body ──────────────────────────────────
+// A run whose task came from a GitHub issue (plugins/github-source stores its
+// html_url in pipelines.source_ref) ships with a closing keyword so merging the
+// PR closes the issue. Only issue URLs count: the issues API also returns PRs.
+
+const ISSUE_URL_RE = /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)\/issues\/([1-9]\d*)\/?(?:[?#].*)?$/i;
+
+/** { owner, repo, number } of a github.com issue URL (never a PR URL), else null. Pure. */
+export function parseGithubIssueUrl(url) {
+  if (typeof url !== 'string') return null;
+  const m = ISSUE_URL_RE.exec(url.trim());
+  return m ? { owner: m[1], repo: m[2], number: Number(m[3]) } : null;
+}
+
+const CLOSING_KEYWORD = '(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)';
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The line that closes the run's source issue from the PR body, or '' when none
+ * should be added: no/non-issue `sourceUrl`, or `body` already closes that issue
+ * with a GitHub closing keyword (by owner/repo#N, the full URL, or — only when the
+ * issue lives in `baseRepo` — #N). `baseRepo` is the PR's OWNER/REPO (case-insensitive);
+ * the same repo gives `Closes #N`, any other (or null) `Closes owner/repo#N`. Pure.
+ */
+export function issueClosingLine({ sourceUrl, baseRepo = null, body = '' } = {}) {
+  const issue = parseGithubIssueUrl(sourceUrl);
+  if (!issue) return '';
+  const slug = `${issue.owner}/${issue.repo}`;
+  const inBase = typeof baseRepo === 'string' && baseRepo.toLowerCase() === slug.toLowerCase();
+  const n = issue.number;
+  const refs = [`${escapeRe(slug)}#${n}`, `https://github\\.com/${escapeRe(slug)}/issues/${n}`];
+  if (inBase) refs.push(`#${n}`);
+  const already = new RegExp(`(?<![\\w-])${CLOSING_KEYWORD}:?\\s+(?:${refs.join('|')})(?!\\d)`, 'i');
+  if (already.test(String(body ?? ''))) return '';
+  return inBase ? `Closes #${n}` : `Closes ${slug}#${n}`;
 }
 
 // ── gh issue create ───────────────────────────────────────────────────────────
