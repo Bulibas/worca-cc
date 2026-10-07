@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/SinishaDjukic/worca-cc/security/policy
+    about: Report security problems privately to security@worca.dev, never in an issue.
+  - name: Documentation
+    url: https://docs.worca.dev/
+    about: Guides for installing, running and hosting Worca.
