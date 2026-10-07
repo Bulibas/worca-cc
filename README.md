@@ -4,8 +4,8 @@
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D22.13-brightgreen)](.nvmrc)
 
-Worca is a **deterministic multi-agent pipeline** that drives Claude Code
-(headless) through a software task. You point it at a project, describe the
+Worca turns a task into **reviewed, merge-ready work**. It is a
+**deterministic multi-agent pipeline**: you point it at a project, describe the
 work, and a state machine runs the agents of a workflow in sequence — by
 default **Clarify → Plan → Refine → Implement → Review** — looping until the
 work clears quality gates, pausing to ask *you* the questions that matter, and
