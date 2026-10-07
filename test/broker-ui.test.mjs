@@ -56,6 +56,19 @@ async function session(email) {
   return { me, call };
 }
 
+test('over https the CSRF cookie is __Host- prefixed (a proxy for sibling hosts forwards only those); a plain one is ignored', async () => {
+  const res = await fetch(`${base}/api/me`, { headers: { 'cf-access-jwt-assertion': jwt('host@example.com') } });
+  const setCookie = res.headers.get('set-cookie');
+  assert.match(setCookie, /^__Host-wb_csrf=[A-Za-z0-9_-]{43}; Path=\/; HttpOnly; SameSite=Strict; Secure$/);
+  const { csrf } = await res.json();
+  const save = (cookie) => fetch(`${base}/api/slots/anthropic`, {
+    method: 'DELETE',
+    headers: { 'cf-access-jwt-assertion': jwt('host@example.com'), origin: PUBLIC, 'x-worca-csrf': csrf, cookie },
+  });
+  assert.equal((await save(`wb_csrf=${csrf}`)).status, 403, 'a cookie a sibling host could plant is not the CSRF cookie');
+  assert.notEqual((await save(`__Host-wb_csrf=${csrf}`)).status, 403);
+});
+
 test('no token, a token for another application, or a bad signature: 401; healthz stays open', async () => {
   assert.equal((await fetch(`${base}/api/me`)).status, 401);
   assert.equal((await fetch(`${base}/api/me`, { headers: { 'cf-access-jwt-assertion': jwt('ada@acme.dev', 'aud-worca-app') } })).status, 401);

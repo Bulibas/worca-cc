@@ -19,7 +19,11 @@ const STATIC = Object.freeze({
   '/page.css': { file: 'page.css', type: 'text/css; charset=utf-8' },
 });
 export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
-const CSRF_COOKIE = 'wb_csrf';
+// Over https the cookie is `__Host-` prefixed: a proxy in front of several instances on sibling
+// subdomains (the hosted platform's gate) forwards only `__Host-` cookies, since any other cookie
+// could be planted from a sibling host. Plain http (local) can't use the prefix.
+const CSRF_COOKIE_PLAIN = 'wb_csrf';
+const CSRF_COOKIE_HOST = '__Host-wb_csrf';
 
 export function securityHeaders() {
   return {
@@ -98,7 +102,9 @@ export function createUiHandler({ config, service, store, identity = createIdent
     if (!staticCache.has(entry.file)) staticCache.set(entry.file, readFileSync(UI_DIR + entry.file, 'utf8'));
     return staticCache.get(entry.file);
   };
-  const secureCookie = String(config.publicUrl || '').startsWith('https:') ? '; Secure' : '';
+  const secure = String(config.publicUrl || '').startsWith('https:');
+  const secureCookie = secure ? '; Secure' : '';
+  const CSRF_COOKIE = secure ? CSRF_COOKIE_HOST : CSRF_COOKIE_PLAIN;
   const deviceFlows = new Map();   // "<email>|<slot>" -> {deviceCode, expiresAt}: in memory, per sign-in attempt
 
   function usageFor(email) {
