@@ -131,11 +131,15 @@ import { deviationsFor, fieldsForRun, capSummary, mcpDeviations } from '../src/c
 import { resolveRegistry, cachedTeamFor, toolNameLimitFor, skipMessage, skipReasonText } from '../src/core/mcp/registry.mjs';
 import { MEMBERSHIP_KEY_RE } from '../src/core/mcp/definitions.mjs';
 import { loadCatalog } from '../src/core/mcp/catalog.mjs';
-import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, mcpRequirements, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
+import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, mcpRequirements, skillRequirements, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
 import { normalizePolicyDoc } from '../src/core/policy/registry.mjs';
 import { checkTeamTotalGate, checkTeamPipelineGate, teamCapsForTarget } from '../src/core/policy/gate.mjs';
 import { readPolicyState } from '../src/core/policy/state.mjs';
-import { teamAction, teamForget } from '../src/core/mcp/team.mjs';
+import { teamAction, teamForget, teamSkillAction, teamSkillConsent, isTeamSkillId } from '../src/core/mcp/team.mjs';
+// Skills registry §2b-13: the policy routes' skill deviations. Aliased: the run-side code imports these names too.
+import { skillDeviations as policySkillDeviations } from '../src/core/policy/effective.mjs';
+import { resolveSkillRegistry as policySkillRegistry } from '../src/core/skills-registry/resolve.mjs';
+import { skillSkipReasonText as policySkillWhy } from '../src/core/skills-registry/texts.mjs';
 import { policyForScope, policyPayload } from '../src/core/policy/scope.mjs';
 import { policyCatalogModels } from '../src/core/policy/cache.mjs';
 import { pickFolderNative, pickAppNative, nativeDialogAvailable } from '../src/core/folder-dialog.mjs';
@@ -293,7 +297,7 @@ import {
 import { fetchCandidate } from '../src/core/plugin-repo.mjs';
 import { reconcileMcpStore } from '../src/core/mcp/catalog.mjs';
 import { readMcpStore } from '../src/core/mcp/store.mjs';
-import { mcpFootprint } from '../src/core/mcp/plugin-lifecycle.mjs';
+import { mcpFootprint, skillFootprint } from '../src/core/mcp/plugin-lifecycle.mjs';
 import {
   addMarketplace, listMarketplaces, syncMarketplace, refreshAllMarketplaces,
   removeMarketplace, readMarketplaces, seedBuiltinMarketplace,
@@ -4745,10 +4749,20 @@ app.get('/api/policy/scopes', async (req, res) => {
       const r = await resolveProjectPolicy(s.path, { discover: false }).catch(() => null);
       if (r?.ok) docs.push({ slug: r.home, doc: r.doc });
     }
-    // MCP rows from the policy cache — the source the consent routes hash against (MCP registry spec §11.3).
-    res.json({ ...scopes, requirements: pluginRequirements(docs), blockedPlugins: blockedPluginFindings(docs), mcpRequirements: await mcpRequirements() });
+    // MCP and skill rows from the policy cache — the source the consent routes hash against (MCP registry spec §11.3,
+    // skills registry spec §5).
+    res.json({ ...scopes, requirements: pluginRequirements(docs), blockedPlugins: blockedPluginFindings(docs), mcpRequirements: await mcpRequirements(), skillRequirements: await skillRequirements() });
   } catch (err) { sendPolicyError(res, err); }
 });
+
+/** Skills registry §2b-13: the Team set's skill deviations for a run on `target` — P3's resolver over the target, its
+ *  Team set from the policy cache as the MCP half takes it (`cachedTeamFor`), worded with the resolver's skip text. */
+async function policySkillNotes(fields, target, optOut = []) {
+  const project = target.kind === 'project';
+  const team = await cachedTeamFor(project ? { projectKey: target.key } : { workspaceId: target.id });
+  const result = await policySkillRegistry({ surface: 'pipeline', targets: [target], teams: { [project ? target.key : `ws:${target.id}`]: team }, optOut });
+  return policySkillDeviations(fields, result, (s) => policySkillWhy(s));
+}
 
 app.get('/api/policy', async (req, res) => {
   const scope = parseScopeParam(req.query.scope);
@@ -4765,6 +4779,12 @@ app.get('/api/policy', async (req, res) => {
         const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
         if (target) { const p = await mcpRunPreview(target); payload.deviations.push(...mcpDeviations(fields, p.result, (sk) => skipReasonText(sk, p.catalog))); }
       } catch { /* a registry fault adds no MCP deviations */ }
+    }
+    if (fields['skills.required']) {
+      try {
+        const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
+        if (target) payload.deviations.push(...(await policySkillNotes(fields, target)));
+      } catch { /* a registry fault adds no skill deviations; the policy's own card still paints */ }
     }
     res.json(payload);
   } catch (err) { sendPolicyError(res, err); }
@@ -4795,6 +4815,12 @@ app.get('/api/policy/notes', async (req, res) => {
           dev.push(...mcpDeviations(fields, p.result, (sk) => skipReasonText(sk, p.catalog)));
         }
       } catch { /* a registry fault adds no MCP notes; the policy's own notes still paint */ }
+    }
+    if (fields['skills.required']) {
+      try {
+        const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
+        if (target) dev.push(...(await policySkillNotes(fields, target, optOut.list)));
+      } catch { /* a registry fault adds no skill notes */ }
     }
     res.json({ scope: meta, policy: { home: r.home, sha: r.sha, delegated: r.delegated, from: r.from, caps: capSummary(r.doc, { workspaceRun }) }, notes: dev, guardrailsDefault: fields['guardrails.default']?.value ?? null });
   } catch (err) { sendPolicyError(res, err); }
@@ -10981,8 +11007,9 @@ app.get('/api/plugins', async (req, res) => {
         ...p,
         marketplaceName: p.marketplace && mkts[p.marketplace] ? mkts[p.marketplace].name : null,
         pythonMissing: !!(notice && Number((p.scriptRuntimes || {}).python) > 0),
-        // The uninstall confirm names the MCP sets its servers leave (§4.6).
+        // The uninstall confirm names the MCP sets its servers leave (§4.6), and the sets its skills leave (skills §5).
         mcpSets: mcpFootprint(mcp, (id) => id.startsWith(`plugin:${p.name}/`)).sets,
+        skillSets: skillFootprint(mcp, (id) => id.startsWith(`skill:plugin:${p.name}/`)).sets,
       })),
       orphans: listOrphanPluginData(),
     });
@@ -11670,6 +11697,28 @@ for (const action of ['install', 'turn-on', 'update']) {
 app.post('/api/mcp/teams/:home/forget', async (req, res) => {
   const home = mcpHome(req, res); if (!home) return;
   try { await teamForget(home); res.json({ ok: true }); }
+  catch (err) { sendMcpError(res, err); }
+});
+// Required skills in the Team set (skills registry spec §5, §7, F8): Turn on is the only consent write — the reference
+// and the hash come from the cached policy, never the body; the consent route is what the dialog shows. Both answer
+// under /api/sets (canonical) and /api/mcp (one handler, two paths).
+function teamSkillParam(req, res) {
+  const id = req.params.skillId;
+  if (!isTeamSkillId(id)) { badRequest(res, 'skillId must be a plugin skill id'); return null; }
+  return id;
+}
+app.get(['/api/sets/teams/:home/skills/:skillId/consent', '/api/mcp/teams/:home/skills/:skillId/consent'], async (req, res) => {
+  const home = mcpHome(req, res); if (!home) return;
+  const skillId = teamSkillParam(req, res); if (!skillId) return;
+  try { res.json(await teamSkillConsent(home, skillId)); }
+  catch (err) { sendMcpError(res, err); }
+});
+app.post(['/api/sets/teams/:home/skills/:skillId/turn-on', '/api/mcp/teams/:home/skills/:skillId/turn-on'], async (req, res) => {
+  const home = mcpHome(req, res); if (!home) return;
+  const skillId = teamSkillParam(req, res); if (!skillId) return;
+  const expectHash = req.body?.expectHash;
+  if (typeof expectHash !== 'string' || !/^[0-9a-f]{64}$/.test(expectHash)) return badRequest(res, 'expectHash must be the hash the consent dialog showed');
+  try { res.json({ ok: true, ...(await teamSkillAction('turn-on', home, skillId, { expectHash })) }); }
   catch (err) { sendMcpError(res, err); }
 });
 

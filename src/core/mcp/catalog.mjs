@@ -80,8 +80,9 @@ export async function loadCatalog(snapshot) {
  *  this runs at server start and at the start of every `worca plugin` command. */
 export async function reconcileMcpStore() {
   const missing = (await loadCatalog()).filter((e) => e.provisional).map((e) => e.id);
-  // §4.4: persist the Team record of every cached home that requires ≥1 MCP server (P3's cachedTeams(),
-  // inlined: registry.mjs imports this module).
-  const homes = cachedPolicyHomes().filter((h) => h.doc.fields?.['mcp.required']?.value?.length).map((h) => h.slug);
+  // §4.4: persist the Team record of every cached home that requires ≥1 MCP server or skill (P3's cachedTeams(),
+  // inlined: registry.mjs imports this module). A Team set's slug is the plugin name its skills load under (skills
+  // registry spec §4.1), so it is persisted before the first write, as for servers.
+  const homes = cachedPolicyHomes().filter((h) => h.doc.fields?.['mcp.required']?.value?.length || h.doc.fields?.['skills.required']?.value?.length).map((h) => h.slug);
   if (missing.length || homes.length) await assignBases(missing, { homes });
 }

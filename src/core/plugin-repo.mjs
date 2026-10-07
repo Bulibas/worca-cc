@@ -208,6 +208,35 @@ function manifestMcp(raw) {
   return r && r.ok ? r.manifest.mcpServers : {};
 }
 
+/**
+ * A plugin's `skills/` at `sha` (its `subdir` in the repo), exported into `<scratch>/<side>` the way exportVersion
+ * exports a version (git archive → tar; an escaping symlink is dropped). When a link sits under `skills/` (or `skills`
+ * is one), the whole plugin is exported instead: such a link may reach the rest of the plugin, which the catalog
+ * follows, so the preview must read the same tree. `<scratch>/<side>` stays empty when that commit ships no `skills/`.
+ * Read-only: the update preview compares the pinned and the candidate skills (skills registry spec §5); nothing runs.
+ */
+async function exportSkillsAt(cache, sha, subdir, scratch, side, exec) {
+  const dest = join(scratch, side);
+  mkdirSync(dest, { recursive: true });
+  // `skills` in any case: a case-insensitive file system (macOS, Windows) reads `Skills/` as `skills/`, and so does the
+  // catalog — git's pathspec does not, so the plugin root's entries are listed and matched by name.
+  const top = (await gitDir(cache, ['ls-tree', '-z', '--name-only', sha, ...(subdir ? ['--', `${subdir}/`] : [])], exec)).split('\0');
+  const scopes = top.filter((p) => p && p.slice(p.lastIndexOf('/') + 1).toLowerCase() === 'skills');
+  if (!scopes.length) return dest;
+  const listed = (await gitDir(cache, ['ls-tree', '-r', sha, '--', ...scopes], exec)).trim();
+  if (!listed) return dest;
+  const linked = listed.split('\n').some((l) => l.startsWith('120000 '));
+  const paths = linked ? (subdir ? [subdir] : []) : scopes;
+  const tar = join(scratch, `${side}.tar`);
+  await gitDir(cache, ['-c', 'core.autocrlf=false', 'archive', '--format=tar', '-o', tar, sha, ...(paths.length ? ['--', ...paths] : [])], exec);
+  const strip = subdir ? ['--strip-components', String(subdir.split('/').length)] : [];
+  // exportVersion's Windows tar rule: a relative archive name (cwd) and a forward-slashed -C.
+  await exec('tar', ['-xf', `${side}.tar`, '-C', dest.replace(/\\/g, '/'), ...strip], { cwd: scratch });
+  rmSync(tar, { force: true });
+  for (const rel of findEscapingSymlinks(dest)) unlinkSync(join(dest, rel));
+  return dest;
+}
+
 async function showManifest(cache, sha, subdir, exec) {
   const p = subdir ? `${subdir}/worca-cc-plugin.json` : 'worca-cc-plugin.json';
   try { return JSON.parse(await gitDir(cache, ['show', `${sha}:${p}`], exec)); } catch { return null; }
@@ -241,6 +270,20 @@ async function computeManifestDelta(name, cache, entry, pinnedSha, candidateSha,
   const pinModels = byLc(pinM.models);
   const candModels = byLc(candM.models);
   const envOf = (m) => JSON.stringify(m.env ?? {});
+  // Skills (skills registry §5): both sides' skills/ exported to a scratch dir, compared, then removed.
+  const scratch = await mkdtemp(join(tmpdir(), 'worca-cc-skills-'));
+  let lifecycle;
+  try {
+    const pinDir = await exportSkillsAt(cache, pinnedSha, entry.subdir, scratch, 'pin', exec);
+    const candDir = await exportSkillsAt(cache, candidateSha, entry.subdir, scratch, 'cand', exec);
+    lifecycle = await mcpUpdatePreview(name, manifestMcp(pin), manifestMcp(cand), { pinDir, candDir });
+  } finally {
+    // A path past PATH_MAX (a deep tree a candidate may ship) defeats fs.rm (ENAMETOOLONG); `rm -rf` walks it by
+    // directory handle. A cleanup failure never hides the preview, or the error that ended it.
+    await rm(scratch, { recursive: true, force: true })
+      .catch(() => (process.platform === 'win32' ? null : exec('rm', ['-rf', scratch])))
+      .catch(() => {});
+  }
   return {
     newSecrets: candSecrets.filter((k) => !pinSecrets.includes(k)),
     newTaskSources: candIds.filter((id) => !pinIds.includes(id)),
@@ -253,8 +296,8 @@ async function computeManifestDelta(name, cache, entry, pinnedSha, candidateSha,
       .map((m) => m.id),
     newModelSecrets: candM.modelSecrets.map((f) => f.key)
       .filter((k) => !pinM.modelSecrets.some((f) => f.key === k)),
-    // MCP servers (registry §4.6): new/removed/changed names + the red lines.
-    ...(await mcpUpdatePreview(name, manifestMcp(pin), manifestMcp(cand))),
+    // MCP servers (registry §4.6) and skills (skills registry §5): new/removed/changed names + the red lines.
+    ...lifecycle,
   };
 }
 
@@ -277,6 +320,7 @@ export async function fetchCandidate(name, { exec = defaultExec, fullDiff = fals
     newSecrets: [], newTaskSources: [], newAgents: [], setupChanged: false,
     newModels: [], removedModels: [], envChangedModels: [], newModelSecrets: [],
     newMcpServers: [], removedMcpServers: [], changedMcpServers: [], mcpLines: [],
+    newSkills: [], removedSkills: [], changedSkills: [], skillLines: [],
   };
   if (candidateSha !== pinnedSha) {
     const log = await gitDir(cache, ['log', '--format=%H%x09%s', `${pinnedSha}..${candidateSha}`], exec);

@@ -170,7 +170,7 @@ import {
   renderProjectTpCell, renderProjectTpChip, projectTpSummary, renderPolicyEnableDialogBody, renderEffectiveTable, renderPolicyEditor, docFromEditor, editorDirty,
   renderPolicyEmptyState, renderPolicySyncChip, renderWsPolicyLine, renderTeamCapsReadout, renderTeamChip, renderPolicyNotesLine,
   renderRequiredStrip, renderSetupChecklist, relTime as tpRelTime,
-  renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel, renderMcpStrip, renderMcpConsent,
+  renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel, renderMcpStrip, renderMcpConsent, handleTeamSkillClick,
 } from './team-policy-view.mjs';
 import { mcpRunsLabel, renderMcpRunsPop, renderRunSkills } from './mcp-run-picker.mjs';
 import { aggregate, toCsv } from '../../src/shared/team-metrics/aggregate.mjs';
@@ -14547,7 +14547,8 @@ if (el.pluginsList) el.pluginsList.addEventListener('click', async (e) => {
     const res = await confirmModal({
       title: 'Uninstall plugin',
       message: `Uninstall "${name}"?${t.dataset.mcpSets
-        ? `\n\nIts MCP servers leave these sets, with their values, secrets and test results: ${t.dataset.mcpSets}.` : ''}`,
+        ? `\n\nIts MCP servers leave these sets, with their values, secrets and test results: ${t.dataset.mcpSets}.` : ''}${t.dataset.skillSets
+        ? `\n\nIt also removes its skills from ${t.dataset.skillSets}.` : ''}`,
       confirmLabel: 'Uninstall',
       checkbox: { label: 'Also delete config, secrets and state (purge — cannot be undone)' },
     });
@@ -18008,12 +18009,14 @@ async function openSetupChecklist() {
   const data = await loadTpScopes({ force: true });
   const reqs = data.requirements || [];
   const mcp = data.mcpRequirements || [];
-  const homes = [...new Set([...reqs.flatMap((r) => r.homes || []), ...mcp.map((r) => r.home)])];
+  const skills = data.skillRequirements || [];
+  const homes = [...new Set([...reqs.flatMap((r) => r.homes || []), ...mcp.map((r) => r.home), ...skills.map((r) => r.home)])];
   const home = homes[0] || (data.homes[0] && data.homes[0].slug) || '';
-  const body = renderSetupChecklist({ home, requirements: reqs, seeds: [], trusted: policyHomeTrusted(home), mcp }, { doc: document });
+  const body = renderSetupChecklist({ home, requirements: reqs, seeds: [], trusted: policyHomeTrusted(home), mcp, skills }, { doc: document });
   body.addEventListener('click', (e) => {
     if (e.target.closest('.tp-install-all')) { closePluginModal(); void installAllRequired(reqs); return; }
     if (e.target.closest('.tp-mcp-act')) { void handleMcpTeamClick(e); return; }
+    if (e.target.closest('.tp-skill-act')) { void handleTeamSkillClick(e, skillTeamDeps()); return; }
     void handlePolicyPluginClick(e);
   });
   body.addEventListener('change', (e) => {
@@ -18031,10 +18034,11 @@ async function paintMcpStrip(host) {
     host.dataset.wired = '1';
     host.addEventListener('click', (e) => {
       if (e.target.closest('.tp-mcp-act')) void handleMcpTeamClick(e);
+      else if (e.target.closest('.tp-skill-act')) void handleTeamSkillClick(e, skillTeamDeps());
       else if (e.target.closest('.pl-policy-setup')) void openSetupChecklist();
     });
   }
-  const fill = (data) => { const strip = renderMcpStrip(data.mcpRequirements || [], { doc: document }); host.replaceChildren(strip || ''); host.hidden = !strip; };
+  const fill = (data) => { const strip = renderMcpStrip(data.mcpRequirements || [], { doc: document, skills: data.skillRequirements || [] }); host.replaceChildren(strip || ''); host.hidden = !strip; };
   // P6 hands a fresh, hidden host on every paint of the pane: paint the last state at once (no flicker; a button painted
   // from it that has moved on repaints instead of acting), then read fresh — the pane repaints after each write on it
   // (a token set, a switch), and the strip must show that state.
@@ -18091,6 +18095,21 @@ async function handleMcpTeamClick(e) {
     ]);
   } finally { delete t.dataset.busy; }
 }
+// Required skills (skills registry spec §5): the Turn on flow lives in team-policy-view.mjs (handleTeamSkillClick);
+// these are its app hooks — the same modal, scopes cache and surfaces the MCP Team actions use.
+const skillTeamDeps = () => ({
+  doc: document,
+  scopes: () => loadTpScopes({ force: true }),
+  api: mcpApi,
+  dialog: pluginModal,
+  close: closePluginModal,
+  owner: (t) => (t.closest('#plugin-modal') ? el.pluginModalBody.firstElementChild : null),
+  isOpen: (node) => el.pluginModalBody.contains(node),
+  repaint: async ({ checklist }) => {
+    await loadTpScopes({ force: true });   // the checklist, the strip and the Projects cells read the new state
+    if (checklist) void openSetupChecklist(); else refreshMcpSurfaces();
+  },
+});
 // One dialog after another — a consent dialog for each missing plugin, an update preview for each
 // one below the floor — the next opens when the previous closes (done or cancelled). Nothing runs
 // without its own click; cancelling one moves on to the next.

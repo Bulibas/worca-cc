@@ -19,8 +19,9 @@ import { NIGHT_FIELDS } from '../night/config.mjs';
 import { cachedPolicyHomes } from './cache.mjs';
 import { readMcpStore } from '../mcp/store.mjs';
 import { loadCatalog } from '../mcp/catalog.mjs';
-import { teamRows } from '../mcp/team.mjs';
-import { hostContext } from '../mcp/registry.mjs';
+import { teamRows, teamSkillRows } from '../mcp/team.mjs';
+import { hostContext, requiredSkillsOf } from '../mcp/registry.mjs';
+import { loadSkillCatalog } from '../skills-registry/catalog.mjs';
 
 export const WORCA_VERSION = createRequire(import.meta.url)('../../../package.json').version;
 
@@ -126,10 +127,33 @@ export async function mcpRequirements(homes = cachedPolicyHomes()) {
   }
 }
 
-/** `local` plus mcp.required's "Yours" for one home — the Team set's working members as they run here (§11.3). */
+/**
+ * Every home's `skills.required` entries, each with its state on this machine (skills registry spec §5: the setup
+ * checklist, "Yours"). Same contract as mcpRequirements: every cached home by default; a fault yields no rows (logged).
+ * @param {Array<{slug:string, sha?:string|null, doc:object}>} [homes]
+ */
+export async function skillRequirements(homes = cachedPolicyHomes()) {
+  const listing = (homes || []).filter((h) => requiredSkillsOf(h.doc).length);
+  if (!listing.length) return [];
+  try {
+    const snapshot = await readMcpStore();
+    const catalog = await loadSkillCatalog();
+    return listing.flatMap((h) => teamSkillRows({ slug: h.slug, sha: h.sha ?? null, doc: h.doc }, {
+      catalog, snapshot, pluginStates: Object.fromEntries(pluginRequirements([h]).map((r) => [r.name, r.state])),
+    }));
+  } catch (err) {
+    console.warn(`[worca] skills: team requirements skipped: ${err.message}`);
+    return [];
+  }
+}
+
+/** `local` plus mcp.required's and skills.required's "Yours" for one home — the Team set's working members as they
+ *  run here (§11.3; skills registry spec §5). */
 export async function withMcpLocal(local, home) {
   const rows = await mcpRequirements([home]);
   if (rows.length) local['mcp.required'] = { value: rows.filter((x) => x.working).map((x) => x.running), set: true };
+  const skills = await skillRequirements([home]);
+  if (skills.length) local['skills.required'] = { value: skills.filter((x) => x.working).map((x) => ({ plugin: x.plugin, skill: x.name })), set: true };
   return local;
 }
 

@@ -687,3 +687,71 @@ test('a consent dialog whose POST lands after the user moved on never closes the
   await settle(8);
   assert.equal(modal.classList.contains('hidden'), false, 'the Turn on that landed never closes the checklist the user opened');
 });
+
+// ---- required skills (skills registry spec §5, §6 boards 1 and 10): the checklist and the Sets-tab strip, wired ----
+const SKILL_NEW = { home: 'acme/gateway', sha: '3f2a1bc0', setId: 'team-acme-gateway-1a2b', setName: 'Team · acme/gateway', skillId: 'skill:plugin:acme/deploy-checklist',
+  name: 'deploy-checklist', plugin: 'acme', state: 'never-consented', working: false, hash: 'd'.repeat(64), problem: null, code: '3f9a1c2', files: 2, bytes: 900,
+  scripts: ['scripts/preflight.sh'], shellBlocks: 1, description: 'Pre-deploy checks' };
+
+test('required skills: the checklist row opens the consent dialog; Turn on posts { expectHash } to the Sets route and closes it; the Sets-tab strip lists it', async () => {
+  let rows = [SKILL_NEW];
+  const posts = [];
+  const { doc, go, settle } = await boot({
+    fetchHandler: (u, opts) => {
+      if (u.includes('/api/policy/scopes')) return json({ ...SCOPES, mcpRequirements: [], skillRequirements: rows });
+      if (u.startsWith('/api/sets/teams/') && u.endsWith('/consent')) return json({ ...SKILL_NEW, allowedTools: null, skillMd: '---\nname: deploy-checklist\n---\n# Deploy\n' });
+      if (u.startsWith('/api/sets/teams/') && opts.method === 'POST') {
+        posts.push([u, JSON.parse(opts.body)]);
+        rows = [{ ...SKILL_NEW, state: 'ok', working: true }];
+        return json({ ok: true, setId: SKILL_NEW.setId, skillId: SKILL_NEW.skillId });
+      }
+      if (u.startsWith('/api/mcp/sets')) return json({ error: 'not in this test' }, 404);
+      return null;
+    },
+  });
+  await go('team-policy');
+  await settle();
+  doc.querySelector('#tp-tab-plugins').click();
+  await settle();
+  doc.querySelector('#tp-sec-plugins .pl-policy-setup').click();
+  await settle(6);
+  const modal = doc.getElementById('plugin-modal');
+  const button = (label) => [...modal.querySelectorAll('#plugin-modal-actions button')].find((b) => b.textContent === label);
+  const turnOn = modal.querySelector('.tp-skill-row .tp-skill-act');
+  assert.equal(turnOn.textContent, 'Turn on');
+  turnOn.click();
+  await settle(8);
+  assert.equal(doc.getElementById('plugin-modal-title').textContent, 'Turn on skill: deploy-checklist');
+  assert.equal(modal.querySelector('pre.tp-skill-md').textContent, '---\nname: deploy-checklist\n---\n# Deploy\n');
+  assert.equal(posts.length, 0, 'nothing is posted before the consent click');
+  button('Turn on').click();
+  await settle(8);
+  assert.deepEqual(posts, [['/api/sets/teams/acme%2Fgateway/skills/skill%3Aplugin%3Aacme%2Fdeploy-checklist/turn-on', { expectHash: 'd'.repeat(64) }]]);
+  assert.equal(modal.classList.contains('hidden'), true, 'done: the dialog closes');
+  // An off row turns on at once and closes the checklist it came from; a row that moved on repaints that checklist.
+  rows = [{ ...SKILL_NEW, state: 'off' }];
+  doc.querySelector('#tp-sec-plugins .pl-policy-setup').click();
+  await settle(6);
+  modal.querySelector('.tp-skill-row .tp-skill-act[data-state="off"]').click();
+  await settle(8);
+  assert.equal(posts.length, 2);
+  assert.equal(modal.classList.contains('hidden'), true, 'the checklist it came from closes');
+  rows = [{ ...SKILL_NEW, state: 'off' }];
+  doc.querySelector('#tp-sec-plugins .pl-policy-setup').click();
+  await settle(6);
+  rows = [{ ...SKILL_NEW, state: 'ok', working: true }];
+  modal.querySelector('.tp-skill-row .tp-skill-act[data-state="off"]').click();
+  await settle(8);
+  assert.equal(posts.length, 2, 'moved on: no POST');
+  assert.equal(modal.classList.contains('hidden'), false);
+  assert.equal(modal.querySelector('.tp-skill-row .tp-skill-state').textContent, 'On', 'the checklist repainted');
+  rows = [SKILL_NEW];
+  await go('settings/mcp');
+  await settle(8);
+  const strip = doc.querySelector('.settings-pane[data-tab="mcp"] [data-mcp-strip]');
+  assert.equal(strip.querySelector('.card-head b').textContent, 'acme/gateway requires the skill deploy-checklist · acme in its Team set');
+  strip.querySelector('.tp-skill-act[data-consent="1"]').click();
+  await settle(8);
+  assert.equal(modal.classList.contains('hidden'), false, 'the strip click opened a dialog');
+  assert.equal(doc.getElementById('plugin-modal-title').textContent, 'Turn on skill: deploy-checklist', 'the strip opens the same dialog');
+});

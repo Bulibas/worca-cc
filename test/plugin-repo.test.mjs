@@ -127,6 +127,7 @@ test('fetchCandidate: commit list + diffstat between pinned and new HEAD', async
     newSecrets: [], newTaskSources: [], newAgents: [], setupChanged: false,
     newModels: [], removedModels: [], envChangedModels: [], newModelSecrets: [],
     newMcpServers: [], removedMcpServers: [], changedMcpServers: [], mcpLines: [],
+    newSkills: [], removedSkills: [], changedSkills: [], skillLines: [],
   });
   // No-change candidate: re-fetch after nothing moved.
   const again = await fetchCandidate('moving-plugin');
