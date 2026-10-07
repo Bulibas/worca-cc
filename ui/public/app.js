@@ -48,6 +48,7 @@ const state = {
   historyPerson: '', // active "Started by" filter (lower-cased name); '' === everyone. Shared deployments only.
   historyError: '',  // the last /api/history load error, shown in the Runs list while it has no rows
   ghAvailable: false,// gh CLI availability, from the last /api/history load
+  adoAvailable: false,// an Azure DevOps credential is configured (prHosts.azure), same source
 
   // --- Workspaces ---
   workspaces: [],            // GET /api/workspaces read-model
@@ -2980,6 +2981,7 @@ if (typeof window !== 'undefined') {
     runStatusMeta,
     histStatusMeta,
     histPrEligible,
+    mergePrStatus,
     histWsShippable, histWsPrChipText, wsRollupPr, histCanShip, wsMemberNote,
     // Test seam: the live list-model row (the object the detail screen re-resolves to).
     historyRow: (projectKey, id) => (state.historyAll || []).find((r) => r && r.id === id && r.projectKey === projectKey) || null,
@@ -11726,13 +11728,22 @@ function setProjAddMode(mode) {
   el.projAddFolderPane.hidden = projAddMode !== 'folder';
   el.projAddClonePane.hidden = projAddMode !== 'clone';
   el.projAddSave.textContent = projAddMode === 'clone' ? 'Clone and add' : 'Add project';
-  setProjAddMsg(projAddMode === 'clone' ? 'Worca clones the repository into its projects folder with the deployment\'s GitHub credential.' : '');
+  setProjAddMsg(projAddMode === 'clone' ? 'Worca clones the repository into its projects folder with the deployment\'s credential for its host (GitHub or Azure DevOps).' : '');
   if (projAddMode === 'clone') el.projCloneUrl.focus();
 }
 
-/** "https://github.com/acme/api(.git)" -> "api", or '' when the URL does not name one repository. */
+/** The folder name worca will use for a clone URL (planClone's rule), or '' when the URL does not name one repository.
+ *  "https://github.com/acme/api(.git)" -> "api"; "https://dev.azure.com/acme/Shop/_git/My%20Repo(.git)" -> "My-Repo". */
 function repoNameFromUrl(url) {
-  const m = /^https:\/\/[^/\s]+\/[^/\s]+\/([^/\s?#]+?)(?:\.git)?\/?$/i.exec(String(url || '').trim());
+  const s = String(url || '').trim();
+  // [org@]dev.azure.com/org[/project]/_git/repo, org.visualstudio.com[/DefaultCollection][/project]/_git/repo
+  const az = /^https:\/\/(?:[^@/\s]+@)?(?:dev\.azure\.com\/[^/\s]+|[^/\s]+\.visualstudio\.com(?:\/defaultcollection)?)(?:\/[^/\s]+)?\/_git\/([^/\s?#]+?)(?:\.git)?\/?$/i.exec(s);
+  if (az) {
+    let n; try { n = decodeURIComponent(az[1]); } catch { n = az[1]; }
+    // the same fold as planClone's folderFrom (src/core/clone-project.mjs)
+    return n.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 100);
+  }
+  const m = /^https:\/\/[^/\s]+\/[^/\s]+\/([^/\s?#]+?)(?:\.git)?\/?$/i.exec(s);
   return m ? m[1] : '';
 }
 
@@ -18349,6 +18360,9 @@ function mergePrStatus(a, b) {
     gh: b.gh !== 'unused' ? b.gh : a.gh,
     ghDetail: b.ghDetail ?? a.ghDetail,
     ghError: b.ghError ?? a.ghError,
+    azure: b.azure && b.azure !== 'unused' ? b.azure : (a.azure ?? b.azure),
+    azureError: b.azureError ?? a.azureError ?? null,
+    azureTruncated: [...new Set([...(a.azureTruncated || []), ...(b.azureTruncated || [])])],
     actionRepos: [...new Set([...(a.actionRepos || []), ...(b.actionRepos || [])])],
     unsupportedRepos: [...new Set([...(a.unsupportedRepos || []), ...(b.unsupportedRepos || [])])],
   };
@@ -18629,14 +18643,14 @@ function readHistoryCache() {
   } catch { localStorage.removeItem(HISTORY_CACHE_KEY); return null; }  // parse bust
 }
 
-function writeHistoryCache(pipelines, ghAvailable) {
+function writeHistoryCache(pipelines, ghAvailable, adoAvailable) {
   try {
     const slim = pipelines.slice(0, HISTORY_CACHE_MAX)
       .map(({ pr, retainedWork, ...rest }) => (Array.isArray(rest.members)
         ? { ...rest, members: rest.members.map(({ pr: _memberPr, ...m }) => m) }   // live per-member PRs too
         : rest)); // never persist live PR or retention facts
     localStorage.setItem(HISTORY_CACHE_KEY, JSON.stringify(
-      { v: HISTORY_CACHE_VER, ts: Date.now(), ghAvailable: !!ghAvailable, pipelines: slim }));
+      { v: HISTORY_CACHE_VER, ts: Date.now(), ghAvailable: !!ghAvailable, adoAvailable: !!adoAvailable, pipelines: slim }));
   } catch { /* quota / serialization: skip cache, never throw */ }
 }
 
@@ -18671,7 +18685,8 @@ async function loadHistoryView({ force = false } = {}) {
     if (cached) {
       state.historyAll = carryHistoryPr(cached.pipelines);
       state.ghAvailable = cached.ghAvailable;
-      paintHistory();                     // instant; rows read their last known PR until Phase 2
+      state.adoAvailable = !!cached.adoAvailable;
+      paintHistory();                    // instant; rows read their last known PR until Phase 2
     }
   }
   setHistoryLoading(true);                // the list is aria-busy until Phase 2 settles
@@ -18697,9 +18712,10 @@ async function loadHistoryView({ force = false } = {}) {
   state.historyAll = pipelines;
   state.historyError = '';
   state.ghAvailable = !!data.ghAvailable;
+  state.adoAvailable = !!(data.prHosts && data.prHosts.azure);
   paintHistory();                                        // fresh skeleton repaint
   rdRepaintOpenGlance();                                 // an open finished run reads its PR from these rows
-  if (pipelines.length) writeHistoryCache(pipelines, data.ghAvailable);  // never cache empty/error
+  if (pipelines.length) writeHistoryCache(pipelines, data.ghAvailable, state.adoAvailable);  // never cache empty/error
   requestHistoryPr(token);                               // Phase 2: ask server to push gh enrichment
   // NOTE: the spinner intentionally stays ON here; onHistoryPr (or the watchdog) clears it.
 }
@@ -19008,7 +19024,7 @@ function setupDiscardWorktreeButton(node, projectDir, p, onDiscarded) {
         return;
       }
       p.retainedWork = null;
-      writeHistoryCache(state.historyAll, state.ghAvailable);
+      writeHistoryCache(state.historyAll, state.ghAvailable, state.adoAvailable);
       paintHistory();
       // Restore the control unconditionally. History never noticed it was missing
       // — paintHistory() rebuilds the node — but the Running detail reuses this
@@ -19833,17 +19849,24 @@ function fillShipItBaseSelect(select, chain, remoteName, remoteBranches, fallbac
   select.value = offered(keep) ? keep : (offered(fallback) ? fallback : (select.options[0]?.value || ''));
 }
 
-// Hint under the selects: names the cross-repo head when the two remotes point at
-// different repositories ("me:branch → up/repo main"); empty otherwise. Pure, so the
-// single modal and each workspace row share it.
+// The base label names the base remote's PR host ("Open PR in (Azure DevOps)"). The hint
+// under the selects says why that host cannot open the PR (no credential, or an Azure
+// cross-repo PR), else names the cross-repo head when the two remotes point at different
+// repositories ("me:branch → up/repo main"); empty otherwise. Pure, so the single modal
+// and each workspace row share it.
 function crossRepoHint(remotes, pushName, baseName, branch, baseBranch) {
   const push = remotes.find((r) => r.name === pushName);
   const base = remotes.find((r) => r.name === baseName);
   const cross = !!(push && base && push.slug && base.slug && push.slug.toLowerCase() !== base.slug.toLowerCase());
+  if (base && base.prSupported === false) return base.prReason || `${base.prHost || 'This host'} pull requests are not available`;
+  if (cross && base.forge === 'azure') return `Azure DevOps pull requests between repositories (forks) are not supported yet — push to ${base.name}.`;
   return cross ? `Cross-repo: ${push.owner}:${branch || ''} → ${base.slug} ${baseBranch}` : '';
 }
 
 function paintShipItRemotesHint(modal, remotes, record) {
+  const base = remotes.find((r) => r.name === modal.querySelector('.shipit-base-remote').value);
+  const label = modal.querySelector('label[for="shipit-base-remote"]');
+  if (label) label.textContent = base && base.prHost ? `Open PR in (${base.prHost})` : 'Open PR in';
   modal.querySelector('.shipit-remotes-hint').textContent = crossRepoHint(remotes,
     modal.querySelector('.shipit-push-remote').value, modal.querySelector('.shipit-base-remote').value,
     record.branch, shipItChosenBase(modal, record));
@@ -19868,6 +19891,7 @@ async function loadShipItRemotes(modal, record, gen, isClosed) {
   const branchWrap = modal.querySelector('.shipit-base-wrap');
   const branchSel = modal.querySelector('.shipit-base-branch');
   box.hidden = true;
+  modal._remotes = [];
   pushSel.innerHTML = ''; baseSel.innerHTML = '';
   branchWrap.hidden = true;
   branchSel.innerHTML = '';
@@ -19884,7 +19908,8 @@ async function loadShipItRemotes(modal, record, gen, isClosed) {
     const data = await safeJson(res);
     if (gen !== shipItRemotesGen || isClosed()) return;              // stale: cancelled or re-opened since
     const remotes = res.ok && Array.isArray(data.remotes) ? data.remotes.filter((r) => r && r.name) : [];
-    const names = (list) => (Array.isArray(list) ? list.filter((b) => typeof b === 'string' && b) : []);
+    modal._remotes = remotes;
+    const names =(list) => (Array.isArray(list) ? list.filter((b) => typeof b === 'string' && b) : []);
     const chain = names(data.chain);
     if (!remotes.length && !chain.length) return;
     if (remotes.length) {
@@ -20056,6 +20081,10 @@ function openShipItModal(record, data) {
     descErr.hidden = true; descErr.textContent = '';
     const payload = { projectDir: record.projectDir || null, projectKey: record.projectKey, id: record.id };
     if (!q('.shipit-base-wrap').hidden) payload.baseBranch = q('.shipit-base-branch').value;
+    if (!q('.shipit-remotes').hidden) {
+      const baseRemote = (modal._remotes || []).find((r) => r.name === q('.shipit-base-remote').value);
+      if (baseRemote && baseRemote.forge === 'azure') payload.forge = 'azure';
+    }
     try {
       const res = await fetch('/api/pr/describe', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -20154,6 +20183,10 @@ function rdRepaintOpenGlance(pipelineId = null) {
   if (pipelineId && r.pipelineId !== pipelineId) return;
   paintRdGlance(runDetailState.screen, r);
 }
+
+/** Some PR host is reachable (gh, or an Azure DevOps token); the Ship-it modal and the server name the
+ *  missing one for the chosen remote (D8). */
+function prHostAvailable() { return !!(state.ghAvailable || state.adoAvailable); }
 
 // --- Ship-it, workspace mode: one row per affected member repo --------------
 
@@ -20538,7 +20571,7 @@ function wsRollupPr(p) {
 // least one MEMBER can still get a PR (histWsShippable) — POST /api/pr's workspace arm
 // takes that member's `memberKey`. A single-project run keeps its three clauses.
 function histPrEligible(p) {
-  if (!(state.ghAvailable && p)) return false;
+  if (!(prHostAvailable() && p)) return false;
   if (p.target === 'workspace') return histWsShippable(p).length > 0;
   return !!(p.survived && p.branch && p.sourceBranch);
 }
@@ -21446,7 +21479,7 @@ function setupHdActions(screen, record, data) {
         // archiving the LAST pipeline would otherwise persist `{pipelines: []}`
         // and the next boot would paint an empty History from cache before the
         // network answers.
-        if (state.historyAll.length) writeHistoryCache(state.historyAll, state.ghAvailable);
+        if (state.historyAll.length) writeHistoryCache(state.historyAll, state.ghAvailable, state.adoAvailable);
         const m = readLastRun();
         if (m && m.pipelineId === r.id && (!m.projectKey || m.projectKey === r.projectKey)) forgetLastRun();
         paintHistory();
@@ -28003,13 +28036,13 @@ function sigRest(tiles) {
 }
 
 // The finished headline's PR input (glanceCopy): the PR's own state, or what is known.
-// No row yet, or gh answered nothing yet -> PENDING; gh missing, or a run that cannot
+// No row yet, or the lookup answered nothing yet -> PENDING; no PR host, or a run that cannot
 // open one (workspace, branch gone) -> UNAVAILABLE; otherwise NONE.
 function glancePrInput(record) {
   const pr = record && record.pr;
   if (pr && typeof pr === 'object') return String(pr.state || '').toUpperCase() || 'UNAVAILABLE';
   if (!record) return 'PENDING';
-  if (!state.ghAvailable) return 'UNAVAILABLE';
+  if (!prHostAvailable()) return 'UNAVAILABLE';
   if (pr === undefined) return 'PENDING';
   return histPrEligible(record) ? 'NONE' : 'UNAVAILABLE';
 }
@@ -28018,7 +28051,7 @@ function glancePrInput(record) {
 const CTA_ICONS = {
   // A pull request with a plus where its head will be.
   'pr-create': '<circle cx="6" cy="6" r="2.5"/><path d="M6 8.5V21M13 6h3a2 2 0 0 1 2 2v3M18 15v6M15 18h6"/>',
-  // An open pull request is on GitHub: a box with an arrow leaving it (a new tab).
+  // An open pull request is on the code host: a box with an arrow leaving it (a new tab).
   external: '<path d="M18 13.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4.5"/><path d="M14 4h6v6M20 4l-9 9"/>',
   // Merged: two lines joining into one.
   merged: '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5V21M6 9a9 9 0 0 0 9 9h.5"/>',
