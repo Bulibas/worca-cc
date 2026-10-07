@@ -229,10 +229,10 @@ test('list filters by name or email', () => {
 });
 `,
 };
-const ATLAS_FILES = {
-  'package.json': `${JSON.stringify({ name: 'atlas-docs', version: '1.4.0', private: true, type: 'module',
+const LUMEN_FILES = {
+  'package.json': `${JSON.stringify({ name: 'lumen-docs', version: '1.4.0', private: true, type: 'module',
     scripts: { build: 'node src/build.js', test: 'node --test' }, dependencies: { marked: '^14.1.0' } }, null, 2)}\n`,
-  'README.md': '# atlas-docs\n\nTurns a folder of Markdown into a static docs site.\n\n```bash\nnpm run build   # docs/ -> dist/\n```\n',
+  'README.md': '# lumen-docs\n\nTurns a folder of Markdown into a static docs site.\n\n```bash\nnpm run build   # docs/ -> dist/\n```\n',
   'src/build.js': `import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { render } from './render.js';
@@ -254,13 +254,13 @@ import { readFileSync } from 'node:fs';
 const layout = readFileSync(new URL('../templates/page.html', import.meta.url), 'utf8');
 
 export function render(md, { pages }) {
-  const title = (md.match(/^# (.+)$/m) || [, 'Atlas'])[1];
+  const title = (md.match(/^# (.+)$/m) || [, 'Lumen'])[1];
   const nav = pages.map((p) => \`<a href="\${p.replace(/\\.md$/, '.html')}">\${p.replace(/\\.md$/, '')}</a>\`).join('');
   return layout.replace('{{title}}', title).replace('{{nav}}', nav).replace('{{body}}', marked.parse(md));
 }
 `,
   'templates/page.html': '<!doctype html>\n<html lang="en">\n<head><meta charset="utf-8"><title>{{title}}</title><link rel="stylesheet" href="theme.css"></head>\n<body><nav>{{nav}}</nav><main>{{body}}</main></body>\n</html>\n',
-  'docs/index.md': '# Atlas\n\nWelcome to the Nimbus developer docs.\n',
+  'docs/index.md': '# Lumen\n\nWelcome to the Nimbus developer docs.\n',
   'docs/api.md': '# API\n\nEvery endpoint answers JSON.\n',
 };
 const WEB_FILES = {
@@ -320,7 +320,7 @@ const REPOS = {
     { who: 'maya', daysAgo: 58, msg: 'Contacts API with an in-memory store', files: CRM_FILES },
     { who: 'diego', daysAgo: 31, msg: 'Pipeline value per deal stage', files: { 'src/routes/deals.js': `${CRM_FILES['src/routes/deals.js']}\ndeals.get('/pipeline', (req, res) => {\n  res.json(stages.map((stage) => ({ stage, deals: 0, valueCents: 0 })));\n});\n` } },
   ])),
-  'atlas-docs': await withOrigin(await makeRepo('atlas-docs', [{ who: 'priya', daysAgo: 44, msg: 'Markdown to HTML build with a page template', files: ATLAS_FILES }])),
+  'lumen-docs': await withOrigin(await makeRepo('lumen-docs', [{ who: 'priya', daysAgo: 44, msg: 'Markdown to HTML build with a page template', files: LUMEN_FILES }])),
   'nimbus-web': await withOrigin(await makeRepo('nimbus-web', [{ who: 'sam', daysAgo: 40, msg: 'Contacts list against the CRM API', files: WEB_FILES }])),
   'nimbus-jobs': await withOrigin(await makeRepo('nimbus-jobs', [{ who: 'diego', daysAgo: 36, msg: 'Lead scoring worker on the crm-events queue', files: JOBS_FILES }])),
 };
@@ -424,23 +424,23 @@ async function inBatches(items, n, fn) {
 const FINISHED = [
   ['nimbus-crm', 'CSV export for contacts', 'Add a CSV export for the filtered contact list: GET /contacts/export.csv streams name, email, company, owner and created date, honouring the same q and owner filters as GET /contacts.', 0.12, 4.82, 21, 5],
   ['nimbus-crm', 'Paginate the search endpoint', 'GET /contacts returns every row. Add cursor pagination (limit + cursor), keep the old response behind ?all=1 and document both in the README.', 0.9, 3.65, 17, 4],
-  ['atlas-docs', 'Dark-mode docs theme', 'Give the generated docs a dark theme that follows prefers-color-scheme, with a toggle in the nav that remembers the choice.', 1.3, 2.91, 14, 3.5],
+  ['lumen-docs', 'Dark-mode docs theme', 'Give the generated docs a dark theme that follows prefers-color-scheme, with a toggle in the nav that remembers the choice.', 1.3, 2.91, 14, 3.5],
   ['nimbus-web', 'Empty state for the contact list', 'When a search matches nothing, show a friendly empty state with a button that clears the search box.', 1.8, 1.42, 7, 1.5],
   ['nimbus-jobs', 'Retry failed scoring jobs with backoff', 'Scoring jobs that throw are lost. Retry them three times with exponential backoff, then move them to a dead-letter queue.', 2.2, 3.18, 16, 4],
   ['nimbus-crm', 'Validate e-mail addresses on create', 'POST /contacts accepts any string as an e-mail. Reject malformed addresses with a 400 that names the field, and cover it with tests.', 2.7, 2.06, 11, 2],
-  ['atlas-docs', 'Broken-link check in the build', 'Fail the build when a page links to another page that does not exist, and print every broken link with its source file.', 3.1, 2.47, 13, 3],
+  ['lumen-docs', 'Broken-link check in the build', 'Fail the build when a page links to another page that does not exist, and print every broken link with its source file.', 3.1, 2.47, 13, 3],
   ['nimbus-web', 'Debounce the contact search box', 'Every keystroke in the search box fires a request. Debounce it by 250 ms and cancel the request that is still in flight.', 3.6, 1.15, 6, 1],
   ['nimbus-crm', 'Deal stage history', 'Record every stage change of a deal with who changed it and when, and expose it at GET /deals/:id/history.', 4.2, 5.94, 29, 7],
   ['nimbus-jobs', 'Nightly lead-score recalculation', 'Add a nightly job that recomputes every lead score from the last 90 days of activity, in batches of 500.', 5.4, 3.77, 19, 4.5],
-  ['atlas-docs', 'Sidebar table of contents', 'Generate a table of contents from the h2 and h3 headings of each page and show it in a sticky right-hand sidebar.', 6.1, 2.33, 12, 2.5],
+  ['lumen-docs', 'Sidebar table of contents', 'Generate a table of contents from the h2 and h3 headings of each page and show it in a sticky right-hand sidebar.', 6.1, 2.33, 12, 2.5],
   ['nimbus-crm', 'Soft-delete contacts', 'DELETE /contacts/:id removes the row for good. Make it a soft delete with a deletedAt column and hide deleted rows from every list.', 6.8, 3.02, 15, 3.5],
   ['nimbus-web', 'Owner filter chips', 'Add filter chips above the contact list for each owner, combinable with the search box, and keep them in the URL.', 7.5, 2.64, 13, 3],
   ['nimbus-crm', 'Health check reports store size', 'Make GET /health also report the number of contacts and deals, and answer 503 while the store is still loading.', 8.2, 0.96, 5, 1],
-  ['atlas-docs', 'Copy button on code blocks', 'Add a copy-to-clipboard button to every fenced code block, with a short "Copied" confirmation.', 9.0, 1.38, 7, 1.5],
+  ['lumen-docs', 'Copy button on code blocks', 'Add a copy-to-clipboard button to every fenced code block, with a short "Copied" confirmation.', 9.0, 1.38, 7, 1.5],
   ['nimbus-jobs', 'Structured JSON logs', 'Replace the console.log calls with structured JSON logs carrying job id, queue and duration.', 9.7, 1.84, 9, 2],
   ['nimbus-crm', 'Rate-limit contact creation', 'Limit POST /contacts to 60 requests per minute per API key and answer 429 with a Retry-After header.', 10.4, 2.95, 15, 3],
   ['nimbus-web', 'Keyboard shortcuts for the list', 'Add j/k to move through the contact list, Enter to open a contact and / to focus the search box.', 11.1, 1.71, 9, 2],
-  ['atlas-docs', 'Versioned docs folders', 'Build docs/v1 and docs/v2 into separate trees with a version switcher in the header.', 13.6, 4.41, 22, 5],
+  ['lumen-docs', 'Versioned docs folders', 'Build docs/v1 and docs/v2 into separate trees with a version switcher in the header.', 13.6, 4.41, 22, 5],
   ['nimbus-crm', 'OpenAPI spec for the contacts API', 'Write an OpenAPI 3.1 document for every contacts and deals route and serve it at GET /openapi.json.', 16.2, 3.36, 17, 4],
   ['nimbus-jobs', 'Graceful shutdown on SIGTERM', 'On SIGTERM, stop taking new jobs, let running jobs finish for up to 30 s, then close the database pool.', 19.5, 1.27, 6, 1.5],
   ['nimbus-web', 'Contact detail drawer', 'Open a side drawer with the full contact and its deals when a row is clicked, without leaving the list.', 23.3, 4.08, 20, 5],
@@ -587,14 +587,14 @@ const askThread = askStore.createThread({ title: 'Contacts search is slow' });
     blocks: [{ kind: 'notice', text: 'Run started — "Paginate the search endpoint"', href: `#history/${pageRun.projectKey}/${pageRun.pipelineId}` }] });
   askStore.appendMessage(askThread.id, { role: 'user', text: 'Does the docs site need a change too?' });
   askStore.appendMessage(askThread.id, { role: 'assistant', status: 'done',
-    text: 'Yes. `docs/api.md` in atlas-docs still documents `GET /contacts` as returning every row. It needs the `limit` and `cursor` parameters, the `nextCursor` field and `?all=1`. Want me to propose a docs run for it?' });
+    text: 'Yes. `docs/api.md` in lumen-docs still documents `GET /contacts` as returning every row. It needs the `limit` and `cursor` parameters, the `nextCursor` field and `?all=1`. Want me to propose a docs run for it?' });
   // Ask spend this week (Statistics' Ask Worca tile): this chat and three shorter ones.
   const turn = (threadId, usd, hoursAgo) => db.prepare('INSERT INTO ask_cost_ledger (thread_id, message_id, amount_usd, tokens, model, ts) VALUES (?, ?, ?, ?, ?, ?)')
     .run(threadId, null, usd, Math.round(usd * 210_000), 'claude-sonnet-5-5', Date.now() - hoursAgo * 3_600_000);
   turn(askThread.id, 0.18, 0.5); turn(askThread.id, 0.07, 0.4);
   askStore.addThreadTotals(askThread.id, { costUsd: 0.25, usage: { input: 41_200, output: 2_900 } });
   for (const [title, q, a, usd, hoursAgo] of [
-    ['Why did the docs build fail?', 'Why did the last atlas-docs build fail?', 'The broken-link check found `api.md` linking to `auth.md`, which does not exist yet. Either add the page or drop the link.', 0.12, 20],
+    ['Why did the docs build fail?', 'Why did the last lumen-docs build fail?', 'The broken-link check found `api.md` linking to `auth.md`, which does not exist yet. Either add the page or drop the link.', 0.12, 20],
     ['Which runs touched deals.js?', 'Which runs changed src/routes/deals.js this month?', 'Two: **Deal stage history** (Monday) and **Pipeline value per deal stage** from before Worca. Both are merged into main.', 0.09, 46],
     ['Plan for the Postgres move', 'What would moving nimbus-crm to Postgres involve?', 'Three steps: a `contacts` table migration, swapping `src/db.js` for a pg pool behind the same functions, and a seed script for local runs.', 0.21, 70],
   ]) {
@@ -611,7 +611,7 @@ const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 const schedule = (proj, title, prompt, extra) => api('/api/run', { projectDir: REPOS[proj], prompt, title, workflowId: 'wf_default', ...extra });
 await schedule('nimbus-crm', 'Nightly dependency audit', 'Run npm audit, upgrade every dependency with a fix that stays inside its semver range, and keep the tests green.',
   { repeat: { rule: { freq: 'weekly', weekdays: ['mo', 'tu', 'we', 'th', 'fr'], time: '02:00', tz: TZ } } });
-await schedule('atlas-docs', 'Weekly broken-link sweep', 'Build the docs, list every broken internal or external link, and fix the internal ones.',
+await schedule('lumen-docs', 'Weekly broken-link sweep', 'Build the docs, list every broken internal or external link, and fix the internal ones.',
   { repeat: { rule: { freq: 'weekly', weekdays: ['mo'], time: '07:30', tz: TZ } } });
 await schedule('nimbus-web', 'Monthly flaky-test sweep', 'Run the test suite ten times, find tests that fail only sometimes, and make them deterministic.',
   { repeat: { rule: { freq: 'monthly', monthDay: 1, time: '06:00', tz: TZ } } });
@@ -675,7 +675,7 @@ const LIVE = [
     { question: 'How should webhook payloads be signed?', options: ['HMAC-SHA256 header with a per-endpoint secret', 'Ed25519 signature with a published public key', 'No signature, HTTPS only'], confidence: [72, 22, 6] },
     { question: 'What should happen when an endpoint keeps failing?', options: ['Retry with backoff for 24 h, then disable the endpoint', 'Retry three times, then drop the event'], confidence: [65, 35] },
   ]],
-  ['atlas-docs', 'Full-text search for the docs', 'Add client-side full-text search across every page, with results that highlight the matching words.', [
+  ['lumen-docs', 'Full-text search for the docs', 'Add client-side full-text search across every page, with results that highlight the matching words.', [
     { question: 'Where should the search index be built?', options: ['At build time, shipped as one JSON file', 'In the browser on the first search', 'On a hosted search service'], confidence: [78, 17, 5] },
     { question: 'Should results point to page sections or whole pages?', options: ['Sections, linking to the heading', 'Whole pages'], confidence: [60, 40] },
   ]],

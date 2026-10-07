@@ -584,7 +584,7 @@ Every finished run keeps its full record, one tab each in **Runs**: **Overview**
   scheduled and finished runs from every project on the machine (see
   [Pipeline](#pipeline)). See [`docs/storage.md`](docs/storage.md).
 
-![Runs page — runs from nimbus-jobs, nimbus-crm and atlas-docs grouped by project, one scheduled and one stopped, with the finished run Paginate the search endpoint open: Ready to ship, 17m 2s, $3.65, 2 files changed](docs/screenshots/history.png)
+![Runs page — runs from nimbus-jobs, nimbus-crm and lumen-docs grouped by project, one scheduled and one stopped, with the finished run Paginate the search endpoint open: Ready to ship, 17m 2s, $3.65, 2 files changed](docs/screenshots/history.png)
 
 ### Getting started & UI levels
 
