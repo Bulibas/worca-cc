@@ -401,3 +401,26 @@ Release checklist addition — before a stable tag, on the rc image:
 | `npm error code EOTP` | A manual publish against a 2FA-protected account — re-run with `--otp=<code>`. Never seen from CI, which authenticates over OIDC |
 | Workflow never starts | Only the commit was pushed, not the tag, or the tag does not match the prefix pattern |
 | `@rc` resolves behind `@latest` | Expected between a GA release and the next RC — see §5. Only a concern if it persists across several release lines |
+
+## 8. Notifying the worca platform
+
+The last job of `release-npm-app.yml`, `notify-platform`, runs after the GitHub
+Release exists and tells app.worca.dev about the release (release emails to
+subscribers, the upgrade offer for hosted instances). It POSTs
+
+```json
+{"version":"1.3.0-rc.1","url":"<GitHub release URL>","notes":"<release notes, may be empty>"}
+```
+
+to `https://app.worca.dev/api/hooks/release` with
+`x-worca-signature: sha256=<hex HMAC-SHA256 of the exact body bytes>`. The body
+is built with `jq` and written to a file; the same file is signed and sent.
+
+| Setting | Where | What |
+| --- | --- | --- |
+| `WORCA_RELEASE_HOOK_SECRET` | repo secret | The shared HMAC key; same value as the platform's. Unset = the job is skipped with a notice. |
+| `WORCA_RELEASE_HOOK_URL` | repo variable, optional | Overrides the endpoint, e.g. a staging platform. |
+
+It is best effort: curl makes up to 3 attempts, and a failure shows as a
+warning on the run without failing the release (npm, the image and the GitHub
+Release are already out). To re-send, re-run the `notify-platform` job.
