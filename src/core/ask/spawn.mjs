@@ -60,6 +60,7 @@ export const ASK_DENY_RULES = Object.freeze([
   'Read(//**/.worca-cc/tmp/**)',       // the chat's own scratch cwd (per-turn mcp-*.json)
   'Read(//**/.worca-cc/logs/**)',      // ask-web.jsonl: every thread's fetched URLs
   'Read(//**/.worca-cc/mcp/**)',       // the MCP registry: servers, sets, secrets, tests (MCP registry §5.5.4)
+  'Read(//**/.worca-cc/skills/**)',    // the skill library (skills registry §2b-7); a turn reads only its own mount under ask/<thread>/
   'Read(~/.ssh/**)',
   'Read(~/.aws/**)',
   'Read(~/.gnupg/**)',
@@ -76,6 +77,23 @@ export const ASK_SPAWN_ENV = Object.freeze({ CLAUDE_CODE_DISABLE_BACKGROUND_TASK
 // override (probes J/J2, 2.1.270; the E2 note in claude-runner.mjs). CLAUDE_-prefixed ⇒ survives
 // the scrub, not a reserved key.
 export const ASK_MEMORY_ENV = Object.freeze({ CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1' });
+// Skills registry §2b-7 (P3 probe 9): a skill's inline `!`cmd`` blocks never run in Ask — on every spawn, through the
+// one --settings seam (claude-runner.mjs buildSettingsArgs `extraSettings`).
+export const ASK_SKILL_SETTINGS = Object.freeze({ disableSkillShellExecution: true });
+// Only with a mount (dropping --disable-slash-commands would list them): Claude Code's bundled skills and workflows stay
+// out — "removed entirely; built-in slash commands stay typable but are hidden from the model. Plugins … unaffected"
+// (the setting's schema text, CLI 2.1.289+; an older CLI ignores the key).
+export const ASK_SKILL_MOUNT_SETTINGS = Object.freeze({ disableBundledSkills: true });
+// A mounted skill's name as the CLI lists it, `<plugin>:<skill>` (PLUGIN_NAME_RE + ':' + SKILL_NAME_RE): the only shape
+// that becomes a `Skill(…)` allow rule — never a comma or a parenthesis inside the comma-joined --allowedTools.
+const QUALIFIED_SKILL_RE = /^[a-z][a-z0-9-]{0,31}:(?=.{1,64}$)[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/** Skills registry §4.4: the turn's own set-skill mount (`<home>/ask/<thread>/skills/<message>/`) — intent, like
+ *  askWorktreeAllowRules (the engine reads it today anyway: `unmatched ⇒ allow`). Shape-checked thread id. */
+export function askSkillsAllowRules(threadId) {
+  if (typeof threadId !== 'string' || !/^ask_[0-9a-f]{8}$/.test(threadId)) return [];
+  return [`Read(//**/.worca-cc/ask/${threadId}/skills/**)`];
+}
 
 /**
  * The per-thread Read allow rules: the chat's worktrees (P4 §6) and its stored
@@ -122,8 +140,12 @@ function networkSentence(web, copies) {
 /** The sub-agent note for one turn. Without copies it is byte-identical to the two notes below (prompt caching). */
 // Agent mode (#574): sub-agents may read blocks, never run or stop a command.
 const COMMANDS_NOTE = 'You may use read_output, wait_for and list_blocks on terminal blocks, but never call run_command or stop_command yourself: running commands belongs to the assistant\'s own turn. ';
-export function sandboxNote({ web = false, copies = [], commands = false } = {}) {
-  return (copies.length ? NOTE_HEAD_MCP : NOTE_HEAD) + networkSentence(web === true, copies) + (commands ? COMMANDS_NOTE : '') + NOTE_TAIL;
+// Skills registry §4.4 (P3 probe 12: sub-agents see the session's plugin skills): only with a mount. A listed skill's own
+// files (references, templates) are the one more place Read may go — §2b-7 keeps the mount readable.
+const skillsSentence = (names) => `This turn also has the Skill tool, for the skills from the user's sets only (${names.join(', ')}): a skill is instructions for the tools above — Read may also open the files under the base directory the Skill tool gives for one of these skills; never invoke any other skill, and never run a skill's scripts or shell blocks. `;
+export function sandboxNote({ web = false, copies = [], commands = false, skills = [] } = {}) {
+  return (copies.length ? NOTE_HEAD_MCP : NOTE_HEAD) + (skills.length ? skillsSentence(skills) : '') + networkSentence(web === true, copies)
+    + (commands ? COMMANDS_NOTE : '') + NOTE_TAIL;
 }
 export const SANDBOX_NOTE = sandboxNote();
 /** The sub-agent note when web access is on for the turn: the network sentence names the web tools. */
@@ -145,13 +167,24 @@ export function buildMockMarkers(card) {
  * @param {{enabled:boolean, allowedDomains:string[], search:object|null}|null} [o.web]  askWebAccess() for this turn
  * @param {object|null} [o.registry]  resolveRegistry()'s result for this turn (MCP registry §9.2); no copies ⇒ ignored
  * @param {{url:string, token:string}|null} [o.commands]  agent mode's command bridge for this turn (#574); null ⇒ no command tools
+ * @param {{pluginDirs:string[], names:string[]}|null} [o.skills]  this turn's set-skill mount (skills registry §4.4); no plugin dir ⇒ ignored
  * @returns {object} runClaude options
  */
-export function buildAskSpawnOptions({ thread = {}, turn = {}, limits = {}, mcpConfigPath, scratchDir, memoryDir = null, web = null, relayed = false, registry = null, commands = null } = {}) {
+export function buildAskSpawnOptions({ thread = {}, turn = {}, limits = {}, mcpConfigPath, scratchDir, memoryDir = null, web = null, relayed = false, registry = null, commands = null, skills = null } = {}) {
   if (!scratchDir) throw new Error('buildAskSpawnOptions: scratchDir is required');
   if (!mcpConfigPath) throw new Error('buildAskSpawnOptions: mcpConfigPath is required');
   const systemPrompt = String(turn.systemPrompt ?? '') + (turn.mock ? buildMockMarkers(turn.mock.card) : '');
   const reg = registry && Array.isArray(registry.copies) && registry.copies.length ? registry : null;
+  // Skills registry §4.4 (P3 probe 6): --disable-slash-commands hides the Skill tool AND every plugin skill, so a turn
+  // that mounts ≥1 set skill drops it and adds Skill. `--setting-sources project` stays: personal ~/.claude skills,
+  // plugins and commands stay out; ASK_SKILL_MOUNT_SETTINGS keeps Claude Code's bundled skills out (its built-in commands
+  // stay hidden from the model; the prompt and the sub-agent note: only the sets' skills), and the turn prompt always
+  // starts `[worca context]`, never a `/`.
+  const sk = skills && Array.isArray(skills.pluginDirs) && skills.pluginDirs.length ? skills : null;
+  // Probed under dontAsk (2.1.291): a skill that declares `allowed-tools` needs approval, and `Skill(<plugin>:<skill>)`
+  // pre-approves exactly that one; with no bare `Skill` allow every other such skill (bundled `update-config`, …) is
+  // denied. Skills without `allowed-tools` (most set skills, bundled `simplify`, …) load without any rule.
+  const skillAllows = sk && Array.isArray(sk.names) ? sk.names.filter((n) => typeof n === 'string' && QUALIFIED_SKILL_RE.test(n)).map((n) => `Skill(${n})`) : [];
   // With copies, ToolSearch keeps their schemas deferred: `--tools` without it sends every MCP schema in full (§16.1 #9).
   const builtins = reg ? [...ASK_BUILTIN_TOOLS, 'ToolSearch'] : [...ASK_BUILTIN_TOOLS];
   // A stdio copy starts through the launcher, which reads the keep-list from the scrubbed claude env (§5.5.1).
@@ -164,10 +197,14 @@ export function buildAskSpawnOptions({ thread = {}, turn = {}, limits = {}, mcpC
     effort: turn.effort,
     modelEnv: { ...(turn.modelEnv || {}), ...ASK_SPAWN_ENV, ...(memoryDir ? ASK_MEMORY_ENV : {}) },
     permissionMode: ASK_PERMISSION_MODE,
-    allowedTools: [...builtins],
+    allowedTools: [...builtins, ...skillAllows],
     mcpServerGrants: [...ASK_MCP_GRANTS, ...(reg ? reg.grants : [])],
     mcpConfigPath,
-    permissionRules: { allow: askWorktreeAllowRules(thread.id), deny: [...ASK_DENY_RULES] },
+    permissionRules: {
+      allow: [...askWorktreeAllowRules(thread.id), ...(sk ? askSkillsAllowRules(thread.id) : [])],
+      deny: sk ? ASK_DENY_RULES.filter((r) => r !== 'Skill') : [...ASK_DENY_RULES],
+    },
+    extraSettings: { ...ASK_SKILL_SETTINGS, ...(sk ? ASK_SKILL_MOUNT_SETTINGS : {}) },
     envScrub: true,
     // P4 §12 E3 (locked D12): ssh-remote `git fetch` needs the agent socket. The
     // spec said "the MCP child only"; granting it on the whole claude process is
@@ -175,14 +212,15 @@ export function buildAskSpawnOptions({ thread = {}, turn = {}, limits = {}, mcpC
     // Relayed (the chat runs as an agent user): the web tools run in the worca server, which already has the key.
     envAllowlist: ['SSH_AUTH_SOCK', ...(!relayed && webKeyVar(web) ? [webKeyVar(web)] : []), ...(stdio ? keepListNames() : [])],
     resumeSessionId: thread.sessionId || undefined,
-    tools: [...builtins],
+    tools: [...builtins, ...(sk ? ['Skill'] : [])],
     strictMcpConfig: true,
     settingSources: ['project'],
-    disableSlashCommands: true,
+    ...(sk ? { pluginDirs: [...sk.pluginDirs] } : { disableSlashCommands: true }),
     includePartialMessages: true,
     maxTurns: limits.maxTurns,
     maxBudgetUsd: limits.maxBudgetUsd ?? null,
-    appendSubagentSystemPrompt: sandboxNote({ web: !!web && web.enabled === true, copies: reg ? reg.copies.map((c) => c.name) : [], commands: !!commands }),
+    appendSubagentSystemPrompt: sandboxNote({ web: !!web && web.enabled === true, copies: reg ? reg.copies.map((c) => c.name) : [], commands: !!commands,
+      skills: sk && Array.isArray(sk.names) ? sk.names : [] }),
     addDirs: memoryDir ? [memoryDir] : undefined,
     signal: turn.signal,
     onEvent: turn.onEvent,

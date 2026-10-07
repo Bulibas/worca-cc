@@ -5815,6 +5815,8 @@ body.term-open .toasts{right:calc(var(--term-w,460px) + 20px);}
 .ask-pop-mcp .switch:disabled{opacity:.5;cursor:not-allowed;}
 .ask-mcp-member.is-skipped .ask-model-name{font-family:var(--mono);font-size:12px;color:var(--ink-3);}
 .ask-mcp-member.is-problem .ask-pop-row-value{color:var(--amber-ink);}
+/* Skills registry §6.8: a level-1 set row's "2 servers · 1 skill · pinned" line under the set name. */
+.ask-pop-mcp .ask-model-name small{display:block;font-size:11.5px;font-weight:400;color:var(--ink-3);}
 .ask-notice-mcp{padding:0;border:0;background:none;color:var(--blue-ink);font:inherit;cursor:pointer;}
 /* Context popover (ask-panel.mjs buildCtxPopover): the window's fill, the chat's topics, agents and
    worktrees. Above the ring (JS sets its right edge); capped, it scrolls when the lists run long. */

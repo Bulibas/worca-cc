@@ -274,8 +274,8 @@ Every finished run keeps its full record, one tab each in **Runs**: **Overview**
   [Plugins & chat](#plugins--chat)).
 - **Sets per project, choices per run** — Ask Worca always uses the built-in **General** set;
   a project picks its sets on its **MCP** tab (**Include General in runs** is on by default),
-  New pipeline › Advanced › **MCP servers** switches servers off for one run, and the Ask
-  composer's **MCP · N** button picks them per chat. **Test** starts a server exactly as a run
+  New pipeline › Advanced › **Sets** switches servers and skills off for one run, and the Ask
+  composer's **Sets · N** button picks them per chat. **Test** starts a server exactly as a run
   would and lists its tools.
 - **Secrets out of config files** — values live only in `~/.worca-cc/mcp/secrets.json`
   (mode 0600) and reach a server as spawn environment; the run's MCP config holds

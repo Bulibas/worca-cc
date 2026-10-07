@@ -110,7 +110,7 @@ import {
   sweepAskWorktrees,
 } from '../src/core/ask/worktrees.mjs';
 import { createAskTurn } from '../src/core/ask/turn.mjs';
-import { validateMcpOff, resolveAskMcp, askMcpPromptInput, askMcpPreview, askMcpJoinNotice } from '../src/core/ask/mcp.mjs';
+import { validateMcpOff, resolveAskMcp, askMcpPromptInput, askMcpPreview, askMcpJoinNotice, resolveAskSkills } from '../src/core/ask/mcp.mjs';
 import { attachRunFollower } from '../src/core/ask/follow.mjs';
 import { mockEnabled, MOCK_WRITER_ROLES } from '../src/core/claude-runner.mjs';
 import { budgetStatus, readCostCapOverride, setCostCapOverride } from '../src/core/cost-budget.mjs';
@@ -9793,6 +9793,9 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // MCP registry §9.1–9.3: General + the targets in play (the tagged dropdown fallback excluded), minus the chat's
     // picker choices — resolved ONCE per turn, so the per-turn file, the spawn and the prompt section agree.
     const mcp = await resolveAskMcp({ ctx, threadId: id, off: mcpOff !== undefined ? mcpOff : thread.mcpOff, model });
+    // Skills registry §4.4: the same targets and choices for the skills from sets — resolved ONCE per turn; the turn
+    // mounts them and appends the prompt section naming exactly what it wrote.
+    const skills = await resolveAskSkills({ ctx, threadId: id, off: mcpOff !== undefined ? mcpOff : thread.mcpOff });
     // Agent mode (#574): this chat's switch, where agent mode exists at all; a message's own value wins.
     const agentOn = askCommandsEnabled() && (agentMode !== undefined ? agentMode : thread.agentMode) !== false;
     const systemPrompt = await askSystemPromptFor(catalog, { web, mcp: await askMcpPromptInput(mcp), commands: agentOn });
@@ -9821,6 +9824,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
       pinnedScope: pinned,                          // #397: proposal defaulting + mismatch flag
       web,
       mcp: mcp.result,
+      skills: skills.result,
       agentMode: agentOn,
       timeZone: ctx.timeZone || (thread.context && thread.context.timeZone) || null,   // scheduled runs: the user's clock
       memoryProject: headerCtx.project ? { key: headerCtx.project.key, name: headerCtx.project.name || '' } : null,   // native-rules revision: the turn mounts global + this project through --add-dir
@@ -9836,7 +9840,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         onCommentMutation: ({ runId }) => { emitDiffCommentsChanged(runId); },
         onWorktreeMutation: () => { emitAskWorktrees(id); },
         // §9.1 (D17): at turn end, name the copies a worktree opened this turn brings into the next one.
-        mcpJoinNotice: () => askMcpJoinNotice({ before: mcp, ctx, threadId: id, off: askGetThread(id)?.mcpOff ?? null, model }),
+        mcpJoinNotice: () => askMcpJoinNotice({ before: { ...mcp, skills: skills.result }, ctx, threadId: id, off: askGetThread(id)?.mcpOff ?? null, model }),
         // A remember/forget in the MCP child is the same scope change a REST write makes (B29).
         // The key is parsed out of worca's OWN tool result, never written by the model; shape-check
         // it anyway before it rides a broadcast (I2-#22).
