@@ -94,12 +94,15 @@ chrome = spawn(CHROME, [`--remote-debugging-port=${PORT}`, `--user-data-dir=${pr
   '--headless=new', '--disable-gpu', '--use-mock-keychain', '--window-size=1400,1000', ...SANDBOX, 'about:blank'],
 { env: { ...process.env, ...REAL_ENV }, stdio: 'ignore' });
 
+// Up to 30 s: a cold Chrome on a busy CI runner can take more than 10 s to open its first page.
+// Wait between tries whether the endpoint is down or just has no page target yet.
 let wsUrl = '';
-for (let i = 0; i < 80 && !wsUrl; i += 1) {
+for (let i = 0; i < 120 && !wsUrl; i += 1) {
   try {
     const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
     wsUrl = (list.find((t) => t.type === 'page') || {}).webSocketDebuggerUrl || '';
-  } catch { await sleep(125); }
+  } catch { /* not listening yet */ }
+  if (!wsUrl) await sleep(250);
 }
 if (!wsUrl) { log('no CDP endpoint'); await shutdown(1); }
 
