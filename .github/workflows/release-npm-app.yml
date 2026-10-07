@@ -144,3 +144,73 @@ jobs:
             --title "@worca/app $VERSION" \
             --generate-notes \
             $PRERELEASE
+
+  # Tells the worca platform (app.worca.dev) a release is out, so it can email the
+  # release newsletter and offer the upgrade to hosted instances. Runs after the
+  # GitHub Release exists. Best effort: a failed notification never fails the
+  # release, but shows as a warning on the run. Skipped while the secret is unset.
+  # See docs/RELEASING.md §8.
+  notify-platform:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      WORCA_RELEASE_HOOK_SECRET: ${{ secrets.WORCA_RELEASE_HOOK_SECRET }}
+      HOOK_URL: ${{ vars.WORCA_RELEASE_HOOK_URL || 'https://app.worca.dev/api/hooks/release' }}
+    steps:
+      - name: Skip (WORCA_RELEASE_HOOK_SECRET not set)
+        if: env.WORCA_RELEASE_HOOK_SECRET == ''
+        run: echo "::notice::WORCA_RELEASE_HOOK_SECRET is not set; not notifying the worca platform."
+
+      - name: Build the signed release payload
+        if: env.WORCA_RELEASE_HOOK_SECRET != ''
+        id: payload
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG_NAME#worca-app-v}"
+          # The release was just created by the `release` job; fall back to the tag URL
+          # and empty notes if it can't be read.
+          if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json url,body > release.json; then
+            URL="$(jq -r '.url // empty' release.json)"
+          else
+            echo "::warning::Could not read the GitHub release for $TAG_NAME; sending the tag URL and no notes."
+            echo '{}' > release.json
+            URL=""
+          fi
+          URL="${URL:-$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG_NAME}"
+          # jq does all quoting: the notes are arbitrary text and never touch the shell.
+          jq -cn --arg version "$VERSION" --arg url "$URL" --slurpfile rel release.json \
+            '{version: $version, url: $url, notes: ($rel[0].body // "")}' > body.json
+          # Sign the exact bytes curl will send (--data-binary @body.json).
+          SIG="$(openssl dgst -sha256 -hmac "$WORCA_RELEASE_HOOK_SECRET" -r body.json | cut -d' ' -f1)"
+          echo "signature=sha256=$SIG" >> "$GITHUB_OUTPUT"
+          echo "Payload for $VERSION ($(wc -c < body.json) bytes): $(jq -c '{version, url, notes_chars: (.notes | length)}' body.json)"
+
+      - name: Notify the worca platform
+        if: env.WORCA_RELEASE_HOOK_SECRET != '' && steps.payload.outcome == 'success'
+        continue-on-error: true
+        env:
+          SIGNATURE: ${{ steps.payload.outputs.signature }}
+        run: |
+          set -uo pipefail
+          echo "POST $HOOK_URL"
+          # --retry 2 = up to 3 attempts on transient failures (timeouts, 408/429/5xx).
+          if curl -sS --fail-with-body --retry 2 --retry-delay 10 --retry-connrefused --max-time 30 \
+               -X POST "$HOOK_URL" \
+               -H "content-type: application/json" \
+               -H "x-worca-signature: $SIGNATURE" \
+               --data-binary @body.json; then
+            echo
+            echo "Platform notified."
+          else
+            rc=$?
+            echo
+            echo "::warning::Release hook to $HOOK_URL failed (curl exit $rc). The release itself is done; re-send by re-running this job."
+            exit "$rc"
+          fi
