@@ -212,7 +212,11 @@ you decide when it upgrades, and every change below is one command. Each one res
 service: Railway stops the old container before starting the new one (a volume can't be attached
 to two). On the stop's SIGTERM worca drains: it starts nothing new, pauses every active run (the
 resume point is saved, as on a Pause click) and waits up to `WORCA_DRAIN_TIMEOUT_MS` (20 s by
-default) before it exits, well inside the 60 s `drainingSeconds` set above. The runs come back
+default) before it exits, well inside the 60 s `drainingSeconds` set above. The container exits 0
+after a stop (the image's tini reports the server's 143 as 0): Railway keeps a deployment whose
+container exited non-zero after a stop marked as running, so a stop would never finish. Keep the
+image's entrypoint; a custom start command for the `worca` service must start with
+`tini -s -e 143 --`. The runs come back
 **paused** ("worca was restarting") and you resume them afterwards, or set `WORCA_AUTO_RESUME=1`
 on the `worca` service to have the new container resume them by itself, as the person who last
 started or resumed each one. A run still busy after the drain timeout comes back `interrupted`,

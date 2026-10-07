@@ -145,5 +145,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # No -g: tini signals only `worca ui` (the entrypoint execs it), which forwards the stop to the
 # server; the server pauses its runs (drain) and stops their agents itself. Signalling the whole
 # group would kill the agents first and turn a clean pause into a failed step.
-ENTRYPOINT ["tini", "-s", "--", "worca-entrypoint"]
+# -e 143: a stop is a clean exit. The server exits 143 after a SIGTERM (the shell convention, kept
+# for `worca ui` outside a container), and tini passes that on as the container's exit code;
+# Railway never marks a deployment stopped whose container exits non-zero after deploymentStop
+# (the instance stays RUNNING, whatever the restart policy). Remapped to 0, it stops in seconds.
+ENTRYPOINT ["tini", "-s", "-e", "143", "--", "worca-entrypoint"]
 CMD ["worca", "ui"]
