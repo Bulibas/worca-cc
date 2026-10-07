@@ -31,8 +31,11 @@ start the run.)
 - **Normal** — protects credential files (`.env*`, `*.pem`, `*.key`, SSH keys,
   cert stores, container secrets under `/run/secrets/`) from agent Read/Edit
   and blocks publication commands
-  (`git push`, `npm/yarn/pnpm publish`). Never breaks a pipeline: commits,
-  installs, tests, and `curl localhost` all still work.
+  (`git push`, `npm/yarn/pnpm publish`). It also protects Worca's own state
+  (the DB, secrets, settings and MCP registry) from Read/Edit and blocks edits
+  to Worca's `plugins`, `scripts`, `agents`, `workflows` and `policy` dirs.
+  Never breaks a pipeline: commits, installs, tests, and `curl localhost` all
+  still work.
 - **Strict** (wire id `secure`) — Normal plus: environment scrub on agent
   spawn (the spawned `claude` gets a minimal env: base vars, the proxy/CA
   connectivity vars, every `ANTHROPIC_*`/`CLAUDE_*` var, and the set's
@@ -40,7 +43,8 @@ start the run.)
   `nc`, `ssh`, `scp`, `rsync`, ...), `gh`/`docker push` and cloud CLIs
   (`aws`, `gcloud`, `az`) denied, `WebFetch`/`WebSearch` denied, and home-dir
   credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`,
-  `~/.git-credentials`, ...) protected from the Read/Edit tools.
+  `~/.git-credentials`, `~/.claude/.credentials.json`, `~/.gnupg`, ...)
+  protected from the Read/Edit tools.
 
 ## Resolution and lifecycle
 
@@ -96,6 +100,10 @@ enforces the set's latest definition.
 
 ## Honest limitations
 
+- **Worca's state protection is tool-level.** The Read/Edit denies on Worca's DB,
+  secrets and code dirs do not stop an agent with Bash (`sqlite3`, `node -e`)
+  from reaching the DB, and only the conventional `.worca-cc` home basename is
+  matched. Container mode is the real containment.
 - **MCP registry servers are outside the presets.** No preset denies `mcp__*`,
   and Strict's exfil and publish denies (`Bash(gh)`, `curl`, `WebFetch`, …) do
   not constrain a registry server's tools, which every agent of the run can
