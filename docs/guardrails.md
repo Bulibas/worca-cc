@@ -31,8 +31,11 @@ start the run.)
 - **Normal** — protects credential files (`.env*`, `*.pem`, `*.key`, SSH keys,
   cert stores, container secrets under `/run/secrets/`) from agent Read/Edit
   and blocks publication commands
-  (`git push`, `npm/yarn/pnpm publish`). Never breaks a pipeline: commits,
-  installs, tests, and `curl localhost` all still work.
+  (`git push`, `npm/yarn/pnpm publish`). It also protects Worca's own state
+  (the DB, secrets, settings and MCP registry) from Read/Edit and blocks edits
+  to Worca's `plugins`, `scripts`, `agents`, `workflows` and `policy` dirs.
+  Never breaks a pipeline: commits, installs, tests, and `curl localhost` all
+  still work.
 - **Strict** (wire id `secure`) — Normal plus: environment scrub on agent
   spawn (the spawned `claude` gets a minimal env: base vars, the proxy/CA
   connectivity vars, every `ANTHROPIC_*`/`CLAUDE_*` var, and the set's
@@ -43,7 +46,8 @@ start the run.)
   `lynx`, `w3m`) denied, `gh`/`docker push` and cloud CLIs
   (`aws`, `gcloud`, `az`) denied, `WebFetch`/`WebSearch` denied, and home-dir
   credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`,
-  `~/.git-credentials`, ...) protected from the Read/Edit tools.
+  `~/.git-credentials`, `~/.claude/.credentials.json`, `~/.gnupg`, ...)
+  protected from the Read/Edit tools.
 
 ## Resolution and lifecycle
 
@@ -99,6 +103,10 @@ enforces the set's latest definition.
 
 ## Honest limitations
 
+- **Worca's state protection is tool-level.** The Read/Edit denies on Worca's DB,
+  secrets and code dirs do not stop an agent with Bash (`sqlite3`, `node -e`)
+  from reaching the DB, and only the conventional `.worca-cc` home basename is
+  matched. Container mode is the real containment.
 - **MCP registry servers are outside the presets.** No preset denies `mcp__*`,
   and Strict's exfil and publish denies (`Bash(gh)`, `curl`, `WebFetch`, …) do
   not constrain a registry server's tools, which every agent of the run can
@@ -347,3 +355,19 @@ enforces the set's latest definition.
   - **Log:** every call, refused ones included, is one JSON line in
     `~/.worca-cc/logs/ask-web.jsonl` (redacted, clipped URLs; never page text,
     queries or keys; rotated at 5 MB). The chat is denied `Read` on `logs/`.
+  **Agent mode (on by default, per chat).** The Agent switch in the Ask composer
+  lets the assistant run shell commands in Worca terminals (`run_command`,
+  `read_output`, `wait_for`, `stop_command`, `list_blocks`): tests, builds, git
+  status, and file changes through commands when you ask for them. The shell runs
+  as the Worca server's user, like a person's terminal and Actions. It starts from
+  a cleaned environment (PATH, HOME, locale, proxy and CA variables and
+  `SSH_AUTH_SOCK`; no model, GitHub or server tokens, and none of your shell rc
+  files), and every command passes a check first: Worca's own files and API,
+  credential paths, force pushes, `rm -r` outside the folder, `sudo` and similar
+  are refused. Ask's terminals are shared with you: a shell you (or Ask) moved
+  with `cd` is kept only while it stays inside the project folder or the run's
+  checkout, and the check runs against the folder the shell is really in; a shell
+  outside it is never used. That check is a rail against mistakes, not a sandbox: an
+  obfuscated command can get around it. `Edit` and `Write` stay denied for the
+  chat itself. With agent isolation on, agent mode is off: a server-user shell
+  would undo the isolation. See [Terminal](terminal.md#ask-worca-agent-mode).

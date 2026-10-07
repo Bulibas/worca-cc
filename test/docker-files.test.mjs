@@ -28,6 +28,9 @@ test('Dockerfile and .dockerignore: non-root, pinned CLI, tini, healthcheck, tar
       assert.match(d, /npm install -g \/tmp\/worca\.tgz/, 'installs the packed tarball, never COPY of the source');
       assert.doesNotMatch(d, /^COPY \. /m, 'no COPY of the whole tree');
       assert.match(d, /^ENTRYPOINT \["tini"/m, 'tini reaps orphaned children');
+      // Railway leaves a deployment RUNNING after deploymentStop when the container exits non-zero:
+      // the server's 143 after SIGTERM must reach the platform as 0.
+      assert.match(d, /^ENTRYPOINT \["tini", "-s", "-e", "143", "--", "worca-entrypoint"\]$/m, 'a stop (exit 143) is a clean container exit');
       assert.match(d, /^HEALTHCHECK/m);
       assert.match(d, /WORCA_NO_NATIVE_DIALOG=1/);
       assert.match(d, /WORCA_CONTAINER=1/, 'Ask Worca knows it runs in the image (src/core/deployment.mjs)');

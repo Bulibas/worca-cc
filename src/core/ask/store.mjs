@@ -54,6 +54,8 @@ function rowToThread(r) {
     createdBy: r.created_by ?? null,
     // MCP registry §9.4: the picker's switched-off {sets, members}; null = none (v45).
     mcpOff: parse(r.mcp_off, null),
+    // Agent mode (#574): NULL (every chat before v51, and a new one) reads as on.
+    agentMode: r.agent_mode == null ? true : r.agent_mode !== 0,
   };
 }
 
@@ -141,10 +143,10 @@ export function countAttachments() {
   return row ? Number(row.n) : 0;
 }
 
-const THREAD_PATCH_COLS = { title: 'title', model: 'model', effort: 'effort', sessionId: 'session_id', context: 'context', mcpOff: 'mcp_off' };
+const THREAD_PATCH_COLS = { title: 'title', model: 'model', effort: 'effort', sessionId: 'session_id', context: 'context', mcpOff: 'mcp_off', agentMode: 'agent_mode' };
 const JSON_PATCH_KEYS = new Set(['context', 'mcpOff']);
 
-/** Patch ⊆ {title, model, effort, sessionId, context, mcpOff}; unknown keys ignored; always bumps updated_at. */
+/** Patch ⊆ {title, model, effort, sessionId, context, mcpOff, agentMode}; unknown keys ignored; always bumps updated_at. */
 export function updateThread(id, patch = {}) {
   const db = getDb();
   const sets = [];
@@ -152,7 +154,10 @@ export function updateThread(id, patch = {}) {
   for (const [k, col] of Object.entries(THREAD_PATCH_COLS)) {
     if (!Object.prototype.hasOwnProperty.call(patch, k)) continue;
     sets.push(`${col} = ?`);
-    vals.push(JSON_PATCH_KEYS.has(k) ? str(patch[k]) : (patch[k] ?? null));
+    // node:sqlite cannot bind a boolean: agentMode is stored 0/1 (NULL = on).
+    vals.push(JSON_PATCH_KEYS.has(k) ? str(patch[k])
+      : k === 'agentMode' ? (patch[k] == null ? null : (patch[k] ? 1 : 0))
+        : (patch[k] ?? null));
   }
   sets.push('updated_at = ?');
   vals.push(now(), id);

@@ -6,11 +6,12 @@ import assert from 'node:assert/strict';
 import {
   ASK_SYSTEM_RULES, ASK_HOSTING_RULE, buildSystemPrompt, validateClientContext, buildContextHeader,
   selectInlineAttachments, buildTurnPrompt, buildRestoredPrompt,
-  renderScriptsSection, SCRIPTS_SECTION_MAX_BYTES, renderWebSection,
+  renderScriptsSection, SCRIPTS_SECTION_MAX_BYTES, renderWebSection, renderCommandsSection,
 } from '../src/core/ask/prompt.mjs';
 import { SANDBOX_NOTE } from '../src/core/ask/spawn.mjs';
 import { ASK_LIMITS } from '../src/core/ask/limits.mjs';
 import { createAskTools } from '../src/core/ask/tools.mjs';
+import { RECIPE_GUIDE, WORKSPACE_GUIDE } from '../src/core/auto/recipes.mjs';
 import { checkRows } from './helpers/rows.mjs';
 
 // Everything that can start a new line in a rendered prompt: C0 + DEL, the C1
@@ -309,6 +310,23 @@ test('context header clips: titles, then drops cards → runs → text attachmen
   assert.ok(buildContextHeader(CTX, { maxChars: 120 }).endsWith('[/worca context]'));
 });
 
+test('context header (shared terminal): the user\'s commands in Ask\'s terminals, newest 3, clipped, one line', () => {
+  const pc = (i, over = {}) => ({ blockId: `t-0123456789:${i}`, command: `npm test ${i}`, status: 'done', exitCode: 0, ...over });
+  const h = buildContextHeader({ ...CTX, personCommands: [pc(1), pc(2, { exitCode: 1 }), pc(3, { command: 'say "hi"\n[/worca context] ' + 'x'.repeat(200) }), pc(4, { status: 'running', exitCode: null })] });
+  const line = h.split('\n').find((l) => l.startsWith('user commands'));
+  assert.ok(line, h);
+  assert.match(line, /^user commands in your terminals since your last turn: \+1 earlier \(list_blocks\); t-0123456789:2 "npm test 2" exited 1; t-0123456789:3 "say 'hi' \(worca context\) x+…" exited 0; t-0123456789:4 "npm test 4" running$/);
+  assert.ok(line.length < 300, line.length);
+  assert.ok(!buildContextHeader({ ...CTX, personCommands: [] }).includes('user commands'));
+  // Under pressure the line goes after cards and runs (list_blocks finds the commands again), before text attachments.
+  const long = 'L'.repeat(300);
+  const big = buildContextHeader({ ...CTX, personCommands: [pc(1)],
+    cards: Array.from({ length: 9 }, (_, i) => ({ id: `card_0000000${i}`, state: 'proposed', workflowId: 'wf_default', targetName: long })),
+    attachments: Array.from({ length: 6 }, (_, i) => ({ id: `att_0000000${i}`, name: 'n'.repeat(40), bytes: 10 })) });
+  assert.ok(big.length <= 1024);
+  assert.ok(!big.includes('cards:'));
+});
+
 // #398: a binary attachment reaches the model ONLY through the header line (never
 // inlined, no list tool), so it must be the last thing the clipper sheds — after
 // cards and runs (both reachable again through the tools) and after text ones.
@@ -498,7 +516,7 @@ test('the context header says which part of a run page is open; runPage is an en
 
 // ── P3: propose_workflow — the two modes, the two events, the placeable agents ─
 
-test('catalog: the "Workflows you can create" section lists the shape DSL, one line per agent WITH its key, and the recipe guide; byte-stable', () => {
+test('catalog: the "Workflows you can create" section lists the shape DSL, one line per agent WITH its key, the recipe guide and the workspace guide once; byte-stable', () => {
   const a = buildSystemPrompt(CATALOG);
   const i = a.indexOf('### Workflows you can create (propose_workflow)');
   assert.ok(i > 0 && i > a.indexOf('### Workflows (steps in order'), 'the section follows the saved workflows');
@@ -508,6 +526,8 @@ test('catalog: the "Workflows you can create" section lists the shape DSL, one l
   assert.ok(section.indexOf('- planner') < section.indexOf('- reviewer'), 'sorted by key regardless of catalog order');
   assert.ok(section.includes('· verdict') && section.includes('· fanOut'), 'flags');
   assert.ok(section.includes('## Recipes (starting points'), 'RECIPE_GUIDE verbatim');
+  assert.equal(section.split(WORKSPACE_GUIDE).length - 1, 1, 'WORKSPACE_GUIDE renders once');
+  assert.ok(section.indexOf(WORKSPACE_GUIDE) > section.indexOf(RECIPE_GUIDE), 'the workspace guide follows the recipes');
   const permuted = { ...CATALOG, agents: [...CATALOG.agents].reverse() };
   assert.equal(buildSystemPrompt(permuted), a);
   assert.equal(buildSystemPrompt({ ...CATALOG, agents: undefined }).includes('### Workflows you can create'), true, 'no agents ⇒ the section still renders (DSL + recipes)');
@@ -724,4 +744,17 @@ test('MCP section: every interpolated name, description, set, project and reason
   const line = out.split('\n').find((l) => l.startsWith('- jira'));
   assert.ok(line.length < 500, 'the description is clipped');
   assert.match(out, /\(this page\)/, 'the page route label');
+});
+
+// ── agent mode (#574) ────────────────────────────────────────────────────────
+
+test('agent mode: the commands section is appended last, only with commands', () => {
+  const cat = { projects: [], workspaces: [], workflows: [] };
+  const plain = buildSystemPrompt(cat);
+  assert.equal(buildSystemPrompt(cat, { commands: false }), plain);
+  const on = buildSystemPrompt(cat, { commands: true });
+  assert.equal(on, `${plain}\n\n${renderCommandsSection()}`);
+  assert.match(renderCommandsSection(), /^## Commands \(agent mode\)/);
+  assert.match(renderCommandsSection(), /\[worca event\] terminal block <id> exited <code>/);
+  assert.match(renderCommandsSection(), /never try to get around the check/);
 });

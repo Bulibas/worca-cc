@@ -71,7 +71,7 @@ import { collectRequiredAssets, stageAssets } from './run-assets.mjs';
 import { loadAgentRegistry, DEFAULT_AGENTS_DIR } from './agent-registry.mjs';
 import {
   createWorktree, removeWorktree, suggestBranchName, sanitizeBranchName, resolveDefaultBranch,
-  isValidSourceRef, snapshotWorktreePatch, listLocalBranches, worktreeHead,
+  isValidSourceRef, snapshotWorktreePatch, listLocalBranches, worktreeHead, deleteBranchIfAt,
 } from './worktree.mjs';
 import { syncBaseForRun, ensureLocalBranch, fetchRemote, isSafeBranchName, runSyncOptions, INTERACTIVE_TIMEOUT_MS } from './git-sync.mjs';
 import { SYNC_EXECUTION_ID } from '../shared/graph/constants.mjs';
@@ -116,7 +116,7 @@ import { runNightAnalysis, readMemoryText } from './night/analysis.mjs';
 import { resolveDeciderPair } from './night/decider-model.mjs';
 import { writeNightDecision, countNightDecisions, nightCounts, nightGateCycles, nightSpendSinceUsd } from './night/store.mjs';
 import { NIGHT_ACTOR, NIGHT_TOGGLES, nightNeverDecides } from './night/config.mjs';
-import { nightModeToggle, nightModeHereSince } from './settings.mjs';
+import { nightModeToggleFor, nightModeHereSinceFor, personAwayStatus, awayPerPerson, awayPersonKey } from './settings.mjs';
 import { MCP_TOOL_NAME_400_RE, MCP_TOOL_NAME_TOO_LONG } from '../shared/mcp-tool-name.mjs';
 
 // worca-cc repo root; holds skills/. fileURLToPath, never URL.pathname: the
@@ -163,6 +163,14 @@ export const ERR_STREAM = Object.freeze({ stream: 'err' });
 function errDetail(res, max = 200) {
   const text = (res?.stderr || '').trim().replace(/\s+/g, ' ');
   return text ? `: ${clip(text, max)}` : '';
+}
+
+/** The parenthetical of a workspace member's teardown audit line. Scan + kept wording is
+ *  unchanged; an unchanged member's dropped branch says why. */
+function memberBranchNote(branch, { readOnly, dropped }) {
+  if (readOnly) return `deleted branch \`${branch}\``;
+  if (dropped) return `deleted branch \`${branch}\` — no changes`;
+  return `kept branch \`${branch}\``;
 }
 
 /** attr for a log line whose text embeds subprocess output: ERR_STREAM only
@@ -950,6 +958,9 @@ export class RunHarness extends EventEmitter {
       decisions: new Map(),                // question id -> decision record (for the answer writers)
       count: 0, flagged: 0,
       answers: 0, checks: 0,               // what the answers list shows: one per answered question
+      // B4 (WORCA_AWAY_PER_PERSON): who last resumed the run, when that is not its starter. Saved in
+      // the resume point so the owner survives a pause and a restart.
+      owner: typeof savedNight?.owner === 'string' ? savedNight.owner : null,
     };
     this._nightClock = this.opts.nightClock || { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) };
     this.state.night = this._nightSnapshot();
@@ -1057,6 +1068,22 @@ export class RunHarness extends EventEmitter {
       pq.reject(pauseErr());
     }
     return true;
+  }
+
+  /**
+   * Pause because the server is stopping (B2: SIGTERM, POST /api/drain): pause() with the
+   * distinct reason 'drain', so the resume point says why and WORCA_AUTO_RESUME can pick the run
+   * up on the next start. Who last started or resumed the run stays on state.lastAction. Returns
+   * false unless the run is currently 'running' (a run already pausing keeps its own reason).
+   */
+  pauseForDrain() {
+    if (this.state.status !== 'running') return false;
+    const la = this.state.lastAction;
+    this._drainResumeAs = la && la.kind === 'resume' && typeof la.by === 'string' && la.by ? la.by : null;
+    this._setPauseReason(REASON.DRAIN, 'Paused while worca was stopping');
+    this._log('orchestrator', 'info', 'worca is stopping — pausing the run; resume continues from here');
+    if (this.pipeline?.dir) appendAudit(this.pipeline.dir, 'Pipeline **paused**: worca was stopping.').catch(() => {});
+    return this.pause();
   }
 
   /** Who stopped / paused / resumed the run (identity.mjs actor): { kind, by, at } on the
@@ -1549,8 +1576,8 @@ export class RunHarness extends EventEmitter {
     } finally {
       this._stopHeartbeat(); // clear timer + NULL owner columns (done/stopped/launch-error/paused)
       // C1: tear the run root + worktree(s) down on done/stopped/launch-error — the branch is
-      // always kept (every member's, on a workspace run), only the disposable checkout
-      // is removed. But NEVER on a pause: the checkout (with any uncommitted agent
+      // kept (except a workspace member's branch this run never changed, and every branch of
+      // a read-only scan), only the disposable checkout is removed. But NEVER on a pause: the checkout (with any uncommitted agent
       // work) and the run root are the things we resume into (§8.13).
       if (this.state.status !== 'paused' && this.state.status !== 'pausing') {
         await this._teardownRunRoot().catch(() => {});
@@ -1573,6 +1600,8 @@ export class RunHarness extends EventEmitter {
   resume() {
     const who = currentBillTo();
     const starter = this.resumeOpts?.row?.started_by ?? this.opts.startedBy ?? null;
+    // B4: the person who resumed it owns it for Away mode from now on (only with per-person Away).
+    if (this._night && awayPerPerson() && awayPersonKey(who)) this._night.owner = who;
     // Pays: whoever resumed. Runs as: the starter's agent user, whose HOME holds the sessions.
     return withBillTo(who && who !== 'local' ? who : (starter || who), () => this._resume(), { owner: starter || who });
   }
@@ -3125,8 +3154,9 @@ export class RunHarness extends EventEmitter {
 
   /**
    * Workspace teardown (C1, N times): per member, commit its work onto its feature
-   * branch (in its own repo), remove its checkout, and KEEP the branch (a read-only
-   * Workspace scan deletes it, D5) — done, error, or stopped alike. Each member's SHA + survival flags are recorded on
+   * branch (in its own repo), remove its checkout, and KEEP the branch — except a member
+   * this run never changed (its branch is dropped) and a read-only Workspace scan (deletes
+   * every branch, D5) — done, error, or stopped alike. Each member's SHA + survival flags are recorded on
    * state.branches[projectKey]. Idempotent (guards against a double teardown by
    * clearing branchInfos); best-effort (never throws). Iterated serially so the
    * teardown commits don't contend on interleaved git index locks across repos.
@@ -3157,25 +3187,23 @@ export class RunHarness extends EventEmitter {
       for (const s of res.steps.filter((x) => !x.ok)) {
         this._log('worktree', 'warn', `teardown ${projectKey_} ${s.step} failed: ${s.stderr || 'unknown error'}`, errStreamAttr(s.stderr));
       }
+      const dropped = !readOnly && await this._dropUnchangedMemberBranch(projectKey_, info, branchRecord);
       if (this.pipeline) {
         await appendAudit(
           this.pipeline.dir,
-          `Worktree \`${projectKey_}\` removed at \`${info.worktreeDir}\` (${readOnly ? 'deleted' : 'kept'} branch \`${info.branch}\`).`,
+          `Worktree \`${projectKey_}\` removed at \`${info.worktreeDir}\` (${memberBranchNote(info.branch, { readOnly, dropped })}).`,
         ).catch(() => {});
       }
       if (branchRecord) {
         branchRecord.worktreeRemoved = true;
-        branchRecord.branchKept = !readOnly;
+        branchRecord.branchKept = !readOnly && !dropped;
       }
       this.workDirs.delete(projectKey_);
     }
     // Keep the scalar mirror coherent for late observers — but never claim a
     // retained checkout was removed (the detached twin guards the same way,
     // via !retainedMembers.length).
-    if (this.state.branch && !anyRetained) {
-      this.state.branch.worktreeRemoved = true;
-      this.state.branch.branchKept = !this._isWorkspaceScan();
-    }
+    if (!anyRetained) this._mirrorPrimaryBranchTeardown();
     this.branchInfo = null;
     this.workDir = this.projectDir;
     await this._persist().catch(() => {});
@@ -3196,7 +3224,8 @@ export class RunHarness extends EventEmitter {
    *      file is deliberately NOT in the exclusion pathspecs)
    *   3. _commitWork with the §8.8 exclusion set (+ status recheck, hook retry)
    *   4. remove this worktree's remaining injected paths
-   *   5. removeWorktree(force:true) — the branch is kept, except on a read-only Workspace scan (deleted, D5)
+   *   5. removeWorktree(force:true) — the branch is kept, except on a read-only Workspace scan
+   *      (deleted, D5) and a workspace member this run never changed (dropped)
    * then, at the run-root level: (6) the same rescue for run-root mounts, (7) the
    * §8.11 stray scan, (8) the run.json durability copy, (9) guarded rm -rf (§8.13).
    */
@@ -3261,7 +3290,8 @@ export class RunHarness extends EventEmitter {
         this.workDirs.delete(key);
         continue;
       }
-      // (5) remove the checkout; the branch is kept — except on a read-only Workspace scan (D5).
+      // (5) remove the checkout. The branch is kept — except on a read-only Workspace scan
+      // (D5), and except for a workspace member this run never changed ("affected only").
       const readOnly = this._isWorkspaceScan();   // D5: a scan leaves no branch behind
       const res = await removeWorktree({
         projectDir: resolve(this.memberByKey.get(key)?.projectDir || this.projectDir),
@@ -3272,23 +3302,21 @@ export class RunHarness extends EventEmitter {
       for (const s of res.steps.filter((x) => !x.ok)) {
         this._log('worktree', 'warn', `teardown ${key} ${s.step} failed: ${s.stderr || 'unknown error'}`, errStreamAttr(s.stderr));
       }
+      const dropped = !readOnly && await this._dropUnchangedMemberBranch(key, info, branchRecord);
       if (this.pipeline) {
         await appendAudit(
           this.pipeline.dir,
-          `Worktree \`${key}\` removed at \`${wt}\` (${readOnly ? 'deleted' : 'kept'} branch \`${info.branch}\`).`,
+          `Worktree \`${key}\` removed at \`${wt}\` (${memberBranchNote(info.branch, { readOnly, dropped })}).`,
         ).catch(() => {});
       }
       if (branchRecord) {
         branchRecord.worktreeRemoved = true;
-        branchRecord.branchKept = !readOnly;
+        branchRecord.branchKept = !readOnly && !dropped;
       }
       this.workDirs.delete(key);
     }
-    // Keep the scalar mirror coherent for late observers.
-    if (this.state.branch && !retainedMembers.length) {
-      this.state.branch.worktreeRemoved = true;
-      this.state.branch.branchKept = !this._isWorkspaceScan();
-    }
+    // Keep the scalar mirror coherent for late observers (never on a retained member).
+    if (!retainedMembers.length) this._mirrorPrimaryBranchTeardown();
     this.branchInfo = null;
     this.workDir = this.projectDir;
 
@@ -3454,6 +3482,53 @@ export class RunHarness extends EventEmitter {
    *  resume() restores this.workflowId from the resume point AFTER construction. */
   _isWorkspaceScan() {
     return this.isWorkspace && this.workflowId === WORKSPACE_SCAN_WORKFLOW_ID;
+  }
+
+  /**
+   * "Affected projects only" (workspace runs): at TERMINAL teardown — after the commit
+   * step, on the non-retained path, once the checkout is gone — a member branch this run
+   * CREATED and never moved carries no change, so it is deleted instead of left behind.
+   * `baseSha` is the "this run created it" proof: it is stamped only on a fresh start
+   * (_setupRunRoot), never on a pre-existing/reused branch, and survives resume via
+   * workspace_meta. (`reusedExisting` is NOT usable: a setup replay re-attaches the
+   * branch its own first attempt created and reports true.) The primary is treated like
+   * any other member. A scan run keeps its own unconditional delete. Returns true when the
+   * branch was deleted; any doubt keeps it. Never throws.
+   */
+  async _dropUnchangedMemberBranch(key, info, branchRecord) {
+    if (!this.isWorkspace || this._isWorkspaceScan()) return false;
+    const sha = branchRecord?.baseSha;
+    if (!sha || !info?.branch) return false;
+    const projectDir = resolve(this.memberByKey.get(key)?.projectDir || this.projectDir);
+    let res;
+    try {
+      res = await deleteBranchIfAt({ projectDir, branch: info.branch, sha });
+    } catch (e) {
+      res = { deleted: false, reason: e?.message || String(e) };
+    }
+    if (!res.deleted) {
+      // 'moved' is the ordinary "this project changed" outcome — nothing to say.
+      if (res.reason !== 'moved') {
+        this._log('worktree', 'info', `${key}: kept branch ${info.branch} (${res.reason}${res.stderr ? `: ${res.stderr}` : ''})`);
+      }
+      return false;
+    }
+    branchRecord.branchDeleted = { reason: 'unchanged', at: new Date().toISOString() };
+    this._log('worktree', 'info', `${key}: no changes — deleted branch ${info.branch}`);
+    return true;
+  }
+
+  /** Keep the scalar `state.branch` (the `pipelines.branch` column) coherent after a
+   *  non-retaining teardown. On a workspace run it mirrors the PRIMARY member's real
+   *  outcome — kept, or dropped as unchanged; a single-project run keeps today's stamp. */
+  _mirrorPrimaryBranchTeardown() {
+    if (!this.state.branch) return;
+    this.state.branch.worktreeRemoved = true;
+    const primary = this.isWorkspace ? this.state.branches?.[this.members[0]?.projectKey] : null;
+    this.state.branch.branchKept = primary && typeof primary.branchKept === 'boolean'
+      ? primary.branchKept
+      : !this._isWorkspaceScan();
+    if (primary?.branchDeleted) this.state.branch.branchDeleted = primary.branchDeleted;
   }
 
   /** Workspace scan: save the scan's map + description as the workspace's (workspace-scan-run.mjs
@@ -4032,7 +4107,8 @@ export class RunHarness extends EventEmitter {
   }
 
   _nightStateNow(config) {
-    return nightState({ config, toggle: nightModeToggle(), hereSince: nightModeHereSince(), optIn: this._night.optIn, override: this._night.override, now: this._nightClock.now() });
+    const owner = this.awayOwner();
+    return nightState({ config, toggle: nightModeToggleFor(owner), hereSince: nightModeHereSinceFor(owner), optIn: this._night.optIn, override: this._night.override, now: this._nightClock.now() });
   }
 
   /** True when night mode may currently decide (used by the team soft-cap override). */
@@ -4293,7 +4369,22 @@ export class RunHarness extends EventEmitter {
   _nightSnapshot() {
     const n = this._night;
     const open = n.q && this.pendingQuestion?.id === n.q.id && n.decidable !== false && n.openedAt != null;
-    return { optIn: n.optIn, override: n.override, decisions: n.count, flagged: n.flagged, answers: n.answers, checks: n.checks, openedAt: open ? new Date(n.openedAt).toISOString() : null };
+    const snap = { optIn: n.optIn, override: n.override, decisions: n.count, flagged: n.flagged, answers: n.answers, checks: n.checks, openedAt: open ? new Date(n.openedAt).toISOString() : null };
+    // B4: whose "I'm here / I'm away" this run follows, and that person's switch (read-only for others).
+    if (awayPerPerson()) {
+      const owner = this.awayOwner();
+      const own = personAwayStatus(owner);
+      snap.owner = awayPersonKey(owner);
+      snap.ownerToggle = own ? own.toggle : null;   // null = the owner follows the instance default
+      snap.ownerHereSince = own?.hereSince ?? null;
+    }
+    return snap;
+  }
+
+  /** B4: the person whose Away mode this run follows: who last resumed it, else who started it
+   *  (a scheduled run's starter is the schedule's creator). Null = nobody in particular. */
+  awayOwner() {
+    return this._night?.owner || this.resumeOpts?.row?.started_by || this.opts.startedBy || null;
   }
 
   /** Run-view switch. @param {'auto'|'on'|'off'} mode */
@@ -4320,7 +4411,11 @@ export class RunHarness extends EventEmitter {
   }
 
   /** Settings / project prefs changed: re-evaluate the open question. */
-  nightConfigChanged() { this._nightArm(); }
+  nightConfigChanged() {
+    // B4: an owner's switch changed: republish it for the run page's read-only line.
+    if (this._night && awayPerPerson()) { try { this.state.night = this._nightSnapshot(); } catch { /* never break re-arming */ } }
+    this._nightArm();
+  }
 
   /** Plan/task artifacts of this run for the nightDecider to read. Never throws. */
   /** What the Away mode review reads: the run's task.md and its NEWEST plan. Plans live in the
@@ -6139,6 +6234,10 @@ export class RunHarness extends EventEmitter {
       // Who paused it survives a restart (rowToState reads it back).
       if (this.state.lastAction && this.state.lastAction.kind === 'pause') rp.lastAction = { ...this.state.lastAction };
       else delete rp.lastAction;
+      // B3: a drained run is resumed on the next start as whoever last resumed it (else its
+      // starter, pipelines.started_by), so the billing and attribution stay theirs.
+      if (this.pauseReason === REASON.DRAIN && this._drainResumeAs) rp.resumeAs = this._drainResumeAs;
+      else delete rp.resumeAs;
       // The token this pause is written with (_persist stamps it into the saved point as `pausedBy`).
       this._pauseToken ||= randomUUID();
     }

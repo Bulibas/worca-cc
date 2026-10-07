@@ -4,9 +4,10 @@
 # command starts, D;<nonce>;<exit> = it ended, W;<nonce>;<base64 folder> = the folder, A;<nonce> = the
 # prompt. Started as `bash --rcfile <this file> -i` by src/core/terminal/shell.mjs.
 __worca_nonce=${WORCA_TERMINAL_NONCE-}
-unset WORCA_TERMINAL_NONCE                                     # programs started here never see it
+__worca_norc=${WORCA_TERMINAL_NORC-}
+unset WORCA_TERMINAL_NONCE WORCA_TERMINAL_NORC                 # programs started here never see them
 if [ -r /etc/bash.bashrc ]; then . /etc/bash.bashrc; fi        # Debian/Ubuntu: --rcfile skips it
-if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
+if [ -z "$__worca_norc" ] && [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi   # Ask's shells (#574) skip the person's rc
 
 __worca_ready=0
 __worca_hist=

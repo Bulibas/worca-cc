@@ -50,7 +50,7 @@ cropping. Each shot uses the lowest interface mode that shows its view (see
 ## Seed
 
 - **Demo repos** under the sandbox, each with a few back-dated commits by four demo people
-  and a bare `origin`: `nimbus-crm` (a small Express contacts API), `atlas-docs` (a Markdown
+  and a bare `origin`: `nimbus-crm` (a small Express contacts API), `lumen-docs` (a Markdown
   site generator), `nimbus-web` (a Vue app on the CRM API) and `nimbus-jobs` (a queue worker).
 - **Finished runs.** 24 mock `wf_default` runs with realistic titles and prompts, answered at
   their clarify question (two stopped there instead). The mock blemishes are then fixed in the

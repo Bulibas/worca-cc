@@ -3,6 +3,10 @@
 Thanks for your interest in contributing! This document covers developing Worca
 from source: setup, testing, the PR workflow, and how releases are cut.
 
+Everyone taking part in this project is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md). Report unacceptable behavior to
+[conduct@worca.dev](mailto:conduct@worca.dev).
+
 > Just want to **use** Worca? You don't need this repo at all — install it from
 > npm as described in the [README](README.md#install).
 
@@ -72,9 +76,13 @@ npm test
 This runs the full `node:test` suite (`test/*.mjs`) against an isolated
 `WORCA_HOME`. No network, no Claude, no API keys needed.
 
-**There is no CI on pull requests** — run `npm test` (and the relevant smoke
-script if you touched the engine, workspace, or plugin paths) locally before
-opening or updating a PR, and say so in the PR description.
+CI runs on every pull request and every push to `dev`: the fast tier always,
+the slow tier when the change touches what it exercises (`test/tiers.json`;
+`npm run test:fast` and `npm run test:slow` run one tier locally). It skips
+docs-only changes, and it does not run the smoke scripts. Run `npm test` (and
+the relevant smoke script if you touched the engine, workspace, or plugin
+paths) locally before opening or updating a PR, and say so in the PR
+description.
 
 ### In a container
 
@@ -139,8 +147,8 @@ tab with no level.
   branch** instead.
 - Stacked PRs are fine: base the child PR on the parent's branch
   (`--base feat/<parent>`) and retarget it to `dev` after the parent merges.
-- Run the tests locally first (see [Testing](#testing)) — there is no CI
-  safety net on PRs.
+- Run the tests locally first (see [Testing](#testing)); CI runs too, but it
+  may skip the slow tier and never runs the smoke scripts.
 - A PR that adds UI names the level of each new element and updates the
   catalogue in [`docs/ui-levels.md`](docs/ui-levels.md).
 

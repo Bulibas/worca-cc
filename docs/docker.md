@@ -233,6 +233,20 @@ with all capabilities dropped, `no-new-privileges`, a 2 GB tmpfs `/tmp` and no
 Docker socket. `worca ui stop` on the host does nothing to the box; use
 `docker compose stop`. `--open` is a no-op inside.
 
+**Stopping without losing work.** A stop (`docker compose stop`, a redeploy, an upgrade) pauses
+every active run before the server exits: worca stops starting new runs, pauses each run with the
+reason "worca was restarting" (its resume point is saved, as on a Pause click) and waits up to
+`WORCA_DRAIN_TIMEOUT_MS` (20 s) for those pauses to land, then shuts down. The runs come back
+**paused**, not interrupted: Resume continues from the same step. Give the container a stop
+grace period longer than the drain (`compose.yml` sets `stop_grace_period: 30s`; `docker stop -t
+30`), or Docker kills it halfway. `POST /api/drain` does the same without exiting, from inside the
+container (or, behind a hosted platform, with `WORCA_HEARTBEAT_TOKEN` as a Bearer token), so a
+platform can drain first and then stop quickly.
+
+Set `WORCA_AUTO_RESUME=1` to have the next start resume those runs by itself, and runs it finds
+interrupted by a crash, each as the person who last started or resumed it. Runs paused by a person,
+by a cost cap or by a usage limit always wait for a person. It is off by default.
+
 **Single-volume hosts** (Railway and other platforms that give a service one volume,
 mounted root-owned): set `WORCA_DATA_DIR=/data`, mount the volume there and start
 the container as root. The entrypoint prepares the volume (worca home, projects and

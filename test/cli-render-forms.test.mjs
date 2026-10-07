@@ -21,10 +21,13 @@ const F = (over) => ({
 // Rows: [original title, field overrides, expected lines (null = not pinned), expected prompt].
 test('formatFormField: select variants (default + required, no default, suggest)', async () => {
   await checkRows([
-    ['formatFormField: a select numbers its option LABELS and marks the default', {
+    ['formatFormField: a select numbers its option LABELS and names the default by its label', {
       options: [{ value: 'approve', label: 'Ship it' }, { value: 'changes', label: 'Another pass' }],
       default: 'approve', required: true,
-    }, ['Verdict *', '  1) Ship it', '  2) Another pass'], 'Choose [number or value, Enter = approve]: '],
+    }, ['Verdict *', '  1) Ship it', '  2) Another pass'], 'Choose [number or value, Enter = Ship it]: '],
+    ['formatFormField: a short `help` prints under the label', {
+      options: [{ value: 'approve', label: 'approve' }], help: 'Pick the one to ship.',
+    }, ['Verdict', '  Pick the one to ship.', '  1) approve'], 'Choose [number or value]: '],
     ['formatFormField: no default, no Enter hint; not required, no asterisk', {
       options: [{ value: 'approve', label: 'approve' }, { value: 'changes', label: 'changes' }],
     }, ['Verdict', '  1) approve', '  2) changes'], 'Choose [number or value]: '],

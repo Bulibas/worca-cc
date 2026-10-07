@@ -309,7 +309,7 @@ export function buildHookArgs() {
 // spawn (the 2.1.220 binary reads all of them). Cloud-provider creds
 // (AWS_*/GOOGLE_APPLICATION_CREDENTIALS/AZURE_*) are intentionally NOT here —
 // a Bedrock/Vertex/Foundry deployment allowlists them per-project (documented).
-const SPAWN_ENV_BASE = [
+export const SPAWN_ENV_BASE = [
   'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'SHELL', 'USER', 'LOGNAME', 'TERM',
   'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
   'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
@@ -1407,31 +1407,33 @@ async function mockAsk({ markers, prompt, cwd, onEvent, signal, resumeSessionId 
   // A metrics-card EVENT, then the metrics trigger — both before the run arm, whose \brun\b would otherwise fire on
   // "include my runs"-style prose (it does not, \b stops at the s, but "propose" would).
   const tmEvent = /^\s*\[worca event\] (?:metrics|policy|model) card (card_[0-9a-f]{8}) (applied|declined|failed)/.exec(userText);
+  // Ask agent mode (#574): a command Ask ran ended. Before every later arm: the command text ("npm run dev") would trip them.
+  const trEvent = /\[worca event\] terminal block (t-[0-9a-f]{10}:\d+) exited (\S+?);/.exec(userText);
   // The metrics arm wants a CHANGE, not a question: "metrics" plus a verb of intent ("stop recording my metrics",
   // "route ... to the metrics home"). A bare "which workspaces use team metrics?" gets the generic echo answer.
-  const metrics = !wfEvent && !tmEvent && /\bmetrics\b/i.test(userText)
+  const metrics = !wfEvent && !tmEvent && !trEvent && /\bmetrics\b/i.test(userText)
     && /\b(?:stop|start|turn|toggle|switch|record\w*|route|change|enable|disable|set)\b/i.test(userText);
   // Scheduled runs (docs/scheduled-runs.md "Ask Worca"): a schedule-card EVENT; a CHANGE to an existing schedule
   // (its id in the text); or a new run to schedule ("schedule …"). All before the run arm, whose \brun\b would fire.
   const scEvent = /^\s*\[worca event\] schedule card (card_[0-9a-f]{8}) (applied|declined|failed)/.exec(userText);
   const scId = /\b(sch_[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i.exec(userText);
-  const scChange = !wfEvent && !tmEvent && !scEvent && !!scId && /\b(?:run now|move|delete|cancel|edit|change)\b/i.test(userText);
-  const scNew = !wfEvent && !tmEvent && !scEvent && !scChange && /\bschedul/i.test(userText);
+  const scChange = !wfEvent && !tmEvent && !trEvent && !scEvent && !!scId && /\b(?:run now|move|delete|cancel|edit|change)\b/i.test(userText);
+  const scNew = !wfEvent && !tmEvent && !trEvent && !scEvent && !scChange && /\bschedul/i.test(userText);
   // The team-policy arm, the metrics rule: "policy" plus a verb of intent ("raise the policy cap to $30").
   // It proposes an edit of the context project's per-pipeline cap: `$<n>` in the text, else $30.
-  const policy = !wfEvent && !tmEvent && !metrics && !scEvent && !scNew && !scChange && /\bpolicy\b/i.test(userText)
+  const policy = !wfEvent && !tmEvent && !trEvent && !metrics && !scEvent && !scNew && !scChange && /\bpolicy\b/i.test(userText)
     && /\b(?:raise|lower|set|change|edit|make|cap)\b/i.test(userText);
   // A tracker task named by key ("fix jira bug PROJ-123"): the run's task is the issue (mock-source's
   // fixture plugin), and "auto" asks for the Auto workflow. Folds into the schedule and run arms.
-  const taskKey = !wfEvent && !tmEvent && !scEvent && /\b(?:issue|ticket|bug|task)\b/i.test(userText) ? /\b([A-Z][A-Z0-9]+-\d+)\b/.exec(userText) : null;
+  const taskKey = !wfEvent && !tmEvent && !trEvent && !scEvent && /\b(?:issue|ticket|bug|task)\b/i.test(userText) ? /\b([A-Z][A-Z0-9]+-\d+)\b/.exec(userText) : null;
   const wantsAuto = /\bauto\b/i.test(userText);
-  const workflow = !wfEvent && !tmEvent && !metrics && !policy && !scNew && !scChange && !taskKey && /\bworkflow\b/i.test(userText);
-  const agents = !wfEvent && !tmEvent && /\bagents?\b/i.test(userText);
+  const workflow = !wfEvent && !tmEvent && !trEvent && !metrics && !policy && !scNew && !scChange && !taskKey && /\bworkflow\b/i.test(userText);
+  const agents = !wfEvent && !tmEvent && !trEvent && /\bagents?\b/i.test(userText);
   // Models (docs/models.md "Ask Worca"): "add a local llama model" proposes a keyless llama.cpp entry; "remove model
   // <id>" its removal. The parent re-validates the INPUT against the real catalog and mints the card.
-  const modelAdd = !wfEvent && !tmEvent && !scEvent && /\bllama\b/i.test(userText) && /\b(?:add|register)\b/i.test(userText);
-  const modelRemove = !wfEvent && !tmEvent && !scEvent && !modelAdd ? /\bremove model ([A-Za-z0-9._-]+)/i.exec(userText) : null;
-  const propose = !wfEvent && !tmEvent && !scEvent && !workflow && !metrics && !policy && !scNew && !scChange && !modelAdd && !modelRemove && (!!taskKey || /\b(propose|start|run)\b/i.test(userText));
+  const modelAdd = !wfEvent && !tmEvent && !trEvent && !scEvent && /\bllama\b/i.test(userText) && /\b(?:add|register)\b/i.test(userText);
+  const modelRemove = !wfEvent && !tmEvent && !trEvent && !scEvent && !modelAdd ? /\bremove model ([A-Za-z0-9._-]+)/i.exec(userText) : null;
+  const propose = !wfEvent && !tmEvent && !trEvent && !scEvent && !workflow && !metrics && !policy && !scNew && !scChange && !modelAdd && !modelRemove && (!!taskKey || /\b(propose|start|run)\b/i.test(userText));
   // The proposal both arms send: a brief, or the task reference instead of one.
   const proposal = () => {
     if (!taskKey) return { ...card, ...(wantsAuto ? { workflowId: 'wf_auto' } : {}) };
@@ -1490,10 +1492,13 @@ async function mockAsk({ markers, prompt, cwd, onEvent, signal, resumeSessionId 
     if (workflow) {
       // The result the real MCP child would return (plan PD1) — the parent re-assembles it with the real registry.
       const shape = normalizeShape(mockShapeFor(userText, { humanInLoop: true }));
-      const wfInput = { task: userText.slice(0, 2000), projectKey: card.projectKey || null, thenRun: /\brun\b/i.test(userText) };
+      // The card's target: a workspace-scoped chat carries workspaceId, a project chat projectKey — never both.
+      const target = card.workspaceId ? { workspaceId: card.workspaceId } : { projectKey: card.projectKey || null };
+      const targetName = card.workspaceId ? { workspaceName: null } : { projectName: null };
+      const wfInput = { task: userText.slice(0, 2000), ...target, thenRun: /\brun\b/i.test(userText) };
       frames.push(delta('[mock] '), delta('building '), delta('a workflow'), atext(MSG1, 'Building a workflow card.'),
         atool(MSG1, 'toolu_mock_workflow', 'mcp__worca__propose_workflow', wfInput),
-        uresult('toolu_mock_workflow', JSON.stringify({ ok: true, mode: 'task', projectKey: card.projectKey || null, projectName: null, name: shape.name, match: null,
+        uresult('toolu_mock_workflow', JSON.stringify({ ok: true, mode: 'task', ...target, ...targetName, name: shape.name, match: null,
           warnings: [], summary: '', shape, costUsd: 0, fingerprint: 'top-level: (mock)\nhints: mock', note: '', thenRun: wfInput.thenRun })));
       answerMsg = MSG2;
     }
@@ -1537,6 +1542,10 @@ async function mockAsk({ markers, prompt, cwd, onEvent, signal, resumeSessionId 
     if (scEvent) {
       const line = scEvent[2] === 'declined' ? 'Declined — nothing changed.' : scEvent[2] === 'failed' ? 'The change failed; check the error and try again.' : 'Done.';
       frames.push(delta('[mock] '), delta(scEvent[2]), atext(MSG1, line));
+      answerMsg = MSG2;
+    }
+    if (trEvent) {
+      frames.push(delta('[mock] '), delta('command'), atext(MSG1, `Command ${trEvent[1]} finished (exit ${trEvent[2]}).`));
       answerMsg = MSG2;
     }
     if (tmEvent) {

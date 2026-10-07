@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createAccessVerifier } from '../core/cf-access.mjs';
+import { createIssuerVerifier } from '../core/issuer-jwt.mjs';
 import { safeEqual, normalizeBillTo } from './tokens.mjs';
 import { startOfUtcDay, startOfUtcMonth } from './limits.mjs';
 import { startDeviceFlow, pollDeviceFlow, githubSecretOf } from './copilot.mjs';
@@ -18,7 +19,11 @@ const STATIC = Object.freeze({
   '/page.css': { file: 'page.css', type: 'text/css; charset=utf-8' },
 });
 export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
-const CSRF_COOKIE = 'wb_csrf';
+// Over https the cookie is `__Host-` prefixed: a proxy in front of several instances on sibling
+// subdomains (the hosted platform's gate) forwards only `__Host-` cookies, since any other cookie
+// could be planted from a sibling host. Plain http (local) can't use the prefix.
+const CSRF_COOKIE_PLAIN = 'wb_csrf';
+const CSRF_COOKIE_HOST = '__Host-wb_csrf';
 
 export function securityHeaders() {
   return {
@@ -56,13 +61,23 @@ function readJson(req, limit = 16 << 10) {
   });
 }
 
-/** The identity resolver for the key page: Access JWT, a trusted header, or none. */
+/** The identity resolver for the key page: Access JWT, an issuer's JWT, a trusted header, or none. */
 export function createIdentity(config, { fetchImpl } = {}) {
   const id = config.identity;
   if (id?.kind === 'access') {
     const verify = createAccessVerifier({ teamDomain: id.teamDomain, aud: id.aud, ...(fetchImpl ? { fetchImpl } : {}) });
     return async (req) => {
       const token = req.headers['cf-access-jwt-assertion'];
+      if (typeof token !== 'string' || !token) return null;
+      const who = await verify(token);
+      return who?.email ? normalizeBillTo(who.email) : null;
+    };
+  }
+  if (id?.kind === 'issuer') {
+    const verify = createIssuerVerifier({ issuer: id.issuer, jwksUrl: id.jwksUrl, audience: id.audience, ...(fetchImpl ? { fetchImpl } : {}) });
+    return async (req) => {
+      const v = req.headers['x-worca-identity'];
+      const token = Array.isArray(v) ? v[0] : v;
       if (typeof token !== 'string' || !token) return null;
       const who = await verify(token);
       return who?.email ? normalizeBillTo(who.email) : null;
@@ -87,7 +102,9 @@ export function createUiHandler({ config, service, store, identity = createIdent
     if (!staticCache.has(entry.file)) staticCache.set(entry.file, readFileSync(UI_DIR + entry.file, 'utf8'));
     return staticCache.get(entry.file);
   };
-  const secureCookie = String(config.publicUrl || '').startsWith('https:') ? '; Secure' : '';
+  const secure = String(config.publicUrl || '').startsWith('https:');
+  const secureCookie = secure ? '; Secure' : '';
+  const CSRF_COOKIE = secure ? CSRF_COOKIE_HOST : CSRF_COOKIE_PLAIN;
   const deviceFlows = new Map();   // "<email>|<slot>" -> {deviceCode, expiresAt}: in memory, per sign-in attempt
 
   function usageFor(email) {

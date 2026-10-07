@@ -95,6 +95,7 @@ class AskTurn extends EventEmitter {
     reader = null,
     web = null,
     mcp = null,
+    agentMode = true,
     deps = {},
   } = {}) {
     super();
@@ -111,6 +112,9 @@ class AskTurn extends EventEmitter {
     this.reader = typeof reader === 'string' && reader ? reader : null;
     // askWebAccess() for this turn (docs/guardrails.md "Web access"): the MCP child's web tools + the sub-agent note.
     this.web = web && web.enabled === true ? web : null;
+    // Agent mode (#574): this chat's switch (the server already folded in whether commands exist here at all).
+    this.agentMode = agentMode !== false;
+    this.commands = null;
     this.assistantMessageId = assistantMessageId;
     this.userMessageId = userMessageId;
     this.prompt = prompt;
@@ -173,6 +177,9 @@ class AskTurn extends EventEmitter {
       // under their own users (agent-pool.mjs): the chat's claude then runs as the person's
       // agent user and its worca tools run in the server through this relay. null = classic.
       agentRelay: deps.agentRelay ?? null,
+      // Agent mode (#574): ({threadId}) => {url, token, dispose()} | null. Set by the server only where the
+      // terminal is enabled (terminalEnabledHere). null = no command tools.
+      commandBridge: deps.commandBridge ?? null,
       serverPath: deps.serverPath ?? ASK_MCP_SERVER_PATH,
       newAskId: deps.newAskId ?? newAskId,
       setPendingCardComments: deps.setPendingCardComments ?? setPendingCardComments,
@@ -279,6 +286,18 @@ class AskTurn extends EventEmitter {
       this.reducer.addBlock({ kind: 'notice', text: `Proposal rejected: ${err?.message || err}` });
     }
     this._persistBlocks();
+  }
+
+  /** run_command RESULT (#574): one command card per block (the live state comes from ask-command frames). */
+  _onRunCommand(text, isError) {
+    if (isError) return;
+    let r = null;
+    try { r = JSON.parse(text); } catch { return; }
+    if (!r || r.ok !== true || typeof r.blockId !== 'string') return;
+    const card = { type: 'command', blockId: r.blockId, sessionId: r.sessionId, seq: r.seq, command: String(r.command || '').slice(0, 4000),
+      folder: r.folder || null, cwd: r.cwd || null, warning: r.warning || null };
+    const block = this.reducer.addBlock({ kind: 'card', id: this.deps.newAskId('card'), state: 'command', card });
+    if (block) this._persistBlocks();
   }
 
   /** track_run's card (D3/D4): the MCP child only resolved the id — deps.trackRun (ui/server.mjs askTrackRun)
@@ -564,12 +583,14 @@ class AskTurn extends EventEmitter {
     this._wfCards.set(toolUseId, cardId);
     const raw = input && typeof input === 'object' ? input : {};
     const pin = this.pinnedScope;
-    // A pinned WORKSPACE is not a default target (D19/PD17): the building card then carries projectKey null and the child's
-    // own "projectKey is required" error flips it to failed at RESULT.
-    const projectKey = (typeof raw.projectKey === 'string' && raw.projectKey.trim()) || (pin && pin.projectKey) || null;
+    // The target resolves as the tool does: an explicit projectKey, else an explicit workspaceId, else the pin.
+    const inKey = typeof raw.projectKey === 'string' ? raw.projectKey.trim() : '';
+    const inWs = typeof raw.workspaceId === 'string' ? raw.workspaceId.trim() : '';
+    const projectKey = inKey || (!inWs && pin && pin.projectKey) || null;
+    const workspaceId = projectKey ? null : (inWs || (pin && pin.workspaceId) || null);
     const mode = typeof raw.task === 'string' && raw.task.trim() ? 'task' : 'shape';
     this.reducer.addBlock({ kind: 'card', id: cardId, state: 'building', card: {
-      type: 'workflow', mode, projectKey, projectName: null,
+      type: 'workflow', mode, projectKey, projectName: null, workspaceId, workspaceName: null,
       // v7: the building payload is transient (the proposed flip replaces `card` wholesale) — cap a hand-authored shape like the task text.
       ...(mode === 'task' ? { task: String(raw.task).slice(0, 2000) } : { shape: raw.shape && typeof raw.shape === 'object' && JSON.stringify(raw.shape).length <= 8000 ? raw.shape : null }),
       name: cleanText(raw.name, 60), note: cleanText(raw.note, d.limits.workflowNoteMaxChars ?? 200), thenRun: raw.thenRun === true,
@@ -598,13 +619,16 @@ class AskTurn extends EventEmitter {
       return;
     }
     try {
-      const r = await d.revalidateWorkflow({ shape: out.shape, projectKey: out.projectKey, warnings: Array.isArray(out.warnings) ? out.warnings : [], costUsd: Number(out.costUsd) || 0, fingerprint: typeof out.fingerprint === 'string' ? out.fingerprint : '' });
-      // v4: the child's projectName first (the real child resolves it), else the parent's own lookup (the MOCK child
-      // returns null — without this every mock card, and its context-header line, would have no project name).
-      const projectName = cleanText(out.projectName, 120) || cleanText(r.project && r.project.name, 120) || null;
+      const workspaceId = typeof out.workspaceId === 'string' && out.workspaceId ? out.workspaceId : null;
+      // workspaceId rides the revalidate input only when set — a project card's input stays exactly what it was.
+      const r = await d.revalidateWorkflow({ shape: out.shape, projectKey: out.projectKey, ...(workspaceId ? { workspaceId } : {}), warnings: Array.isArray(out.warnings) ? out.warnings : [], costUsd: Number(out.costUsd) || 0, fingerprint: typeof out.fingerprint === 'string' ? out.fingerprint : '' });
+      // v4: the child's name first (the real child resolves it), else the parent's own lookup (the MOCK child
+      // returns null — without this every mock card, and its context-header line, would have no target name).
+      const workspaceName = workspaceId ? (cleanText(out.workspaceName, 120) || cleanText(r.workspace && r.workspace.name, 120) || null) : null;
+      const projectName = workspaceId ? null : (cleanText(out.projectName, 120) || cleanText(r.project && r.project.name, 120) || null);
       const flipped = this.reducer.updateBlock(cardId, { state: 'proposed', card: {
-        type: 'workflow', mode: out.mode === 'shape' ? 'shape' : 'task', projectKey: typeof out.projectKey === 'string' ? out.projectKey : null,
-        projectName, note: cleanText(out.note, 200), thenRun: out.thenRun === true,
+        type: 'workflow', mode: out.mode === 'shape' ? 'shape' : 'task', projectKey: !workspaceId && typeof out.projectKey === 'string' ? out.projectKey : null,
+        projectName, workspaceId, workspaceName, note: cleanText(out.note, 200), thenRun: out.thenRun === true,
         shape: r.shape, summary: cleanText(r.summary, 2000),
         ...r.proposal,
       } });
@@ -644,6 +668,7 @@ class AskTurn extends EventEmitter {
       onWorkflowStart: ({ toolUseId, input }) => this._onWorkflowStart(toolUseId, input),
       onWorkflowResult: ({ toolUseId, text, isError }) => this._onWorkflowResult(toolUseId, text, isError),   // the hook's `input` is not needed here: the card is rebuilt from `out`
       onTrackRun: ({ input, isError }) => this._onTrackRun(input, isError),
+      onRunCommand: ({ text, isError }) => this._onRunCommand(text, isError),
       onAwaySwitch: ({ text, isError }) => this._onAwaySwitch(text, isError),
       onMetricsProposal: ({ input, text, isError }) => this._onMetricsProposal(input, text, isError),
       onAwayProposal: ({ input, text, isError }) => this._onAwayProposal(input, text, isError),
@@ -892,10 +917,12 @@ class AskTurn extends EventEmitter {
         : dirname(d.worcaHome());
       mcpConfigPath = join(scratchDir, `mcp-${this.assistantMessageId}.json`);
       this.relay = d.agentRelay ? d.agentRelay({ threadId: this.threadId, reader: this.reader || null, web: this.web }) : null;
+      // Agent mode never rides the relay: relay mode is agent isolation, where the terminal refuses agent callers.
+      this.commands = !this.relay && this.agentMode && d.commandBridge ? d.commandBridge({ threadId: this.threadId }) : null;
       await d.fs.writeFile(
         mcpConfigPath,
         // MCP registry §9.2: the copies ride after `worca` — refs only (`${MCPSECRET_…}`); the values go in spawnEnv.
-        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, ...(this.reader ? { reader: this.reader } : {}), ...(this.relay ? { relay: this.relay } : {}), ...(this.web ? { web: this.web } : {}), ...(this.mcp ? { extraServers: this.mcp.servers } : {}) }), null, 2),
+        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, ...(this.reader ? { reader: this.reader } : {}), ...(this.relay ? { relay: this.relay } : {}), ...(this.web ? { web: this.web } : {}), ...(this.mcp ? { extraServers: this.mcp.servers } : {}), ...(this.commands ? { commands: this.commands } : {}) }), null, 2),
         // Never a key value (webKeyVar: the key rides the process env). A relayed turn runs as
         // the person's agent user (agent-pool.mjs), which reads this file through its group: the
         // scratch dir is setgid worca-share (2770), so 0640 reaches the agent users and nobody
@@ -917,6 +944,7 @@ class AskTurn extends EventEmitter {
       if (timer != null) d.clearTimeout(timer);
       if (mcpConfigPath) await d.fs.unlink(mcpConfigPath).catch(() => {});
       if (this.relay) { try { this.relay.dispose(); } catch { /* already gone */ } this.relay = null; }
+      if (this.commands) { try { this.commands.dispose(); } catch { /* already gone */ } this.commands = null; }
     }
     this._kickoffTitle();
     return out;
@@ -968,6 +996,7 @@ class AskTurn extends EventEmitter {
         web: this.web,
         relayed: !!this.relay,
         registry: this.mcp,   // MCP registry §9.2: EVERY attempt, the resume-fallback retry included
+        commands: this.commands,
       });
       // With the relay, the chat's claude runs as the person's agent user (agent-pool.mjs).
       if (this.relay) options.asAgent = true;

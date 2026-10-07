@@ -6,7 +6,7 @@
 // night mode can abort); test/cli-forms-unit.test.mjs drives it with a scripted one.
 
 import { formatFormField, formatCoerceError, formatFormErrors, FORM_REPROMPT_MAX } from './render.mjs';
-import { promptFields, projectForm, coerceInput } from '../shared/forms/project.mjs';
+import { promptFields, unfoldForm, coerceInput } from '../shared/forms/project.mjs';
 import { whenOk } from '../shared/forms/layout.mjs';
 import { validate } from '../shared/forms/schema.mjs';
 import { collectAnswer } from '../shared/forms/answer.mjs';
@@ -90,7 +90,8 @@ export function createFormAsker({ out, c, question }) {
   /**
    * Ask ONE kind:'form' question interactively (spec §8). Prints P1's text projection
    * — display widgets as text, files as `rel (mime, size)` — then prompts field by
-   * field in LAYOUT order, honouring `when` as answers accumulate (a field that
+   * field in LAYOUT order, honouring `when` as answers accumulate: a gated item's
+   * projection prints only once the answers so far open it (a field that
    * becomes hidden loses its value and is not required). Each entry goes through P1's
    * coerceInput + validate; the whole set through collectAnswer, which drops hidden
    * fields, strips unknown keys and treats "" as missing. Returns { values }.
@@ -98,7 +99,8 @@ export function createFormAsker({ out, c, question }) {
    */
   async function askForm(rl, ask) {
     out('');
-    const projected = projectForm(ask).split('\n');
+    const reveal = unfoldForm(ask);
+    const projected = reveal({});
     out(c('bold', `? ${projected[0]}`));
     for (const line of projected.slice(1)) out(line);
     const fields = promptFields(ask);
@@ -108,9 +110,11 @@ export function createFormAsker({ out, c, question }) {
       for (let i = from; i < fields.length; i++) {
         const f = fields[i];
         if (!whenOk(f.when, values)) { delete values[f.field]; continue; }
+        for (const line of reveal(values, f.field)) out(line);
         if (f.widget === 'review-list') await askReviewList(rl, f, values);
         else await askFormField(rl, ask, f, values);
       }
+      for (const line of reveal(values)) out(line);   // a gated display item after the last prompt
       const collected = collectAnswer(ask, ask.answerSchema, values);
       if (!collected.errors.length) return { values: collected.values };
       for (const line of formatFormErrors(collected.errors)) out(c('red', line));

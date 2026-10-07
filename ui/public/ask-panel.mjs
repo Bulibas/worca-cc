@@ -14,6 +14,7 @@ import { createThinkingOrb } from './thinking-orb.mjs';
 import { workflowPickerLabel } from './results-view.mjs';
 import { renderAutoProposal, AUTO_PROPOSAL_ORDER_CARD } from './auto-proposal.mjs';
 import { createRunProgressCard, snapshotFromState, PROGRESS_CARD_TYPE } from './ask-run-card.mjs';
+import { createCommandCard, COMMAND_CARD_TYPE } from './ask-command-card.mjs';
 import { buildTrace, scheduleTrace, playAssembly } from './auto-build.mjs';
 import { buildNodeConfigRows, pruneNodeSelection, modifiedFieldsOf } from './node-tunables.mjs';
 import { classifyLoops } from '../../src/shared/graph/loops.mjs';
@@ -250,7 +251,7 @@ const PILL_MORPH_IN_MS = 520;
 const PILL_MORPH_OUT_MS = 800;
 const PILL_SETTLE_FALLBACK_MS = PILL_MORPH_OUT_MS + 150;
 
-export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null, createVoice = null, voiceLongPressMs = 500 }) {
+export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, showTerminal = () => {}, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null, createVoice = null, voiceLongPressMs = 500 }) {
   const homePick = browserPick();         // hoisted declaration (defined below)
   const st = {
     open: false,
@@ -279,6 +280,12 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // the last POST /api/ask/mcp-preview body and whether it failed; gen drops a stale response, render repaints
     // an open picker, saving chains the PATCHes so they land in toggle order.
     mcp: { off: { sets: [], members: [] }, preview: null, failed: false, gen: 0, queued: false, render: null, saving: Promise.resolve() },
+    // Agent mode (#574): the chat's switch (sent with every message, PATCHed like mcpOff); `available` comes from
+    // GET /api/ask/commands/status once at first open — false hides the switch and nothing is sent.
+    agent: { on: true, saving: Promise.resolve(), available: false },
+    commands: new Map(),      // blockId → command card handle (ask-command-card.mjs)
+    commandFrames: new Map(), // blockId → the last ask-command view that arrived before its card was built
+    commandsShown: new Set(), // blockIds whose start already showed their terminal tab (shared terminal)
     pinned: true,
     prevFocus: null,
     size: readStoredSize(),   // {w,h} the user's persisted sheet size (hoisted reader); null = stylesheet default
@@ -959,6 +966,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         storeThread(id);
       }
       const sentOff = st.mcp.off;
+      const sentAgent = st.agent.on;
       const payload = {
         text,
         model: st.picker.model,
@@ -968,6 +976,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         // MCP registry §9.4: every message carries the picker's choices, so each turn runs what the picker shows —
         // a refused first message (429/403/400, network) or a PATCH still in flight would leave the stored ones behind.
         mcpOff: sentOff,
+        // Agent mode (#574): like mcpOff, every message carries the switch (only where agent mode exists).
+        ...(st.agent.available ? { agentMode: sentAgent } : {}),
         ...(st.pendingFiles.length ? { attachments: st.pendingFiles.map((f) => ({ name: f.name, dataBase64: f.dataBase64 })) } : {}),
       };
       const model = st.model;
@@ -987,6 +997,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       }
       // A toggle made while this POST was out PATCHed a value the route then overwrote with sentOff: re-send the latest.
       if (st.mcp.off !== sentOff) patchMcpOff(id, st.mcp.off);
+      if (st.agent.available && st.agent.on !== sentAgent) patchAgentMode(id, st.agent.on);
       const { userMessageId, attachments: stored, contexts } = await res.json();
       if (Array.isArray(contexts)) setContexts(contexts);   // an older server omits it: keep what is shown
       // Prefer the server's rows: they carry the store-minted ids that key the
@@ -1083,6 +1094,21 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     mcpBtn.addEventListener('click', () => openMcpPopover(mcpBtn));
     el.mcpBtn = mcpBtn;
     row.appendChild(mcpBtn);
+
+    // Agent mode (#574): Ask may run commands in a Worca terminal. A safety control, so it shows at every interface
+    // level; hidden where agent mode cannot work (GET /api/ask/commands/status).
+    const agentBtn = make('button', 'ask-scope-btn ask-agent-btn');
+    agentBtn.type = 'button';
+    agentBtn.setAttribute('data-ask-agent-btn', '');
+    agentBtn.title = 'Agent mode: Ask can run commands in a Worca terminal';
+    agentBtn.hidden = true;
+    agentBtn.appendChild(make('span', 'ask-scope-label', 'Agent'));
+    el.agentSwitch = make('span', 'switch on');
+    el.agentSwitch.setAttribute('aria-hidden', 'true');
+    agentBtn.appendChild(el.agentSwitch);
+    agentBtn.addEventListener('click', () => setAgentMode(!st.agent.on));
+    el.agentBtn = agentBtn;
+    row.appendChild(agentBtn);
 
     row.appendChild(make('span', 'ask-composer-spacer'));
 
@@ -1424,7 +1450,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     }
     // `.hd-cmt-card` joins the allowlist: its "Ask Worca" button appends to the
     // composer, and pointerdown lands BEFORE the click that would open the sheet.
-    if (t.closest('.viewer-modal, #confirm-modal, .info-bubble, .mention-popup, .hd-cmt-card')) return;
+    // `.term-pane` too: Ask's terminal is shared, so the user clicks and types there while the chat stays open.
+    if (t.closest('.viewer-modal, #confirm-modal, .info-bubble, .mention-popup, .hd-cmt-card, .term-pane')) return;
     closeSheet();
   }
 
@@ -1745,6 +1772,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.firstOpenDone) return;
     st.firstOpenDone = true;
     loadCatalog();
+    loadAgentStatus();
     const stored = readStoredThread();
     if (stored && !st.threadId) switchThread(stored);
   }
@@ -1949,6 +1977,37 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     scheduleMcpRefresh();
   }
   const toggle = (list, v) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
+
+  // ---- Agent mode switch (#574) -------------------------------------------------
+  /** Whether agent mode can work here at all (not hosted-off, not agent isolation): once, at first open. */
+  async function loadAgentStatus() {
+    let data = null;
+    try {
+      const r = await fetch('/api/ask/commands/status');
+      data = r && r.ok ? await r.json() : null;
+    } catch { data = null; }
+    if (st.destroyed) return;
+    st.agent.available = !!(data && data.enabled === true);
+    paintAgent();
+  }
+  function paintAgent() {
+    if (!el.agentBtn) return;
+    el.agentBtn.hidden = !st.agent.available;
+    el.agentBtn.setAttribute('aria-pressed', String(st.agent.on));
+    el.agentSwitch.classList.toggle('on', st.agent.on);
+  }
+  /** Same chain as patchMcpOff: one PATCH at a time, in click order. */
+  function patchAgentMode(tid, value) {
+    const body = JSON.stringify({ agentMode: value });
+    st.agent.saving = st.agent.saving
+      .then(() => fetch(`/api/ask/threads/${tid}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }))
+      .catch(() => { /* the switch keeps the choice; the next message carries it */ });
+  }
+  function setAgentMode(on) {
+    st.agent.on = on;
+    if (st.threadId) patchAgentMode(st.threadId, on);
+    paintAgent();
+  }
 
   function mcpSwitch(on, label, onToggle, focusKey) {
     const b = make('button', `switch ask-mcp-switch${on ? ' on' : ''}`);
@@ -2442,6 +2501,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     setContexts([]);
     restoreBrowserPick();               // …and on the browser-level pick, not the last chat's
     st.mcp.off = { sets: [], members: [] };   // …and with every MCP server on
+    st.agent.on = true;                       // …and with Agent mode on (#574)
+    paintAgent();
     scheduleMcpRefresh();
     pruneCardEls();                     // st.model is already null — renderTranscript's keep set cannot see the old ids
     renderTranscript();
@@ -2926,11 +2987,29 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return nodes;
   }
 
+  /** The card's target: the workspace (+ member count once proposed), else the project name or key; '' on old cards. */
+  const wfTargetLine = (card) => card.workspaceId
+    ? `workspace · ${card.workspaceName || card.workspaceId}${Array.isArray(card.members) && card.members.length ? ` · ${card.members.length} projects` : ''}`
+    : (card.projectName || card.projectKey || '');
+  function wfTargetEl(text) {
+    const el = make('div', 'ask-wfcard-meta ask-wfcard-target', text);
+    el.setAttribute('data-ask-wf-target', '');
+    return el;
+  }
+
   function buildWorkflowCard(block, prev) {
     const card = block.card || {};
     const name = card.name || '';
-    if (block.state === 'declined') return { el: make('div', 'ask-card-stub', `Declined — ${name || 'workflow proposal'}`) };
-    if (block.state === 'failed') return { el: make('div', 'ask-card-stub ask-card-failed', `Proposal failed: ${block.error || 'unknown error'}`) };
+    const target = wfTargetLine(card);
+    // Old cards (no target fields) stay the bare stub; otherwise the stub keeps its text and the target sits under it.
+    const stub = (el) => {
+      if (!target) return { el };
+      const wrap = make('div', 'ask-wfcard-stubwrap');
+      wrap.append(el, wfTargetEl(target));
+      return { el: wrap };
+    };
+    if (block.state === 'declined') return stub(make('div', 'ask-card-stub', `Declined — ${name || 'workflow proposal'}`));
+    if (block.state === 'failed') return stub(make('div', 'ask-card-stub ask-card-failed', `Proposal failed: ${block.error || 'unknown error'}`));
     // State modifier = `is-<state>` (v6): `ask-wfcard-${state}` would make the SAVED root carry the same class as the check line below.
     const rootEl = make('div', `ask-card ask-wfcard is-${block.state}`);
     rootEl.setAttribute('data-ask-wfcard', block.state);
@@ -2939,6 +3018,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     head.appendChild(make('span', 'ask-wfcard-round', `round ${card.round || 1}`));
     if (block.state === 'saved') { head.appendChild(make('span', 'ask-wfcard-spacer')); head.appendChild(make('span', 'ask-wfcard-tag', 'Auto')); }
     rootEl.appendChild(head);
+    if (target) rootEl.appendChild(wfTargetEl(target));
     if (block.state === 'building') {
       const trace = buildTrace(doc, { mode: card.mode });
       rootEl.appendChild(trace.el);
@@ -4238,7 +4318,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   function isProgressBlock(block) {
     const card = block.card || {};
     if (card.type === PROGRESS_CARD_TYPE) return true;
-    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'actions' || card.type === 'away') return false;
+    if (card.type === COMMAND_CARD_TYPE || card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'actions' || card.type === 'away') return false;
     return block.state === 'started' || (block.state === 'failed' && !!block.runId);
   }
   function buildCard(block) {
@@ -4254,8 +4334,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const isWeb = !!(block.card && block.card.type === 'web');
     const isActions = !!(block.card && block.card.type === 'actions');
     const isAway = !!(block.card && block.card.type === 'away');
+    const isCommand = !!(block.card && block.card.type === COMMAND_CARD_TYPE);
     const isProgress = isProgressBlock(block);
-    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isWeb || isWorkspace || isActions || isAway || isProgress || block.state === 'proposed')) return cached.el;
+    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isWeb || isWorkspace || isActions || isAway || isCommand || isProgress || block.state === 'proposed')) return cached.el;
     if (cached) disposeCardEntry(cached);
     const built = isWorkflow ? buildWorkflowCard(block, cached)
       : isMetrics ? buildMetricsCard(block)
@@ -4266,6 +4347,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       : isWorkspace ? buildWorkspaceCard(block)
       : isActions ? buildActionsCard(block)
       : isAway ? buildAwayCard(block)
+      : isCommand ? buildCommandCard(block)
       : isProgress ? buildProgressCard(block)
         : { el: block.state === 'proposed' ? buildCardForm(block) : buildCardTerminal(block) };
     st.cardEls.set(block.id, { el: built.el, state: block.state, handle: built.handle || null, dispose: built.dispose || null, animate: !!built.animate, cancelAnim: null, lastW: -1 });
@@ -4299,6 +4381,41 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       }
       if (c.animate) { c.animate = false; c.cancelAnim = playAssembly(c.handle, { win, onDone: () => { c.cancelAnim = null; } }); }
     }
+  }
+
+  // ---- command cards (ui/public/ask-command-card.mjs; Ask agent mode, #574) ------------------------------------------
+  /** One command Ask ran: hydrated once over REST (a reload, a finished block), then live from ask-command frames. */
+  function buildCommandCard(block) {
+    const card = block.card || {};
+    const blockId = String(card.blockId || '');
+    const handle = createCommandCard({ doc, card, onStop: (sid) => {
+      fetch(`/api/terminal/sessions/${encodeURIComponent(sid)}/stop`, { method: 'POST' }).catch(() => { /* the next frame says what happened */ });
+    }, onShow: (sid) => showTerminal(sid, { auto: false }) });
+    st.commands.set(blockId, handle);
+    const early = st.commandFrames.get(blockId);
+    if (early) { st.commandFrames.delete(blockId); handle.update(early); }
+    const tid = st.threadId;
+    if (!early && tid) {
+      fetch(`/api/ask/threads/${tid}/commands/${encodeURIComponent(blockId)}`)
+        .then((r) => (r && r.ok ? r.json() : null))
+        .catch(() => null)
+        .then((view) => {
+          if (st.destroyed || st.commands.get(blockId) !== handle) return;
+          // A `running` reply may be older than a frame that already landed (even the final one): it only fills an empty card.
+          if (view && typeof view.status === 'string') { if (!handle.view || view.status !== 'running') handle.update(view); }
+          else if (!handle.view) handle.update({ status: 'done', exitCode: null, tail: '' });   // 404/403: the command, an `ended` pill
+        });
+    }
+    // No `handle` here: relayoutCards() measures a graph on cached handles, and this card has none.
+    return { el: handle.el, dispose: () => { if (st.commands.get(blockId) === handle) st.commands.delete(blockId); handle.destroy(); } };
+  }
+  /** An ask-command frame: the card's live state. Never a row change, so it never reaches the model. */
+  function applyCommandFrame(view) {
+    if (!view || typeof view.blockId !== 'string') return;
+    const handle = st.commands.get(view.blockId);
+    if (handle) { handle.update(view); return; }
+    st.commandFrames.set(view.blockId, view);                  // the turn's card block and the first frames race
+    if (st.commandFrames.size > 50) st.commandFrames.delete(st.commandFrames.keys().next().value);
   }
 
   // ---- run progress cards (ui/public/ask-run-card.mjs; D1 runStore seam, D9 REST hydration, D11 cadence) ------------
@@ -4814,6 +4931,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // would otherwise clobber a pick the user just made (its PATCH may not have landed).
     if (switched) applyThreadPick(snap.thread);
     if (switched) st.mcp.off = mcpOffOf(snap.thread && snap.thread.mcpOff);   // §9.4: the chat's own choices
+    if (switched) { st.agent.on = snap.thread?.agentMode !== false; paintAgent(); }   // #574: a resync keeps an unsaved click
     scheduleMcpRefresh();
     renderTranscript();
     updateMeters();
@@ -4934,6 +5052,19 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       // A shared deployment's clear names the threads it removed: only a tab showing one of them resets.
       if (Array.isArray(frame.threadIds) && !frame.threadIds.includes(st.threadId)) { scheduleThreadsRefresh(); return; }
       onHistoryCleared();
+      return;
+    }
+    if (frame.type === 'ask-command') {                         // #574: a command card's live state, this chat only
+      if (frame.threadId !== st.threadId) return;
+      applyCommandFrame(frame.command);
+      // Shared terminal: a command starting in the chat the user is looking at shows its tab in the terminal pane
+      // (the pane decides whether to open or switch); once per block.
+      const c = frame.command;
+      if (st.open && c && c.status === 'running' && typeof c.sessionId === 'string' && !st.commandsShown.has(c.blockId)) {
+        st.commandsShown.add(c.blockId);
+        if (st.commandsShown.size > 200) st.commandsShown.delete(st.commandsShown.values().next().value);
+        showTerminal(c.sessionId, { auto: true });
+      }
       return;
     }
     if (THREADS_REFRESH_FRAMES.has(frame.type)) scheduleThreadsRefresh();

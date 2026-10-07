@@ -6,7 +6,7 @@ typeset -g __worca_nonce=${WORCA_TERMINAL_NONCE-}
 unset WORCA_TERMINAL_NONCE
 __worca_zdot=$ZDOTDIR
 ZDOTDIR=${WORCA_USER_ZDOTDIR:-$HOME}
-[[ -f $ZDOTDIR/.zshenv ]] && source $ZDOTDIR/.zshenv
+[[ -z ${WORCA_TERMINAL_NORC-} && -f $ZDOTDIR/.zshenv ]] && source $ZDOTDIR/.zshenv   # Ask (#574): not yours; zshrc.zsh unsets the flag
 export WORCA_USER_ZDOTDIR=$ZDOTDIR
 ZDOTDIR=$__worca_zdot
 unset __worca_zdot

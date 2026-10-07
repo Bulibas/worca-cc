@@ -8,6 +8,12 @@
 //                                   separated; ".example.com" matches subdomains
 //   WORCA_CF_ACCESS_TEAM_DOMAIN     + WORCA_CF_ACCESS_AUD: every request must carry
 //                                   a valid Cloudflare Access token for that app
+//   WORCA_IDENTITY_ISSUER           or instead: every request must carry a JWT from this
+//                                   issuer in X-Worca-Identity (a gate such as the hosted
+//                                   platform's). WORCA_IDENTITY_JWKS_URL (default
+//                                   <issuer>/.well-known/jwks.json) and
+//                                   WORCA_IDENTITY_AUDIENCE (default: the allowed hosts).
+//                                   Exact hosts only: no ".example.com" entries
 //   WORCA_INSECURE_NO_IDENTITY_CHECK=1  run with an allowlist but no token check
 //                                   (the proxy alone is trusted); never the default
 //
@@ -15,6 +21,7 @@
 // the insecure flag says so explicitly. With none of these set, nothing changes.
 import os from 'node:os';
 import { createAccessVerifier, normalizeTeamDomain } from './cf-access.mjs';
+import { createIssuerVerifier, normalizeIssuer } from './issuer-jwt.mjs';
 
 export const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 const LOOPBACK_ADDRS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
@@ -44,6 +51,9 @@ export function parseAllowedHosts(value) {
   return { hosts, invalid };
 }
 
+/** The header a gate with its own issuer hands worca the identity token in. */
+export const ISSUER_TOKEN_HEADER = 'x-worca-identity';
+
 const truthy = (v) => /^(1|true|yes|on)$/i.test(String(v || '').trim());
 
 /** The remote-access settings from the environment. Pure: reads only `env`. */
@@ -51,12 +61,37 @@ export function readRemoteAccessConfig(env = process.env) {
   const { hosts, invalid } = parseAllowedHosts(env.WORCA_ALLOWED_HOSTS);
   const teamDomain = normalizeTeamDomain(env.WORCA_CF_ACCESS_TEAM_DOMAIN);
   const aud = String(env.WORCA_CF_ACCESS_AUD || '').trim();
+  const access = teamDomain || aud ? { provider: 'cloudflare-access', teamDomain, aud } : null;
+  const issuer = normalizeIssuer(env.WORCA_IDENTITY_ISSUER);
+  let issuerCfg = null;
+  if (issuer) {
+    const audience = parseAllowedHosts(env.WORCA_IDENTITY_AUDIENCE).hosts;
+    issuerCfg = {
+      provider: 'issuer',
+      issuer,
+      jwksUrl: String(env.WORCA_IDENTITY_JWKS_URL || '').trim() || `${issuer}/.well-known/jwks.json`,
+      audience: audience.length ? audience : hosts.filter((h) => !h.startsWith('.') && !LOCAL_HOSTNAMES.has(h)),
+    };
+  }
   return {
     allowedHosts: hosts,
     invalidHosts: invalid,
-    identity: teamDomain || aud ? { provider: 'cloudflare-access', teamDomain, aud } : null,
+    // Both configured is a startup error (checkRemoteAccessConfig); Access is kept here so the
+    // message can name both.
+    identity: access || issuerCfg,
+    conflictingIdentity: !!(access && issuerCfg),
     insecureNoIdentity: truthy(env.WORCA_INSECURE_NO_IDENTITY_CHECK),
   };
+}
+
+/** A URL worca may fetch keys from or trust as an issuer: https, or http on loopback only. */
+function secureUrl(value) {
+  try {
+    const u = new URL(value);
+    return u.protocol === 'https:' || (u.protocol === 'http:' && LOCAL_HOSTNAMES.has(u.hostname));
+  } catch {
+    return false;
+  }
 }
 
 /** True when the server answers to any non-loopback hostname. */
@@ -74,27 +109,46 @@ export function checkRemoteAccessConfig(cfg, { bindHost = '127.0.0.1' } = {}) {
   if (cfg.invalidHosts.length) {
     errors.push(`WORCA_ALLOWED_HOSTS has invalid entries: ${cfg.invalidHosts.join(', ')} (use hostnames like worca-01.example.com or .example.com, no scheme or port)`);
   }
-  if (cfg.identity) {
+  if (cfg.conflictingIdentity) {
+    errors.push('both WORCA_CF_ACCESS_* and WORCA_IDENTITY_ISSUER are set: configure one identity check, not two');
+  }
+  if (cfg.identity?.provider === 'issuer') {
+    const id = cfg.identity;
+    if (!secureUrl(id.issuer)) errors.push('WORCA_IDENTITY_ISSUER must be an https URL (http only for localhost)');
+    if (!secureUrl(id.jwksUrl)) errors.push('WORCA_IDENTITY_JWKS_URL must be an https URL (http only for localhost)');
+    if (!id.audience.length) errors.push('WORCA_IDENTITY_ISSUER is set but there is no audience: set WORCA_IDENTITY_AUDIENCE or an exact host in WORCA_ALLOWED_HOSTS');
+    // W2: with a shared issuer, a suffix entry would accept the Origin of every other instance
+    // under the same domain. The issuer's audience check stops their tokens, not their pages.
+    const suffixes = cfg.allowedHosts.filter((h) => h.startsWith('.'));
+    if (suffixes.length) errors.push(`WORCA_ALLOWED_HOSTS: with WORCA_IDENTITY_ISSUER, list exact hosts only (remove ${suffixes.join(', ')})`);
+  } else if (cfg.identity) {
     if (!cfg.identity.teamDomain) errors.push('WORCA_CF_ACCESS_AUD is set but WORCA_CF_ACCESS_TEAM_DOMAIN is not');
     if (!cfg.identity.aud) errors.push('WORCA_CF_ACCESS_TEAM_DOMAIN is set but WORCA_CF_ACCESS_AUD is not');
   }
   const remote = isRemoteMode(cfg);
   if (remote && !cfg.identity && !cfg.insecureNoIdentity) {
-    errors.push('WORCA_ALLOWED_HOSTS is set but no identity check is configured: set WORCA_CF_ACCESS_TEAM_DOMAIN and WORCA_CF_ACCESS_AUD, or set WORCA_INSECURE_NO_IDENTITY_CHECK=1 if a proxy you trust is the only way in');
+    errors.push('WORCA_ALLOWED_HOSTS is set but no identity check is configured: set WORCA_CF_ACCESS_TEAM_DOMAIN and WORCA_CF_ACCESS_AUD (or WORCA_IDENTITY_ISSUER), or set WORCA_INSECURE_NO_IDENTITY_CHECK=1 if a proxy you trust is the only way in');
   }
   if (remote && !cfg.identity && cfg.insecureNoIdentity) {
     warnings.push('WORCA_INSECURE_NO_IDENTITY_CHECK=1: worca checks no identity; anyone who reaches it controls this machine');
   }
   if (cfg.identity && cfg.insecureNoIdentity) {
-    warnings.push('WORCA_INSECURE_NO_IDENTITY_CHECK is ignored: a Cloudflare Access check is configured and enforced');
+    warnings.push(`WORCA_INSECURE_NO_IDENTITY_CHECK is ignored: ${identityLabel(cfg.identity)} is configured and enforced`);
   }
   if (cfg.identity && !remote) {
-    warnings.push('WORCA_CF_ACCESS_* is set but WORCA_ALLOWED_HOSTS is empty: only localhost requests are accepted');
+    const vars = cfg.identity.provider === 'issuer' ? 'WORCA_IDENTITY_ISSUER' : 'WORCA_CF_ACCESS_*';
+    warnings.push(`${vars} is set but WORCA_ALLOWED_HOSTS is empty: only localhost requests are accepted`);
   }
   if (!LOOPBACK_BINDS.has(String(bindHost).toLowerCase()) && !remote) {
     warnings.push(`listening on ${bindHost} but WORCA_ALLOWED_HOSTS is empty: every request not addressed to localhost gets a 403`);
   }
   return { errors, warnings };
+}
+
+/** "a Cloudflare Access check" | "an identity issuer check": for log lines and messages. */
+export function identityLabel(identity) {
+  if (!identity) return 'no identity check';
+  return identity.provider === 'issuer' ? 'an identity issuer check' : 'a Cloudflare Access check';
 }
 
 /** (req) => true when Host and (if present) Origin are loopback or allowlisted. */
@@ -139,7 +193,8 @@ export function isPeerThisMachine(req, ifaces = os.networkInterfaces()) {
 /**
  * The identity check for this config, or null when none applies (local mode,
  * or the explicit insecure flag). Provider-agnostic: returns
- * `(req) => Promise<{ email, sub } | null>`; rejects only when the provider
+ * `(req) => Promise<{ email, sub, ... } | null>`; an issuer identity also carries
+ * name, org, inst, teams and the token's exp (W4, W7). Rejects only when the provider
  * cannot be reached (the caller answers 503).
  */
 export function createIdentityCheck(cfg, { fetchImpl, now } = {}) {
@@ -147,6 +202,15 @@ export function createIdentityCheck(cfg, { fetchImpl, now } = {}) {
   if (cfg.identity.provider === 'cloudflare-access') {
     const verify = createAccessVerifier({ teamDomain: cfg.identity.teamDomain, aud: cfg.identity.aud, fetchImpl, now });
     return (req) => verify(req.headers['cf-access-jwt-assertion']);
+  }
+  if (cfg.identity.provider === 'issuer') {
+    const { issuer, jwksUrl, audience } = cfg.identity;
+    const verify = createIssuerVerifier({ issuer, jwksUrl, audience, fetchImpl, now });
+    return async (req) => {
+      const v = req.headers[ISSUER_TOKEN_HEADER];
+      const who = await verify(Array.isArray(v) ? v[0] : v);
+      return who ? { ...who, provider: 'issuer' } : null;
+    };
   }
   throw new Error(`unknown identity provider: ${cfg.identity.provider}`);
 }
