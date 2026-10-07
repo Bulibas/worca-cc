@@ -906,6 +906,8 @@ export class GraphOrchestrator extends RunHarness {
       ...(this.claude.model || this.claude.effort
         ? { claude: { ...(this.claude.model ? { model: this.claude.model } : {}), ...(this.claude.effort ? { effort: this.claude.effort } : {}) } }
         : {}),
+      // A run started as mock (a per-request `mock: true`) resumes as mock (the harness constructor).
+      ...(this.claude.mock ? { mock: true } : {}),
       workflowId: this.workflowId,
       // Auto workflow: the decision state while UNDECIDED (spec §5.6); null once
       // the graph is adopted (workflowId is then the real id) and on saved workflows.

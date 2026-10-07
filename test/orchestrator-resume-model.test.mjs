@@ -91,3 +91,22 @@ test('a point without the field (an older run, or none named) resumes exactly as
   assert.ok(models.every((m) => m == null), JSON.stringify(models));
   assert.ok(!logs.some((l) => /no longer in the catalog/.test(l.text || '')));
 });
+
+// A run started as mock (POST /api/run {mock:true} on a real server) stays mock across a resume
+// that does not say so itself — a restart's auto-resume, Resume, Away lifting all pass no mock.
+test('a mock run rides the resume point, and a resume that passes no mock flag stays mock', { timeout: 120000 }, async () => {
+  const { dir, saved } = await pausedRun('rmock-keep', {});
+  assert.equal(saved.resumePoint.mock, true);
+  const orch = createOrchestrator({ projectDir: dir, workflowId: 'wf_default', auto: true, claude: {}, resume: saved });
+  assert.equal(orch.claude.mock, true, 'restored from the resume point');
+  const res = await orch.resume();
+  assert.equal(res.status, 'done', res.error);
+  assert.equal(readPipelineForResume(orch.getState().id).row.status, 'done');
+});
+
+test('a point without the flag (a real run, or one written before it) resumes real', { timeout: 120000 }, async () => {
+  const { dir, saved } = await pausedRun('rmock-real', {});
+  delete saved.resumePoint.mock;
+  const orch = createOrchestrator({ projectDir: dir, workflowId: 'wf_default', auto: true, claude: {}, resume: saved });
+  assert.equal(orch.claude.mock, false);
+});

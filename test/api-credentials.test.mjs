@@ -18,6 +18,7 @@ import { builtinSlots } from '../src/broker/slots.mjs';
 import { startBroker } from '../src/broker/main.mjs';
 import { seal, suffixOf } from '../src/broker/vault.mjs';
 import { resetBrokerClient } from '../src/core/broker-client.mjs';
+import { writeGraphWorkflow } from '../src/core/workflows.mjs';
 
 useTempHome(after);
 
@@ -106,6 +107,27 @@ test('a run started with an explicit model is refused up front when that model\'
   assert.match(bob.body.error, /You haven't added your Anthropic API key or Claude subscription yet, and claude-sonnet-5 needs it.*https:\/\/worca-01-keys\.example\.com/);
   const ada = await call('POST', '/api/run', 'ada@example.com', { projectDir: '/definitely/not/a/project', prompt: 'do it', model: 'claude-sonnet-5' });
   assert.notEqual(ada.body?.code, 'credential-missing', 'Ada has a key: whatever else happens, it is not this refusal');
+});
+
+test('a workflow of script cards only is not refused for a missing key, even with an explicit model', async () => {
+  await writeGraphWorkflow({
+    id: 'wf_shell_only', name: 'Shell only', domain: 'coding',
+    nodes: [
+      { id: 'n_task', kind: 'task', x: 0, y: 0, config: {} },
+      { id: 'n_sh', kind: 'script', key: 'shell', x: 300, y: 0, config: { params: { command: 'echo hi' },
+        ports: { inputs: [{ id: 'in', type: 'md', required: false }], outputs: [{ id: 'log', type: 'md', when: 'always', filename: 'shell-cycle{cycle}.md' }] } } },
+      { id: 'n_end', kind: 'end', x: 600, y: 0, config: {} }],
+    wires: [
+      { id: 'w1', from: { node: 'n_task', port: 'task' }, to: { node: 'n_sh', port: 'in' } },
+      { id: 'w2', from: { node: 'n_sh', port: 'log' }, to: { node: 'n_end', port: 'result' } }],
+  });
+  // Bob has no key: the script-only workflow gets past the key check (the bogus project then
+  // refuses it for its own reason), while the same request on an agent workflow does not.
+  const scripts = await call('POST', '/api/run', 'bob@example.com', { projectDir: '/definitely/not/a/project', prompt: 'do it', model: 'claude-sonnet-5', workflowId: 'wf_shell_only' });
+  assert.notEqual(scripts.body?.code, 'credential-missing', JSON.stringify(scripts.body));
+  const agents = await call('POST', '/api/run', 'bob@example.com', { projectDir: '/definitely/not/a/project', prompt: 'do it', model: 'claude-sonnet-5', workflowId: 'wf_default' });
+  assert.equal(agents.status, 409);
+  assert.equal(agents.body.code, 'credential-missing');
 });
 
 test('/api/stats adds spend per person from the broker', async () => {
