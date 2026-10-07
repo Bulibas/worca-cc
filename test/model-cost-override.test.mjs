@@ -199,6 +199,8 @@ test('liveCostRates: built-ins price from the list table; [1m]/dated ids share t
     'Opus 5 keeps its own row beside Opus 5.5');
   assert.deepEqual(liveCostRates('claude-sonnet-5-5'), { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5, cacheWrite1h: 4 },
     'Sonnet 5.5 prices like Sonnet 5 ($2 / $10, cache read $0.20)');
+  assert.deepEqual(liveCostRates('claude-haiku-5-5'), { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125, cacheWrite1h: 0.2 },
+    'Haiku 5.5 prices at its prompts-up-to-100k tier ($0.10 / $0.50)');
   assert.equal(liveCostRates('claude-fable-5-1').cacheRead, 0.25, 'Fable 5.1 cache reads are 0.025× input');
   assert.deepEqual(liveCostRates('claude-opus-4-8[1m]'), PREDEFINED_LIST_PRICES['claude-opus-4-8'], '[1m] twin → base row');
   assert.deepEqual(liveCostRates('claude-haiku-4-5-20251001'), PREDEFINED_LIST_PRICES['claude-haiku-4-5'], 'dated id → base row');

@@ -41,9 +41,11 @@ path; the native skill cannot express dated ids or per-agent effort.
 | `claude-sonnet-5-5` | Sonnet 5.5 | medium, high, xhigh, max |
 | `claude-sonnet-4-6` | Sonnet 4.6 | medium, high, max |
 | `claude-sonnet-4-6[1m]` | Sonnet 4.6 (1M) | medium, high, max |
+| `claude-haiku-5-5` | Haiku 5.5 | medium, high, xhigh, max |
 | `claude-haiku-4-5` | Haiku 4.5 | medium, high |
 
 The `[1m]` suffix selects the 1M-token long-context variant. Haiku 4.5 1M is omitted
-(the CLI rejects it). Opus 5.5 (`claude-opus-5-5`), Opus 5 (`claude-opus-5`) and
-Sonnet 5.5 (`claude-sonnet-5-5`) are 1M-context only and need no `[1m]` suffix. These
-ids are aliases the installed `claude` CLI must accept — verify with `claude --model <id>`.
+(the CLI rejects it). Opus 5.5 (`claude-opus-5-5`), Opus 5 (`claude-opus-5`),
+Sonnet 5.5 (`claude-sonnet-5-5`) and Haiku 5.5 (`claude-haiku-5-5`) are 1M-context
+only and need no `[1m]` suffix. These ids are aliases the installed `claude` CLI must
+accept — verify with `claude --model <id>`.

@@ -208,7 +208,7 @@ test('removing a global model keeps the row/step\'s OTHER tunables (only model+e
     'the node row is UPDATED, not deleted — the effort goes with its model, the rest stays');
 });
 
-test('the built-in catalog: Fable 5.1 (not 5), Opus 5.5 first then Opus 5, Sonnet 5.5 right before Sonnet 5, no [1m] twins', async () => {
+test('the built-in catalog: Fable 5.1 (not 5), Opus 5.5 first then Opus 5, Sonnet 5.5 right before Sonnet 5, Haiku 5.5 right before Haiku 4.5, no [1m] twins', async () => {
   await checkRows([
     { name: 'the built-in catalog offers Fable 5.1 and no longer Fable 5', run: async () => {
       const fable = PREDEFINED_MODELS.find((m) => m.id === 'claude-fable-5-1');
@@ -230,6 +230,13 @@ test('the built-in catalog: Fable 5.1 (not 5), Opus 5.5 first then Opus 5, Sonne
       const i = PREDEFINED_MODELS.findIndex((m) => m.id === 'claude-sonnet-5-5');
       assert.equal(PREDEFINED_MODELS[i + 1]?.id, 'claude-sonnet-5', 'Sonnet 5 stays, right after it');
       assert.equal(PREDEFINED_MODELS.some((m) => m.id === 'claude-sonnet-5-5[1m]'), false, '1M-only: no [1m] twin');
+    } },
+    { name: 'the built-in catalog offers Haiku 5.5 right before Haiku 4.5', run: async () => {
+      const haiku55 = PREDEFINED_MODELS.find((m) => m.id === 'claude-haiku-5-5');
+      assert.deepEqual(haiku55, { id: 'claude-haiku-5-5', label: 'Haiku 5.5', efforts: ['medium', 'high', 'xhigh', 'max'] });
+      const i = PREDEFINED_MODELS.findIndex((m) => m.id === 'claude-haiku-5-5');
+      assert.equal(PREDEFINED_MODELS[i + 1]?.id, 'claude-haiku-4-5', 'Haiku 4.5 stays, right after it');
+      assert.equal(PREDEFINED_MODELS.some((m) => m.id === 'claude-haiku-5-5[1m]'), false, '1M-only: no [1m] twin');
     } },
   ]);
 });
