@@ -16,6 +16,8 @@ import {
 import { listProjects } from '../projects.mjs';
 import { pluginNameFor, teamSkillMembers } from './sets.mjs';
 import { parseSkillId } from '../skills-registry/ids.mjs';
+import { skillHostFacts } from '../skills-registry/host.mjs';
+import { pluginNamesFor } from '../skills-registry/resolve.mjs';
 import { SKILL_PROBLEM_REASONS, skillSkipReasonText } from '../skills-registry/texts.mjs';
 import { loadSkillCatalog } from '../skills-registry/catalog.mjs';
 
@@ -166,13 +168,17 @@ const skillReason = (e, m) => (!e ? 'missing-skill' : e.pluginEnabled === false 
   : m.team && m.consent === null ? 'needs-consent' : !m.enabled ? 'off' : null);
 const skillSourceLabel = (x) => (x?.source === 'plugin' ? x.plugin : x?.source === 'library' ? 'Imported' : '');
 const takenPluginNames = (ctx) => ctx.hostFacts?.installedPluginNames ?? [];
+// The name a set's skills load under by the resolver's own rule over every set on this host (skills registry §4.1,
+// P3 pluginNamesFor), so Settings shows the prefix pipelines and Ask use: a renamed set never takes another set's slug.
+const setPluginName = (ctx, set) => pluginNamesFor(setRows(ctx), ctx.snapshot, takenPluginNames(ctx)).get(set.id)
+  ?? pluginNameFor(set, takenPluginNames(ctx));
 
 /** Skill cards of one set (skills registry §6.2; §7 SkillMemberView, plus `files` for the "4 files · 1 script" hint and `hooks` for the "declares hooks" badge):
  *  the name agents see (`<plugin name>:<skill>`), the catalog's facts and the member's state — a reason and, for a
  *  problem, its text. */
 export function skillMemberViews(ctx, set) {
   const cat = new Map((ctx.skillCatalog ?? []).map((e) => [e.id, e]));
-  const { pluginName } = pluginNameFor(set, takenPluginNames(ctx));
+  const { pluginName } = setPluginName(ctx, set);
   const problems = new Set(SKILL_PROBLEM_REASONS);
   return skillMembersOf(ctx, set).map((m) => {
     const e = cat.get(m.skillId) ?? null;
@@ -235,7 +241,7 @@ export function buildSetsView(ctx) {
 export function buildSetView(ctx, id) {
   const s = setRows(ctx).find((x) => x.id === id);
   if (!s) return null;
-  const { pluginName, renamed } = pluginNameFor(s, takenPluginNames(ctx));
+  const { pluginName, renamed } = setPluginName(ctx, s);
   return {
     newer: ctx.snapshot.newer,
     set: { id: s.id, name: s.name, group: s.group, greyed: !!s.greyed, home: s.home ?? null,
@@ -356,16 +362,6 @@ function claudeConfigNames() {
   } catch { return []; }
 }
 
-/** The Claude Code plugins installed on this host — the names before `@` of the `enabledPlugins` keys in
- *  ~/.claude/settings.json — which a set's skills never load as (skills registry §4.1). Best effort: unreadable ⇒ none. */
-function claudePluginNames() {
-  try {
-    const j = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8'));
-    const keys = j && j.enabledPlugins && typeof j.enabledPlugins === 'object' && !Array.isArray(j.enabledPlugins) ? Object.keys(j.enabledPlugins) : [];
-    return [...new Set(keys.map((k) => k.split('@')[0]).filter(Boolean))].sort();
-  } catch { return []; }
-}
-
 /** Everything the builders read, from disk and the policy cache. */
 export async function viewContext() {
   const snapshot = await readMcpStore();
@@ -375,7 +371,7 @@ export async function viewContext() {
   const projectHomes = {};
   for (const p of projects) projectHomes[p.key] = (await cachedTeamFor({ projectKey: p.key }))?.home ?? null;
   return { snapshot, catalog, skillCatalog, teams: cachedTeams(), projects, projectHomes, claudeNames: [],
-    hostFacts: { installedPluginNames: claudePluginNames() }, ...hostContext(), now: Date.now() };
+    hostFacts: { installedPluginNames: skillHostFacts().installedPluginNames }, ...hostContext(), now: Date.now() };
 }
 
 export async function listCatalogView() { return buildCatalogView({ ...(await viewContext()), claudeNames: claudeConfigNames() }); }

@@ -38,6 +38,7 @@ test('guard answers --version and --help like a capable build and logs nothing',
     const h = spawnSync(SHIM, ['--help'], { env, encoding: 'utf8' });
     assert.equal(h.status, 0, h.stderr);
     assert.ok(h.stdout.includes('--mcp-config'), 'probeClaudeCapabilities reads this flag from --help');
+    assert.ok(h.stdout.includes('--plugin-dir'), 'probeClaudeCapabilities reads this flag from --help (skills registry §4.1)');
     assert.equal(existsSync(log), false, 'probes are not real spawns');
   });
 });
