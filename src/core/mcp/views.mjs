@@ -3,6 +3,7 @@
 // builders over { snapshot, catalog, teams, host facts, … } — every per-member state comes from the
 // resolver itself, run on one set as a spawn would (resolveSet) — plus thin async shells that gather
 // those inputs. Nothing here writes, and no secret value ever leaves: secrets read as { set, updatedAt, env? }.
+// Sets also hold skills (skills registry §6, §7): `skillCatalog` and `hostFacts` join the context.
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +14,10 @@ import {
   resolveMcpServers, materializeCopy, skipReasonText, PROBLEM_REASONS, teamMembers, cachedTeams, cachedTeamFor, hostContext,
 } from './registry.mjs';
 import { listProjects } from '../projects.mjs';
+import { pluginNameFor, teamSkillMembers } from './sets.mjs';
+import { parseSkillId } from '../skills-registry/ids.mjs';
+import { SKILL_PROBLEM_REASONS, skillSkipReasonText } from '../skills-registry/texts.mjs';
+import { loadSkillCatalog } from '../skills-registry/catalog.mjs';
 
 const SYN = 'mcp-view-00000000';   // the synthetic project a one-set resolution targets
 const DAY_MS = 86400000;
@@ -29,10 +34,11 @@ export function teamSetsOf(snapshot, teams) {
   const fresh = teamRecordsFor(snapshot.teams, teams.map((t) => t.home), taken);
   const out = teams.map((t) => {
     const rec = fresh[t.home] ?? snapshot.teams[t.home];
-    return { id: rec.id, slug: rec.slug, name: rec.name, home: t.home, required: t.required, greyed: false, provisional: !!fresh[t.home] };
+    return { id: rec.id, slug: rec.slug, name: rec.name, home: t.home, required: t.required, requiredSkills: t.requiredSkills ?? [],
+      greyed: false, provisional: !!fresh[t.home] };
   });
   for (const [home, rec] of Object.entries(snapshot.teams)) {
-    if (!teams.some((t) => t.home === home)) out.push({ id: rec.id, slug: rec.slug, name: rec.name, home, required: [], greyed: true });
+    if (!teams.some((t) => t.home === home)) out.push({ id: rec.id, slug: rec.slug, name: rec.name, home, required: [], requiredSkills: [], greyed: true });
   }
   return out.sort(byName);
 }
@@ -139,6 +145,52 @@ function memberViews(ctx, set) {
   });
 }
 
+// ── Skills in sets (skills registry §6.2, §7) ─────────────────────────────────
+
+/** A set's skills with their own state: the user set's (or General's) list, or the Team set's skills derived from its
+ *  policy over the skill catalog (a greyed Team set requires none). A `pending` entry reads as off; the consent is
+ *  teamSkillMembers' (the entry's consent hash, or null). */
+function skillMembersOf(ctx, set) {
+  const { snapshot } = ctx;
+  if (set.group !== 'team') {
+    const list = own(snapshot.sets, set.id) ? snapshot.sets[set.id].skills ?? [] : [];
+    return list.map((k) => ({ skillId: k.skill, enabled: k.enabled === true && !k.pending, consent: null, team: false }));
+  }
+  const state = own(snapshot.teams, set.home) ? snapshot.teams[set.home].skills : undefined;
+  return teamSkillMembers(set.home, set.requiredSkills, ctx.skillCatalog ?? [], state).map(({ skillId, state: st }) => ({
+    skillId, enabled: st.enabled === true && !st.pending, consent: st.consent, team: true }));
+}
+
+// The first skills-registry §4.2 skip reason a one-set view can see (no opt-out, chat or cap here), or null when it loads.
+const skillReason = (e, m) => (!e ? 'missing-skill' : e.pluginEnabled === false ? 'plugin-disabled' : e.valid === false ? 'invalid-skill'
+  : m.team && m.consent === null ? 'needs-consent' : !m.enabled ? 'off' : null);
+const skillSourceLabel = (x) => (x?.source === 'plugin' ? x.plugin : x?.source === 'library' ? 'Imported' : '');
+const takenPluginNames = (ctx) => ctx.hostFacts?.installedPluginNames ?? [];
+
+/** Skill cards of one set (skills registry §6.2; §7 SkillMemberView, plus `files` for the "4 files · 1 script" hint and `hooks` for the "declares hooks" badge):
+ *  the name agents see (`<plugin name>:<skill>`), the catalog's facts and the member's state — a reason and, for a
+ *  problem, its text. */
+export function skillMemberViews(ctx, set) {
+  const cat = new Map((ctx.skillCatalog ?? []).map((e) => [e.id, e]));
+  const { pluginName } = pluginNameFor(set, takenPluginNames(ctx));
+  const problems = new Set(SKILL_PROBLEM_REASONS);
+  return skillMembersOf(ctx, set).map((m) => {
+    const e = cat.get(m.skillId) ?? null;
+    const id = parseSkillId(m.skillId);
+    const name = e?.name ?? id?.name ?? m.skillId;
+    const reason = skillReason(e, m);
+    const view = {
+      skillId: m.skillId, name, qualifiedName: `${pluginName}:${name}`, source: e?.source ?? id?.source ?? null,
+      sourceLabel: skillSourceLabel(e ?? id), description: e?.description ?? '', enabled: m.enabled,
+      valid: !!e && e.valid !== false, problems: e?.problems ?? [], files: e?.files ?? 0, scripts: e?.scripts ?? [],
+      shellBlocks: e?.shellBlocks ?? 0, pluginRootRefs: e?.frontmatter?.pluginRootRefs === true, hooks: e?.frontmatter?.hooks === true, reason,
+      problem: reason && problems.has(reason) ? skillSkipReasonText({ setId: set.id, setName: set.name, skillId: m.skillId, name, reason }) : null,
+    };
+    if (set.group === 'team') view.team = { consented: m.consent !== null };
+    return view;
+  });
+}
+
 /** The sets in list order (§7.1): General, user sets by name, then Team sets. */
 function setRows(ctx) {
   const { snapshot } = ctx;
@@ -169,7 +221,7 @@ export function buildSetsView(ctx) {
       const members = memberViews(ctx, s);
       return {
         id: s.id, name: s.name, group: s.group, greyed: !!s.greyed, home: s.home ?? null,
-        serverCount: members.length,
+        serverCount: members.length, skillCount: skillMembersOf(ctx, s).length,
         problem: members.some((m) => m.problem || (m.test && !m.test.ok)),
         usedBy: usedBy(ctx, s).map((p) => ({ key: p.key, name: p.name })),
         members: members.map((m) => ({ serverId: m.serverId, copy: m.copy, problem: m.problem, test: testWord(m) })),
@@ -178,15 +230,44 @@ export function buildSetsView(ctx) {
   };
 }
 
-/** GET /api/mcp/sets/:id — null when no such set. */
+/** GET /api/mcp/sets/:id — null when no such set. `set.pluginName` is the prefix its skills load under (skills registry
+ *  §4.1); `renamedPlugin` when an installed Claude Code plugin holds the slug. */
 export function buildSetView(ctx, id) {
   const s = setRows(ctx).find((x) => x.id === id);
   if (!s) return null;
+  const { pluginName, renamed } = pluginNameFor(s, takenPluginNames(ctx));
   return {
     newer: ctx.snapshot.newer,
     set: { id: s.id, name: s.name, group: s.group, greyed: !!s.greyed, home: s.home ?? null,
-      usedBy: usedBy(ctx, s).map((p) => ({ key: p.key, name: p.name })) },
+      usedBy: usedBy(ctx, s).map((p) => ({ key: p.key, name: p.name })), pluginName, renamedPlugin: renamed },
     members: memberViews(ctx, s),
+    skills: skillMemberViews(ctx, s),
+  };
+}
+
+// The last "Check for updates" result per library skill since this server started (skills registry §6.3 badge): the
+// update-preview route records it; Update and Remove clear it. Kept in memory: a restart forgets it until the next check.
+const updateChecks = new Set();
+/** Record one "Check for updates" result: `available` = the skill's origin differs from its library copy. */
+export function recordSkillUpdateCheck(skillId, available) {
+  if (available === true) updateChecks.add(skillId); else updateChecks.delete(skillId);
+}
+
+/** GET /api/skills (skills registry §7): every catalog entry (§3.3) with the sets it is in; `updateAvailable` for an id in
+ *  `ctx.updatesAvailable`, else in the recorded Check for updates results; `installedPluginClash` when a Claude Code
+ *  plugin of the skill's plugin name is installed on this host, so pipeline agents also see that plugin's own copy (F4). */
+export function buildSkillCatalogView(ctx) {
+  const rows = setRows(ctx).map((s) => ({ s, ids: new Set(skillMembersOf(ctx, s).map((m) => m.skillId)) }));
+  const installed = new Set(takenPluginNames(ctx));
+  const updates = new Set(ctx.updatesAvailable ?? updateChecks);
+  return {
+    newer: ctx.snapshot.newer,
+    skills: (ctx.skillCatalog ?? []).map((e) => ({
+      ...e,
+      inSets: rows.filter((r) => r.ids.has(e.id)).map((r) => ({ id: r.s.id, name: r.s.name })),
+      updateAvailable: updates.has(e.id),
+      installedPluginClash: installed.has(e.plugin),   // a library skill's plugin is null
+    })),
   };
 }
 
@@ -238,10 +319,10 @@ export function membershipKeys(ctx, match) {
   return out;
 }
 
-/** duplicateSet's `team` option for a Team set id (P1 cannot derive the members): `{ home, members }`, or null. */
+/** duplicateSet's `team` option for a Team set id (P1 cannot derive the members): `{ home, members, skills }`, or null. */
 export function teamDuplicateSource(ctx, setId) {
   const s = setMembers(ctx, setId);
-  return s && { home: s.set.home, members: s.members.map((m) => m.serverId) };
+  return s && { home: s.set.home, members: s.members.map((m) => m.serverId), skills: skillMembersOf(ctx, s.set).map((m) => m.skillId) };
 }
 
 /** The §11.2 locks on a Team set's members PUT: `{ home }` when allowed, else `{ status, error }`.
@@ -256,6 +337,16 @@ export function teamMemberRefusal(ctx, setId, serverId, patch) {
   return { home: set.home };
 }
 
+/** The same Team locks on a Team set's skills PUT (skills registry §5): `{ home }`, or `{ status, error }`. */
+export function teamSkillMemberRefusal(ctx, setId, skillId, patch) {
+  const set = teamSetsOf(ctx.snapshot, ctx.teams).find((t) => t.id === setId);
+  if (!set) return { status: 404, error: 'set not found' };
+  const m = skillMembersOf(ctx, { ...set, group: 'team' }).find((x) => x.skillId === skillId);
+  if (!m) return { status: 409, error: 'Team set skills come from team policy and cannot be added here' };
+  if (patch.enabled === true && m.consent === null) return { status: 409, error: 'turn it on from the team checklist' };
+  return { home: set.home };
+}
+
 // ── IO shells ────────────────────────────────────────────────────────────────
 
 function claudeConfigNames() {
@@ -265,19 +356,32 @@ function claudeConfigNames() {
   } catch { return []; }
 }
 
+/** The Claude Code plugins installed on this host — the names before `@` of the `enabledPlugins` keys in
+ *  ~/.claude/settings.json — which a set's skills never load as (skills registry §4.1). Best effort: unreadable ⇒ none. */
+function claudePluginNames() {
+  try {
+    const j = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8'));
+    const keys = j && j.enabledPlugins && typeof j.enabledPlugins === 'object' && !Array.isArray(j.enabledPlugins) ? Object.keys(j.enabledPlugins) : [];
+    return [...new Set(keys.map((k) => k.split('@')[0]).filter(Boolean))].sort();
+  } catch { return []; }
+}
+
 /** Everything the builders read, from disk and the policy cache. */
 export async function viewContext() {
   const snapshot = await readMcpStore();
   const catalog = await loadCatalog(snapshot);
+  const skillCatalog = await loadSkillCatalog();
   const projects = (await listProjects()).map((p) => ({ key: p.key, name: p.name }));
   const projectHomes = {};
   for (const p of projects) projectHomes[p.key] = (await cachedTeamFor({ projectKey: p.key }))?.home ?? null;
-  return { snapshot, catalog, teams: cachedTeams(), projects, projectHomes, claudeNames: [], ...hostContext(), now: Date.now() };
+  return { snapshot, catalog, skillCatalog, teams: cachedTeams(), projects, projectHomes, claudeNames: [],
+    hostFacts: { installedPluginNames: claudePluginNames() }, ...hostContext(), now: Date.now() };
 }
 
 export async function listCatalogView() { return buildCatalogView({ ...(await viewContext()), claudeNames: claudeConfigNames() }); }
 export async function listSetsView() { return buildSetsView(await viewContext()); }
 export async function getSetView(id) { return buildSetView(await viewContext(), id); }
+export async function listSkillCatalogView() { return buildSkillCatalogView(await viewContext()); }
 export async function projectAssignmentView(projectKey) {
   return buildProjectAssignment(await viewContext(), projectKey, await cachedTeamFor({ projectKey }));
 }

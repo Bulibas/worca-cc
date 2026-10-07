@@ -6,7 +6,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MCP_ENV_VAR_RE, URL_SAFE_SECRET_RE } from './definitions.mjs';
 import { QUERY_SECRET_RE, hasTokenShape } from '../mcp-secrets.mjs';
-import { copyName, secretEnvName, teamRecordsFor } from './identity.mjs';
+import { copyName, secretEnvName } from './identity.mjs';
+import { collectSets } from './sets.mjs';
 import { readMcpStore, testFingerprint } from './store.mjs';
 import { loadCatalog } from './catalog.mjs';
 import { WIN_CMD_METACHAR_RE, resolveWindowsCommand } from '../win-command.mjs';
@@ -197,67 +198,8 @@ export function skipMessage(skip, catalog) {
   return `${label} in ${skip.setName} skipped: ${skipReasonText(skip, catalog)}`;
 }
 
-/**
- * A Team set's members, derived from the policy's `mcp.required` entries (§11.2): a plugin reference maps to
- * `plugin:<p>/<s>`, an inline entry to `policy:<home>/<name>`; an entry whose server is not in the catalog is no
- * member (a checklist row). A member's state is `state[serverId]`, else off and never consented.
- * @returns {Array<{ serverId: string, state: { enabled: boolean, values: object, seeded: object, consent: string|null } }>}
- */
-export function teamMembers(home, required, catalog, state) {
-  const ids = new Set(catalog.map((e) => e.id));
-  const out = [];
-  for (const r of Array.isArray(required) ? required : []) {
-    if (typeof r?.plugin === 'string' ? typeof r.server !== 'string' : typeof r?.name !== 'string') continue;   // not an entry
-    const serverId = typeof r.plugin === 'string' ? `plugin:${r.plugin}/${r.server}` : `policy:${home}/${r.name}`;
-    if (!ids.has(serverId) || out.some((m) => m.serverId === serverId)) continue;
-    out.push({ serverId, state: own(state, serverId) ?? { enabled: false, values: {}, seeded: {}, consent: null } });
-  }
-  return out;
-}
-
-/** §5.1: every set the targets bring, with the projects and routes that bring it and its best rank. */
-function collectSets({ ask, targets, teams, store }) {
-  const sets = new Map();
-  const takenSlugs = [...Object.values(store.sets), ...Object.values(store.teams)].map((s) => s.slug).filter(Boolean);
-  // §4.4: a Team set with no record is named for reads the way a write would persist it (homes ascending).
-  const homes = Object.values(teams).filter((t) => Array.isArray(t?.required) && t.required.length).map((t) => t.home);
-  const provisional = teamRecordsFor(store.teams, homes, takenSlugs);
-  const teamRec = (home) => own(store.teams, home) ?? own(provisional, home);
-  const bring = (id, make, target, projects) => {
-    let s = sets.get(id);
-    if (!s) sets.set(id, (s = { ...make(), rank: Infinity, projects: new Set(), routes: new Map() }));
-    s.rank = Math.min(s.rank, target.rank ?? 0);
-    for (const p of projects) {
-      s.projects.add(p);
-      const r = s.routes.get(p);
-      if (!r || (target.rank ?? 0) < r.rank) s.routes.set(p, { route: target.route ?? null, rank: target.rank ?? 0 });
-    }
-  };
-  const userSet = (id) => () => {
-    const s = own(store.sets, id) ?? { members: [] };
-    return { id, name: id === 'general' ? 'General' : s.name, slug: id === 'general' ? null : s.slug ?? null,
-      group: id === 'general' ? 'general' : 'set', provisional: false,
-      members: (s.members ?? []).map((m) => ({ serverId: m.server, team: false, enabled: m.enabled === true && !m.pending, values: m.values ?? {} })) };
-  };
-  const teamSet = (home, required) => () => {
-    const rec = teamRec(home);
-    return { id: rec.id, name: rec.name, slug: rec.slug, group: 'team', provisional: !own(store.teams, home),
-      members: teamMembers(home, required, store.catalog, own(store.teams, home)?.members).map(({ serverId, state }) => ({
-        serverId, team: true, consent: state.consent ?? null, enabled: state.enabled === true && !state.pending, values: state.values ?? {} })) };
-  };
-  const ownSets = (key) => {
-    const a = own(store.projects, key) ?? {};
-    return [...(a.includeGeneral !== false ? ['general'] : []), ...(Array.isArray(a.sets) ? a.sets : [])].filter((id) => own(store.sets, id));
-  };
-  if (ask) bring('general', userSet('general'), { rank: 0 }, []);   // D12: always, and nobody's
-  for (const t of [...targets].sort(byKeys((x) => x.rank ?? 0, (x) => x.kind, (x) => x.key ?? x.id, (x) => x.route ?? ''))) {
-    const projects = t.kind === 'workspace' ? (t.members ?? []).map((m) => m.key) : [t.key];
-    for (const p of projects) for (const id of ownSets(p)) if (!(ask && id === 'general')) bring(id, userSet(id), t, [p]);
-    const team = own(teams, t.kind === 'workspace' ? `ws:${t.id}` : t.key);
-    if (team && Array.isArray(team.required) && team.required.length) bring(teamRec(team.home).id, teamSet(team.home, team.required), t, projects);
-  }
-  return sets;
-}
+// teamMembers and collectSets (§5.1) live in sets.mjs, shared with the skills resolver (skills registry §4.2).
+export { teamMembers } from './sets.mjs';
 
 /**
  * The pure resolver (§5): the registry copies one spawn gets. Input and output exactly as the design's §5
@@ -375,12 +317,27 @@ export function requiredOf(doc) {
   return Array.isArray(v) ? v : [];
 }
 
+/** A policy doc's `skills.required` entries `{ plugin, skill }` ([] when there are none; skills registry F8). */
+export function requiredSkillsOf(doc) {
+  const v = doc?.fields?.['skills.required']?.value;
+  return Array.isArray(v) ? v : [];
+}
+
+// One cached home's Team set input: `requiredSkills` only when the policy requires a skill, so an MCP-only home reads
+// exactly as before; null when it requires neither.
+function teamInputOf(home, doc) {
+  const required = requiredOf(doc);
+  const requiredSkills = requiredSkillsOf(doc);
+  if (!required.length && !requiredSkills.length) return null;
+  return { home, required, ...(requiredSkills.length ? { requiredSkills } : {}) };
+}
+
 /**
  * The Team set input (§11.2) of one Ask / preview target, from the policy cache — never git, never the network
  * (§9.2): a project's policy (its own or the home it follows); a workspace's policy home while it is still a
- * member. null when there is no policy or it requires no MCP server. `deps` are test seams.
+ * member. null when there is no policy or it requires no MCP server and no skill. `deps` are test seams.
  * @param {{ projectKey?: string, workspaceId?: string }} target
- * @returns {Promise<{ home: string, required: object[] } | null>}
+ * @returns {Promise<{ home: string, required: object[], requiredSkills?: object[] } | null>}
  */
 export async function cachedTeamFor(target, { policyForKey = cachedPolicyForKey, policyForDir = cachedPolicyFor, readWs = readWorkspace } = {}) {
   let p = null;
@@ -391,13 +348,12 @@ export async function cachedTeamFor(target, { policyForKey = cachedPolicyForKey,
     try { homeKey = ws?.policyProject ? projectKey(ws.policyProject) : null; } catch { /* unreadable path: no home */ }
     if (homeKey && ws.projectKeys.includes(homeKey)) p = policyForDir(ws.policyProject);
   }
-  const required = requiredOf(p?.doc);
-  return required.length ? { home: p.home, required } : null;
+  return p ? teamInputOf(p.home, p.doc) : null;
 }
 
-/** Every cached policy home that requires ≥1 MCP server: [{ home, required, doc }]. */
+/** Every cached policy home that requires ≥1 MCP server or skill: [{ home, required, requiredSkills?, doc }]. */
 export function cachedTeams(homes = cachedPolicyHomes()) {
-  return homes.filter((h) => requiredOf(h.doc).length).map((h) => ({ home: h.slug, required: requiredOf(h.doc), doc: h.doc }));
+  return homes.map((h) => { const t = teamInputOf(h.slug, h.doc); return t && { ...t, doc: h.doc }; }).filter(Boolean);
 }
 
 /** §5.6: 64 when any of the models is translated by the bridge (OpenAI-style upstreams cap tool names at 64), else 128. */

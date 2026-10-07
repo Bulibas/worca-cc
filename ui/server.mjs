@@ -348,6 +348,10 @@ import {
   viewContext, listCatalogView, listSetsView, getSetView, projectAssignmentView, teamMemberRefusal, teamDuplicateSource,
 } from '../src/core/mcp/views.mjs';
 import { testMembership, retestAfterSave, retestServers } from '../src/core/mcp/test.mjs';
+import { SETS_API_NOUNS } from '../src/core/mcp/definitions.mjs';
+import { putSkillMember, deleteSkillMember } from '../src/core/mcp/store.mjs';
+import { teamSkillMemberRefusal } from '../src/core/mcp/views.mjs';
+import { SKILL_ID_RE } from '../src/core/skills-registry/ids.mjs';
 import { HLJS_GRAMMAR_IDS } from './public/hljs-loader.mjs';
 import { useEnvProxy, proxyNotice } from '../src/core/env-proxy.mjs';
 
@@ -11364,6 +11368,28 @@ app.use('/api/mcp', (req, res, next) => {
   next();
 });
 
+// /api/sets is the Sets API's canonical prefix (skills registry §7): every /api/mcp route answers under it too, one handler
+// for both paths. /api/sets/<noun>/<rest> (SETS_API_NOUNS: servers, projects, teams, preview) is /api/mcp/<noun>/<rest>;
+// /api/sets and /api/sets/<set id>/<rest> are /api/mcp/sets/<set id>/<rest>; letter case is ignored, as Express routes
+// ignore it. The request is dispatched again under its /api/mcp path, so routes registered anywhere in this file answer
+// it (POST /api/mcp/preview sits far above); when none does, the path is restored and the routes registered under
+// /api/sets itself answer it. On the second pass the body guard above runs for every route registered after it; a route
+// registered above it (POST /api/mcp/preview) answers without it on both paths, as /api/mcp/preview always has.
+function setsAliasPath(path) {
+  const m = /^\/api\/sets(?:\/([^/]*))?(\/.*)?$/i.exec(path);
+  if (!m) return null;
+  if (!m[1]) return m[2] ? null : '/api/mcp/sets';
+  return SETS_API_NOUNS.includes(m[1].toLowerCase()) ? `/api/mcp/${m[1]}${m[2] ?? ''}` : `/api/mcp/sets/${m[1]}${m[2] ?? ''}`;
+}
+app.use((req, res, next) => {
+  const to = setsAliasPath(req.path);
+  if (!to) return next();
+  const url = req.url;
+  const q = url.indexOf('?');
+  req.url = to + (q < 0 ? '' : url.slice(q));
+  app.handle(req, res, (err) => { req.url = url; next(err); });
+});
+
 function sendMcpError(res, err) {
   if (err instanceof McpStoreError) return res.status(err.status).json({ error: err.message });
   res.status(500).json({ error: err?.message || String(err) });
@@ -11513,6 +11539,48 @@ app.post('/api/mcp/sets/:id/members/:serverId/test', async (req, res) => {
   const serverId = id && mcpServerId(req, res);
   if (!serverId) return;
   try { res.json(await testMembership(id, serverId)); } catch (err) { sendMcpError(res, err); }
+});
+
+// A set's skills (skills registry §7): add or switch (`{ enabled? }`), remove. Registered under both prefixes, so a set
+// whose id is an /api/sets noun (one an older Worca made) still answers at the canonical path. A Team set's skills come
+// from team policy: update only, and a never-consented skill turns on only from the team checklist (§5).
+const SET_SKILL_PATHS = ['/api/sets/:id/skills/:skillId', '/api/mcp/sets/:id/skills/:skillId'];
+// DELETE also takes any `skill:` id a set may hold (up to 1024 characters, no whitespace), so an entry a newer Worca wrote
+// (shown as missing-skill) can still be removed; PUT takes only the ids this build can parse.
+const HELD_SKILL_ID_RE = /^(?=.{1,1024}$)skill:\S+$/;
+function setSkillId(req, res, re = SKILL_ID_RE) {
+  const id = req.params.skillId;
+  if (!re.test(id)) { badRequest(res, 'invalid skill id'); return null; }
+  return id;
+}
+app.put(SET_SKILL_PATHS, async (req, res) => {
+  const id = mcpSetId(req, res);
+  const skillId = id && setSkillId(req, res);
+  if (!skillId) return;
+  const patch = req.body;
+  if (!isPlainObject(patch)) return badRequest(res, 'body must be an object');
+  const extra = Object.keys(patch).find((k) => k !== 'enabled');
+  if (extra !== undefined) return badRequest(res, `"${extra}" cannot be set on a skill`);
+  try {
+    const ctx = await viewContext();
+    const entry = ctx.skillCatalog.find((e) => e.id === skillId);
+    if (!entry) return res.status(404).json({ error: 'skill not found' });
+    const opts = { entry };
+    if (id.startsWith('team-')) {
+      const t = teamSkillMemberRefusal(ctx, id, skillId, patch);
+      if (t.status) return res.status(t.status).json({ error: t.error });
+      opts.team = { home: t.home };
+    }
+    await putSkillMember(id, skillId, { enabled: patch.enabled }, opts);
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+app.delete(SET_SKILL_PATHS, async (req, res) => {
+  const id = mcpSetId(req, res);
+  const skillId = id && setSkillId(req, res, HELD_SKILL_ID_RE);
+  if (!skillId) return;
+  if (id.startsWith('team-')) return res.status(409).json({ error: 'Team set skills come from team policy and cannot be removed here' });
+  try { await deleteSkillMember(id, skillId); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
 });
 
 app.get('/api/mcp/projects/:key', async (req, res) => {

@@ -14,13 +14,23 @@ export const SERVER_NAME_RE = /^[a-z][a-z0-9-]{0,19}$/;
 // Ids (§4.2, §4.4, §12): set ids (user, General, Team `team-…`); server ids `manual:<name>`,
 // `plugin:<plugin>/<name>` (plugin per PLUGIN_NAME_RE), `policy:<lowercase home slug>/<name>` (home segments as
 // slugSegment in metrics/sync.mjs makes them: `_` may lead, `.` and `-` never do);
-// membership keys `<setId>|<serverId>` (mcpOptOut, mcpOff.members).
+// membership keys `<setId>|<memberId>` (mcpOptOut, mcpOff.members), a member being a server or a skill (skills registry §3.1).
 export const SET_ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const SERVER_ID_SRC = '(?:manual:[a-z][a-z0-9-]{0,19}|plugin:[a-z][a-z0-9]*(?:-[a-z0-9]+)*/[a-z][a-z0-9-]{0,19}|policy:[a-z0-9_][a-z0-9._-]*(?:/[a-z0-9_][a-z0-9._-]*)*/[a-z][a-z0-9-]{0,19})';
 // At most 1024 characters, checked first: a 6.4 MB entry (P4 mcpOptOut, P5 mcpOff come from 8 MB bodies) would
 // overflow the regexp backtrack stack in SERVER_ID_SRC's repeated groups and throw RangeError.
 export const SERVER_ID_RE = new RegExp('^(?=.{1,1024}$)' + SERVER_ID_SRC + '$');
-export const MEMBERSHIP_KEY_RE = new RegExp('^[a-z][a-z0-9-]{0,31}\\|(?=.{1,1024}$)' + SERVER_ID_SRC + '$');
+// Skill ids `skill:plugin:<plugin>/<name>` and `skill:library:<name>` (skills registry §3.1): a literal copy of SKILL_ID_SRC in
+// src/core/skills-registry/ids.mjs, with no import between the two modules; test/mcp-store-skills.test.mjs asserts they are equal.
+const SKILL_ID_SRC = '(?:skill:plugin:[a-z][a-z0-9]*(?:-[a-z0-9]+)*/[a-z0-9]+(?:-[a-z0-9]+)*|skill:library:[a-z0-9]+(?:-[a-z0-9]+)*)';
+export const SET_MEMBER_ID_SRC = '(?:' + SERVER_ID_SRC + '|' + SKILL_ID_SRC + ')';
+export const SET_MEMBER_ID_RE = new RegExp('^(?=.{1,1024}$)' + SET_MEMBER_ID_SRC + '$');
+export const MEMBERSHIP_KEY_RE = new RegExp('^[a-z][a-z0-9-]{0,31}\\|(?=.{1,1024}$)' + SET_MEMBER_ID_SRC + '$');
+const SKILL_MEMBERSHIP_KEY_RE = new RegExp('^[a-z][a-z0-9-]{0,31}\\|(?=.{1,1024}$)' + SKILL_ID_SRC + '$');
+/** A membership key `<setId>|<memberId>` whose member is a skill. Text only: a key is never coerced. */
+export const isSkillMemberKey = (key) => typeof key === 'string' && SKILL_MEMBERSHIP_KEY_RE.test(key);
+// The words after /api/sets/ that name another part of the Sets API (the /api/sets alias in ui/server.mjs): no new set takes one as its id.
+export const SETS_API_NOUNS = Object.freeze(['servers', 'projects', 'teams', 'preview']);
 export const MCP_ENV_VAR_RE = /^MCP_[A-Z0-9_]{1,60}$/;
 export const URL_SAFE_SECRET_RE = /^[A-Za-z0-9._~-]+$/;
 const FIELD_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
