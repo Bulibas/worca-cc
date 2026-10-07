@@ -825,6 +825,8 @@ The skill starts the same deterministic orchestrator as the CLI;
 Bug reports and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for
 the from-source setup, mock mode, the test suite, and the PR workflow.
 Development happens on the `dev` branch, and PRs target `dev`.
+Everyone taking part is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
