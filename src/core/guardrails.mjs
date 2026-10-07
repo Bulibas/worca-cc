@@ -80,6 +80,7 @@ const WORCA_STATE_DENY = [
  * Normal: protect credential files, block publication; never breaks a pipeline
  * (git commit / npm install / npm test / curl localhost all untouched).
  * Secure++: Normal + env scrub (the real exfil control) + egress binaries +
+ * git network subcommands + DNS/socat/openssl s_client/download CLIs +
  * publish channels + cloud-credential CLIs + WebFetch/WebSearch (defense against
  * frontmatter-widened agents). Still functional: project file Read/Write/Edit,
  * npm install/test, and local git commits are untouched.
@@ -121,6 +122,13 @@ export const GUARDRAIL_PRESETS = deepFreeze({
       'Bash(gh)', 'Bash(gh:*)',
       'Bash(docker push)', 'Bash(docker push:*)',
       'Bash(aws)', 'Bash(aws:*)', 'Bash(gcloud)', 'Bash(gcloud:*)', 'Bash(az)', 'Bash(az:*)',
+      'Bash(git clone)', 'Bash(git clone:*)', 'Bash(git fetch)', 'Bash(git fetch:*)',
+      'Bash(git pull)', 'Bash(git pull:*)', 'Bash(git ls-remote)', 'Bash(git ls-remote:*)',
+      'Bash(git remote add)', 'Bash(git remote add:*)', 'Bash(git remote set-url)', 'Bash(git remote set-url:*)',
+      'Bash(dig)', 'Bash(dig:*)', 'Bash(nslookup)', 'Bash(nslookup:*)',
+      'Bash(socat)', 'Bash(socat:*)',
+      'Bash(openssl s_client)', 'Bash(openssl s_client:*)',
+      'Bash(aria2c)', 'Bash(aria2c:*)', 'Bash(lynx)', 'Bash(lynx:*)', 'Bash(w3m)', 'Bash(w3m:*)',
       'WebFetch', 'WebSearch',
     ],
   },

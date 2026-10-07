@@ -40,7 +40,10 @@ start the run.)
   spawn (the spawned `claude` gets a minimal env: base vars, the proxy/CA
   connectivity vars, every `ANTHROPIC_*`/`CLAUDE_*` var, and the set's
   allowlist — nothing else), network egress binaries denied (`curl`, `wget`,
-  `nc`, `ssh`, `scp`, `rsync`, ...), `gh`/`docker push` and cloud CLIs
+  `nc`, `ssh`, `scp`, `rsync`, ...), git network subcommands (`clone`,
+  `fetch`, `pull`, `ls-remote`, `remote add|set-url`), DNS tools (`dig`,
+  `nslookup`), `socat`, `openssl s_client` and download CLIs (`aria2c`,
+  `lynx`, `w3m`) denied, `gh`/`docker push` and cloud CLIs
   (`aws`, `gcloud`, `az`) denied, `WebFetch`/`WebSearch` denied, and home-dir
   credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`,
   `~/.git-credentials`, `~/.claude/.credentials.json`, `~/.gnupg`, ...)
@@ -150,6 +153,11 @@ enforces the set's latest definition.
   flow degrades rather than breaks. `.env*` also matches `.env.example` /
   `.env.sample`, which agents may legitimately edit; a deny list can't carve
   per-file exceptions, so those become read-only under Normal/Strict too.
+- Strict's deny list cannot stop egress from interpreters (`node -e` /
+  `python -c` with a fetch — tests need them) or from the browser MCP tools
+  (`browser_navigate` accepts any URL, and the manual web-UI-testing agent
+  needs them). The real egress control is the container egress overlay
+  ([`docs/docker.md`](docker.md), `docker/compose.egress.yml`).
 - Exempt from scrub/deny: UI-triggered utility agents outside pipeline runs
   (overview generation, agent generation), the `graphify` graph-build
   subprocess, and the `claude --help`/`--version`
