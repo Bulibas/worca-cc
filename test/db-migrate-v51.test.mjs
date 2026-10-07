@@ -8,7 +8,7 @@ import { getDb, SCHEMA_VERSION, _resetForTests } from '../src/core/db.mjs';
 useTempHome(after);
 const cols = (db, t) => db.prepare(`PRAGMA table_info(${t})`).all().map((r) => r.name);
 
-test('a DB stamped 50 without ask_threads.agent_mode gains it; user_version reads 51', () => {
+test('a DB stamped 50 without ask_threads.agent_mode gains it; user_version reads the current version', () => {
   let db = getDb();
   assert.ok(SCHEMA_VERSION >= 51);
   db.exec('ALTER TABLE ask_threads DROP COLUMN agent_mode');
@@ -17,5 +17,5 @@ test('a DB stamped 50 without ask_threads.agent_mode gains it; user_version read
   _resetForTests();
   db = getDb();
   assert.ok(cols(db, 'ask_threads').includes('agent_mode'));
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 51);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION);
 });
