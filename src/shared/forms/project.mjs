@@ -4,7 +4,7 @@
 // into values. Derived from the same declaration the web renderer draws, so a surface
 // without pixels can still answer.
 import { resolvePath } from './paths.mjs';
-import { walkLayout } from './layout.mjs';
+import { walkLayout, whenOk } from './layout.mjs';
 import { widgetClass } from './catalog.mjs';
 
 const isObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
@@ -69,7 +69,7 @@ function itemFieldsOf(item, schema) {
 
 /** The input fields of an ask, in layout order. `ask` = { data, layout, answerSchema }.
  *  → [{ field, label, widget, type, schema, options: [{ value, label }], items, itemFields,
- *       verdicts, free, default, required, when }]
+ *       verdicts, free, default, required, when, help }]
  *  `items` is [{ id, label }] for the row widgets (rank, table-select, gallery, review-list),
  *  else null; `itemFields` is set for review-list only. */
 export function promptFields(ask) {
@@ -88,24 +88,35 @@ export function promptFields(ask) {
       verdicts: review ? s.items.properties.verdict.enum.slice() : [],
       free: Array.isArray(eff.suggest),
       default: s.default, required: required.has(eff.field), when: eff.when || null,
+      help: text(eff.help),
     });
   });
   return out;
 }
 
-function describe(f) {
+/** A value as the label its field shows for it; the value itself when no option has it. */
+const shownAs = (f, v) => { const o = f && f.options.find((x) => x.value === v); return o ? o.label : v; };
+
+/** A `when` as text, each value by the label its field shows: `looksRight=Correct`. */
+function whenText(when, fields) {
+  const field = (k) => fields.find((x) => x.field === k);
+  return Object.entries(when).map(([k, v]) => `${k}=${(Array.isArray(v) ? v : [v]).map((x) => String(shownAs(field(k), x))).join('/')}`).join(', ');
+}
+
+/** `fields` = all of promptFields(); `gated` = false when the field's `when` is known to hold. */
+function describe(f, fields, { gated = true } = {}) {
   const bits = [];
   if (f.widget === 'rank') bits.push(`order of: ${f.options.map((o) => o.value).join(', ')}`);
-  else if (f.widget === 'review-list') bits.push(`per item ${f.verdicts.join('/')} for: ${f.options.map((o) => o.value).join(', ')}`);
+  else if (f.widget === 'review-list') bits.push(`per item ${f.itemFields[0].options.map((o) => o.label).join('/')} for: ${f.options.map((o) => o.value).join(', ')}`);
   else if (f.options.length) bits.push(`${f.type === 'array' ? 'any of' : 'one of'}${f.free ? ' (or your own text)' : ''}: ${f.options.map((o, i) => `${i + 1}) ${o.label}`).join('  ')}`);
   else {
     const s = f.schema;
     const range = s.minimum !== undefined && s.maximum !== undefined ? ` ${s.minimum}–${s.maximum}` : s.minimum !== undefined ? ` ≥ ${s.minimum}` : '';
     bits.push(`${f.type === 'boolean' ? 'yes/no' : f.type}${range}${s.format ? ` (${s.format})` : ''}${s.pattern ? ` /${s.pattern}/` : ''}`);
   }
-  if (f.default !== undefined) bits.push(`default ${JSON.stringify(f.default)}`);
+  if (f.default !== undefined) bits.push(`default ${JSON.stringify(Array.isArray(f.default) ? f.default.map((v) => shownAs(f, v)) : shownAs(f, f.default))}`);
   if (!f.required) bits.push('optional');
-  if (f.when) bits.push(`only when ${Object.entries(f.when).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join('/') : v}`).join(', ')}`);
+  if (f.when && gated) bits.push(`only when ${whenText(f.when, fields)}`);
   return bits.join(' · ');
 }
 
@@ -114,16 +125,66 @@ function describe(f) {
  *  0 / omitted = no cap; otherwise DISPLAY text is dropped from the end until it fits and
  *  the cut is marked by a lone `…` line — the title, the prompts and the reply line never are. */
 export function projectForm(ask, { ref, maxChars = 0 } = {}) {
+  const { fields, blocks } = formBlocks(ask);
+  if (typeof ref === 'string' && ref !== '') {
+    const hint = fields.filter((f) => !f.when).slice(0, REPLY_HINT_FIELDS).map((f) => `${f.field}=${f.type === 'array' ? '<a,b>' : '<value>'}`);
+    blocks.push({ keep: true, lines: ['', `Reply: /answer ${ref} ${hint.join(' | ')}`.trimEnd()] });
+  }
+  if (!(maxChars > 0) || render(blocks).length <= maxChars) return render(blocks);
+  const kept = blocks.slice();
+  let marker = -1;   // the one `…` line; it always sits after the next block to go
+  while (render(kept).length > maxChars) {
+    const last = kept.findLastIndex((b) => !b.keep);
+    if (last < 0) break;
+    if (marker >= 0) kept.splice(marker, 1);
+    kept[last] = { keep: true, lines: ['…'] };
+    marker = last;
+  }
+  return render(kept);
+}
+
+/** The projection as an interactive surface unfolds it (spec §8): `reveal(values, field)` → the
+ *  lines of the items visible under `values` that no earlier call returned, up to and including
+ *  `field`'s own item (every item when `field` is omitted; none when `field` is hidden). The
+ *  first call starts with the title. A `when`-gated item shows once the answers so far open it,
+ *  so a reader who never opens it never sees its rows. */
+export function unfoldForm(ask) {
+  const shown = new Set();
+  return (values, field) => {
+    const { blocks } = formBlocks(ask, isObject(values) ? values : {});
+    const at = blocks.find((b) => b.field !== undefined && b.field === field);
+    if (field !== undefined && !at) return [];   // that field is not shown under these answers
+    const fresh = blocks.filter((b) => !shown.has(b.key) && (!at || b.item <= at.item));
+    for (const b of fresh) shown.add(b.key);
+    const lines = render(fresh).split('\n');
+    return lines.every((l) => l === '') ? [] : lines;
+  };
+}
+
+const render = (bs) => bs.flatMap((b) => b.lines).join('\n').replace(/\n{3,}/g, '\n\n');
+/** A field's `help`, printed under its label when it is short enough to read inline. */
+const HELP_CHARS = 200;
+export const shortHelp = (f) => (f && typeof f.help === 'string' && f.help.trim() !== '' && f.help.length <= HELP_CHARS ? oneLine(f.help) : '');
+
+/** → { fields, blocks: [{ key, item, field?, keep, lines }] }. `key` names a block by its layout
+ *  position (`item` is the walk index), so unfoldForm can tell which it has printed. With
+ *  `values`, an item whose own `when` or an ancestor's fails against them is left out; without,
+ *  every item is in. */
+function formBlocks(ask, values) {
   const data = ask.data;
   const fileLine = (rel) => {
     const f = (ask.files || []).find((x) => x.rel === rel);
     return f ? `${rel} (${f.mime}, ${size(f.bytes)})` : String(rel);
   };
   const fields = promptFields(ask);
-  const blocks = [{ keep: true, lines: [`${ask.title}${ask.agent ? ` — ${ask.agent}` : ''}`, ''] }];
-  const show = (...lines) => blocks.push({ keep: false, lines });
-  walkLayout(ask.layout, (raw, eff) => {
+  const blocks = [{ key: 'title', item: -1, keep: true, lines: [`${ask.title}${ask.agent ? ` — ${ask.agent}` : ''}`, ''] }];
+  let item = -1;
+  const add = (keep, lines, field) => blocks.push({ key: `${item}.${blocks.length}`, item, field, keep, lines });
+  const show = (...lines) => add(false, lines);
+  walkLayout(ask.layout, (raw, eff, parents) => {
+    item += 1;
     if (!eff) return;
+    if (values && ![...parents, eff].every((x) => whenOk(x.when, values))) return;
     const w = eff.widget;
     const v = typeof eff.bind === 'string' ? resolvePath(eff.bind, { data }) : undefined;
     // An absent optional value prints NOTHING: this text is posted to a chat channel, and the
@@ -167,24 +228,12 @@ export function projectForm(ask, { ref, maxChars = 0 } = {}) {
       show(...rowsOf(eff.bind, data).map((r) => rowLine(eff, r)));
     }
     const at = fields.findIndex((f) => f.field === eff.field);
-    if (at >= 0 && widgetClass(w, eff) === 'input') blocks.push({ keep: true, lines: [`${at + 1}. ${fields[at].label} {${fields[at].field}}`, `   ${describe(fields[at])}`] });
+    if (at >= 0 && widgetClass(w, eff) === 'input') {
+      const f = fields[at];
+      add(true, [`${at + 1}. ${f.label} {${f.field}}`, ...(shortHelp(f) ? [`   ${shortHelp(f)}`] : []), `   ${describe(f, fields, { gated: !values })}`], f.field);
+    }
   });
-  if (typeof ref === 'string' && ref !== '') {
-    const hint = fields.filter((f) => !f.when).slice(0, REPLY_HINT_FIELDS).map((f) => `${f.field}=${f.type === 'array' ? '<a,b>' : '<value>'}`);
-    blocks.push({ keep: true, lines: ['', `Reply: /answer ${ref} ${hint.join(' | ')}`.trimEnd()] });
-  }
-  const render = (bs) => bs.flatMap((b) => b.lines).join('\n').replace(/\n{3,}/g, '\n\n');
-  if (!(maxChars > 0) || render(blocks).length <= maxChars) return render(blocks);
-  const kept = blocks.slice();
-  let marker = -1;   // the one `…` line; it always sits after the next block to go
-  while (render(kept).length > maxChars) {
-    const last = kept.findLastIndex((b) => !b.keep);
-    if (last < 0) break;
-    if (marker >= 0) kept.splice(marker, 1);
-    kept[last] = { keep: true, lines: ['…'] };
-    marker = last;
-  }
-  return render(kept);
+  return { fields, blocks };
 }
 
 /** Split on an unescaped separator. A backslash pair is kept as-is for unescapeToken(). */

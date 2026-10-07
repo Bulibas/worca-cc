@@ -17,6 +17,7 @@
 // executions render nothing; `token` events are never rendered.
 import { BOOKEND_EXECUTION_IDS, KEYED_KINDS } from '../shared/graph/constants.mjs';
 import { awayAnswersSummary } from '../shared/away-mode/labels.mjs';
+import { shortHelp } from '../shared/forms/project.mjs';
 
 const nodesOf = (m) => ((m && m.graph && m.graph.nodes) || []).filter(Boolean);
 const wiresOf = (m) => ((m && m.graph && m.graph.wires) || []).filter(Boolean);
@@ -225,11 +226,14 @@ export const FORM_REPROMPT_MAX = 3;
 
 const isNum = (type) => type === 'number' || type === 'integer';
 
-/** The `, Enter = <default>` / ` [Enter = <default>]` tail, or ''. */
+/** The `, Enter = <default>` / ` [Enter = <default>]` tail, or ''. A default that is one of
+ *  the field's options is named by the label the list above shows, never its raw value. */
 function defaultHint(field, { bare = false } = {}) {
   const d = field.default;
   if (d === undefined || d === null || d === '') return '';
-  const text = Array.isArray(d) ? d.join(', ') : String(d);
+  const options = Array.isArray(field.options) ? field.options : [];
+  const shown = (v) => { const o = options.find((x) => x.value === v); return o ? String(o.label) : String(v); };
+  const text = Array.isArray(d) ? d.map(shown).join(', ') : shown(d);
   return bare ? ` [Enter = ${text}]` : `, Enter = ${text}`;
 }
 
@@ -244,6 +248,7 @@ export function formatFormField(field) {
   const f = field || {};
   const label = f.label || f.field;
   const lines = [`${label}${f.required ? ' *' : ''}`];
+  if (shortHelp(f)) lines.push(`  ${shortHelp(f)}`);
   const choices = Array.isArray(f.options) ? f.options : [];
   if (choices.length) choices.forEach((o, i) => lines.push(`  ${i + 1}) ${String(o.label)}`));
 
