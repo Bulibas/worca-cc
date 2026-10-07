@@ -90,6 +90,9 @@ test('buildEnvelope: bound inputs only (await never), fresh mirrors the trigger,
   assert.equal(env.ctx.mock, false);
   const ws = buildEnvelope({ ...ctx, runRoot: '/abs/root', workspace: { kind: 'metadata', projects: [{}] } });
   assert.deepEqual(ws.ctx.repos, [{ key: 'app', dir: ctx.projectDir }]);
+  const wsRef = buildEnvelope({ ...ctx, runRoot: '/abs/root', workspace: { kind: 'metadata', projects: [{}] },
+    repos: [{ projectKey: 'app', dir: ctx.projectDir, checkpointRef: 'abc123' }] });
+  assert.deepEqual(wsRef.ctx.repos, [{ key: 'app', dir: ctx.projectDir, checkpointRef: 'abc123' }], 'a member\'s own diff base rides its repo entry');
   assert.equal(ws.ctx.runRoot, '/abs/root');
   assert.equal(buildEnvelope({ ...ctx, claudeOpts: { mock: true } }).ctx.mock, true);
   assert.equal(envelopeAuditPath(ctx), join(ctx.pipelineDir, 'scripts', 'n_tests-c2.envelope.json'));

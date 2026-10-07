@@ -415,6 +415,46 @@ export async function worktreeHead(dir) {
   return r.ok ? r.stdout.trim() : null;
 }
 
+/** Full SHA of `ref^{commit}` in `dir`, or null. Rejects a leading '-' (a git option). */
+export async function commitOf(dir, ref) {
+  if (typeof ref !== 'string' || !ref || /^-/.test(ref)) return null;
+  const r = await git(dir, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  return r.ok && r.stdout.trim() ? r.stdout.trim() : null;
+}
+
+/** True iff commit `a` is an ancestor of (or equal to) `b` in `dir`. False on any failure. */
+export async function isAncestor(dir, a, b) {
+  const [x, y] = await Promise.all([commitOf(dir, a), commitOf(dir, b)]);
+  if (!x || !y) return false;
+  return (await git(dir, ['merge-base', '--is-ancestor', x, y])).ok;
+}
+
+/**
+ * The diff base of a REUSED feature branch: where it forks from the source — the remote's copy
+ * first (`<remote>/<source>`: what is merged upstream is not this branch's change), else the local
+ * source. Every unmerged commit on the branch (plus uncommitted work) is then its diff, and the
+ * source moving on never reads as deletions. Returns { sha, against } or null (no candidate
+ * resolves, or the histories are unrelated). Never throws.
+ */
+export async function reusedBranchBase(projectDir, { feature, source, remote = 'origin' } = {}) {
+  if (typeof feature !== 'string' || !feature || typeof source !== 'string' || !source || /^-/.test(source)) return null;
+  const tip = await commitOf(projectDir, `refs/heads/${feature}`);
+  if (!tip) return null;
+  const candidates = [];
+  if (typeof remote === 'string' && /^[A-Za-z0-9._-]+$/.test(remote)) {
+    candidates.push({ ref: `refs/remotes/${remote}/${source}`, against: `${remote}/${source}` });
+  }
+  candidates.push({ ref: source, against: source });
+  for (const c of candidates) {
+    const at = await commitOf(projectDir, c.ref);
+    if (!at) continue;
+    const mb = await git(projectDir, ['merge-base', tip, at]);
+    const sha = mb.ok ? mb.stdout.trim() : '';
+    if (sha) return { sha, against: c.against };
+  }
+  return null;
+}
+
 /**
  * Env for every Ask Worca git spawn (spec §8). Pager OFF and — load-bearing —
  * NEVER prompt: an https/ssh fetch with no cached credential would otherwise

@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { ENGINES } from './helpers/engines.mjs';
 import { listArtifacts, readPipelineForResume } from '../src/core/artifacts.mjs';
+import { getDb } from '../src/core/db.mjs';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { templateRepo } from './helpers/git-dir.mjs';
 import { writeGraphWorkflow } from '../src/core/workflows.mjs';
@@ -95,6 +96,37 @@ test(`[${engine.id}] a run that pauses on a failure mid-flight persists results.
 
   const arts = await listArtifacts(orch.getState().id);
   assert.ok(arts.some((a) => a.kind === 'diff-patch'), 'the diff-patch artifact is indexed');
+});
+
+test(`[${engine.id}] resuming a run paused with a pre-fix diff base corrects it to the worktree start (audit line)`, async () => {
+  const repo = await freshRepo();
+  // A commit off main that the run never makes: a pre-fix run persisted the checkout's HEAD (here: this) as its base.
+  const git = (args) => spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+  git(['checkout', '-q', '-b', 'other']);
+  writeFileSync(join(repo, 'other.txt'), 'other\n');
+  git(['add', '-A']); git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'other']);
+  const wrong = git(['rev-parse', 'HEAD']).stdout.trim();
+  git(['checkout', '-q', 'main']);
+  const orch1 = engine.create({
+    projectDir: repo, prompt: 'x', auto: true, claude: { mock: true }, branch: { source: 'main' },
+    runners: { producer: async () => { throw new Error('boom'); }, verifier: okVerifier },
+  });
+  editOnWorktree(orch1, 'errored work\n');
+  const r1 = await orch1.run();
+  assert.equal(r1.status, 'paused', JSON.stringify(r1));
+  const start = orch1.getState().branch.baseSha;
+  assert.ok(start);
+  const saved = readPipelineForResume(orch1.state.id);
+  saved.resumePoint.checkpointRef = wrong;            // what a run started before the fix carries
+  const orch2 = engine.create({ projectDir: repo, auto: true, claude: { mock: true }, resume: saved });
+  const r2 = await orch2.resume();
+  assert.equal(r2.status, 'done', JSON.stringify(r2));
+  assert.equal(orch2.getState().checkpointRef, start);
+  const text = readFileSync(patch(r2.pipelineDir), 'utf8');
+  assert.match(text, /\+errored work/, 'the run\'s uncommitted work is still in the diff');
+  assert.doesNotMatch(text, /other\.txt/, 'the pre-fix base no longer leaks a foreign commit');
+  const audit = getDb().prepare('SELECT text FROM pipeline_events WHERE pipeline_id = ?').all(orch1.state.id).map((r) => r.text).join('\n');
+  assert.match(audit, new RegExp(`Diff base for \`[^\`]+\` corrected to the worktree's start: \`${wrong.slice(0, 10)}\` → \`${start.slice(0, 10)}\``));
 });
 
 test(`[${engine.id}] the persisted patch matches what the kept feature branch commit carries`, async () => {
