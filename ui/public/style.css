@@ -5268,27 +5268,56 @@ body.term-open .toasts{right:calc(var(--term-w,460px) + 20px);}
   body.term-open .ask-dock>.ask-pill{display:none;}
  }
 
-.ask-pill{pointer-events:auto;display:flex;align-items:center;gap:10px;padding:11px 18px 11px 14px;
-  border:1.5px solid var(--line-2);border-radius:999px;background:var(--panel);color:var(--ink);
-  font-family:inherit;font-weight:600;font-size:13.5px;cursor:pointer;
-  box-shadow:var(--shadow-pop);transition:border-color .15s;}
-.ask-pill:hover{border-color:var(--hover-outline);}
+/* The launcher: a 48px round icon button in the dock's bottom-right corner, taken out of the dock's flex flow
+   so the sheet's centring and size do not change. Coming back from a closed sheet (display:none -> flex) replays
+   the pop-in; hiding stays instant. The label is kept for screen readers, the shortcut lives in the tooltip. */
+.ask-pill{pointer-events:auto;position:absolute;right:24px;bottom:calc(24px + env(safe-area-inset-bottom,0px));
+  display:flex;align-items:center;justify-content:center;width:48px;height:48px;padding:0;box-sizing:border-box;
+  border:1.5px solid var(--line-2);border-radius:50%;background:var(--panel);color:var(--ink);cursor:pointer;
+  box-shadow:var(--shadow-pop);animation:ask-pill-pop .22s cubic-bezier(.34,1.56,.64,1);
+  transition:transform .16s ease-out,border-color .16s ease-out,box-shadow .16s ease-out;}
+.ask-pill:hover{border-color:var(--hover-outline);transform:translateY(-2px) scale(1.04);box-shadow:var(--shadow-sheet);}
+.ask-pill:active{transform:scale(.94);}
 .ask-pill:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-pill[hidden]{display:none;}
-/* "Thinking" on the collapsed pill: the label shimmers, the same sweep the live
-   thinking row paints on .ask-thinking-label (gradient clipped to the glyphs,
-   swept by the shared ask-shimmer keyframes). At rest the label needs no rule:
-   the pill's own color/weight paint it. Toggled with the .is-live class by
-   ask-panel.mjs updateSendStop(), alongside the mark<->orb morph below. */
-.ask-pill.is-live .ask-pill-label{background:linear-gradient(100deg,var(--ink-3) 0%,var(--ink-3) 34%,var(--ink) 50%,var(--ink-3) 66%,var(--ink-3) 100%);
-  background-size:220% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:ask-shimmer 2.4s linear infinite;}
-.ask-pill-logo{width:22px;height:22px;border-radius:50%;display:inline-block;flex:0 0 auto;background:var(--ink);
+@keyframes ask-pill-pop{from{opacity:0;transform:scale(.6)}to{opacity:1;transform:scale(1)}}
+.ask-pill-label{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+  clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0;}
+/* "Thinking" on the collapsed button: a thin violet conic ring turns round it while the mark morphs into the orb
+   (below). Toggled with the .is-live class by ask-panel.mjs updateSendStop(). It fades in on the morph's .52s and
+   out on its .8s; a transition reads its timing from the AFTER-change style, so the live rule carries the first. */
+.ask-pill::before{content:"";position:absolute;inset:-3.5px;border-radius:50%;pointer-events:none;opacity:0;
+  background:conic-gradient(from 0deg,transparent 0%,var(--violet) 100%);
+  -webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),var(--ink) calc(100% - 1.5px));
+  mask:radial-gradient(farthest-side,transparent calc(100% - 2px),var(--ink) calc(100% - 1.5px));
+  transition:opacity .8s cubic-bezier(.22,1,.36,1);}
+.ask-pill.is-live::before{opacity:1;transition-duration:.52s;animation:ask-ring 1.6s linear infinite;}
+@keyframes ask-ring{to{transform:rotate(360deg)}}
+/* The unread dot: a turn ended while the sheet was closed (.has-unread, ask-panel.mjs). Scales in once. */
+.ask-pill.has-unread::after{content:"";position:absolute;top:1px;right:1px;width:10px;height:10px;border-radius:50%;
+  background:var(--violet);box-shadow:0 0 0 2px var(--panel);animation:ask-dot-in .24s cubic-bezier(.34,1.56,.64,1);}
+@keyframes ask-dot-in{from{transform:scale(0)}to{transform:scale(1)}}
+/* The tooltip: left of the button, vertically centred on it (8px gap). Shown by ask-panel.mjs (.is-shown): after a
+   400ms hover, at once on keyboard focus. Touch devices never show it. */
+.ask-tip{position:absolute;right:calc(24px + 48px + 8px);bottom:calc(24px + 24px + env(safe-area-inset-bottom,0px));
+  display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:var(--r-ctrl);
+  background:var(--ink);color:var(--panel);font:500 12.5px/1.2 var(--sans);white-space:nowrap;
+  opacity:0;pointer-events:none;transform:translate(4px,50%);
+  transition:opacity .12s ease-out,transform .12s ease-out;}
+.ask-tip.is-shown{opacity:1;transform:translate(0,50%);}
+.ask-tip .ask-kbd{background:var(--panel);color:var(--ink);}
+@media (hover:none){.ask-tip{display:none;}}
+@media (max-width:760px){
+  .ask-pill{right:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px));}
+  .ask-tip{right:calc(16px + 48px + 8px);bottom:calc(16px + 24px + env(safe-area-inset-bottom,0px));}
+}
+.ask-pill-logo{width:26px;height:26px;border-radius:50%;display:inline-block;flex:0 0 auto;background:var(--ink);
   -webkit-mask:url(/assets/worca-mark-mask.png) center/contain no-repeat;-webkit-mask-mode:luminance;
   mask:url(/assets/worca-mark-mask.png) center/contain no-repeat;mask-mode:luminance;}
 /* The mark slot: the masked logo and the pill's own thinking orb stacked in one
-   22px host. A CSS mask clips children, so the orb is a SIBLING of the masked
-   span, absolutely stacked on it; the host is what the pill's flex row sizes,
-   so the label and the kbd never move. The morph between them is these
+   26px host. A CSS mask clips children, so the orb is a SIBLING of the masked
+   span, absolutely stacked on it; the host is what the button's flex centring
+   sizes, so nothing moves. The morph between them is these
    transitions, keyed off .is-live: lighting shrinks and fades the mark while
    the orb fades in (.52s — the canvas grows its dots out of the centre on the
    same clock, thinking-orb morphTo, so no CSS scale on the orb: a scaled
@@ -5298,7 +5327,7 @@ body.term-open .toasts{right:calc(var(--term-w,460px) + 20px);}
    morph-back one. Under prefers-reduced-motion the `*{transition:none}`
    blanket makes this an instant swap and the orb snaps its tween too; no rule
    of its own is needed. */
-.ask-pill-mark{position:relative;width:22px;height:22px;flex:0 0 auto;display:inline-block;line-height:0;}
+.ask-pill-mark{position:relative;width:26px;height:26px;flex:0 0 auto;display:inline-block;line-height:0;}
 .ask-pill-mark>.ask-pill-logo{position:absolute;inset:0;
   transition:opacity .8s cubic-bezier(.22,1,.36,1),transform .8s cubic-bezier(.22,1,.36,1);}
 .ask-pill-mark>.ask-orb{position:absolute;inset:0;opacity:0;transition:opacity .8s cubic-bezier(.22,1,.36,1);}
@@ -5402,7 +5431,10 @@ body.term-open .toasts{right:calc(var(--term-w,460px) + 20px);}
    this only restores a legible fill under the clipped background. */
 @media (prefers-reduced-motion: reduce){
   .ask-thinking-label{background:none;-webkit-background-clip:border-box;background-clip:border-box;color:var(--ink-2);}
-  .ask-pill.is-live .ask-pill-label{background:none;-webkit-background-clip:border-box;background-clip:border-box;color:var(--ink-2);}
+  /* Pseudo-elements do not inherit the dock blanket's `animation:none`, so the ring and the dot are named: the
+     states still show, as a static violet ring and a dot, without movement. */
+  .ask-pill.is-live::before{animation:none;transition:none;background:var(--violet);}
+  .ask-pill.has-unread::after{animation:none;}
 }
 .ask-tool-row{display:flex;align-items:center;gap:9px;min-width:0;}
 .ask-tool-op{width:38px;flex:0 0 38px;font-family:var(--mono);font-size:10px;letter-spacing:.06em;

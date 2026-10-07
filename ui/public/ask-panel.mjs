@@ -250,6 +250,10 @@ const THREADS_REFRESH_MS = 250;
 const PILL_MORPH_IN_MS = 520;
 const PILL_MORPH_OUT_MS = 800;
 const PILL_SETTLE_FALLBACK_MS = PILL_MORPH_OUT_MS + 150;
+const PILL_NAME = 'Ask Worca';
+const PILL_NAME_UNREAD = 'Ask Worca, new reply';
+/** Hover has to rest on the button this long before its tooltip shows. */
+const PILL_TIP_DELAY_MS = 400;
 
 export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, showTerminal = () => {}, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null, createVoice = null, voiceLongPressMs = 500 }) {
   const homePick = browserPick();         // hoisted declaration (defined below)
@@ -464,8 +468,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
     const pill = make('button', 'ask-pill');
     pill.type = 'button';
+    pill.setAttribute('aria-label', PILL_NAME);
     // The mark slot: the masked logo and the pill's OWN thinking orb stacked in
-    // one 22px host (a CSS mask clips children, so the orb cannot live under
+    // one 26px host (a CSS mask clips children, so the orb cannot live under
     // the masked span). Both exist from birth — .is-live morphs one into the
     // other in CSS and syncPillOrb() runs the canvas only while there is
     // something to paint. Its own instance on purpose: the transcript's orb
@@ -475,7 +480,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const pillLogo = make('span', 'ask-pill-logo');
     pillLogo.setAttribute('aria-hidden', 'true');
     mark.appendChild(pillLogo);
-    el.pillOrb = createThinkingOrb({ doc, win, size: 22 });
+    el.pillOrb = createThinkingOrb({ doc, win, size: 26 });
     el.pillOrb.stop();                 // the factory arms its loop; nothing is lit yet
     el.pillOrb.morphTo(0, 0);          // the dots wait on the centre for the first morph-in
     // The morph-back ends when the orb layer's opacity fade does (the transform
@@ -487,8 +492,29 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     mark.appendChild(el.pillOrb.el);
     pill.appendChild(mark);
     pill.appendChild(make('span', 'ask-pill-label', 'Ask Worca'));
-    pill.appendChild(make('span', 'ask-kbd', shortcutLabel(win)));
     pill.addEventListener('click', openSheet);
+
+    // The tooltip is a sibling of the button (a button's face holds no other widget); style.css .ask-tip
+    // places it to the left. aria-describedby gives assistive tech the shortcut the face no longer shows.
+    const tip = make('div', 'ask-tip');
+    tip.id = 'ask-pill-tip';
+    tip.setAttribute('role', 'tooltip');
+    tip.appendChild(make('span', null, 'Ask Worca'));
+    tip.appendChild(make('span', 'ask-kbd', shortcutLabel(win)));
+    pill.setAttribute('aria-describedby', tip.id);
+    pill.addEventListener('pointerenter', () => {
+      clearTipTimer();
+      st.tipTimer = setTimeout(showTip, PILL_TIP_DELAY_MS);
+      if (st.tipTimer && typeof st.tipTimer.unref === 'function') st.tipTimer.unref();
+    });
+    pill.addEventListener('pointerleave', hideTip);
+    pill.addEventListener('blur', hideTip);
+    pill.addEventListener('focus', () => {
+      // A mouse click focuses the button too; only keyboard focus earns the tooltip at once.
+      let visible = true;
+      try { visible = pill.matches(':focus-visible'); } catch { /* no :focus-visible: treat as keyboard */ }
+      if (visible) showTip();
+    });
 
     const sheet = make('section', 'ask-sheet');
     sheet.hidden = true;
@@ -542,7 +568,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     sheet.appendChild(buildDropTarget(sheet));
     dock.appendChild(sheet);
     dock.appendChild(pill);
+    dock.appendChild(tip);
     el.pill = pill;
+    el.tip = tip;
     el.sheet = sheet;
     el.dock = dock;           // measured by dockInner(); `root` is TDZ here
     return dock;
@@ -706,8 +734,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // The collapsed launcher pill mirrors "Ask Worca is working": a live turn, a
     // snapshot that reports one in flight (load() nulls live until a frame is
     // adopted, so Stop alone would stay dark on a collapsed reload), or the
-    // POST→ask-start window (st.sending). The label shimmer and the mark↔orb
-    // morph are pure CSS on this class (.ask-pill.is-live .ask-pill-label and
+    // POST→ask-start window (st.sending). The thinking ring and the mark↔orb
+    // morph are pure CSS on this class (.ask-pill.is-live::before and
     // .ask-pill.is-live .ask-pill-mark), so a boundary costs one classList
     // write plus syncPillOrb() — local rAF bookkeeping for the pill's canvas,
     // idle when nothing changed. Keep every OTHER side effect out of here, see
@@ -1182,10 +1210,31 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     try { el.input.focus({ preventScroll: true }); } catch { try { el.input.focus(); } catch { /* detached */ } }
   }
 
+  function showTip() {
+    clearTipTimer();
+    if (el.tip && !st.open) el.tip.classList.add('is-shown');
+  }
+  function hideTip() {
+    clearTipTimer();
+    if (el.tip) el.tip.classList.remove('is-shown');
+  }
+  function clearTipTimer() {
+    if (st.tipTimer) { clearTimeout(st.tipTimer); st.tipTimer = null; }
+  }
+
+  /** The unread dot: a turn ended while the sheet was closed. Memory only — a reload clears it. */
+  function setUnread(on) {
+    if (!el.pill) return;
+    el.pill.classList.toggle('has-unread', on);
+    el.pill.setAttribute('aria-label', on ? PILL_NAME_UNREAD : PILL_NAME);
+  }
+
   function openSheet() {
     if (st.open || st.destroyed) return;
     st.open = true;
     st.prevFocus = doc.activeElement;
+    hideTip();
+    setUnread(false);
     el.pill.hidden = true;
     syncPillOrb();                                 // nothing to paint behind the sheet
     el.sheet.hidden = false;
@@ -1424,6 +1473,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
   function onDocKeydown(e) {
     if (st.destroyed) return;
+    if (e.key === 'Escape' && el.tip && el.tip.classList.contains('is-shown')) hideTip();   // the tooltip yields, the key carries on
     if (st.drag && e.key === 'Escape') { e.preventDefault(); cancelResize(); return; }
     if (isToggleCombo(e)) {
       // The terminal pane (#573) owns its keys: Ctrl+K is the shell's kill-line there.
@@ -5028,6 +5078,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     }
     if (frame.type === 'ask-done' || frame.type === 'ask-error') {
       stopElapsed(); updateSendStop(); announce('answer finished');
+      if (!st.open) setUnread(true);
       // Conversation chips: the turn's resolved list rides ask-done (an older server omits it: keep what is shown).
       if (frame.type === 'ask-done' && Array.isArray(frame.contexts)) setContexts(frame.contexts);
       // P4: a finished turn may have created/removed/navigated worktrees. This must
@@ -5228,6 +5279,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.elapsedTimer) { clearInterval(st.elapsedTimer); st.elapsedTimer = null; }
     if (el.orb) el.orb.stop();
     settlePillOrb();
+    clearTipTimer();
     doc.removeEventListener('keydown', onDocKeydown, true);
     doc.removeEventListener('pointerdown', onDocPointerdown, true);
     win.removeEventListener('resize', onWinResize);

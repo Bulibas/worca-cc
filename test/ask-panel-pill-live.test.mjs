@@ -1,5 +1,5 @@
 // test/ask-panel-pill-live.test.mjs — the collapsed launcher pill's "thinking"
-// state. The label shimmer itself is CSS (style.css .ask-pill.is-live .ask-pill-label,
+// state. The thinking ring and the mark ↔ orb morph are CSS (style.css .ask-pill.is-live,
 // pinned by test/ui-ask-style.test.mjs); this suite pins WHEN the panel raises and lowers
 // the `is-live` class, through the same public surface the stream suite drives
 // (pushServerFrame / open / close / the History popover / the composer).
@@ -16,7 +16,7 @@ const MID = 'askm_00000001';
 // The mark host wraps the masked logo AND the pill's own orb (a CSS mask clips
 // children, so the orb cannot sit under the masked span): both are built once,
 // at build time, and the morph between them is CSS keyed off .is-live.
-const PILL_CHILDREN = ['ask-pill-mark', 'ask-pill-label', 'ask-kbd'];
+const PILL_CHILDREN = ['ask-pill-mark', 'ask-pill-label'];
 const MARK_CHILDREN = ['ask-pill-logo', 'ask-orb'];
 
 function snapBody(over = {}) {
@@ -70,7 +70,7 @@ test('pill-live: lit on send / ask-start / an in-flight or adopted turn; at rest
       ctx.flush();
       assert.equal(lit(ctx.pill), true, 'lit from ask-start while the sheet is closed');
       assert.equal(ctx.pill.hidden, false);
-      assert.deepEqual(childClasses(ctx.pill), PILL_CHILDREN, 'the shimmer is CSS on the existing label, not a new child');
+      assert.deepEqual(childClasses(ctx.pill), PILL_CHILDREN, 'the thinking ring is CSS on the button itself, not a new child');
       assert.deepEqual(childClasses(ctx.pill.firstElementChild), MARK_CHILDREN, 'the orb was built with the pill, not on lighting');
       ctx.panel.pushServerFrame(done);
       ctx.flush();
