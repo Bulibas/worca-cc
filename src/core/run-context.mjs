@@ -1445,14 +1445,32 @@ export async function assembleRunContext({
 }
 
 /**
+ * Skills registry (design §4.3): the set-skill clause of a run's audit line — "3 set skills in 2
+ * plugins (1 skipped)", or "2 set skills not loaded (sideload-disabled; 1 skipped)" for a blocked
+ * layer. '' without a layer (a run whose target brings no set skill).
+ * @param {{mounted:object[], plugins:object[], skipped:object[], blocked:string|null}|null} layer  run-harness `skillLayer`
+ * @returns {string}
+ */
+export function renderSkillAudit(layer) {
+  if (!layer) return '';
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const n = layer.mounted?.length || 0;
+  const k = layer.skipped?.length || 0;
+  if (layer.blocked) return `${plural(n, 'set skill')} not loaded (${layer.blocked}; ${k} skipped)`;
+  return `${plural(n, 'set skill')} in ${plural(layer.plugins?.length || 0, 'plugin')} (${k} skipped)`;
+}
+
+/**
  * ONE markdown audit line for appendAudit — member / source / mount / server /
  * warning counts, e.g. "Context: 2 members, 7 memory sources inlined (41,208
  * bytes), 5 skills mounted (1 renamed), 3 MCP servers merged (1 renamed), 2
- * warnings." The rename parenthetical is omitted when nothing was renamed.
+ * warnings." The rename parenthetical is omitted when nothing was renamed. With a
+ * skills-registry layer the set-skill clause (renderSkillAudit) closes the line.
  * @param {object} rc  the assembleRunContext() result
+ * @param {object|null} [skills]  run-harness `skillLayer`
  * @returns {string}
  */
-export function renderContextAudit(rc) {
+export function renderContextAudit(rc, skills = null) {
   const count = (v) => (Array.isArray(v) ? v.length : Number(v) || 0);
   const keys = (o) => Object.keys(o || {}).length;
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -1462,6 +1480,6 @@ export function renderContextAudit(rc) {
     `${plural(keys(rc?.bytes?.bySource), 'memory source')} inlined (${fmtNum(rc?.bytes?.total)} bytes), ` +
     `${plural(count(rc?.injectedSkillNames), 'skill')} mounted${ren(keys(rc?.renames?.skills))}, ` +
     `${plural(count(rc?.mcpServerNames), 'MCP server')} merged${ren(keys(rc?.renames?.mcpServers))}, ` +
-    `${plural(count(rc?.warnings), 'warning')}.`
+    `${plural(count(rc?.warnings), 'warning')}${skills ? `, ${renderSkillAudit(skills)}` : ''}.`
   );
 }

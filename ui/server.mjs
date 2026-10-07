@@ -2386,13 +2386,42 @@ app.post('/api/run', startRunHandler);
 // preview route serves New Pipeline, the project MCP tab and the workspace overview.
 // ---------------------------------------------------------------------------
 
-/** `mcpOptOut` (D16): at most 100 '<setId>|<serverId>' entries, de-duplicated. */
+// Skills registry, pipeline side (skills registry design §4.3, §4.5): the same preview and opt-out carry
+// a target's set skills. Namespaced imports (ES imports are hoisted), kept beside their only users so no
+// other region's imports can collide with these names.
+import * as runSkillResolve from '../src/core/skills-registry/resolve.mjs';
+import * as runSkillHost from '../src/core/skills-registry/host.mjs';
+import * as runSkillTexts from '../src/core/skills-registry/texts.mjs';
+import * as runSkillPolicy from '../src/core/policy/effective.mjs';
+
+/** `mcpOptOut` (D16): at most 100 '<setId>|<serverId>' or '<setId>|<skillId>' entries (the membership
+ *  key grammar the skills registry widened), de-duplicated. */
 function parseMcpOptOut(v) {
   if (v == null) return { list: [] };
   if (!Array.isArray(v) || v.length > 100 || !v.every((e) => typeof e === 'string' && MEMBERSHIP_KEY_RE.test(e))) {
-    return { error: 'mcpOptOut must be at most 100 "<setId>|<serverId>" entries' };
+    return { error: 'mcpOptOut must be at most 100 "<setId>|<serverId>" or "<setId>|<skillId>" entries' };
   }
   return { list: [...new Set(v)] };
+}
+
+/** The Team set's skill input of a resolver target (skills §4.2): P3's cachedSkillTeamFor over the policy cache (a
+ *  project's policy, or a workspace's policy home while it is still a member), as `{ home, required: skills.required }`. */
+async function skillTeamFor(target) {
+  const t = await runSkillResolve.cachedSkillTeamFor(target.kind === 'project' ? { projectKey: target.key } : { workspaceId: target.id });
+  return t?.requiredSkills?.length ? { home: t.home, required: t.requiredSkills } : null;
+}
+
+/** The set skills a run on the target would mount (§4.5): the resolver over the run's input. The layer
+ *  is `sideload-disabled` when this host's managed settings forbid --plugin-dir (the CLI's own flag
+ *  support is probed at run start). */
+async function skillRunPreview(target, { optOut = [] } = {}) {
+  const team = await skillTeamFor(target);
+  const result = await runSkillResolve.resolveSkillRegistry({
+    surface: 'pipeline', targets: [target], teams: { [target.kind === 'project' ? target.key : `ws:${target.id}`]: team },
+    optOut, skillCap: runSkillResolve.SKILL_CAP.pipeline,
+  });
+  const blocked = result.mounted.length && runSkillHost.skillHostFacts().sideloadDisabled ? 'sideload-disabled' : null;
+  return { result, team, blocked };
 }
 
 const mcpWorkspaceTarget = (ws) => ({
@@ -2433,9 +2462,11 @@ async function mcpRunPreview(target, { optOut = [], models = [] } = {}) {
  *  the opt-out by exact key (and adds nothing when it fails too). */
 async function knownMcpOptOut(list, target) {
   if (!list.length) return list;
-  let result;
-  try { ({ result } = await mcpResolve(target)); } catch { return list; }
+  let result, skills;
+  try { [{ result }, { result: skills }] = await Promise.all([mcpResolve(target), skillRunPreview(target)]); } catch { return list; }
   const known = new Set([...result.copies, ...result.skipped].map((m) => `${m.setId}|${m.serverId}`));
+  for (const m of skills.mounted) known.add(`${m.setId}|${m.id}`);
+  for (const s of skills.skipped) known.add(`${s.setId}|${s.skillId}`);
   return list.filter((k) => known.has(k));
 }
 
@@ -2452,14 +2483,36 @@ app.post('/api/mcp/preview', async (req, res) => {
     if (!target) return res.status(404).json({ error: 'target not found' });
     const { result, catalog, team } = await mcpRunPreview(target, { optOut: opt.list, models: b.models || [] });
     const why = (sk) => skipReasonText(sk, catalog);
+    // Skills registry §4.5: the set skills beside the servers. A skills fault leaves `skills` null and the
+    // servers' answer intact (the run resolves again at start).
+    const sr = await skillRunPreview(target, { optOut: opt.list }).catch(() => null);
+    const count = (v) => (Array.isArray(v) ? v.length : Number(v) || 0);
+    const skillSets = new Map((sr?.result.sets || []).map((s) => [s.id, s]));
+    // Both halves collect the target's sets with one rule (P2 collectSets; the Team input carries the required skills
+    // too), so the servers' `sets` already list a set that holds only skills.
+    const sets = result.sets.map((s) => ({ ...s, skills: count(skillSets.get(s.id)?.skills), startedSkills: sr?.blocked ? 0 : count(skillSets.get(s.id)?.started) }));
+    const skillWhy = (s) => runSkillTexts.skillSkipReasonText(s);
     res.json({
-      sets: result.sets,
+      sets,
       copies: result.copies,
       skipped: result.skipped.map((sk) => ({ ...sk, message: skipMessage(sk, catalog), why: why(sk) })),
       skippedTools: result.skippedTools,   // §5.6: `tool-name-too-long:<tool>`; the copy still starts
       started: result.copies.length,
       newer: !!result.newer,   // §4.5: a store written by a newer Worca resolves to nothing; say why
-      deviations: mcpDeviations(team ? { 'mcp.required': { value: team.required } } : {}, result, why),
+      deviations: [
+        ...mcpDeviations(team ? { 'mcp.required': { value: team.required } } : {}, result, why),
+        // P5's skillDeviations (none until it lands: the namespace import keeps this module loading without it).
+        ...(sr && typeof runSkillPolicy.skillDeviations === 'function'
+          ? runSkillPolicy.skillDeviations(sr.team ? { 'skills.required': { value: sr.team.required } } : {}, sr.result, skillWhy) : []),
+      ],
+      skills: sr && {
+        mounted: sr.result.mounted.map(({ dir, ...m }) => m),   // never a host path to the browser
+        plugins: sr.result.plugins,
+        skipped: sr.result.skipped.map((s) => ({ ...s, message: runSkillTexts.skillSkipMessage(s), why: skillWhy(s) })),
+        started: sr.blocked ? 0 : sr.result.mounted.length,
+        layer: { blocked: sr.blocked, text: sr.blocked ? runSkillTexts.skillLayerText(sr.blocked) : null },
+        newer: !!sr.result.newer,
+      },
     });
   } catch (err) { res.status(500).json({ error: err?.message || String(err) }); }
 });

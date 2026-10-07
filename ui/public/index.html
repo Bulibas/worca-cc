@@ -414,16 +414,16 @@
                       <small class="hint" id="guardrailsHint">Applies to every agent this run spawns. Permissive = no restrictions (the legacy default).</small>
                     </div>
 
-                    <!-- MCP servers (MCP registry §6.2, D16): the registry copies this run starts, opted out
-                         per membership. app.js#paintMcpRuns fills it from POST /api/mcp/preview; hidden while
-                         the target resolves to no membership. -->
+                    <!-- Sets (MCP registry §6.2, D16; skills registry §6 board 7): the registry copies and the
+                         set skills this run gets, opted out per membership. app.js#paintMcpRuns fills it from
+                         POST /api/mcp/preview; hidden while the target resolves to no membership. -->
                     <div class="field" id="mcpRunsField" hidden>
-                      <span class="label" id="mcpRunsHead">MCP servers</span>
+                      <span class="label" id="mcpRunsHead">Sets</span>
                       <details class="mcp-runs" id="mcpRuns">
                         <summary class="select" id="mcpRunsLabel" aria-labelledby="mcpRunsHead mcpRunsLabel"></summary>
                         <div id="mcpRunsPop"></div>
                       </details>
-                      <small class="hint">Names are before any <code>_w</code> rename, which is decided at run start.</small>
+                      <small class="hint">Server names are before any <code>_w</code> rename, which is decided at run start; skills load as <code>&lt;set&gt;:&lt;skill&gt;</code>.</small>
                     </div>
 
                   </div>

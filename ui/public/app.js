@@ -172,7 +172,7 @@ import {
   renderRequiredStrip, renderSetupChecklist, relTime as tpRelTime,
   renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel, renderMcpStrip, renderMcpConsent,
 } from './team-policy-view.mjs';
-import { mcpRunsLabel, renderMcpRunsPop } from './mcp-run-picker.mjs';
+import { mcpRunsLabel, renderMcpRunsPop, renderRunSkills } from './mcp-run-picker.mjs';
 import { aggregate, toCsv } from '../../src/shared/team-metrics/aggregate.mjs';
 import { buildWorkItems, prLookupFor } from '../../src/shared/team-metrics/timeline.mjs';
 import { renderTimeline, renderTimelinePopover, timelineWindow, shiftAnchor, TL_MODES, TL_ZOOMS } from './team-metrics-timeline.mjs';
@@ -2108,6 +2108,8 @@ function onState(r, msg) {
   for (const k of ['active', 'endReached', 'result', 'warnings', 'wireDeliveries', 'tokens', 'gate']) {
     if (msg[k] !== undefined) r[k] = msg[k];
   }
+  // Skills registry §6 board 9: the run's set skills (run-harness state.skillMount) for its Overview.
+  if (msg.skillMount !== undefined) r.skillMount = msg.skillMount;
   // Every state event is a new decor generation (runDecorFor memoises on it).
   r._decorSeq = (r._decorSeq || 0) + 1;
   if (msg.title && msg.title !== r.title) r.title = msg.title;
@@ -17806,11 +17808,17 @@ async function paintMcpRuns() {
   const valid = !!data && Array.isArray(data.sets) && Array.isArray(data.copies) && Array.isArray(data.skipped);
   // An answer prunes the opt-out to the target's memberships; no answer (no target, defrag, a
   // failed fetch) keeps it: the server drops whatever the run's target does not know.
+  // Skills registry §4.5: the target's set skills are memberships too ('<setId>|<skillId>'); a preview
+  // without a usable `skills` block (an older server, a skills fault) shows the servers alone.
+  const skills = valid && data.skills && Array.isArray(data.skills.mounted) && Array.isArray(data.skills.skipped) ? data.skills : null;
   if (valid) {
     const known = new Set([...data.copies, ...data.skipped].map((m) => `${m.setId}|${m.serverId}`));
+    for (const s of skills ? skills.mounted : []) known.add(`${s.setId}|${s.id}`);
+    for (const s of skills ? skills.skipped : []) known.add(`${s.setId}|${s.skillId}`);
     state.mcpOptOut = state.mcpOptOut.filter((k) => known.has(k));
   }
-  state.mcpPreview = valid && data.copies.length + data.skipped.length > 0 ? { ...data, workspace: kind === 'workspace' } : null;
+  const rows = valid ? data.copies.length + data.skipped.length + (skills ? skills.mounted.length + skills.skipped.length : 0) : 0;
+  state.mcpPreview = rows > 0 ? { ...data, skills, workspace: kind === 'workspace' } : null;
   renderMcpRuns();
 }
 function renderMcpRuns() {
@@ -23000,6 +23008,9 @@ function buildHdOverview(sec, record, data) {
   // not, so without it the card would read `released` for the life of the screen.)
   wrap.appendChild(grid);
   wrap.appendChild(tagLevel(hdWorktreeRow(retained ? 'retained' : 'released', wt.worktreeDir || ''), 'expert'));
+  // Skills registry §6 board 9: the set skills the run got (run.json.skillMount, in the detail payload).
+  const skillsCard = renderRunSkills(data.skillMount, { doc: document });
+  if (skillsCard) wrap.appendChild(tagLevel(skillsCard, 'advanced'));
   const filesBox = hdFilesChangedBox(sec, results);
   if (filesBox) wrap.appendChild(filesBox);
   // Agent memory (§6): what this run wrote into worca's memory, per execution.
@@ -24031,6 +24042,13 @@ function rdOvTask(r) {
   return task;
 }
 
+/** Skills registry §6 board 9: a run's set-skill card into `host` (hidden without a record). */
+function paintRunSkills(host, mount) {
+  const card = renderRunSkills(mount, { doc: document });
+  host.hidden = !card;
+  host.replaceChildren(...(card ? [card] : []));
+}
+
 function buildRdOverview(sec, ctx) {
   sec.innerHTML = '';
   const wrap = document.createElement('div');
@@ -24045,14 +24063,16 @@ function buildRdOverview(sec, ctx) {
   // Actions strip: terminal runs only, filled once the run has its pipeline id.
   const strip = document.createElement('div'); strip.className = 'act-strip'; tagLevel(strip, 'advanced');
   strip.hidden = true;
-  wrap.append(banner, strip, grid, rdOvTask(ctx.run));
+  const skills = tagLevel(document.createElement('div'), 'advanced');   // the set skills it got (§6 board 9)
+  skills.className = 'hd-ov-skills-host';
+  wrap.append(banner, strip, grid, skills, rdOvTask(ctx.run));
   sec.appendChild(wrap);
   const paintStrip = (run) => {
     const on = isTerminalStatus(run.status) && !!run.pipelineId;
     strip.hidden = !on;
     if (on && strip.dataset.runId !== run.pipelineId) paintActionsStrip(strip, run.pipelineId, rdScopeQuery(run));
   };
-  const paint = (c) => { rdOvStateBanner(banner, c.run); paintStrip(c.run); rdOvStats(grid, c.run); };
+  const paint = (c) => { rdOvStateBanner(banner, c.run); paintStrip(c.run); rdOvStats(grid, c.run); paintRunSkills(skills, c.run.skillMount); };
   paint(ctx);
   sec.__update = paint;
 }
