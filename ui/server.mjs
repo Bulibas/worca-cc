@@ -170,7 +170,7 @@ import { buildLauncherCommand, launchAndWatch, installedLaunchers, launcherExamp
 import { assertNoRawCommand, normalizeStacks, memberAliases, SETUP_ACTION_ID, ActionConfigError } from '../src/core/actions/model.mjs';
 import { parsePortRange } from '../src/core/actions/ports.mjs';
 import { checkoutRun, discardCheckout, membersOfRow, checkoutPathFor, setSetupState, markInterruptedSetups,
-  enforceCheckoutCap, releaseKeptCheckouts } from '../src/core/checkout.mjs';
+  enforceCheckoutCap, releaseKeptCheckouts, updateBranchRecords } from '../src/core/checkout.mjs';
 import { createAskToolServer } from '../src/core/ask/mcp-stdio.mjs';
 import { webMcpEnv as askWebMcpEnv } from '../src/core/ask/spawn.mjs';
 import { brokerEnabled, brokerInfo, personSlots, brokerUsageSummary, foldUsageByPerson } from '../src/core/broker-client.mjs';
@@ -260,7 +260,7 @@ import {
   projectSyncBlock, workspaceSyncBlocks, effectiveSyncSettings, projectSyncEvents, startProjectSyncBackground,
 } from '../src/core/project-sync.mjs';
 import { mapWithCap, fanoutCap } from '../src/core/fanout.mjs';
-import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, listRemoteBranches, sameRepo, readPrBody, editPrBody, branchPushedTo,
+import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, listRemoteBranches, sameRepo, readPrBody, editPrBody, branchPushedTo, branchTips,
   prProviderFor, prHostsAvailable, anyPrHost, issueClosingLine, parseGithubIssueUrl } from '../src/core/git-info.mjs';
 import { prNumberFromUrl } from '../src/core/forge.mjs';
 import { forkRefusal, workItemIdFromSourceRef } from '../src/core/pr/azure.mjs';
@@ -6346,6 +6346,44 @@ function defaultPrRemotes(remotes, remembered) {
   return { pushRemote, baseRemote };
 }
 
+// The push and base remotes of POST /api/pr and Publish branch. A named remote must exist in
+// the repo's real remote list (never trusted from the body); unnamed ones take the dialog's
+// defaults. With no usable remote list (no remotes, unparseable URLs) the legacy argv
+// applies: push `origin`, no --repo, bare head. A git failure is only fatal when the body
+// actually names a remote (otherwise legacy argv, as before).
+// -> { remotes, pushRemote, baseRemote, pushR, baseR } | { status, error }
+async function pickPrRemotes(body, repoDir) {
+  const named = (v) => !(v === undefined || v === null || v === '');
+  const rl = await listRemotes(repoDir);
+  if (!rl.ok && (named(body.pushRemote) || named(body.baseRemote))) {
+    return { status: 500, error: `git remote failed: ${rl.error}` };
+  }
+  const remotes = rl.ok ? rl.remotes : [];
+  const byName = new Map(remotes.map((r) => [r.name, r]));
+  const pick = (field, label) => {
+    const v = body[field];
+    if (!named(v)) return { name: null };
+    if (typeof v !== 'string' || !byName.has(v.trim())) {
+      return { error: `unknown ${label} remote: ${String(v).slice(0, 80)}` };
+    }
+    return { name: v.trim() };
+  };
+  const pushPick = pick('pushRemote', 'push');
+  if (pushPick.error) return { status: 400, error: pushPick.error };
+  const basePick = pick('baseRemote', 'base');
+  if (basePick.error) return { status: 400, error: basePick.error };
+  const defaults = defaultPrRemotes(remotes, readPrRemotePrefs(repoDir));
+  const pushRemote = pushPick.name || defaults.pushRemote || 'origin';
+  const baseRemote = basePick.name || defaults.baseRemote || 'origin';
+  return { remotes, pushRemote, baseRemote, pushR: byName.get(pushRemote) || null, baseR: byName.get(baseRemote) || null };
+}
+
+// Azure DevOps cannot open a PR between forks: the refusal text when the branch would be
+// pushed to another repo than an Azure base remote, else null. Checked BEFORE anything is pushed.
+function azureForkRefusal(pushR, baseR) {
+  return prProviderFor(baseR).forge === 'azure' && pushR && !sameRepo(pushR, baseR) ? forkRefusal(baseR) : null;
+}
+
 // A PR route's store key: a project key (PROJECT_KEY_RE, already imported from
 // store.mjs — the same literal the route inlined), or a workspace composite
 // `workspaces/<wks-…>` (the key the History UI carries for workspace rows;
@@ -6547,34 +6585,9 @@ app.post('/api/pr', async (req, res) => {
     base = b;
   }
 
-  // Remote selection. A named remote must exist; unnamed ones take the dialog's
-  // defaults. With no usable remote list (no remotes, unparseable URLs) the legacy
-  // argv applies: push `origin`, no --repo, bare head. A git failure is only fatal
-  // when the body actually names a remote (otherwise legacy argv, as before).
-  const named = (v) => !(v === undefined || v === null || v === '');
-  const rl = await listRemotes(repoDir);
-  if (!rl.ok && (named(body.pushRemote) || named(body.baseRemote))) {
-    return res.status(500).json({ error: `git remote failed: ${rl.error}` });
-  }
-  const remotes = rl.ok ? rl.remotes : [];
-  const byName = new Map(remotes.map((r) => [r.name, r]));
-  const pick = (field, label) => {
-    const v = body[field];
-    if (!named(v)) return { name: null };
-    if (typeof v !== 'string' || !byName.has(v.trim())) {
-      return { error: `unknown ${label} remote: ${String(v).slice(0, 80)}` };
-    }
-    return { name: v.trim() };
-  };
-  const pushPick = pick('pushRemote', 'push');
-  if (pushPick.error) return badRequest(res, pushPick.error);
-  const basePick = pick('baseRemote', 'base');
-  if (basePick.error) return badRequest(res, basePick.error);
-  const defaults = defaultPrRemotes(remotes, readPrRemotePrefs(repoDir));
-  const pushRemote = pushPick.name || defaults.pushRemote || 'origin';
-  const baseRemote = basePick.name || defaults.baseRemote || 'origin';
-  const pushR = byName.get(pushRemote) || null;
-  const baseR = byName.get(baseRemote) || null;
+  const picked = await pickPrRemotes(body, repoDir);
+  if (picked.error) return res.status(picked.status).json({ error: picked.error });
+  const { remotes, pushRemote, baseRemote, pushR, baseR } = picked;
   // Always target the chosen base repo explicitly (gh's default-repo guess prefers
   // a remote named upstream over origin); use the owner:branch head only when the
   // branch lives in a different repository than the PR (gh matches by head label).
@@ -6587,9 +6600,8 @@ app.post('/api/pr', async (req, res) => {
   const provider = prProviderFor(baseR);
   const avail = await provider.available();
   if (!avail.ok) return res.status(409).json({ error: avail.reason, forge: provider.forge });
-  if (provider.forge === 'azure' && pushR && !sameRepo(pushR, baseR)) {
-    return res.status(422).json({ error: forkRefusal(baseR), kind: 'unsupported' });
-  }
+  const refusal = azureForkRefusal(pushR, baseR);
+  if (refusal) return res.status(422).json({ error: refusal, kind: 'unsupported' });
 
   // Push (idempotent) -> create PR -> read mergeability. All args are passed as
   // an argv array (no shell), so branch/remote/source names cannot inject.
@@ -6638,6 +6650,104 @@ app.post('/api/pr', async (req, res) => {
   const mergeable = await prMergeable({ projectDir: repoDir, head: feature, repo, headOwner, prUrl: pr.url || null, baseRemote: baseR });
   // Single-project response shape is pinned by pr-api.test; the workspace arm echoes its member.
   res.json({ ok: true, url: pr.url, mergeable, existed: !!pr.existed, draft: newDraft, ...(memberKey ? { memberKey } : {}) });
+});
+
+// ---------------------------------------------------------------------------
+// Publish branch (#618): put a finished run's feature branch on a remote WITHOUT opening a
+// PR, so a teammate, CI or another machine can test it first. Same pipeline resolution
+// and remote checks as POST /api/pr (pickPrRemotes, azureForkRefusal); no PR host needed.
+// The push is recorded on the run's branch record (`published: { remote, sha, at, by }`,
+// beside `checkout`) plus an audit line; Ship it afterwards opens a PR for that branch.
+// ---------------------------------------------------------------------------
+
+// The repos a run's branches live in, with the recorded publish: one row for a project run
+// (memberKey/name null), one per member for a workspace run.
+function publishMembers(state) {
+  if (state.target !== 'workspace') {
+    return [{ memberKey: null, name: null, repoDir: state.projectDir || null,
+      feature: state.branch?.feature || null, published: state.branch?.published || null }];
+  }
+  return prStateMembers(state).map((m) => ({ memberKey: m.memberKey, name: m.name, repoDir: m.projectDir,
+    feature: m.feature, published: state.branches?.[m.memberKey]?.published || null }));
+}
+
+// One member's published state from refs only (no network): the recorded remote, else the one
+// branchPushedTo finds (a branch Ship it pushed). 'moved' = local commits since (Push changes).
+// -> 'none' (no branch here) | 'unpublished' | 'published' | 'moved'
+async function publishStatus(m) {
+  if (!m.repoDir || !m.feature) return { remote: null, state: 'none' };
+  const recorded = m.published?.remote || null;
+  let tips = recorded ? await branchTips(m.repoDir, m.feature, recorded) : null;
+  let remote = tips?.remote ? recorded : null;
+  if (!remote) {
+    remote = (await branchPushedTo(m.repoDir, m.feature))?.remote || null;
+    tips = await branchTips(m.repoDir, m.feature, remote);
+  }
+  if (remote && tips?.remote) return { remote, state: tips.local && tips.local !== tips.remote ? 'moved' : 'published' };
+  return { remote: null, state: tips?.local ? 'unpublished' : 'none' };
+}
+
+// GET /api/runs/:id/publish?projectKey=|projectDir= -> { ok, members:[{ memberKey, name, branch,
+// remote, state, published }] } (memberKey/name null for a project run; published = the recorded push or null).
+app.get('/api/runs/:id/publish', async (req, res) => {
+  const resolved = await resolvePrPipeline({ ...(req.query || {}), id: req.params.id }, res);
+  if (!resolved) return;
+  try {
+    const members = await Promise.all(publishMembers(resolved.state).map(async (m) => ({
+      memberKey: m.memberKey, name: m.name, branch: m.feature, ...(await publishStatus(m)), published: m.published,
+    })));
+    res.json({ ok: true, members });
+  } catch (e) { res.status(500).json({ error: e?.message || String(e) }); }
+});
+
+// POST /api/runs/:id/publish  body: { projectKey | projectDir, memberKey?, pushRemote?, baseRemote? }
+// -> { ok, remote, branch, sha, upToDate[, memberKey] }. `git push -u` (never forced): a branch
+// already published fast-forwards, or is a no-op (upToDate, no audit line). A workspace run
+// REQUIRES memberKey (one member per call, as POST /api/pr). 409 while the run is in progress
+// or when the branch is no longer in the repo; 400/422/500 for remotes as POST /api/pr.
+app.post('/api/runs/:id/publish', async (req, res) => {
+  const body = req.body || {};
+  const resolved = await resolvePrPipeline({ ...body, id: req.params.id }, res);
+  if (!resolved) return;
+  const { state } = resolved;
+  const runId = state.id || resolved.id;
+  if (!['done', 'stopped', 'error'].includes(state.status) || isLiveRun(runId) || isFinishingRun(runId)) {
+    return res.status(409).json({ error: 'Publish is available once the run has finished.' });
+  }
+  const target = prTargetFor(state, body.memberKey);
+  if (target.error) return badRequest(res, target.error);
+  const { repoDir, feature, memberKey } = target;
+  if (!repoDir || !feature) return badRequest(res, 'pipeline has no branch to publish');
+
+  const picked = await pickPrRemotes(body, repoDir);
+  if (picked.error) return res.status(picked.status).json({ error: picked.error });
+  const { remotes, pushRemote, baseRemote, pushR, baseR } = picked;
+  const refusal = azureForkRefusal(pushR, baseR);
+  if (refusal) return res.status(422).json({ error: refusal, kind: 'unsupported' });
+
+  const tips = await branchTips(repoDir, feature, pushRemote);
+  if (!tips?.local) return res.status(409).json({ error: `The branch \`${feature}\` is no longer in the repository.` });
+  const pushed = await pushBranch(repoDir, feature, pushRemote);
+  if (!pushed.ok) return res.status(500).json({ error: `git push failed: ${pushed.stderr}` });
+
+  const by = actorOf(req);
+  try {
+    updateBranchRecords(runId, [memberKey || 'project'], (br) => {
+      br.published = { remote: pushRemote, sha: tips.local, at: new Date().toISOString(), by };
+    });
+  } catch { /* best-effort: the remote-tracking ref still shows the branch as published */ }
+  const upToDate = tips.remote === tips.local;
+  if (!upToDate) {
+    const where = memberKey ? ` in \`${target.memberName}\`` : '';
+    appendAuditById(runId, tips.remote
+      ? `Pushed changes to \`${pushRemote}/${feature}\`${where}${byActor(by)}.`
+      : `Branch \`${feature}\` published to \`${pushRemote}\`${where}${byActor(by)}.`, { actor: by });
+  }
+  if (remotes.length) {
+    try { await setPrRemotePrefs(repoDir, { pushRemote, baseRemote }); } catch { /* best-effort */ }
+  }
+  emitChanged('pipelines-changed', 'updated');
+  res.json({ ok: true, remote: pushRemote, branch: feature, sha: tips.local, upToDate, ...(memberKey ? { memberKey } : {}) });
 });
 
 // ---------------------------------------------------------------------------

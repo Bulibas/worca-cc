@@ -20938,6 +20938,164 @@ function hdWsRepoItem(m) {
   return li;
 }
 
+// --- Publish branch (#618): push a finished run's branch without opening a PR ----
+// GET /api/runs/:id/publish answers each repo's state from refs only: 'none' (no branch here),
+// 'unpublished', 'published' or 'moved' (local commits since: the action reads Push changes).
+const PUBLISH_FINISHED = new Set(['done', 'stopped', 'error']);
+let publishPaintGen = 0;
+
+const publishScope = (record) => (record.projectKey ? { projectKey: record.projectKey } : { projectDir: record.projectDir || '' });
+const publishTarget = (m) => `${m.remote}/${m.branch}`;
+
+async function paintHdPublish(screen, record, data) {
+  const btn = screen.querySelector('.hd-publish');
+  const note = screen.querySelector('.hd-published');
+  if (!btn || !note) return;
+  const gen = ++publishPaintGen;
+  btn.hidden = true;
+  note.hidden = true;
+  const status = String((data && data.state && data.state.status) || record.status || '').toLowerCase();
+  if (!PUBLISH_FINISHED.has(status) || !record.id) return;
+  let members;
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(record.id)}/publish?${new URLSearchParams(publishScope(record))}`);
+    const d = await safeJson(res);
+    if (!res.ok || !d || !Array.isArray(d.members)) return;
+    members = d.members.filter((m) => m && m.branch && m.state && m.state !== 'none');
+  } catch { return; }
+  if (gen !== publishPaintGen || !members.length) return;
+  const pub = members.filter((m) => m.remote && m.state !== 'unpublished');
+  if (pub.length) {
+    note.textContent = record.target === 'workspace'
+      ? `Published: ${pub.map((m) => `${m.name || m.memberKey} → ${publishTarget(m)}`).join(', ')}`
+      : `Published to ${publishTarget(pub[0])}`;
+    note.hidden = false;
+  }
+  const moved = members.some((m) => m.state === 'moved');
+  if (!moved && !members.some((m) => m.state === 'unpublished')) return;
+  btn.textContent = moved ? 'Push changes' : 'Publish branch';
+  btn.hidden = false;
+  btn.onclick = () => openPublishModal(screen, record, data, members);   // property: repaints re-bind it
+}
+
+function openPublishModal(screen, record, data, members) {
+  const modal = document.getElementById('publish-modal');
+  if (!modal || !modal.classList.contains('hidden')) return;
+  const q = (sel) => modal.querySelector(sel);
+  const card = q('.publish-card');
+  const okBtn = q('.publish-ok');
+  const list = q('.publish-repos');
+  const ws = record.target === 'workspace';
+  list.replaceChildren();
+  cardAlert(card, null);
+  const rows = members.map((m) => {
+    const el = document.createElement('div');
+    el.className = 'publish-repo';
+    if (m.memberKey) el.dataset.memberKey = m.memberKey;
+    const head = document.createElement('label');
+    head.className = 'publish-repo-head';
+    const pick = document.createElement('input');
+    pick.type = 'checkbox';
+    pick.className = 'publish-pick';
+    pick.checked = m.state !== 'published';
+    pick.hidden = !ws;                                    // a project run has one branch: nothing to tick
+    pick.setAttribute('aria-label', `Publish ${m.branch}`);
+    const name = document.createElement('b');
+    name.textContent = ws ? (m.name || m.memberKey) : '';
+    const branch = document.createElement('span');
+    branch.className = 'mono';
+    branch.textContent = m.branch;
+    head.append(pick, ...(ws ? [name] : []), branch);
+    const wrap = document.createElement('label');
+    wrap.className = 'publish-remote-wrap';
+    wrap.hidden = true;                                   // until the remotes load; else the server's default
+    const sel = document.createElement('select');
+    sel.className = 'publish-remote';
+    wrap.append('Push to', sel);
+    const statusEl = document.createElement('div');
+    statusEl.className = 'publish-status hint';
+    statusEl.hidden = true;
+    el.append(head, wrap, statusEl);
+    list.appendChild(el);
+    return { m, pick, wrap, sel, statusEl, done: false };
+  });
+  const picked = () => rows.filter((r) => r.pick.checked && !r.done);
+  const okLabel = () => {
+    const n = picked().length;
+    okBtn.disabled = n === 0;
+    const moved = picked().some((r) => r.m.state === 'moved');
+    okBtn.textContent = n > 1 ? `${moved ? 'Push' : 'Publish'} ${n} branches` : (moved ? 'Push changes' : 'Publish');
+  };
+  for (const r of rows) r.pick.onchange = okLabel;
+  okLabel();
+  modal.classList.remove('hidden');
+  okBtn.focus();
+
+  let closed = false;
+  const done = () => {
+    if (closed) return;
+    closed = true;
+    modal.classList.add('hidden');
+    okBtn.removeEventListener('click', onOk);
+    q('.publish-cancel').removeEventListener('click', done);
+    modal.removeEventListener('click', onBackdrop);
+    document.removeEventListener('keydown', onKey);
+  };
+  const onBackdrop = (e) => { if (e.target === modal) done(); };
+  const onKey = (e) => { if (e.key === 'Escape') done(); };
+
+  // Sequential per repo, like the workspace Ship-it batch: failed rows stay ticked for a retry.
+  const onOk = async () => {
+    const batch = picked();
+    if (!batch.length) return;
+    okBtn.disabled = true;
+    cardAlert(card, null);
+    let failed = 0;
+    for (const r of batch) {
+      if (closed) break;
+      r.statusEl.hidden = false;
+      r.statusEl.textContent = 'Pushing…';
+      const body = { ...publishScope(record), ...(record.projectDir ? { projectDir: record.projectDir } : {}),
+        ...(r.m.memberKey ? { memberKey: r.m.memberKey } : {}), ...(r.wrap.hidden ? {} : { pushRemote: r.sel.value }) };
+      try {
+        const res = await fetch(`/api/runs/${encodeURIComponent(record.id)}/publish`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const dd = await safeJson(res);
+        if (!res.ok) throw new Error((dd && dd.error) || `HTTP ${res.status}`);
+        r.done = true;
+        r.pick.checked = false;
+        r.statusEl.textContent = dd.upToDate ? `Already up to date on ${dd.remote}.` : `Pushed to ${dd.remote}/${dd.branch}.`;
+      } catch (e) {
+        failed += 1;
+        r.statusEl.textContent = `Could not push: ${e.message}`;
+      }
+    }
+    paintHdPublish(screen, record, data);
+    if (closed) return;
+    if (!failed) { done(); return; }
+    cardAlert(card, { title: 'Not published', detail: `${failed} of ${batch.length} branch${batch.length === 1 ? '' : 'es'} could not be pushed. Fix the cause and retry.` });
+    okLabel();
+  };
+  okBtn.addEventListener('click', onOk);
+  q('.publish-cancel').addEventListener('click', done);
+  modal.addEventListener('click', onBackdrop);
+  document.addEventListener('keydown', onKey);
+
+  for (const r of rows) {
+    const qs = new URLSearchParams({ id: record.id, ...publishScope(record), ...(r.m.memberKey ? { memberKey: r.m.memberKey } : {}) });
+    fetch(`/api/pr/remotes?${qs}`).then(async (res) => {
+      const d = await safeJson(res);
+      const remotes = res.ok && d && Array.isArray(d.remotes) ? d.remotes.filter((x) => x && x.name) : [];
+      if (closed || !remotes.length) return;
+      // Push changes goes back to the remote the branch is on; a first publish takes the Ship-it default.
+      const chosen = r.m.remote && remotes.some((x) => x.name === r.m.remote) ? r.m.remote : (d.defaults || {}).pushRemote;
+      fillRemoteSelect(r.sel, remotes, chosen);
+      r.wrap.hidden = false;
+    }).catch(() => { /* remotes unavailable: the POST omits pushRemote (server default) */ });
+  }
+}
+
 // --- detail header: meta line, branch copy, Resume, Archive, banners --------
 
 // "8/17/2026, 8:54:42 PM" -> { day, clock } (locale-driven; no comma -> clock '').
@@ -21644,6 +21802,7 @@ function setupHdActions(screen, record, data) {
 
   paintHdPr(screen, record, data);
   paintHdAfter(screen, record, data);
+  paintHdPublish(screen, record, data);
 }
 
 // Re-run only the IDEMPOTENT painters after the open detail's real list row

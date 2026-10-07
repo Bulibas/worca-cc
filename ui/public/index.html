@@ -814,6 +814,9 @@
                   <span class="auto-badge" hidden></span>
                   <span class="hist-merge" hidden data-min-level="expert"></span>
                   <button type="button" class="hd-pr" hidden data-min-level="advanced">Create PR</button>
+                  <!-- Publish branch (#618): push a finished run's branch without a PR. Painted by paintHdPublish. -->
+                  <button type="button" class="hd-publish btn-ghost" hidden data-min-level="advanced">Publish branch</button>
+                  <span class="hd-published hint mono" hidden data-min-level="advanced"></span>
                   <span class="act-pill-slot"></span>
                   <a class="hd-pr-link" hidden data-min-level="advanced" target="_blank" rel="noopener"></a>
                 </div>
@@ -2519,6 +2522,21 @@
         <div class="shipit-actions" data-card-actions>
           <button type="button" class="shipit-cancel btn-ghost">Cancel</button>
           <button type="button" class="shipit-ok">Open pull request</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Publish branch modal (History detail, #618) ===== -->
+    <!-- One row per repo whose branch is here (a workspace run: per member, each with a tick);
+         the push remote is the Ship-it dialog's default (GET /api/pr/remotes). No PR opens. -->
+    <div id="publish-modal" class="viewer-modal hidden" role="dialog" aria-modal="true" aria-label="Publish branch">
+      <div class="card publish-card">
+        <h2>Publish branch</h2>
+        <p class="publish-sub hint">Pushes the branch so others can pull and test it. No pull request is opened.</p>
+        <div class="publish-repos"></div>
+        <div class="publish-actions" data-card-actions>
+          <button type="button" class="publish-cancel btn-ghost">Cancel</button>
+          <button type="button" class="publish-ok">Publish</button>
         </div>
       </div>
     </div>

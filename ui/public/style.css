@@ -4101,6 +4101,20 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .shipit-skipped{margin:0;}
 @media (max-width:520px){.shipit-remotes,.shipit-repo-remotes{grid-template-columns:1fr;}}
 
+/* Publish branch (#618): the header's outline pill + "Published to …" note, and its dialog
+   (one row per repo: tick for a workspace member, name, branch, push remote, status). */
+.hd-publish{padding:8px 16px;border:1.5px solid var(--ink);border-radius:999px;
+  font:600 12.5px var(--sans);cursor:pointer;flex:0 0 auto;}
+.hd-publish[hidden],.hd-published[hidden]{display:none;}
+.hd-published{flex:0 1 auto;margin:0;font-size:12px;color:var(--ink-3);word-break:break-all;}
+#publish-modal .card{max-width:520px;}
+.publish-repos{display:grid;gap:10px;margin-top:14px;max-height:50vh;overflow:auto;text-align:left;}
+.publish-repo{display:grid;gap:6px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;}
+.publish-repo-head{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12.5px;}
+.publish-pick[hidden],.publish-remote-wrap[hidden],.publish-status[hidden]{display:none;}
+.publish-remote-wrap{display:flex;align-items:center;gap:8px;font-size:12px;}
+.publish-remote{flex:1 1 auto;}
+
 /* The PR description: label, Write / Preview tabs and Generate with AI on one row,
    the textarea (or its rendered preview) under it. Left-aligned inside the centered
    card like the remotes. `.btn` sets display:inline-flex and `.hint` display:block,
