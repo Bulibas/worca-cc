@@ -1167,9 +1167,9 @@ const WF_TOOL = 'mcp__worca__propose_workflow';
 const wfStart = (onEvent, id, input) => push(onEvent, { type: 'assistant', parent_tool_use_id: null, message: { id: 'msg_1', content: [{ type: 'tool_use', id, name: WF_TOOL, input }] } });
 const wfResult = (onEvent, id, text, isError = false) => push(onEvent, { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: id, content: text, ...(isError ? { is_error: true } : {}) }] } });
 const drain = async () => { for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r)); };
-const BUILDING_KEYS = ['mode', 'name', 'note', 'projectKey', 'projectName', 'task', 'thenRun', 'trace', 'type'];
-const PROPOSED_KEYS = ['costUsd', 'fingerprint', 'ignoredProjectOverrides', 'manifest', 'match', 'mode', 'models', 'name', 'nodes', 'note', 'order',
-  'projectKey', 'projectName', 'reasoning', 'round', 'shape', 'signals', 'size', 'summary', 'taskKind', 'thenRun', 'type', 'warnings'];
+const BUILDING_KEYS = ['mode', 'name', 'note', 'projectKey', 'projectName', 'task', 'thenRun', 'trace', 'type', 'workspaceId', 'workspaceName'];
+const PROPOSED_KEYS = ['costUsd', 'fingerprint', 'ignoredProjectOverrides', 'manifest', 'match', 'members', 'mode', 'models', 'name', 'nodes', 'note', 'order',
+  'projectKey', 'projectName', 'reasoning', 'round', 'shape', 'signals', 'size', 'summary', 'target', 'taskKind', 'thenRun', 'type', 'warnings', 'workspaceId', 'workspaceName'];
 
 test('workflow card: building at START, proposed at RESULT (cost booked); a tool error, unassemblable shape, {ok:false} or a mid-build end fails it with the reason', async () => {
   await checkRows([
@@ -1212,6 +1212,55 @@ test('workflow card: building at START, proposed at RESULT (cost booked); a tool
       const done = frames.find((f) => f.type === 'ask-done');
       assert.equal(done.costUsd, 0.07, 'RESULT() bills 0.05 (test/ask-turn.test.mjs:20) + the classifier\'s 0.02 ride the turn\'s four sinks (PD2)');
       assert.equal(final.costUsd, 0.07);
+      assert.equal(card.card.workspaceId, null); assert.equal(card.card.workspaceName, null);
+    } },
+    { name: 'workflow card: a workspace-pinned chat with no explicit target builds a workspace card; the workspace result revalidates with workspaceId and names the workspace', run: async () => {
+      const s = seed();
+      let midBlocks = null; let revalArgs = null;
+      const { turn } = makeTurn(s, { pinnedScope: { workspaceId: 'ws_00000001' } }, {
+        revalidateWorkflow: async (o) => { revalArgs = o; return { proposal: { ...proposalFor(), target: 'workspace', members: [] }, shape: o.shape, summary: 's', workspace: { id: 'ws_00000001', name: 'Fleet' } }; },
+        runClaudeImpl: async (opts) => {
+          wfStart(opts.onEvent, 'toolu_ws', { task: 'Add a settings page' });
+          await drain();
+          midBlocks = getMessage(s.asst.id).blocks;
+          wfResult(opts.onEvent, 'toolu_ws', JSON.stringify({ ok: true, mode: 'task', projectKey: null, workspaceId: 'ws_00000001', workspaceName: null, projectName: 'Stray',
+            summary: 's', shape: { name: 'N', stages: [] }, costUsd: 0, fingerprint: 'workspace: Fleet' }));
+          await drain();
+          push(opts.onEvent, RESULT());
+          return { text: '', exitCode: 0 };
+        },
+      });
+      await turn.run();
+      const building = (midBlocks || []).find((b) => b.kind === 'card');
+      assert.equal(building.card.projectKey, null, 'a pinned workspace is the default target');
+      assert.equal(building.card.workspaceId, 'ws_00000001');
+      assert.equal(building.card.workspaceName, null);
+      assert.equal(revalArgs.workspaceId, 'ws_00000001', 'revalidate gets the workspace');
+      const card = getMessage(s.asst.id).blocks.find((b) => b.kind === 'card');
+      assert.equal(card.state, 'proposed');
+      assert.equal(card.card.workspaceId, 'ws_00000001');
+      assert.equal(card.card.workspaceName, 'Fleet', 'the parent\'s lookup names the workspace when the child returns null');
+      assert.equal(card.card.projectName, null, 'a workspace card carries no project name');
+      assert.equal(card.card.projectKey, null);
+      assert.equal(card.card.target, 'workspace');
+    } },
+    { name: 'workflow card: an explicit projectKey wins over a workspace pin', run: async () => {
+      const s = seed();
+      let midBlocks = null;
+      const { turn } = makeTurn(s, { pinnedScope: { workspaceId: 'ws_00000001' } }, {
+        revalidateWorkflow: async (o) => ({ proposal: proposalFor(), shape: o.shape, summary: 's', project: { key: 'demo-00000001', name: 'Demo' } }),
+        runClaudeImpl: async (opts) => {
+          wfStart(opts.onEvent, 'toolu_p', { task: 'Add a settings page', projectKey: 'demo-00000001' });
+          await drain();
+          midBlocks = getMessage(s.asst.id).blocks;
+          push(opts.onEvent, RESULT());
+          return { text: '', exitCode: 0 };
+        },
+      });
+      await turn.run();
+      const building = (midBlocks || []).find((b) => b.kind === 'card');
+      assert.equal(building.card.projectKey, 'demo-00000001');
+      assert.equal(building.card.workspaceId, null);
     } },
     { name: 'workflow card: a tool error, an unassemblable shape or an {ok:false} classifier result flips the card to failed with the reason (the failed classifier\'s spend is still booked); a turn that ends mid-build fails it', run: async () => {
       const s = seed();
@@ -1662,4 +1711,70 @@ test('MCP §5.5.3: the persisted answer is redacted whole with the turn\'s regis
   const text = getMessage(s.asst.id).text;
   assert.ok(!text.includes('plainvalue9f3k2x7q'), 'the runner redacts per event; the persisted text is redacted whole here');
   assert.match(text, /\[redacted\]/);
+});
+
+// ── Agent mode (#574) ─────────────────────────────────────────────────────────────────────────────
+test('agent mode: the bridge URL rides the mcp json, the token only spawnEnv; disposed when the turn ends', async () => {
+  const s = seed();
+  let raw = null; let spawnEnv = null; let note = null; const asked = []; let disposed = 0;
+  const { turn } = makeTurn(s, { agentMode: true }, {
+    commandBridge: (o) => { asked.push(o); return { url: 'http://127.0.0.1:4317/api/ask/commands', token: 'TOKEN-574-xyz', dispose: () => { disposed += 1; } }; },
+    runClaudeImpl: async (opts) => {
+      raw = readFileSync(opts.mcpConfigPath, 'utf8');
+      spawnEnv = opts.spawnEnv; note = opts.appendSubagentSystemPrompt;
+      throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+    },
+  });
+  await turn.run();
+  assert.deepEqual(asked, [{ threadId: s.thread.id }]);
+  assert.equal(JSON.parse(JSON.parse(raw).mcpServers.worca.env.WORCA_ASK_COMMANDS).url, 'http://127.0.0.1:4317/api/ask/commands');
+  assert.ok(!raw.includes('TOKEN-574-xyz'), 'the token never lands on disk');
+  assert.equal(spawnEnv.ASK_COMMAND_TOKEN, 'TOKEN-574-xyz');
+  assert.match(note, /never call run_command or stop_command/);
+  assert.equal(disposed, 1);
+});
+
+test('agent mode off, or relay mode: the bridge is never asked and the mcp json has no command key', async () => {
+  for (const [over, deps] of [[{ agentMode: false }, {}],
+    [{}, { agentRelay: () => ({ url: 'http://127.0.0.1:1/api/ask/relay', token: 'r', dispose() {} }) }]]) {
+    const s = seed();
+    let cfg = null; let called = 0;
+    const { turn } = makeTurn(s, over, {
+      ...deps,
+      commandBridge: () => { called += 1; return { url: 'u', token: 't', dispose() {} }; },
+      runClaudeImpl: async (opts) => {
+        cfg = JSON.parse(readFileSync(opts.mcpConfigPath, 'utf8'));
+        throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+      },
+    });
+    await turn.run();
+    assert.equal(called, 0);
+    assert.ok(!('WORCA_ASK_COMMANDS' in cfg.mcpServers.worca.env));
+  }
+});
+
+test('run_command result mints one command card; an error result mints nothing', async () => {
+  const s = seed();
+  const runner = (frames) => async (opts) => {
+    for (const [id, name, input, text, isError] of frames) {
+      push(opts.onEvent, { type: 'assistant', parent_tool_use_id: null, message: { id: 'msg_1', content: [{ type: 'tool_use', id, name, input }] } });
+      push(opts.onEvent, { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: id, content: text, ...(isError ? { is_error: true } : {}) }] } });
+    }
+    await new Promise((r) => setImmediate(r)); await new Promise((r) => setImmediate(r));
+    push(opts.onEvent, RESULT());
+    return { text: '', exitCode: 0 };
+  };
+  const ok = JSON.stringify({ ok: true, blockId: 't-0000000001:1', sessionId: 't-0000000001', seq: 1, command: 'npm test', cwd: '/w/p', folder: 'p · main', warning: null });
+  const { turn, frames } = makeTurn(s, {}, {
+    runClaudeImpl: runner([
+      ['toolu_1', 'mcp__worca__run_command', { command: 'npm test' }, ok, false],
+      ['toolu_2', 'mcp__worca__run_command', { command: 'git push --force' }, 'error: run_command: blocked', true],
+    ]),
+  });
+  await turn.run();
+  const cards = getMessage(s.asst.id).blocks.filter((b) => b.kind === 'card');
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].state, 'command');
+  assert.deepEqual(cards[0].card, { type: 'command', blockId: 't-0000000001:1', sessionId: 't-0000000001', seq: 1, command: 'npm test', folder: 'p · main', cwd: '/w/p', warning: null });
+  assert.ok(frames.some((f) => f.type === 'ask-card' && f.block.card.type === 'command'));
 });

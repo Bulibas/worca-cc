@@ -195,7 +195,7 @@ test('projectForm text projection: display widgets, files, reply line, caps, rev
       assert.match(text, /\[image\] a: mockups\/a\.png \(image\/png, 180 KB\) — Option A/);
       assert.match(text, /\[image\] b: mockups\/b\.png — Option B/, 'a file with no manifest entry prints bare');
       assert.match(text, /1\. Which direction\? \{picked\}\n {3}one of: 1\) Option A {2}2\) Option B/);
-      assert.match(text, /3\. What should change\? \{notes\}\n {3}string · only when verdict=iterate$/);
+      assert.match(text, /3\. What should change\? \{notes\}\n {3}string · only when verdict=Another pass$/, 'the condition names the option by its label');
       assert.doesNotMatch(text, /Reply:|undefined/, 'no ref → no reply line');
     } },
     { name: 'projectForm: `ref` appends one reply line naming the first three unconditional fields', run: () => {
@@ -230,6 +230,19 @@ test('projectForm text projection: display widgets, files, reply line, caps, rev
         layout: [{ widget: 'markdown', bind: 'data.notes' }, { widget: 'table', bind: 'data.rows', columns: [{ key: 'a', label: 'A' }] }, { widget: 'markdown', bind: 'data.plain' }],
         answerSchema: { type: 'object', properties: {} } };
       assert.equal(projectForm(ask), 'T\n\n[markdown] docs/notes.md (text/markdown, 2 KB)\n[table] out/rows.csv\nJust text.\n');
+    } },
+    { name: 'projectForm: a gated review-list (chat) keeps its rows but names its condition and verdicts by label', run: () => {
+      const ask = { title: 'T', data: { tasks: [{ id: 't1', name: 'Release' }] },
+        layout: [
+          { widget: 'select', field: 'looksRight', label: 'Looks right?', help: 'Pick the second to fix a line.', labels: { yes: 'Yes', correct: 'Fix it' } },
+          { widget: 'review-list', field: 'tasks', bind: 'data.tasks', label: 'Tasks', titleKey: 'name', labels: { confirm: 'Keep', remove: 'Drop' }, when: { looksRight: 'correct' } }],
+        answerSchema: { type: 'object', properties: {
+          looksRight: { type: 'string', enum: ['yes', 'correct'], default: 'yes' },
+          tasks: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, verdict: { type: 'string', enum: ['confirm', 'remove'] } } } } } } };
+      const text = projectForm(ask);
+      assert.match(text, /^1\. Looks right\? \{looksRight\}\n {3}Pick the second to fix a line\.\n {3}one of: 1\) Yes {2}2\) Fix it · default "Yes" · optional$/m);
+      assert.match(text, /^- t1: Release\n2\. Tasks \{tasks\}\n {3}per item Keep\/Drop for: t1 · optional · only when looksRight=Fix it$/m);
+      assert.doesNotMatch(text, /confirm|remove/);
     } },
     { name: 'projectForm: a review-list shows what is being judged — the body, on one line, clipped', run: () => {
       const form = planForm();

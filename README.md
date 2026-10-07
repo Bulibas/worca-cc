@@ -4,8 +4,8 @@
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D22.13-brightgreen)](.nvmrc)
 
-Worca is a **deterministic multi-agent pipeline** that drives Claude Code
-(headless) through a software task. You point it at a project, describe the
+Worca turns a task into **reviewed, merge-ready work**. It is a
+**deterministic multi-agent pipeline**: you point it at a project, describe the
 work, and a state machine runs the agents of a workflow in sequence — by
 default **Clarify → Plan → Refine → Implement → Review** — looping until the
 work clears quality gates, pausing to ask *you* the questions that matter, and
@@ -585,7 +585,7 @@ Every finished run keeps its full record, one tab each in **Runs**: **Overview**
   scheduled and finished runs from every project on the machine (see
   [Pipeline](#pipeline)). See [`docs/storage.md`](docs/storage.md).
 
-![Runs page — runs from nimbus-jobs, nimbus-crm and atlas-docs grouped by project, one scheduled and one stopped, with the finished run Paginate the search endpoint open: Ready to ship, 17m 2s, $3.65, 2 files changed](docs/screenshots/history.png)
+![Runs page — runs from nimbus-jobs, nimbus-crm and lumen-docs grouped by project, one scheduled and one stopped, with the finished run Paginate the search endpoint open: Ready to ship, 17m 2s, $3.65, 2 files changed](docs/screenshots/history.png)
 
 ### Getting started & UI levels
 
@@ -827,6 +827,8 @@ The skill starts the same deterministic orchestrator as the CLI;
 Bug reports and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for
 the from-source setup, mock mode, the test suite, and the PR workflow.
 Development happens on the `dev` branch, and PRs target `dev`.
+Everyone taking part is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

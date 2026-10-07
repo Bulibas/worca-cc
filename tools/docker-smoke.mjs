@@ -265,10 +265,14 @@ async function main() {
       const stop = docker(['stop', '-t', '15', UI_NAME]);
       void stop;
       const code = Number(docker(['wait', UI_NAME]).stdout.trim());
-      if (code !== 143) {
-        process.stderr.write(docker(['logs', UI_NAME], { allowFail: true }).stderr);
-        fail(`docker stop -> exit ${code}, expected 143 (graceful SIGTERM)`);
-      } else ok('UI: docker stop -> exit 143 (SIGTERM reached the server through tini)');
+      // The server exits 143 after SIGTERM; tini (-e 143) reports that as 0, so platforms that
+      // treat a non-zero exit as a crash (Railway) see a clean stop. 137 would be a kill.
+      const logs = docker(['logs', UI_NAME], { allowFail: true });
+      const graceful = /stopping \(SIGTERM\)/.test(`${logs.stdout}${logs.stderr}`);
+      if (code !== 0 || !graceful) {
+        process.stderr.write(logs.stderr);
+        fail(`docker stop -> exit ${code}${graceful ? '' : ', no "stopping (SIGTERM)" in the log'}; expected a graceful stop and exit 0`);
+      } else ok('UI: docker stop -> graceful SIGTERM, exit 0 (tini maps the server\'s 143)');
     }
 
     // 3. The volume holds the database.

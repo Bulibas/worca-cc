@@ -108,3 +108,29 @@ test('bash 5.1+: an array PROMPT_COMMAND keeps every element, and none is record
     assert.match(blocks[1].out, /b=[1-9]/);
   } finally { rmSync(join(home, '.bashrc'), { force: true }); }
 });
+
+test('bash: WORCA_TERMINAL_NORC=1 (Ask\'s shells, #574) skips the person\'s .bashrc and is gone for commands', { skip: !BASH }, async () => {
+  writeFileSync(join(home, '.bashrc'), 'export LEAK=1\n');
+  try {
+    const launch = shellLaunch({ file: BASH, kind: 'bash', platform: process.platform }, { nonce: NONCE });
+    const plain = await runShell(BASH, launch, ['echo "[$LEAK]"']);
+    assert.equal(plain[0].out.trim(), '[1]');
+    const norc = await runShell(BASH, { ...launch, env: { ...launch.env, WORCA_TERMINAL_NORC: '1' } }, ['echo "[$LEAK]"', 'echo "n=[$WORCA_TERMINAL_NORC]"']);
+    assert.equal(norc[0].out.trim(), '[]');
+    assert.equal(norc[1].out.trim(), 'n=[]');
+  } finally { rmSync(join(home, '.bashrc'), { force: true }); }
+});
+
+test('zsh: WORCA_TERMINAL_NORC=1 skips the person\'s .zshenv and .zshrc', { skip: !ZSH }, async () => {
+  const dir = ensureZshDir(join(home, 'zsh-norc'));
+  writeFileSync(join(home, '.zshenv'), 'export LEAK_ENV=1\n');
+  writeFileSync(join(home, '.zshrc'), 'export LEAK_RC=1\n');
+  try {
+    const launch = shellLaunch({ file: ZSH, kind: 'zsh', platform: process.platform }, { env: { HOME: home }, zshDir: dir, nonce: NONCE });
+    const plain = await runShell(ZSH, launch, ['echo "[$LEAK_ENV$LEAK_RC]"']);
+    assert.equal(plain[0].out.trim(), '[11]');
+    const norc = await runShell(ZSH, { ...launch, env: { ...launch.env, WORCA_TERMINAL_NORC: '1' } }, ['echo "[$LEAK_ENV$LEAK_RC]"', 'echo "n=[$WORCA_TERMINAL_NORC]"']);
+    assert.equal(norc[0].out.trim(), '[]');
+    assert.equal(norc[1].out.trim(), 'n=[]');
+  } finally { rmSync(join(home, '.zshenv'), { force: true }); rmSync(join(home, '.zshrc'), { force: true }); }
+});

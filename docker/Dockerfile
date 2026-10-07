@@ -12,7 +12,7 @@
 #   CLAUDE_CODE_VERSION  the @anthropic-ai/claude-code version to pin              [required]
 #   VARIANT              slim | full                                               [slim]
 #   NODE_IMAGE           base image                                                [node:22-bookworm-slim]
-#   APT_REFRESH          any string; a new value rebuilds the OS layer (CI: UTC date)
+#   APT_REFRESH          any string; a new value rebuilds the OS layer (CI: Debian publish stamps)
 
 ARG NODE_IMAGE=node:22-bookworm-slim
 FROM ${NODE_IMAGE}
@@ -20,7 +20,7 @@ FROM ${NODE_IMAGE}
 ARG WORCA_TARBALL
 ARG CLAUDE_CODE_VERSION
 ARG VARIANT=slim
-# Changes daily in CI (UTC date) so the cached OS layer picks up Debian fixes.
+# Changes in CI whenever Debian publishes, so the cached OS layer picks up its fixes.
 ARG APT_REFRESH=
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -142,5 +142,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 # -s: also work as a subreaper when the runtime puts its own init at PID 1
 # (compose `init: true`, `docker run --init`) instead of warning about it.
-ENTRYPOINT ["tini", "-s", "--", "worca-entrypoint"]
+# No -g: tini signals only `worca ui` (the entrypoint execs it), which forwards the stop to the
+# server; the server pauses its runs (drain) and stops their agents itself. Signalling the whole
+# group would kill the agents first and turn a clean pause into a failed step.
+# -e 143: a stop is a clean exit. The server exits 143 after a SIGTERM (the shell convention, kept
+# for `worca ui` outside a container), and tini passes that on as the container's exit code;
+# Railway never marks a deployment stopped whose container exits non-zero after deploymentStop
+# (the instance stays RUNNING, whatever the restart policy). Remapped to 0, it stops in seconds.
+ENTRYPOINT ["tini", "-s", "-e", "143", "--", "worca-entrypoint"]
 CMD ["worca", "ui"]

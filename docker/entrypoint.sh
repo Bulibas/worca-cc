@@ -3,7 +3,8 @@
 #
 # Runs as the `worca` user under tini (in single-volume mode it may start as
 # root to prepare the volume, see 0. below). Three jobs, then `exec "$@"` so signals
-# reach the server (it handles SIGTERM itself and exits 143 on the graceful path):
+# reach the server (it handles SIGTERM itself and exits 143 on the graceful path, which tini
+# reports as 0: a stop is a clean exit, see the Dockerfile's ENTRYPOINT):
 #   1. detect a named volume the runtime created as root (rootful Docker Engine
 #      on first start) and print the one-line fix — it cannot chown as `worca`;
 #   2. report the GitHub credential mode (tokens are passed per call, never globally);
