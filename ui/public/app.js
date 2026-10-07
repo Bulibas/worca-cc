@@ -8115,11 +8115,17 @@ function buildWdOverview(sec, id) {
     + '<button type="button" class="ws-desc-save btn btn-primary btn-mini">Save</button></div>';   // static markup
   desc.append(dh, view, pane);
   sec.appendChild(desc);
-  // MCP servers a run on this workspace gets (the workspace policy's Team set, not the members').
+  // Sets from member projects (docs/skills.md; a workspace attaches no sets of its own): the servers and skills a run on
+  // this workspace gets — its members' sets and the workspace policy's Team set — each with the member(s) that bring it.
   const mcp = tagLevel(document.createElement('div'), 'advanced');
   mcp.className = 'wd-mcp';
   sec.appendChild(mcp);
-  void paintMcpResolution(mcp, { target: { workspaceId: id }, title: `MCP servers in runs on ${w.name || w.id}`, api: mcpApi });
+  const memberProjects = paths.map((p, i) => {
+    const k = Array.isArray(w.projectKeys) ? w.projectKeys[i] : null;
+    const pr = k ? projectByKey(k) : null;
+    return k ? { key: k, name: (pr && pr.name) || basenameOf(p) } : null;
+  }).filter(Boolean);
+  void paintMcpResolution(mcp, { target: { workspaceId: id }, title: w.name || w.id, members: memberProjects, api: mcpApi });
   if (!hdMarkdown.isReady()) void bindMarkdownReady().then((ok) => { if (ok) repaintWsDescription(); });
   void paintWsMetricsRows();
   void paintWsPolicyLines();
@@ -11161,7 +11167,7 @@ const PD_TABS = [
   { key: 'team', label: 'Team', level: 'expert', badge: () => null, visible: () => true, build: (sec, key) => buildPdTeam(sec, key) },
   { key: 'memory', label: 'Memory', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMemory(sec, key) },
   { key: 'away', label: 'Away mode', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdAway(sec, key) },
-  { key: 'mcp', label: 'MCP', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMcp(sec, key) },
+  { key: 'mcp', label: 'Sets', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMcp(sec, key) },
   { key: 'actions', label: 'Actions', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdActions(sec, key) },
 ];
 function initPdTabs(screen, p) {
@@ -11350,7 +11356,7 @@ function paintPdBranchCards() {
   }
 }
 
-// ---- MCP tab (docs/mcp-servers.md): the project's sets and the servers its runs get ----
+// ---- Sets tab (key mcp; docs/mcp-servers.md, docs/skills.md): the project's sets and the servers and skills its runs get ----
 function buildPdMcp(sec, key) {
   sec.innerHTML = '';
   sec.classList.add('pd-sec-mcp');
@@ -14038,7 +14044,11 @@ function setPluginsMsg(text, kind, extra) {
 }
 
 // Tiny modal shell around #plugin-modal: swap in a body element + action buttons.
+// `pluginModalAfterClose`: the open step's own Cancel, run once when the header Close dismisses it (set through
+// mcpTab's `afterClose`); every open starts without one.
+let pluginModalAfterClose = null;
 function pluginModal(title, bodyEl, actions = []) {
+  pluginModalAfterClose = null;
   el.pluginModalTitle.textContent = title;
   el.pluginModalBody.replaceChildren(bodyEl);
   el.pluginModalActions.replaceChildren(...actions.map(([label, cls, fn]) => {
@@ -14631,7 +14641,10 @@ if (el.pluginAddBtn) el.pluginAddBtn.addEventListener('click', () => {
 if (el.marketplaceAdd) el.marketplaceAdd.addEventListener('click', addMarketplaceFromInput);
 if (el.pluginModalClose) el.pluginModalClose.addEventListener('click', () => {
   if (grvState.wizard) return grvCloseWizard();
+  const after = pluginModalAfterClose;
+  pluginModalAfterClose = null;
   closePluginModal();
+  if (after) void after();
 });
 
 // ---- Guardrails view (named sets: list + two-step wizard popup) ----
@@ -29127,7 +29140,7 @@ const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ ask: 'advanced', guardrails: 'adv
 const VIEW_TITLES = Object.freeze({
   stats: 'Statistics', composer: 'Workflow Composer', workspaces: 'Workspaces', 'workspace-create': 'Workspaces',
   'agent-create': 'Create agent', 'team-metrics': 'Team metrics', 'team-policy': 'Team policy', agents: 'Agents', scripts: 'Scripts',
-  guardrails: 'Guardrails', plugins: 'Plugins', mcp: 'MCP servers', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
+  guardrails: 'Guardrails', plugins: 'Plugins', mcp: 'Sets', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
   schedules: 'Schedules',
 });
 function pageMinLevel() {
@@ -29489,8 +29502,8 @@ function showSettingsTab(param = '') {
   if (tab === 'mcp') void mcpTab().show(sub);
 }
 
-// Settings › MCP servers (mcp-view.mjs): one controller, made on first entry; its sub-route
-// ('', 'sets/<id>', 'servers') rides behind #settings/mcp/.
+// Settings › Sets (tab key mcp; mcp-view.mjs): one controller, made on first entry; its sub-route
+// ('', 'sets/<id>', 'servers', 'skills') rides behind #settings/mcp/.
 async function mcpApi(method, path, body) {
   try {
     const res = await fetch(path, body === undefined ? { method }
@@ -29508,7 +29521,12 @@ function mcpTab() {
       api: mcpApi,
       navigate: (hash) => { if (location.hash.slice(1) !== hash) location.hash = hash; },
       confirm: confirmModal,
-      modal: { open: pluginModal, close: closePluginModal },
+      // `shows(node)`: is this node still in the open dialog? A flow whose answer lands after the dialog's own Close, a
+      // tab switch or another dialog opens nothing (skill-import.mjs). `afterClose(fn)`: the dialog's own Close runs fn
+      // once, as the open step's Cancel (an Import preview's or an Update's staged copy is discarded).
+      modal: { open: pluginModal, close: closePluginModal,
+        shows: (node) => !el.pluginModal.classList.contains('hidden') && el.pluginModalBody.contains(node),
+        afterClose: (fn) => { pluginModalAfterClose = fn; } },
       notify: (o) => notify(o),
     });
   }

@@ -266,14 +266,15 @@ Every finished run keeps its full record, one tab each in **Runs**: **Overview**
 ### MCP servers & credential broker
 
 - **Worca's own MCP registry** — servers installed for Worca only, never written into your
-  Claude Code config, that pipeline agents and Ask Worca can call. **Settings › MCP servers**
-  (Advanced) has two views: **Servers**, the catalog (servers shipped by plugins, added by hand
+  Claude Code config, that pipeline agents and Ask Worca can call. **Settings › Sets**
+  (Advanced) has three views: **Servers**, the catalog (servers shipped by plugins, added by hand
   with **Add MCP server** as `stdio`, `http` or `sse`, or required by a team policy), and
   **Sets**, where each server gets its values and secrets, so one server can sit in two sets
-  with different credentials. The built-in marketplace ships MCP servers as plugins (see
+  with different credentials, and **Skills**, the skill catalog ([Skills](docs/skills.md)): skills that
+  plugins ship or that you import, added to sets like servers. The built-in marketplace ships MCP servers as plugins (see
   [Plugins & chat](#plugins--chat)).
 - **Sets per project, choices per run** — Ask Worca always uses the built-in **General** set;
-  a project picks its sets on its **MCP** tab (**Include General in runs** is on by default),
+  a project picks its sets on its **Sets** tab (**Include General in runs** is on by default),
   New pipeline › Advanced › **Sets** switches servers and skills off for one run, and the Ask
   composer's **Sets · N** button picks them per chat. **Test** starts a server exactly as a run
   would and lists its tools.
@@ -807,6 +808,7 @@ The skill starts the same deterministic orchestrator as the CLI;
 - [Actions](docs/actions.md) — check out a finished run and run the project's commands from Worca
 - [Models](docs/models.md) — the catalog, providers (GitHub Copilot, OpenAI-compatible) and the built-in bridge
 - [MCP servers](docs/mcp-servers.md) — Worca's own MCP registry: catalog, sets, copies, secrets, Test
+- [Skills](docs/skills.md) — skills in sets: the library, imports, `/<set>:<skill>` names, Team required skills
 - [Credential broker](docs/credential-broker.md) — model keys stay out of Worca's container: each `claude` it starts gets a short-lived token, and the broker adds the real key on the way to the provider
 - [Voice mode](docs/speech.md) — hands-free Ask Worca: Whisper and Kokoro in the browser, or your own speech servers
 - [Voice languages](docs/speech-languages.md) — which languages work today, and the plan for more

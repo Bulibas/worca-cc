@@ -356,6 +356,16 @@ import { SETS_API_NOUNS } from '../src/core/mcp/definitions.mjs';
 import { putSkillMember, deleteSkillMember } from '../src/core/mcp/store.mjs';
 import { teamSkillMemberRefusal } from '../src/core/mcp/views.mjs';
 import { SKILL_ID_RE } from '../src/core/skills-registry/ids.mjs';
+// Skills registry (docs/skills.md). Namespace imports: the /api/skills* routes read skIds.*, skLibrary.*, … so
+// no binding here can clash with a named import the MCP, pipeline or Ask routes add from the same modules.
+import * as skIds from '../src/core/skills-registry/ids.mjs';
+import * as skInspect from '../src/core/skills-registry/inspect.mjs';
+import * as skLibrary from '../src/core/skills-registry/library.mjs';
+import * as skImport from '../src/core/skills-registry/import.mjs';
+import * as skCatalog from '../src/core/skills-registry/catalog.mjs';
+import * as skStore from '../src/core/mcp/store.mjs';
+import * as skViews from '../src/core/mcp/views.mjs';
+import * as skClone from '../src/core/clone-project.mjs';
 import { HLJS_GRAMMAR_IDS } from './public/hljs-loader.mjs';
 import { useEnvProxy, proxyNotice } from '../src/core/env-proxy.mjs';
 
@@ -11724,6 +11734,259 @@ app.post(['/api/sets/teams/:home/skills/:skillId/turn-on', '/api/mcp/teams/:home
   if (typeof expectHash !== 'string' || !/^[0-9a-f]{64}$/.test(expectHash)) return badRequest(res, 'expectHash must be the hash the consent dialog showed');
   try { res.json({ ok: true, ...(await teamSkillAction('turn-on', home, skillId, { expectHash })) }); }
   catch (err) { sendMcpError(res, err); }
+});
+
+// ---------------------------------------------------------------------------
+// /api/skills/* — the skill catalog and library (docs/skills.md; skills registry spec §7): what plugins ship and
+// what was imported (a folder, a git URL, a pasted SKILL.md, one of ~/.claude/skills). Import is stage → preview →
+// commit with consent; a library skill with an origin updates through a preview, never on its own. Set memberships
+// are /api/sets/:id/skills/:skillId. Bodies never set `consent` or `hash` (MCP_REFUSED_KEYS).
+// ---------------------------------------------------------------------------
+app.use('/api/skills', (req, res, next) => {
+  if (isPlainObject(req.body)) {
+    const bad = MCP_REFUSED_KEYS.find((k) => Object.hasOwn(req.body, k));
+    if (bad) return badRequest(res, `"${bad}" cannot be set here`);
+  }
+  next();
+});
+
+const SKILL_STAGE_RE = /^[0-9a-f]{16}$/;
+const SKILL_SOURCE_KINDS = ['dir', 'paste', 'home', 'git'];
+const skillStageDir = (stage) => skLibrary.stageDirOf(stage);   // P1 checks the id again (a 400 inside the routes' try)
+// An update stage → the library hash it was checked against: Update refuses a stage checked before the copy changed. In
+// memory, like the "update available" badge: after a restart a stage applies as before.
+const skillUpdateBases = new Map();
+// One Update per skill at a time (name → the tail of its queued Updates): the base check and applyUpdate run back to
+// back, so two Updates posted together (two tabs) cannot both pass the check and leave the older copy in the library.
+const skillUpdateRuns = new Map();
+function oneUpdateAtATime(name, fn) {
+  const run = (skillUpdateRuns.get(name) ?? Promise.resolve()).then(fn);
+  const tail = run.then(() => {}, () => {});
+  skillUpdateRuns.set(name, tail);
+  void tail.then(() => { if (skillUpdateRuns.get(name) === tail) skillUpdateRuns.delete(name); });
+  return run;
+}
+// A hosted worca (remote access on): the server's folders and its user's ~/.claude/skills are not the viewer's, and on a
+// shared instance they hold other people's run checkouts. Folder and Claude Code imports stay local-only.
+const SKILL_FOLDER_IMPORTS = DEPLOYMENT !== 'hosted';
+// …and its git sources follow a hosted project clone's rules (clone-project.mjs planClone): an https:// URL that names one
+// repository, `https://host/owner/repo`, with no credentials, port, query, fragment or encoded character — P1 accepts
+// file:// (the server's own disk: other people's run checkouts), ssh:// (the server's keys), git://, http:// and ports
+// for a local Worca — and inside WORCA_CLONE_ALLOW when the deployment sets it. Host and path are read as typed, because
+// git fetches the URL as typed: WHATWG reads `%2e%2e` as `..` (`/evil/%2e%2e/acme/r` would pass an `acme/*` allowlist)
+// and ends the host at a backslash; a typed host that differs from WHATWG's (a port, a user, a backslash, a non-ASCII
+// name) is refused.
+const SKILL_HOSTED_GIT = 'a hosted Worca imports skills from an https:// git URL only';
+const SKILL_HOSTED_GIT_SHAPE = 'a hosted Worca imports skills from a URL naming one repository, like https://github.com/owner/repo (no port, credentials, query or encoded characters)';
+const SKILL_HOSTED_GIT_PATH_RE = /^\/([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*?)(?:\.git)?\/?$/;
+/** Why a hosted Worca refuses this git URL, or null. */
+function hostedGitRefusal(url) {
+  const s = String(url ?? '');
+  if (!/^https:\/\//i.test(s)) return SKILL_HOSTED_GIT;
+  let u;
+  try { u = new URL(s); } catch { return SKILL_HOSTED_GIT_SHAPE; }
+  const typed = s.slice('https://'.length);
+  const host = typed.slice(0, typed.search(/\/|$/)).toLowerCase();
+  const m = SKILL_HOSTED_GIT_PATH_RE.exec(typed.slice(host.length));
+  if (!m || host !== u.hostname) return SKILL_HOSTED_GIT_SHAPE;
+  const [, owner, repo] = m;
+  return skClone.cloneAllowed(skClone.parseCloneAllow(process.env.WORCA_CLONE_ALLOW), { host, owner, repo })
+    ? null : `${host}/${owner}/${repo} is not in WORCA_CLONE_ALLOW`;
+}
+
+/** A library error keeps what the modal acts on: `candidates` (a git repository holding several skills) and `problems`. */
+function sendSkillsError(res, err) {
+  if (err instanceof skLibrary.SkillLibraryError || err instanceof McpStoreError) {
+    return res.status(err.status || 400).json({ error: err.message,
+      ...(Array.isArray(err.candidates) ? { candidates: err.candidates } : {}), ...(Array.isArray(err.problems) ? { problems: err.problems } : {}) });
+  }
+  res.status(500).json({ error: err?.message || String(err) });
+}
+/** A stage id the preview returned (16 hex): it becomes a path segment, so nothing else passes. */
+function skillStage(res, stage) {
+  if (typeof stage !== 'string' || !SKILL_STAGE_RE.test(stage)) { badRequest(res, 'stage must be the id the preview returned'); return null; }
+  return stage;
+}
+/** `:id` of a library skill → its name; 400 for a malformed id or a plugin skill. */
+function librarySkillName(req, res) {
+  const parsed = skIds.parseSkillId(req.params.id);
+  if (!parsed) { badRequest(res, 'invalid skill id'); return null; }
+  if (parsed.source !== 'library') { badRequest(res, 'a plugin skill comes and goes with its plugin'); return null; }
+  return parsed.name;
+}
+// A library.json from a newer Worca, or one that cannot be trusted: P1 reads no entry and refuses every write (409). The
+// routes say so in P1's words (library.mjs keeps them private) instead of "skill not found" for a skill that is there.
+const SKILL_LIBRARY_NEWER = 'the skill library needs a newer Worca';
+const SKILL_LIBRARY_DAMAGED = 'the skill library file skills/library.json is damaged — fix it or remove it';
+/** The library's entries (null-prototype, by name), or null after answering 409 for a newer or damaged library.json. */
+async function librarySkillsOr409(res) {
+  const lib = await skLibrary.readSkillLibrary();
+  if (lib.newer || lib.damaged) { res.status(409).json({ error: lib.newer ? SKILL_LIBRARY_NEWER : SKILL_LIBRARY_DAMAGED }); return null; }
+  return lib.skills;
+}
+/** A library origin as the browser sees it: its kind, and where a git one points (P1 keeps credentials out of it) — never
+ *  a folder origin's host path. */
+const skillOriginView = (o) => (!o ? null : o.kind === 'git' ? { kind: 'git', url: o.url, ref: o.ref ?? null, subdir: o.subdir ?? null }
+  : o.kind === 'home' ? { kind: 'home', name: o.name } : { kind: o.kind });
+/** A staged folder's problems (spec §2b-8: limits, no frontmatter, an escaping symlink, `.claude-plugin/`). */
+async function stageProblems(dir, name) {
+  return (await skInspect.inspectSkillDir(dir, { name })).problems || [];
+}
+
+app.get('/api/skills', async (_req, res) => {
+  try {
+    const body = await skViews.buildSkillCatalogView(await skViews.viewContext());
+    const { newer, damaged, skills: lib } = await skLibrary.readSkillLibrary();
+    // The Skills view offers Check for updates only for a library skill with an origin (a pasted one has none);
+    // `folderImports` tells the Import modal whether the Folder and Claude Code sources exist here; `library` says why no
+    // imported skill is listed (a newer or damaged library.json reads as empty). No host path reaches the browser, as in
+    // /api/mcp/preview: neither the catalog's `dir` nor a folder origin's `path`.
+    res.json({ ...body, folderImports: SKILL_FOLDER_IMPORTS, library: { newer, damaged }, skills: body.skills.map(({ dir: _dir, ...s }) => ({
+      ...s, origin: s.source === 'library' && Object.hasOwn(lib, s.name) ? skillOriginView(lib[s.name].origin) : null })) });
+  } catch (err) { sendSkillsError(res, err); }
+});
+
+app.get('/api/skills/home', async (_req, res) => {
+  try { res.json({ skills: SKILL_FOLDER_IMPORTS ? await skImport.listHomeSkills() : [], folderImports: SKILL_FOLDER_IMPORTS }); }
+  catch (err) { sendSkillsError(res, err); }
+});
+
+// The read-only SKILL.md drawer: the text of a catalog skill's SKILL.md (the plugin's or the library's copy). Only a
+// regular file inside the skill's folder: a linked plugin keeps whatever links it holds (P1's readSkillMd lstat's for the
+// same reason), O_NOFOLLOW refuses a link swapped in after the realpath, and O_NONBLOCK makes a FIFO named SKILL.md a 404
+// instead of a request that holds a thread forever. The size is checked on what was read, so a file that grows between
+// the stat and the read is still capped. A file that cannot be reached (a link loop, no permission) is a 404 too: its
+// error would name a server path.
+const SKILL_MD_UNREACHABLE = new Set(['ENOENT', 'ENOTDIR', 'ELOOP', 'EACCES', 'EPERM', 'EISDIR']);
+app.get('/api/skills/:id/skill-md', async (req, res) => {
+  if (!skIds.SKILL_ID_RE.test(req.params.id)) return badRequest(res, 'invalid skill id');
+  let fh = null;
+  try {
+    const entry = (await skCatalog.loadSkillCatalog()).find((e) => e.id === req.params.id);
+    if (!entry) return res.status(404).json({ error: 'skill not found' });
+    const root = await fsp.realpath(entry.dir);
+    const real = await fsp.realpath(path.join(entry.dir, 'SKILL.md'));
+    if (!real.startsWith(root + path.sep)) return res.status(404).json({ error: 'SKILL.md not found' });
+    fh = await fsp.open(real, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0) | (fs.constants.O_NOFOLLOW ?? 0));
+    const st = await fh.stat();
+    if (!st.isFile()) return res.status(404).json({ error: 'SKILL.md not found' });
+    const tooBig = () => res.status(413).json({ error: 'SKILL.md is larger than 1 MB' });
+    if (st.size > skInspect.SKILL_LIMITS.fileBytes) return tooBig();
+    const buf = await fh.readFile();
+    if (buf.length > skInspect.SKILL_LIMITS.fileBytes) return tooBig();
+    res.json({ id: entry.id, bytes: buf.length, text: buf.toString('utf8') });
+  } catch (err) {
+    if (SKILL_MD_UNREACHABLE.has(err?.code)) return res.status(404).json({ error: 'SKILL.md not found' });
+    sendSkillsError(res, err);
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+});
+
+app.post('/api/skills/import/preview', async (req, res) => {
+  const source = req.body?.source;
+  if (!isPlainObject(source) || !SKILL_SOURCE_KINDS.includes(source.kind)) {
+    return badRequest(res, 'source must be { kind: "dir" | "paste" | "home" | "git", … }');
+  }
+  if (!SKILL_FOLDER_IMPORTS && (source.kind === 'dir' || source.kind === 'home')) {
+    return badRequest(res, 'folder imports need a local Worca: use a git URL or paste the SKILL.md');
+  }
+  const hostedGit = !SKILL_FOLDER_IMPORTS && source.kind === 'git' ? hostedGitRefusal(source.url) : null;
+  if (hostedGit) return badRequest(res, hostedGit);
+  try {
+    const { stage, name, inspection } = await skImport.stageImport(source);
+    res.json({ stage, name, inspection });
+  } catch (err) { sendSkillsError(res, err); }
+});
+
+app.post('/api/skills/import', async (req, res) => {
+  const stage = skillStage(res, req.body?.stage);
+  if (!stage) return;
+  const name = req.body?.name;
+  if (!skInspect.isValidSkillFolderName(name)) {
+    return badRequest(res, 'a skill name is lowercase letters, digits and single hyphens, up to 64 characters (not synced or anthropic-skills)');
+  }
+  try {
+    const lib = await librarySkillsOr409(res);
+    if (!lib) return;
+    if (Object.hasOwn(lib, name)) return res.status(409).json({ error: `a skill named ${name} is already in the library` });
+    const dir = skillStageDir(stage);
+    if (!fs.existsSync(dir)) return res.status(404).json({ error: 'nothing staged under that id: preview again' });
+    const problems = await stageProblems(dir, name);
+    if (problems.length) return badRequest(res, `cannot import: ${problems.join('; ')}`);
+    await skLibrary.commitImport(dir, name);
+    const id = skIds.skillIdOf({ source: 'library', name });
+    // A Check for updates still fetching when this name was removed may have marked it since: a new import starts unmarked.
+    skViews.recordSkillUpdateCheck(id, false);
+    res.json({ ok: true, id });
+  } catch (err) { sendSkillsError(res, err); }
+});
+
+app.delete('/api/skills/import/:stage', async (req, res) => {
+  const stage = skillStage(res, req.params.stage);
+  if (!stage) return;
+  try { await skImport.discardStage(stage); skillUpdateBases.delete(stage); res.json({ ok: true }); } catch (err) { sendSkillsError(res, err); }
+});
+
+// Library only. P1 checks the library first, then runs `beforeRemove` OUTSIDE the skills lock — memberships and Team
+// state (removeSkillEverywhere, MCP lock) — then removes the folder and the entry under the skills lock: the two locks are
+// never held together, and a refused sweep removes nothing (spec §3.2, the removeServerEverywhere order).
+app.delete('/api/skills/:id', async (req, res) => {
+  const name = librarySkillName(req, res);
+  if (!name) return;
+  try {
+    const lib = await librarySkillsOr409(res);
+    if (!lib) return;
+    if (!Object.hasOwn(lib, name)) return res.status(404).json({ error: 'skill not found' });
+    await skLibrary.removeLibrarySkill(name, { beforeRemove: () => skStore.removeSkillEverywhere(req.params.id) });
+    skViews.recordSkillUpdateCheck(req.params.id, false);
+    res.json({ ok: true });
+  } catch (err) { sendSkillsError(res, err); }
+});
+
+app.post('/api/skills/:id/update/preview', async (req, res) => {
+  const name = librarySkillName(req, res);
+  if (!name) return;
+  try {
+    const lib = await librarySkillsOr409(res);
+    if (!lib) return;
+    if (!Object.hasOwn(lib, name)) return res.status(404).json({ error: 'skill not found' });
+    if (!lib[name].origin) return res.status(409).json({ error: 'a pasted skill has no origin: import it again to change it' });
+    const o = lib[name].origin;   // hosted: a folder or non-https origin would re-read the server's disk
+    const hostedGit = SKILL_FOLDER_IMPORTS ? null : o.kind === 'git' ? hostedGitRefusal(o.url) : SKILL_HOSTED_GIT;
+    if (hostedGit) return res.status(409).json({ error: `this skill's origin cannot be fetched here — ${hostedGit}` });
+    const diff = await skImport.updatePreview(name);
+    skillUpdateBases.set(diff.stage, lib[name].hash ?? null);
+    // The Skills view's "update available" badge: this check's answer, kept until Update, Remove or a server restart.
+    skViews.recordSkillUpdateCheck(req.params.id, diff.added.length + diff.removed.length + diff.changed.length > 0);
+    res.json(diff);
+  } catch (err) { sendSkillsError(res, err); }
+});
+
+app.post('/api/skills/:id/update', async (req, res) => {
+  const name = librarySkillName(req, res);
+  if (!name) return;
+  const stage = skillStage(res, req.body?.stage);
+  if (!stage) return;
+  try {
+    await oneUpdateAtATime(name, async () => {   // the library is read after any Update of this skill already posted
+      const lib = await librarySkillsOr409(res);
+      if (!lib) return;
+      if (!Object.hasOwn(lib, name)) return res.status(404).json({ error: 'skill not found' });
+      const dir = skillStageDir(stage);
+      if (!fs.existsSync(dir)) return res.status(404).json({ error: 'nothing staged under that id: check for updates again' });
+      // Checked against another copy (a later Update, or a Remove and a new import, since): it would put older files back.
+      if (skillUpdateBases.has(stage) && skillUpdateBases.get(stage) !== (lib[name].hash ?? null)) {
+        return res.status(409).json({ error: 'the skill changed since this update was checked: check for updates again' });
+      }
+      const problems = await stageProblems(dir, name);
+      if (problems.length) return badRequest(res, `cannot update: ${problems.join('; ')}`);
+      await skLibrary.applyUpdate(name, dir);
+      skillUpdateBases.delete(stage);
+      skViews.recordSkillUpdateCheck(req.params.id, false);
+      res.json({ ok: true });
+    });
+  } catch (err) { sendSkillsError(res, err); }
 });
 
 // ---------------------------------------------------------------------------

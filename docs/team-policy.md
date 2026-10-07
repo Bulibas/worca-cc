@@ -39,6 +39,7 @@ No run is ever blocked by a policy. The two Ask Worca web fields are the excepti
 | Allowed models, step defaults, hide built-ins | pickers warn on an off-list model; roles you have not configured start from the team's | soft / default |
 | Marketplaces, required plugins, blocked plugins | marketplaces are added once (metadata only); required plugins go through the setup checklist with consent; blocked ones warn | default / soft |
 | Required MCP servers (`mcp.required`) | servers each developer turns on with consent; they form the **Team** set ([below](#mcp-servers-the-team-set)); never in `workspaceRuns` | soft |
+| Required skills (`skills.required`) | plugin skills each developer turns on with consent; they join the **Team** set ([below](#skills-required-plugin-skills)); never in `workspaceRuns` | soft |
 | Default workflow, human in the loop | when the project has no active workflow / switch of its own | default |
 | Record runs to team metrics, minimum Worca version | a hint when "Include my runs" is off; a banner on an older client | soft |
 | Catalogs: guardrail sets, models | distributed as read-only rows with a **policy** badge; model env may use `${VAR}` indirection only — secrets never go on the branch | — |
@@ -106,12 +107,12 @@ only when you save — and secrets are yours to enter.
 a command is absolute or on `PATH`, never `./`) with a `name` and optional non-secret `values`. An
 entry that breaks a rule is dropped with a warning; the other entries stay.
 
-- **The Team set.** Each home with at least one entry gets a `Team · <home>` set in Settings › MCP
-  servers. Its members are the entries installed on this machine; each teammate fills in the secrets.
+- **The Team set.** Each home with at least one entry gets a `Team · <home>` set in Settings › Sets.
+  Its members are the entries installed on this machine; each teammate fills in the secrets.
   Project runs use their policy's Team set; workspace runs use only the workspace policy's, which is
   why the field is refused in the `workspaceRuns` block.
 - **Consent, never automatic.** The setup checklist lists every entry with its action, and the strip
-  on the MCP servers tab every entry still to set up: **Install** (an inline entry), **Turn on**,
+  on the Sets tab every entry still to set up: **Install** (an inline entry), **Turn on**,
   **Update** (the team definition changed; the dialog shows before and after), **Set <field>**, or
   *Needs plugin* (the plugin's own row). Install, a first Turn on and Update open a consent dialog:
   the command or URL, environment and headers, what each teammate fills in and the values the team
@@ -131,12 +132,37 @@ entry that breaks a rule is dropped with a warning; the other entries stay.
   it cannot read at all (one published for a newer Worca): their state stays. A Team set greys with
   **Forget** once no project here follows its home (removing a project from Worca drops its cached
   policy, unless the repo is still in one of your workspaces; adding a project reads its policy at
-  once) or its policy requires no MCP server any more; Forget then drops the set with its values,
+  once) or its policy requires no MCP server and no skill any more; Forget then drops the set with its values,
   secrets and tests. A policy server no home requires any more reads "no longer required by <home>"
   in the Servers view, keeps working in your own sets, and offers **Remove**.
 - **Pair it with `worca.minVersion`.** An older Worca drops `mcp.required` as an unknown field, and a
   publish from such a client removes it from the branch. A teammate who upgrades sees the field at
   the next discovery, without a new publish.
+
+## Skills: required plugin skills
+
+`skills.required` lists the skills a team needs, as plugin references
+`{ "plugin": "acme", "skill": "deploy-checklist" }` (the plugin must also be in `plugins.required`; a skill
+imported into someone's library cannot be required). They join the home's **Team** set beside its MCP
+servers, and agents call them by that set, like every set skill (`/team-platfor:deploy-checklist`,
+[skills.md](skills.md)).
+
+- **Consent, never automatic.** The setup checklist shows each entry as *Needs plugin*, *Off · never turned
+  on* or *Off* (each with **Turn on**), *On*, or the reason it cannot load. **Turn on** for a skill never turned
+  on opens a dialog with the SKILL.md, its scripts and shell blocks and the plugin's pinned commit (one turned off
+  later turns back on at once); consent is recorded on exactly that `{ plugin, skill }`. A skill's content changes
+  only through its plugin's update preview (`SKILL CHANGED: …`), so there is no Update here: to refuse a change, turn
+  the skill off on the Team set's page (Settings › Sets). **Forget** appears only once no project on this machine
+  follows that home, or its policy requires no MCP server and no skill any more.
+- **Deviations.** A run whose policy requires a skill that cannot reach it warns and records why; it never blocks:
+  `skill-missing:<plugin>/<skill>` (not installed), `skill-off:<plugin>/<skill>` (off, or never turned on),
+  `skill-opted-out:<plugin>/<skill>` (switched off for that run) and `skill-skipped:<plugin>/<skill>` (any other
+  reason, e.g. its plugin is disabled).
+- **Trusted homes.** Trusting a home on the Plugins page installs its missing required plugins without the
+  checklist, and updates to required skills apply without another review when you trust this home. Required skills are
+  still never turned on automatically.
+- Refused in the `workspaceRuns` block, like `mcp.required`. Pair it with `worca.minVersion`: an older
+  Worca drops the field.
 
 ## Reading and freshness
 
