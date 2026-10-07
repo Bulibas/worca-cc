@@ -6047,7 +6047,7 @@ export class RunHarness extends EventEmitter {
       // A failed title used to vanish into a kept provisional title. Say so in
       // the run log — once per run, there is only ever one title call.
       onError: ({ model, error }) => this._log('orchestrator', 'warn',
-        `title generation failed (model ${model}): ${clipMiddle(error?.message || error, 300)} — keeping the provisional title`),
+        `title generation failed (${model ? `model ${model}` : 'the CLI default model'}): ${clipMiddle(error?.message || error, 300)} — keeping the provisional title`),
       // Same env policy as the pipeline nodes. Both undefined on an unconfigured
       // project ⇒ byte-identical spawn env (legacy parity).
       envScrub: this.guardrails?.envScrub || undefined,
