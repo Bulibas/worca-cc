@@ -224,7 +224,7 @@ Everything on the page: the list, the runtime step, the workspace and the bench 
 
 | Element | Level |
 |---|---|
-| General: Appearance, Interface mode, Getting started, About | S |
+| General: Appearance, Alerts, Interface mode, Getting started, About | S |
 | Runs tab: Budget & cost limits | S |
 | General: root folders; Runs tab: Scheduled runs defaults, Workspaces (scan models), chat notifications; Ask Worca tab (limits, tools, web access, chat history) | A |
 | Runs tab: Actions (keep policy, port range, editor/terminal, cap) | A |

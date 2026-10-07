@@ -73,6 +73,7 @@ const state = {
 import { logLineClass, logLineTime, serializeLog, cycleSeparatorBefore, newCycleState, projectLogRecord } from './log-line.mjs';
 import { logLineVisible, logFacets, compileLogFilter } from './log-filter.mjs';
 import { alreadyApplied, noteBoot } from './ws-seq.mjs';
+import { createAlerts, mountAlertsCard } from './alerts.mjs';
 import { decorFromState, applyDecor, isGraphManifest, ledgerRows } from './graph/run-decor.mjs';
 import { mountRunGraph } from './graph/run-hosts.mjs';
 import { AWAY_GLYPH } from './away-glyph.mjs';
@@ -610,6 +611,22 @@ function scheduleReconnect(delayMs = 1500) {
     connectWS();
   }, delayMs);
 }
+
+// ---------------------------------------------------------------------------
+// Alerts (alerts.mjs): desktop notifications for a run waiting on a person and the
+// waiting badge. Per browser, off until turned on in Settings › General › Alerts.
+// Storage is read lazily so a missing or throwing localStorage never stops boot.
+// ---------------------------------------------------------------------------
+const alerts = createAlerts({
+  Notification: typeof window.Notification === 'function' ? window.Notification : null,
+  doc: document,
+  nav: navigator,
+  storage: { getItem: (k) => localStorage.getItem(k), setItem: (k, v) => localStorage.setItem(k, v) },
+  win: window,
+  onOpen: (target) => { location.hash = target.schedule ? 'schedules' : rdHash(target.runId); },
+});
+/** The run as alerts.mjs names it: makeRun's '(untitled)' placeholder is no title (the id stands in). */
+const alertRun = (r) => ({ runId: r.runId, title: r.title === '(untitled)' ? '' : r.title });
 
 // ---------------------------------------------------------------------------
 // Sidebar collapse (icon rail) + the responsive nav tiers. `sidebarCollapsed` is
@@ -1155,6 +1172,7 @@ function handleServerMessage(msg) {
     return;
   }
   if (msg.type === 'notification' || msg.type === 'notifications-changed') {
+    if (msg.type === 'notification') alerts.onScheduleNotification(msg.notification);
     refreshAllCounts();
     if (currentView() === 'schedules') void schedulesView.loadFeed();
     return;
@@ -1414,6 +1432,7 @@ function onHello(msg) {
   // "unknown runId" to and hide the run's working Resume.
   if (rebooted) for (const r of runs.values()) r.staleBoot = true;
 
+  const firstHello = !helloSeeded;
   if (!helloSeeded) {
     helloSeeded = true;
     for (const r0 of list) {
@@ -1426,6 +1445,7 @@ function onHello(msg) {
 
   for (const r0 of list) {
     if (!r0 || !r0.runId) continue;
+    const prevQuestion = runs.get(r0.runId)?.pendingQuestion || null;
     const rr = upsertRun({
       runId: r0.runId,
       title: r0.title,
@@ -1447,6 +1467,12 @@ function onHello(msg) {
     // sub-agents to their real nodes BEFORE any subagent delta paints — closing
     // the window where r.stepper is null and nothing can be resolved.
     if (r0.stepper && rr.stepper == null) rr.stepper = r0.stepper;
+    // Already pending when the page loaded: it counts on the badge but never notifies. A reconnect
+    // hello can list a wait raised while the socket was down, so it notifies; one this tab has
+    // already seen is deduplicated by tag, and so is the subscribe replay below.
+    if (r0.pendingQuestion) alerts.onQuestion(alertRun(rr), r0.pendingQuestion, { backfill: firstHello });
+    // Answered while the socket was down: the upsert cleared it without a question-resolved frame.
+    else if (prevQuestion && prevQuestion.id != null) alerts.onResolved(alertRun(rr), { id: prevQuestion.id });
 
     const nonTerminal =
       r0.status === 'starting' || r0.status === 'running' || r0.status === 'pausing' ||
@@ -1668,6 +1694,7 @@ function dropPendingQuestion(r) {
 // repaint so the foot chip + stepper leave the false "paused" state. Id-aware so a
 // late or duplicate resolution cannot wipe a NEWER pending question.
 function onQuestionResolved(r, msg) {
+  alerts.onResolved(alertRun(r), msg);
   if (!r.pendingQuestion) return;
   if (msg && msg.id && r.pendingQuestion.id !== msg.id) return;
   dropPendingQuestion(r);
@@ -4679,6 +4706,7 @@ function onQuestion(r, msg) {
   r._decorSeq = (r._decorSeq || 0) + 1;   // isLive(r) reads pendingQuestion
   // A new question supersedes any half-finished answer attempt.
   r._answering = false;
+  alerts.onQuestion(alertRun(r), msg);
 }
 
 // The `?` glyph used in the panel head. Built fresh each call (a node can only
@@ -13365,6 +13393,11 @@ try {
   const mq = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
   if (mq && typeof mq.addEventListener === 'function') mq.addEventListener('change', () => applyTheme(document.documentElement.dataset.theme));
 } catch { /* no media queries here */ }
+
+// ---- Alerts (Settings › General) ----
+// This browser's choices (localStorage, no server round trip): painted at boot, and the
+// permission prompt is raised only by the switch's own click.
+mountAlertsCard({ doc: document, alerts });
 
 // ---- Away mode (Settings › Runs) ----
 // Settings › Away mode: the user layer (night-mode-form.mjs), its live summary and the status strip.
@@ -28843,6 +28876,9 @@ function updateNavCounts() {
   }
   // One badge on Runs (D11): while anything needs you, the amber Needs-you count shows and
   // CSS hides the live count beside it.
+  let waiting = 0;
+  for (const r of runs.values()) if (r.pendingQuestion != null) waiting += 1;
+  alerts.updateBadge({ waitingRuns: waiting });
   const needs = runsNeedsCount();
   const nc = $('#nav-needs-count');
   if (nc) { nc.textContent = String(needs); nc.hidden = needs === 0; }
@@ -28893,6 +28929,7 @@ async function refreshAllCounts() {
 let schedulesInUse = false;
 function paintScheduleCounts(c) {
   if (!c) return;
+  if (Number.isFinite(c.unread)) alerts.updateBadge({ unreadProblems: c.unread });
   const inUse = !!((c.scheduled || 0) + (c.missed || 0) + (c.recurring || 0) + (c.unread || 0));
   if (inUse !== schedulesInUse) { schedulesInUse = inUse; paintLevelBanner(); }
   if (el.navSchedulesCount && Number.isFinite(c.scheduled)) {
