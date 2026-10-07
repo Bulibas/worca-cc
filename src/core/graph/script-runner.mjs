@@ -110,7 +110,8 @@ export function buildEnvelope(ctx) {
   }
   const detached = Boolean(ctx.runRoot) && Boolean(ctx.workspace);
   const repos = detached && Array.isArray(ctx.repos) && ctx.repos.length
-    ? ctx.repos.map((r) => ({ key: r.projectKey, dir: r.dir }))
+    // A member's own diff base rides its entry (additive): the scalar ctx.checkpointRef is the PRIMARY's only.
+    ? ctx.repos.map((r) => ({ key: r.projectKey, dir: r.dir, ...(r.checkpointRef ? { checkpointRef: r.checkpointRef } : {}) }))
     : null;
   return {
     apiVersion: 1,

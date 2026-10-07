@@ -90,3 +90,42 @@ test('liveDiff returns null before setup and a per-project shape for a workspace
   assert.equal(ws.results.summary.filesNew, 2);
   assert.match(ws.patch, /^# a\n/);
 });
+
+test('_reconcileDiffBases: a re-attached member moves to its recorded start; a non-ancestor, pending or base-less record is left alone', async () => {
+  const h = fakeHarness({ isWorkspace: true, dirs: { a: repo, b: repo } });
+  // An EMPTY commit: HEAD moves past `base` (so the two differ) without changing any tree, so the
+  // file's other tests — which diff `base` against the working tree — are unaffected.
+  git(['commit', '-q', '--allow-empty', '-m', 'later']);
+  const head = git(['rev-parse', 'HEAD']).stdout.trim();
+  h.members = [{ projectKey: 'a' }, { projectKey: 'b' }];
+  h.pipeline = null;                                   // no audit sink: the audit is best-effort
+  h._log = () => {};
+  h.state = { branches: {
+    a: { worktreeDir: repo, baseSha: base },
+    b: { worktreeDir: repo, baseSha: '0'.repeat(40) },    // not in the checkout's history
+  } };
+  h.checkpointRefs = { a: head, b: head };
+  await h._reconcileDiffBases();
+  assert.equal(h.checkpointRefs.a, base, 'corrected to the recorded worktree start');
+  assert.equal(h.checkpointRefs.b, head, 'an unknown/non-ancestor start is never adopted');
+  assert.equal(h.checkpointRef, base, 'the scalar mirrors the primary');
+  assert.deepEqual(h.state.checkpointRefs, { a: base, b: head });
+  const pending = fakeHarness({ dirs: { a: repo } });
+  pending.members = [{ projectKey: 'a' }]; pending.pipeline = null; pending._log = () => {};
+  pending.state = { branches: { a: { source: 'main', baseSha: base } } };   // no worktreeDir: a pending record
+  pending.checkpointRefs = { a: head };
+  await pending._reconcileDiffBases();
+  assert.equal(pending.checkpointRefs.a, head);
+  // No persisted base (a legacy resume point with checkpointRef: null): today the diff is skipped.
+  // Adopting baseSha here could diff the enclosing project checkout, so nothing changes, and the
+  // state is not re-mirrored (stays exactly as it was).
+  const baseless = fakeHarness({ dirs: { a: repo } });
+  baseless.members = [{ projectKey: 'a' }]; baseless.pipeline = null; baseless._log = () => {};
+  baseless.state = { branches: { a: { worktreeDir: repo, baseSha: base } } };
+  baseless.checkpointRefs = {};
+  baseless.checkpointRef = 'ref-from-hook';
+  await baseless._reconcileDiffBases();
+  assert.deepEqual(baseless.checkpointRefs, {});
+  assert.equal(baseless.checkpointRef, 'ref-from-hook', 'an untouched run keeps its scalar');
+  assert.equal(baseless.state.checkpointRefs, undefined, 'nothing changed → no re-mirror');
+});

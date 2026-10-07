@@ -26,7 +26,7 @@ const PROBE = await probePython();
 const pySkip = PROBE.ok ? false : `no python on this host: ${PROBE.reason}`;
 
 /** A runner ctx over a temp pipeline dir for a built-in with CONFIG ports (shell, js) or sidecar ports (gitDiff). */
-function ctxFor(key, { params = {}, ports: configPorts, cwd = tmp('worca-bi-cwd-'), checkpointRef = null } = {}) {
+function ctxFor(key, { params = {}, ports: configPorts, cwd = tmp('worca-bi-cwd-'), checkpointRef = null, extra = {} } = {}) {
   const meta = REG[key];
   const pipelineDir = tmp('worca-bi-pipe-');
   const declared = meta.ports === 'config' ? readConfigPorts(configPorts || meta.defaultPorts, { hasVerdict: !!meta.verdict }).ports : { inputs: meta.inputs, outputs: meta.outputs };
@@ -40,6 +40,7 @@ function ctxFor(key, { params = {}, ports: configPorts, cwd = tmp('worca-bi-cwd-
     bindings: {}, trigger: { wireIds: [], freshPorts: [] },
     script: { meta, runtime: meta.runtime, file: meta.scriptPath, command: meta.commandResolved, params: effectiveScriptParams(meta, { params }), timeoutMs: meta.timeoutMs, mock: null },
     claudeOpts: {}, onEvent: () => {},
+    ...extra,
   };
 }
 
@@ -112,6 +113,45 @@ test('gitDiff: a fenced diff against the checkpoint ref (or the ref param), --st
   assert.match(readFileSync(stat.outputs.diff.path, 'utf8'), /```text\n[\s\S]*a\.txt \|[\s\S]*```/);
   const head = await runScriptExecution(ctxFor('gitDiff', { cwd: repo, checkpointRef: ref, params: { ref: 'HEAD' } }));
   assert.match(readFileSync(head.outputs.diff.path, 'utf8'), /-hello\n\+hello world/, 'the ref param wins over the checkpoint');
+});
+
+test('gitDiff on a workspace run: each member diffs against ITS OWN checkpoint, an explicit ref still wins for all', async () => {
+  // gitDir makes ONE empty commit with a fixed identity and message, so two gitDir repos made in the
+  // same second share the SAME sha — a per-repo commit with a distinct message makes each base a
+  // commit that exists in its own repository only (otherwise the bug is invisible).
+  const mk = (tag, file) => {
+    const repo = gitDir(tag);
+    scratch.push(repo);
+    execSync(`git -c user.email=t@t -c user.name=t commit -q --allow-empty -m ${tag}`, { cwd: repo });
+    const base = execSync('git rev-parse HEAD', { cwd: repo, encoding: 'utf8' }).trim();
+    writeFileSync(join(repo, file), `${file}\n`);
+    execSync('git add -N .', { cwd: repo });           // intent-to-add: a plain `git diff <base>` lists the new file
+    return { repo, base };
+  };
+  const a = mk('bi-diff-ws-a', 'a-new.txt');
+  const b = mk('bi-diff-ws-b', 'b-new.txt');
+  assert.notEqual(a.base, b.base, 'precondition: each member has its own base commit');
+  const repos = [{ projectKey: 'api', dir: a.repo, checkpointRef: a.base }, { projectKey: 'web', dir: b.repo, checkpointRef: b.base }];
+  const events = [];
+  const extra = { runRoot: tmp('worca-bi-root-'), workspace: { kind: 'metadata', projects: [{ projectKey: 'api' }, { projectKey: 'web' }] }, repos,
+    onEvent: (e) => events.push(e) };
+  const ctx = ctxFor('gitDiff', { cwd: a.repo, checkpointRef: a.base, extra });   // the scalar is the PRIMARY's base only
+  await runScriptExecution(ctx);
+  // The script's log('warn') never lands in r.warnings: the runner emits it as a `[warn] …` text event.
+  const warns = events.map((e) => String(e?.text ?? '')).filter((t) => t.startsWith('[warn]'));
+  assert.deepEqual(warns, [], 'no member was diffed against another repo\'s commit');
+  const md = readFileSync(ctx.outputs.diff.path, 'utf8');
+  const sectionOf = (key) => (md.split(/^## /m).find((s) => s.startsWith(`${key}\n`)) || '');
+  // The RED signal: today `web` is diffed against a.base (not a commit in web's repo) → "(no changes)".
+  assert.match(sectionOf('web'), /b-new\.txt/, 'web lists its own new file');
+  assert.match(sectionOf('api'), /a-new\.txt/);
+  assert.match(sectionOf('web'), new RegExp(`^web\\n\\nBase: \`${b.base}\`\\n`));
+  assert.match(sectionOf('api'), new RegExp(`^api\\n\\nBase: \`${a.base}\`\\n`));
+  assert.match(md, /^# Diff against each project's diff base\n/);
+  const head = await runScriptExecution(ctxFor('gitDiff', { cwd: a.repo, checkpointRef: a.base, params: { ref: 'HEAD' }, extra }));
+  const headMd = readFileSync(head.outputs.diff.path, 'utf8');
+  assert.match(headMd, /^# Diff against HEAD\n/, 'an explicit ref applies to every member');
+  assert.match(headMd, /## web\n\nBase: `HEAD`\n/);
 });
 
 test('shell: the command param runs in the cwd with the WORCA_* env; exit 1 fires the synthesized blocking verdict', async () => {

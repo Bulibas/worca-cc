@@ -23,6 +23,9 @@ import {
   worktreePathForBranch,
   createDetachedWorktree,
   worktreeHead,
+  commitOf,
+  isAncestor,
+  reusedBranchBase,
   runGitCapture,
   ASK_GIT_ENV,
 } from '../src/core/worktree.mjs';
@@ -463,4 +466,37 @@ test('deleteBranchIfAt: missing branch, unknown base and option-shaped input are
   assert.equal((await deleteBranchIfAt({ projectDir: repo, branch: 'worca-cc/b-1', sha: '-q' })).reason, 'invalid');
   assert.equal((await deleteBranchIfAt({})).reason, 'invalid');
   assert.ok((await listLocalBranches(repo)).includes('worca-cc/b-1'), 'nothing was deleted');
+});
+
+test('reusedBranchBase / isAncestor / commitOf: fork point vs <remote>/<source> first, then local source; null on unrelated or bad input', async () => {
+  const repo = await freshRepo();
+  const g = (...a) => spawnSync('git', a, { cwd: repo, encoding: 'utf8' }).stdout.trim();
+  const fork = g('rev-parse', 'HEAD');
+  g('checkout', '-q', '-b', 'feat/x'); await writeFile(join(repo, 'x.txt'), 'x\n'); g('add', '-A'); g('commit', '-qm', 'x');
+  g('checkout', '-q', 'main'); await writeFile(join(repo, 'm.txt'), 'm\n'); g('add', '-A'); g('commit', '-qm', 'm');
+  await checkRows([
+    { name: 'local source only', run: async () => {
+      assert.deepEqual(await reusedBranchBase(repo, { feature: 'feat/x', source: 'main' }), { sha: fork, against: 'main' });
+    } },
+    { name: 'remote-tracking ref preferred over the local source', run: async () => {
+      g('update-ref', 'refs/remotes/origin/main', fork);
+      try {
+        assert.deepEqual(await reusedBranchBase(repo, { feature: 'feat/x', source: 'main', remote: 'origin' }), { sha: fork, against: 'origin/main' });
+      } finally {
+        g('update-ref', '-d', 'refs/remotes/origin/main');   // checkRows runs the later rows even after a failure
+      }
+    } },
+    { name: 'unrelated history / bad input → null', run: async () => {
+      g('checkout', '-q', '--orphan', 'island'); g('commit', '-q', '--allow-empty', '-m', 'island'); g('checkout', '-q', 'main');
+      assert.equal(await reusedBranchBase(repo, { feature: 'island', source: 'main' }), null);
+      assert.equal(await reusedBranchBase(repo, { feature: '', source: 'main' }), null);
+      assert.equal(await reusedBranchBase(repo, { feature: 'feat/x', source: '--output=x' }), null);
+      assert.equal(await commitOf(repo, '-x'), null);
+    } },
+    { name: 'isAncestor', run: async () => {
+      assert.equal(await isAncestor(repo, fork, 'feat/x'), true);
+      assert.equal(await isAncestor(repo, 'feat/x', 'main'), false);
+      assert.equal(await isAncestor(repo, 'nope', 'main'), false);
+    } },
+  ]);
 });

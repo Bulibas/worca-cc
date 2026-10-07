@@ -72,6 +72,7 @@ import { loadAgentRegistry, DEFAULT_AGENTS_DIR } from './agent-registry.mjs';
 import {
   createWorktree, removeWorktree, suggestBranchName, sanitizeBranchName, resolveDefaultBranch,
   isValidSourceRef, snapshotWorktreePatch, listLocalBranches, worktreeHead, deleteBranchIfAt,
+  reusedBranchBase, isAncestor,
 } from './worktree.mjs';
 import { syncBaseForRun, ensureLocalBranch, fetchRemote, isSafeBranchName, runSyncOptions, INTERACTIVE_TIMEOUT_MS } from './git-sync.mjs';
 import { SYNC_EXECUTION_ID } from '../shared/graph/constants.mjs';
@@ -1983,7 +1984,49 @@ export class RunHarness extends EventEmitter {
         checkpointRefs: this.checkpointRefs, branches: meta.branches || {},
       });
     }
+    // A run paused before the diff-base fix persisted the project checkout's HEAD as its base.
+    // Correct it from the recorded worktree start before anything diffs, persists or renders it.
+    await this._reconcileDiffBases();
     return resumeManifest;
+  }
+
+  /**
+   * Re-attached members only (`workDirs`): adopt the RECORDED start of each checkout as its diff
+   * base — `diffBase` (a reused branch's fork point) or `baseSha` (a fresh start) — when it differs
+   * from the persisted base and is in the checkout's history, with one audit line per change.
+   * A pending (setup-incomplete) member is not attached; the setup replay sets its base. A record
+   * with neither field keeps its base. A member with NO persisted base is left alone: its diff is
+   * skipped today, and a legacy empty dir inside the project repo would let the ancestor check pass
+   * against the user's own checkout. Shared by resume and stop-of-paused. Runs before `_rehydrated`
+   * (the 'resume' failure site), so it NEVER throws.
+   */
+  async _reconcileDiffBases() {
+    const short = (s) => (s ? String(s).slice(0, 10) : 'none');
+    try {
+      let changed = false;
+      for (const [key, dir] of this.workDirs.entries()) {
+        const rec = this.state.branches?.[key];
+        const want = rec && rec.worktreeDir ? (rec.diffBase || rec.baseSha || null) : null;
+        const had = this.checkpointRefs[key] || null;
+        if (!want || !had || want === had) continue;
+        if (!(await isAncestor(dir, want, 'HEAD'))) {
+          this._log('worktree', 'warn', `${key}: recorded start ${short(want)} is not in the checkout's history — keeping diff base ${short(had)}`);
+          continue;
+        }
+        this.checkpointRefs[key] = want;
+        changed = true;
+        if (this.pipeline?.dir) {
+          await appendAudit(this.pipeline.dir, `Diff base for \`${key}\` corrected to the worktree's start: \`${short(had)}\` → \`${short(want)}\`.`).catch(() => {});
+        }
+      }
+      if (!changed) return;                               // nothing corrected: state stays exactly as re-attached
+      const primaryKey = this.members?.[0]?.projectKey;
+      if (primaryKey && this.checkpointRefs[primaryKey]) this.checkpointRef = this.checkpointRefs[primaryKey];
+      this.state.checkpointRef = this.checkpointRef;
+      this.state.checkpointRefs = { ...this.checkpointRefs };
+    } catch (err) {
+      this._log('worktree', 'warn', `diff base check on resume failed: ${err?.message || err}`);
+    }
   }
 
   /**
@@ -2163,6 +2206,9 @@ export class RunHarness extends EventEmitter {
           return;
         }
         try {
+          // The project checkout's HEAD (_ensureGitCheckpointFor), or a replay's persisted base. Only
+          // used to say in the audit whether the diff base differs from it — never as the base itself.
+          const checkoutHead = this.checkpointRefs[m.projectKey] || null;
           // Replay (resume after a pausable setup failure): the first attempt persisted its planned
           // start below. Resume passes no `branch`, so without it a replay would re-resolve
           // resolveDefaultBranch and could start from — and record — another branch.
@@ -2209,22 +2255,28 @@ export class RunHarness extends EventEmitter {
               && pending.plannedFeature === sanitizeBranchName(featureRaw)
             ? pending.reuse
             : (await listLocalBranches(resolve(m.projectDir))).includes(sanitizeBranchName(featureRaw));
-          // D17 / C3: the checkpoint is the project dir's HEAD from BEFORE the sync. When this run
-          // moved its start (fast-forward, remote start, a source created from the remote — before
-          // the sync by _ensureLocalSource or by the Sync fetch itself), diffing against it would
-          // count every upstream commit as the run's own change. Move the member's diff base NOW —
-          // before createWorktree — so a paused setup persists it.
+          // D17 / C3: when this run moved its start (fast-forward, remote start, a source created from
+          // the remote), move the member's diff base NOW — before createWorktree — so a paused setup
+          // persists it. The final base is set after createWorktree from the worktree itself (below).
           const moved = synced.record && ['fast-forwarded', 'remote-start', 'created'].includes(synced.record.result)
             ? synced.record.to : (this._createdSources.get(m.projectKey) || null);
           const baseMoved = !willReuse && (!!moved || !!(pending && pending.baseMoved));
           if (baseMoved && moved && this.checkpointRefs[m.projectKey] !== moved) this.checkpointRefs[m.projectKey] = moved;
           const syncRecord = synced.record || (pending && pending.sync) || null;
+          // A REUSED branch ignores sourceBranch and sits on its old tip: its diff is every change on it
+          // that <remote>/<source> has not merged (plus uncommitted work). Decided before createWorktree,
+          // like the move above, so a paused setup persists it. NEVER stored as baseSha: that field is
+          // the "this run created the branch" proof _dropUnchangedMemberBranch deletes by.
+          const reuseBase = willReuse ? await this._reusedBranchBase(m, source, featureRaw, pending, syncRecord) : null;
+          if (reuseBase && this.checkpointRefs[m.projectKey] !== reuseBase.sha) this.checkpointRefs[m.projectKey] = reuseBase.sha;
           // Pending record, persisted with the checkpoint if createWorktree fails pausably (mirrored
           // into state.branch before the throw, below). It has no worktreeDir: that marks it pending.
           // `plannedFeature`, not `feature`: readers treat `feature` as "a branch this run owns".
           this.state.branches[m.projectKey] = { source, plannedFeature: sanitizeBranchName(featureRaw), reuse: willReuse,
             ...(startRef ? { startRef } : {}),
-            ...(baseMoved ? { baseMoved: true } : {}), ...(syncRecord ? { sync: syncRecord } : {}) };
+            ...(baseMoved ? { baseMoved: true } : {}),
+            ...(reuseBase ? { diffBase: reuseBase.sha, diffBaseFrom: reuseBase.against } : {}),
+            ...(syncRecord ? { sync: syncRecord } : {}) };
           const info = await createWorktree({
             projectDir: resolve(m.projectDir),              // the REAL dir: git runs here
             pipelineId: this.pipeline.id,
@@ -2245,21 +2297,35 @@ export class RunHarness extends EventEmitter {
           // info.sourceBranch would echo the startRef SHA on a remote start, so don't use it.
           // A fresh start: a new branch, or (replay) the branch the first attempt created at the
           // start point, which createWorktree now reports as reusedExisting. Only a branch that
-          // existed BEFORE this run (willReuse) ignored sourceBranch; its diff base never moved.
+          // existed BEFORE this run (willReuse) ignored sourceBranch.
           const freshStart = !willReuse;
           const baseSha = freshStart ? await worktreeHead(info.worktreeDir) : null;
-          // A fresh worktree whose start this run moved (now, or on the first attempt of a replay):
-          // its real HEAD is the diff base (a ref could also have moved in between).
-          if (baseMoved && baseSha && this.checkpointRefs[m.projectKey] !== baseSha) this.checkpointRefs[m.projectKey] = baseSha;
+          // A replayed reuse whose branch vanished while paused: createWorktree just re-created it
+          // from the source, so its real start is the worktree HEAD, not the recorded fork point.
+          const recreated = !freshStart && !info.reusedExisting;
+          // THE diff base: where this worktree started — never the project checkout's HEAD, which can
+          // sit on any other branch (sync off, up-to-date, no-upstream, a tag/SHA source, a workspace
+          // fallback). A reused branch diffs from its fork point (above); with no common history, from
+          // its tip, so upstream commits can never read as this run's changes.
+          const diffBase = freshStart ? baseSha
+            : recreated ? await worktreeHead(info.worktreeDir)
+            : (reuseBase?.sha || await worktreeHead(info.worktreeDir));
+          if (diffBase && this.checkpointRefs[m.projectKey] !== diffBase) this.checkpointRefs[m.projectKey] = diffBase;
           const keptStart = startRef && freshStart ? startRef : null;   // a reused branch ignored it
           this.state.branches[m.projectKey] = { source, feature: info.branch,
                                                 worktreeDir: info.worktreeDir,
                                                 reusedExisting: info.reusedExisting,
                                                 ...(baseSha ? { baseSha } : {}),
+                                                ...(!freshStart && diffBase ? { diffBase, diffBaseFrom: recreated ? null : (reuseBase?.against || null) } : {}),
                                                 ...(keptStart ? { startRef: keptStart } : {}),
                                                 ...(syncRecord ? { sync: syncRecord } : {}) };
-          if (baseMoved) {
-            await appendAudit(this.pipeline.dir, `Diff base for \`${m.projectKey}\` moved to the run's start \`${String(this.checkpointRefs[m.projectKey]).slice(0, 10)}\`.`).catch(() => {});
+          const short = (s) => String(s).slice(0, 10);
+          if ((freshStart || recreated) && diffBase && (baseMoved || (checkoutHead && diffBase !== checkoutHead))) {
+            await appendAudit(this.pipeline.dir, `Diff base for \`${m.projectKey}\` moved to the run's start \`${short(diffBase)}\`.`).catch(() => {});
+          } else if (!freshStart && !recreated && diffBase) {
+            await appendAudit(this.pipeline.dir, reuseBase
+              ? `Diff base for \`${m.projectKey}\` is \`${short(diffBase)}\`, where \`${info.branch}\` forks from \`${reuseBase.against}\` (reused branch).`
+              : `Diff base for \`${m.projectKey}\` is the reused branch's tip \`${short(diffBase)}\` (no common commit with \`${source}\`).`).catch(() => {});
           }
           const reuseNote = info.reusedExisting ? ' (resumed existing branch)' : '';
           await appendAudit(this.pipeline.dir,
@@ -6515,6 +6581,22 @@ export class RunHarness extends EventEmitter {
   _pendingStart(key) {
     const b = (this.state.branches && this.state.branches[key]) || (!this.isWorkspace ? this.state.branch : null);
     return b && typeof b === 'object' && !b.worktreeDir && b.source ? b : null;
+  }
+
+  /** The diff base of a reused feature branch (see reusedBranchBase): measured against the remote the
+   *  sync used (its record), else the member's configured sync remote (default origin) — even with
+   *  sync off: the remote-tracking ref is read, never fetched. A replay keeps the first attempt's
+   *  recorded answer: nothing was fetched since, and on a resume opts.sync is absent, so memberFor()
+   *  would default the remote to origin. */
+  async _reusedBranchBase(m, source, featureRaw, pending = null, syncRecord = null) {
+    // Only for the SAME planned name — the rule willReuse already follows for pending.reuse.
+    if (pending && pending.diffBase && pending.plannedFeature === sanitizeBranchName(featureRaw)) {
+      return { sha: pending.diffBase, against: pending.diffBaseFrom || source };
+    }
+    return reusedBranchBase(resolve(m.projectDir), {
+      feature: sanitizeBranchName(featureRaw), source,
+      remote: syncRecord?.remote || this.syncOpts.memberFor(m.projectKey).remote,
+    });
   }
 
   /** A remote-only source (picked from the Remote only group / proposed by Ask) becomes a local

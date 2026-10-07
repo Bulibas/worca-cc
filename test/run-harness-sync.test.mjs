@@ -1,8 +1,8 @@
 // test/run-harness-sync.test.mjs
 // #527 Phase C: the run harness's Sync bookend stage. Each world is a bare origin, clone A
 // (the run's projectDir, on `dev`) and a teammate clone B that pushes. Sync is OFF unless
-// opts.sync.members[projectKey].enabled (D4). The diff base (checkpointRefs) moves to the
-// run's start only when the run moved its start (C3/D17).
+// opts.sync.members[projectKey].enabled (D4). The diff base (checkpointRefs) is always the
+// worktree's start (a reused branch: its fork point vs `<remote>/<source>`).
 import { test, before, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, mkdirSync, renameSync } from 'node:fs';
@@ -220,6 +220,62 @@ test('sync off (no opts.sync): nothing is fetched or moved; baseSha still record
   assert.equal(syncRow(orch), undefined);
 });
 
+// RC1: the diff base used to be the PROJECT CHECKOUT's HEAD. With the checkout on another branch than
+// sourceBranch, every commit between the two showed up as the run's own change.
+test('checkout on another branch than the source: the diff base is the worktree start, not the checkout HEAD', { timeout: 90000 }, async () => {
+  const onOther = () => {
+    const w = world();
+    git(w.a, ['checkout', '-q', '-b', 'other']);
+    localCommit(w.a, 'other.txt');                     // the checkout now sits one commit off dev
+    return w;
+  };
+  await checkRows([
+    { name: 'sync off: base = dev, other.txt never appears', run: async () => {
+      const w = onOther();
+      const start = sha(w.a, 'dev');
+      const orch = orchFor(w, { branch: { source: 'dev' } });
+      const res = await orch.run();
+      assert.equal(res.status, 'done', JSON.stringify(res));
+      const st = orch.getState();
+      assert.equal(st.branch.baseSha, start);
+      assert.equal(st.checkpointRef, start, 'the diff base is where the worktree started');
+      assert.equal(st.checkpointRefs[w.key], start);
+      assert.doesNotMatch(diffText(res.pipelineDir), /other\.txt/, 'a commit of the user\'s checkout is not the run\'s change');
+    } },
+    { name: 'sync on + up to date: base = dev, other.txt never appears', run: async () => {
+      gitSync.reset(); fetches = 0; fetchDelayMs = 0; installRunner();
+      const w = onOther();
+      const start = sha(w.a, 'dev');
+      const orch = orchFor(w, { branch: { source: 'dev' }, sync: on(w.key) });
+      const res = await orch.run();
+      assert.equal(res.status, 'done', JSON.stringify(res));
+      const st = orch.getState();
+      assert.equal(st.branch.sync.result, 'up-to-date');
+      assert.equal(st.checkpointRef, start);
+      assert.doesNotMatch(diffText(res.pipelineDir), /other\.txt/);
+    } },
+  ]);
+});
+
+// RC1 / sourceFromPrevious: the source is the previous run's LOCAL feature branch (no origin copy →
+// sync `no-upstream`). The previous run's commits are its own diff, never this run's.
+test('source = the previous run\'s local feature branch (sync on, no-upstream): its commits are not in this run\'s diff', { timeout: 60000 }, async () => {
+  const w = world();
+  git(w.a, ['checkout', '-q', '-b', 'worca-cc/prev-run']);
+  localCommit(w.a, 'prev.txt');
+  const prevTip = sha(w.a, 'HEAD');
+  git(w.a, ['checkout', '-q', 'dev']);                 // the user's checkout is back on dev
+  const orch = orchFor(w, { branch: { source: 'worca-cc/prev-run' }, sync: on(w.key) });
+  const res = await orch.run();
+  assert.equal(res.status, 'done', JSON.stringify(res));
+  const st = orch.getState();
+  assert.equal(st.branch.sync.result, 'no-upstream');
+  assert.equal(st.branch.source, 'worca-cc/prev-run');
+  assert.equal(st.branch.baseSha, prevTip);
+  assert.equal(st.checkpointRef, prevTip);
+  assert.doesNotMatch(diffText(res.pipelineDir), /prev\.txt/, 'the previous run\'s commit is not this run\'s change');
+});
+
 test('diverged + onDiverged fail: terminal error, dev untouched, the record is kept', { timeout: 60000 }, async () => {
   const w = world();
   teammate(w, ['m.txt']);
@@ -336,7 +392,7 @@ test('feature == source is refused: before any fetch when behind, and on the rem
   ]);
 });
 
-test('reused feature branch + behind + sync on: base moves, diff base does not', { timeout: 60000 }, async () => {
+test('reused feature branch + behind + sync on: base moves, diff base = the fork point', { timeout: 60000 }, async () => {
   const w = world();
   git(w.a, ['branch', 'feat/x']);                       // off the old dev
   teammate(w, ['mate1.txt', 'mate2.txt']);
@@ -352,7 +408,47 @@ test('reused feature branch + behind + sync on: base moves, diff base does not',
   assert.equal(st.branch.baseSha, undefined);
   assert.equal(st.branch.startRef, undefined);
   assert.equal(st.checkpointRef, preSync);
+  assert.equal(st.branch.diffBase, preSync, 'fork point of feat/x vs origin/dev');
   assert.doesNotMatch(diffText(res.pipelineDir), /mate1\.txt|mate2\.txt/);
+});
+
+// RC2: a reused branch's diff = every unmerged change on it vs <remote>/<source> (+ uncommitted work).
+// dev moving on after the fork must never read as deletions by this run.
+test('reused feature branch: base = merge-base(feature, origin/dev); earlier unmerged work shows, newer dev commits do not', { timeout: 90000 }, async () => {
+  await checkRows([
+    { name: 'reused branch, dev moved on (pushed), sync off: diffBase = fork point vs origin/dev', run: async () => {
+      const w = world();
+      git(w.a, ['checkout', '-q', '-b', 'feat/x']); localCommit(w.a, 'x1.txt'); git(w.a, ['checkout', '-q', 'dev']);
+      const fork = sha(w.a, 'dev');
+      localCommit(w.a, 'later.txt'); git(w.a, ['push', '-q', 'origin', 'dev']);
+      const orch = orchFor(w, { branch: { source: 'dev', feature: 'feat/x' } });
+      const res = await orch.run();
+      assert.equal(res.status, 'done', JSON.stringify(res));
+      const st = orch.getState();
+      assert.equal(st.branch.reusedExisting, true);
+      assert.equal(st.branch.baseSha, undefined, 'baseSha stays the fresh-start proof only');
+      assert.equal(st.branch.diffBase, fork);
+      assert.equal(st.branch.diffBaseFrom, 'origin/dev');
+      assert.equal(st.checkpointRef, fork);
+      const diff = diffText(res.pipelineDir);
+      assert.match(diff, /x1\.txt/, 'the branch\'s unmerged earlier work is part of its diff');
+      assert.doesNotMatch(diff, /later\.txt/, 'a newer dev commit is not a deletion by this run');
+    } },
+    { name: 'reused branch, no remote: falls back to the local source', run: async () => {
+      const w = world();
+      git(w.a, ['remote', 'remove', 'origin']);
+      git(w.a, ['checkout', '-q', '-b', 'feat/x']); localCommit(w.a, 'x1.txt'); git(w.a, ['checkout', '-q', 'dev']);
+      const fork = sha(w.a, 'dev');
+      localCommit(w.a, 'later.txt');
+      const orch = orchFor(w, { branch: { source: 'dev', feature: 'feat/x' } });
+      const res = await orch.run();
+      assert.equal(res.status, 'done', JSON.stringify(res));
+      const st = orch.getState();
+      assert.equal(st.branch.diffBase, fork);
+      assert.equal(st.branch.diffBaseFrom, 'dev');
+      assert.doesNotMatch(diffText(res.pipelineDir), /later\.txt/);
+    } },
+  ]);
 });
 
 test('tag source + sync on: never synced, no branch named after the tag', { timeout: 60000 }, async () => {
@@ -500,6 +596,7 @@ test('paused setup with a pre-existing feature branch: diff base never moves; a 
   assert.equal(st.checkpointRefs[w.key], preSync);
   assert.equal(st.branch.reuse, true);
   assert.equal(st.branch.plannedFeature, 'feat/x');
+  assert.equal(st.branch.diffBase, preSync);
   rmSync(blocker, { recursive: true, force: true });
   const saved = readPipelineForResume(st.id);
   const orch2 = createOrchestrator({ projectDir: w.a, auto: true, claude: { mock: true }, resume: saved });
@@ -519,6 +616,26 @@ function wsOpts(dirs, { branch = { source: 'dev' } } = {}) {
   const id = `wks-sync-${projects.map((p) => p.projectKey).join('').slice(0, 8)}`;
   return { workspace: { id, key: id, name: 'Sync WS', description: '', projects: projects.map((p) => ({ ...p, branch })) }, branch, workflowId: SYNC_WF.id };
 }
+
+// RC1 / workspace: every member's base is ITS OWN worktree start — including a member that fell back to
+// its default branch because its named source exists nowhere.
+test('workspace: each member diffs from its own worktree start (checkout elsewhere; fallback member)', { timeout: 90000 }, async () => {
+  const w1 = world(); const w2 = world();
+  git(w1.a, ['checkout', '-q', '-b', 'other']); localCommit(w1.a, 'other1.txt');
+  git(w2.a, ['checkout', '-q', '-b', 'tmp']); localCommit(w2.a, 'other2.txt'); git(w2.a, ['checkout', '-q', '--detach', 'tmp']);
+  const ws = wsOpts([w1.a, w2.a]);
+  ws.workspace.projects.find((p) => p.projectDir === w2.a).branch = { source: 'feat/ghost' };   // falls back (sync off: no fetch)
+  const orch = createOrchestrator({ ...ws, prompt: 'x', auto: true, claude: { mock: true } });
+  const res = await orch.run();
+  assert.equal(res.status, 'done', JSON.stringify(res));
+  const st = orch.getState();
+  for (const w of [w1, w2]) {
+    assert.equal(st.branches[w.key].source, 'dev');
+    assert.equal(st.branches[w.key].baseSha, sha(w.a, 'dev'));
+    assert.equal(st.checkpointRefs[w.key], st.branches[w.key].baseSha, `${w.key}: base = its worktree start`);
+  }
+  assert.doesNotMatch(diffText(res.pipelineDir), /other1\.txt|other2\.txt/);
+});
 
 test('workspace: per-member Sync — enabled members behind are fast-forwarded under ONE Sync row; a disabled member is untouched', { timeout: 90000 }, async () => {
   const w1 = world(); const w2 = world(); const w3 = world();
