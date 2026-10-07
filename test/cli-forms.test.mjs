@@ -151,7 +151,9 @@ test('form arm: the projection renders, fields prompt in layout order, `when` ga
   assert.match(r.stdout, /Two directions\./);
   assert.match(r.stdout, /^1\. Verdict \{verdict\}$/m);
   assert.match(r.stdout, /one of: 1\) approve {2}2\) changes/);
-  assert.match(r.stdout, /^3\. What should change\? \{notes\}$/m);
+  // the gated field's block prints only once `verdict` opens it, just before its own prompt
+  assert.match(r.stdout, /3\. What should change\? \{notes\}$/m);
+  assert.ok(r.stdout.indexOf('3. What should change?') > r.stdout.indexOf('Choose [number or value]: '), r.stdout);
   assert.doesNotMatch(r.stdout, /Reply: \/answer/, 'no ref on the CLI, so no reply line');
   // formatFormField's own lines (Task 2): the required marker and the numbered options.
   assert.match(r.stdout, /^Verdict \*$/m);

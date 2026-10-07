@@ -68,7 +68,7 @@ test('the projection prints first; Enter accepts the default and `when` DROPS th
   assert.equal(r.prompts.length, 2, 'a `when`-hidden field is never prompted');
   assert.deepEqual(r.lines.slice(0, 2), ['', '? Review mockups — Form Asker']);
   assert.match(r.text, /Two directions\./);
-  assert.match(r.text, /^3\. What should change\? \{notes\}$/m, 'the projection lists the gated field');
+  assert.doesNotMatch(r.text, /What should change/, 'a field its `when` keeps closed is never projected');
   assert.match(r.text, /^Verdict \*$/m);
 });
 
@@ -79,6 +79,8 @@ test('`when` reveals the gated field once its condition holds, in layout order',
     { cue: /^Your answer/, send: 'tighten the spacing' },               // notes, revealed by `when`
   ]);
   assert.deepEqual(r.answer, { values: { verdict: 'changes', picked: 'b', notes: 'tighten the spacing' } });
+  const notesAt = r.lines.indexOf('3. What should change? {notes}');
+  assert.ok(notesAt > r.lines.indexOf('Which one'), 'the opened field is projected just before its own prompt');
 });
 
 test('a review-list prompts per item and collects one row each', async () => {
@@ -103,6 +105,48 @@ test('a review-list prompts per item and collects one row each', async () => {
   ]);
   assert.match(r.text, /^Per-step verdict \*$/m);
   assert.deepEqual(r.answer, { values: { steps: [{ id: 's1', verdict: 'keep' }, { id: 's2', verdict: 'drop', note: 'too risky' }] } });
+});
+
+// A confirm card: one gate question, and a review-list with labelled verdicts that only a
+// reader who says something is wrong ever needs to see.
+const CONFIRM_FORM = {
+  version: 1, title: 'Did we read your repo right?',
+  data: { type: 'object', required: ['tasks'], properties: {
+    tasks: { type: 'array', items: { type: 'object', required: ['id', 'name'], properties: {
+      id: { type: 'string' }, name: { type: 'string' }, why: { type: 'string' } } } } } },
+  answer: { type: 'object', required: ['looksRight', 'tasks'], properties: {
+    looksRight: { type: 'string', enum: ['yes', 'correct'], default: 'yes' },
+    tasks: { type: 'array', items: { type: 'object', required: ['id', 'verdict'], properties: {
+      id: { type: 'string' },
+      verdict: { type: 'string', enum: ['confirm', 'remove'], default: 'confirm' } } } } } },
+  layout: [
+    { widget: 'select', field: 'looksRight', label: 'Looks right?', help: 'Pick the second to fix any line.',
+      labels: { yes: 'Yes, looks right', correct: 'Some of it is wrong' } },
+    { widget: 'review-list', field: 'tasks', bind: 'data.tasks', label: 'Recurring tasks', titleKey: 'name', bodyKey: 'why',
+      labels: { confirm: 'Keep', remove: 'Drop it' }, when: { looksRight: 'correct' } },
+  ],
+  example: { tasks: [{ id: 't1', name: 'Release', why: 'Every Friday' }, { id: 't2', name: 'Triage', why: 'Daily' }] },
+};
+
+test('a `when`-gated review-list: "yes" never prints its rows or a raw value; "correct" prints them with labels', async () => {
+  const ask = await askOf('readiness-confirm', CONFIRM_FORM, CONFIRM_FORM.example);
+  const yes = await drive(ask, [{ cue: /^Choose \[number or value, Enter = Yes, looks right\]/, send: '' }]);
+  assert.deepEqual(yes.answer, { values: { looksRight: 'yes' } });
+  assert.match(yes.text, /^Looks right\? \*\n {2}Pick the second to fix any line\.$/m, 'help prints under the label');
+  assert.doesNotMatch(yes.text, /Release|Triage|Recurring tasks/, 'no gated rows');
+  assert.doesNotMatch(yes.text, /\b(confirm|remove|correct)\b|looksRight=/, 'no raw values and no condition notes');
+
+  const fix = await drive(ask, [
+    { cue: /^Choose \[number or value, Enter = Yes, looks right\]/, send: '2' },   // -> correct
+    { cue: /^ {2}Choose \[number or value, Enter = Keep\]/, send: '' },            // t1 -> confirm
+    { cue: /^ {2}Choose \[number or value, Enter = Keep\]/, send: 'Drop it' },     // t2 -> remove, by label
+  ]);
+  assert.deepEqual(fix.answer, { values: { looksRight: 'correct', tasks: [{ id: 't1', verdict: 'confirm' }, { id: 't2', verdict: 'remove' }] } });
+  assert.match(fix.text, /^- t1: Release — Every Friday$/m);
+  assert.match(fix.text, /^ {3}per item Keep\/Drop it for: t1, t2$/m);
+  assert.ok(fix.lines.indexOf('- t1: Release — Every Friday') > fix.lines.findIndex((l) => /^ {2}2\) Some of it is wrong$/.test(l)),
+    'the rows print after the gate question is answered');
+  assert.doesNotMatch(fix.text, /\b(confirm|remove)\b|only when/, 'labels, never raw verdicts');
 });
 
 // Every input class the review form does not prompt, plus all four re-ask paths: a
