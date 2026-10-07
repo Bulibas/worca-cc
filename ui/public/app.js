@@ -30517,6 +30517,7 @@ terminalPane = createTerminalPane({
     try { ws.send(JSON.stringify(obj)); return true; } catch { return false; }
   },
   getPageContext,
+  confirm: confirmModal,
   storage: window.localStorage,
 });
 document.body.appendChild(terminalPane.root);
