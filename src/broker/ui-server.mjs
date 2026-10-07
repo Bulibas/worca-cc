@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createAccessVerifier } from '../core/cf-access.mjs';
+import { createIssuerVerifier } from '../core/issuer-jwt.mjs';
 import { safeEqual, normalizeBillTo } from './tokens.mjs';
 import { startOfUtcDay, startOfUtcMonth } from './limits.mjs';
 import { startDeviceFlow, pollDeviceFlow, githubSecretOf } from './copilot.mjs';
@@ -56,13 +57,23 @@ function readJson(req, limit = 16 << 10) {
   });
 }
 
-/** The identity resolver for the key page: Access JWT, a trusted header, or none. */
+/** The identity resolver for the key page: Access JWT, an issuer's JWT, a trusted header, or none. */
 export function createIdentity(config, { fetchImpl } = {}) {
   const id = config.identity;
   if (id?.kind === 'access') {
     const verify = createAccessVerifier({ teamDomain: id.teamDomain, aud: id.aud, ...(fetchImpl ? { fetchImpl } : {}) });
     return async (req) => {
       const token = req.headers['cf-access-jwt-assertion'];
+      if (typeof token !== 'string' || !token) return null;
+      const who = await verify(token);
+      return who?.email ? normalizeBillTo(who.email) : null;
+    };
+  }
+  if (id?.kind === 'issuer') {
+    const verify = createIssuerVerifier({ issuer: id.issuer, jwksUrl: id.jwksUrl, audience: id.audience, ...(fetchImpl ? { fetchImpl } : {}) });
+    return async (req) => {
+      const v = req.headers['x-worca-identity'];
+      const token = Array.isArray(v) ? v[0] : v;
       if (typeof token !== 'string' || !token) return null;
       const who = await verify(token);
       return who?.email ? normalizeBillTo(who.email) : null;
