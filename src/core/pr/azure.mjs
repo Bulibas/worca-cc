@@ -93,13 +93,14 @@ async function activePr(baseRepo, head, base, env) {
 }
 
 /** @returns {Promise<PrCreateResult>} */
-export async function createPr({ base, head, title, body = '', baseRepo, pushRepo = null, workItemId = null, env = process.env }) {
+export async function createPr({ base, head, title, body = '', baseRepo, pushRepo = null, workItemId = null, draft = false, env = process.env }) {
   if (!baseRepo?.org) return { ok: false, kind: 'failed', error: 'the base remote is not an Azure DevOps repository' };
   if (pushRepo && !sameRepo(pushRepo, baseRepo)) return { ok: false, kind: 'unsupported', error: forkRefusal(baseRepo) };
   const payload = {
     sourceRefName: `refs/heads/${head}`, targetRefName: `refs/heads/${base}`,
     title: title || head, description: fitDescription(body || title || head),
     ...(workItemId ? { workItemRefs: [{ id: String(workItemId) }] } : {}),
+    ...(draft === true ? { isDraft: true } : {}),   // a new PR only: a 409 recovers the existing one as-is
   };
   try {
     const { json } = await adoFetch('write', `${repoApi(baseRepo)}/pullrequests`, { method: 'POST', body: payload, env });

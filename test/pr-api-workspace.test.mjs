@@ -181,3 +181,23 @@ test('crosslink refuses a single-project run; single-project /api/pr shape is un
   const j = await (await json('/api/pr', { projectKey: s.key, id: s.id, memberKey: 'ignored' })).json();
   assert.deepEqual(Object.keys(j).sort(), ['draft', 'existed', 'mergeable', 'ok', 'url']);
 });
+
+test('an issue-sourced workspace run: only the member in the issue\'s repo closes it (PR body + "Will close")', async () => {
+  const setSource = (v) => getDb().prepare('UPDATE pipelines SET source_ref = ? WHERE id = ?').run(v, runId);
+  setSource(JSON.stringify({ plugin: 'github-source', taskId: 'o/web#7', url: 'https://github.com/o/web/issues/7' }));
+  try {
+    const bodyOf = (seen) => { const a = seen.find((c) => c.argv[2] === 'create').argv; return a[a.indexOf('--body') + 1]; };
+    const issueOf = async (memberKey) => (await (await fetch(`${base}/api/pr/remotes?${new URLSearchParams({ projectKey: KEY, id: runId, memberKey })}`)).json()).issue;
+    let seen = []; stubWs(seen);
+    assert.equal((await json('/api/pr', { projectKey: KEY, id: runId, memberKey: 'web-00000002', body: 'Web part.' })).status, 200);
+    assert.match(bodyOf(seen), /^Web part\.\n\nCloses #7(\n|$)/);
+    seen = []; stubWs(seen);
+    assert.equal((await json('/api/pr', { projectKey: KEY, id: runId, memberKey: 'api-00000001', body: 'Api part.' })).status, 200);
+    assert.doesNotMatch(bodyOf(seen), /Closes/, 'another member\'s PR must not close the issue at its own merge');
+    stubWs([]);
+    assert.deepEqual(await issueOf('web-00000002'), { slug: 'o/web', number: 7 });
+    assert.equal(await issueOf('api-00000001'), null);
+  } finally {
+    setSource(null);
+  }
+});

@@ -845,3 +845,19 @@ test('GET /api/pr/remotes carries the run\'s source issue (null for a prompt run
   assert.equal(failed.status, 500);
   assert.deepEqual((await failed.json()).issue, { slug: 'up/repo', number: 42 }, 'still offered when git fails, like chain');
 });
+
+test('POST /api/pr on an Azure origin: draft reaches the REST create as isDraft; a GitHub issue source adds no Closes line', () => withEnv(WITH_ADO, async () => {
+  await setPrRemotePrefs(betaRepo, {});
+  const id = await seedIssueRun({ feature: 'worca-cc/azure-draft-run' });
+  const calls = [];
+  stubAzureRepo([]);
+  stubAdo(calls);
+  const r = await post({ projectKey: betaKey, id, draft: true, body: 'Did it.' });
+  const j = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(j));
+  assert.equal(j.draft, true);
+  const create = calls.find((c) => c.method === 'POST');
+  assert.equal(create.body.isDraft, true);
+  assert.doesNotMatch(create.body.description, /Closes/);
+  assert.equal((await (await getRemotes({ projectKey: betaKey, id })).json()).issue, null, 'no "Will close" line for an Azure base');
+}));
