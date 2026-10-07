@@ -176,7 +176,7 @@ import {
 } from '../src/core/platform-heartbeat.mjs';
 import { freeDailyStatus } from '../src/core/openrouter-free.mjs';
 import { checkBrokerAtBoot } from '../src/core/broker-boot.mjs';
-import { modelSlot, missingCredentials, describeMissing } from '../src/core/broker-routing.mjs';
+import { modelSlot, missingCredentials, describeMissing, workflowNeedsModel } from '../src/core/broker-routing.mjs';
 import { syncPluginSlots } from '../src/core/plugin-broker-slots.mjs';
 import { planClone, cloneProject, CloneError } from '../src/core/clone-project.mjs';
 import { listFolders } from '../src/core/fs-browse.mjs';
@@ -1919,14 +1919,6 @@ const startRunHandler = async (req, res) => {
       return badRequest(res, 'workspaceId or projectDir is required');
     }
 
-    // Credential broker: the run's own model, when the request names one, is checked here
-    // (an instant refusal); the harness then checks every node's model before it spawns
-    // anything (run-harness.mjs#_brokerPreflight).
-    if (!internal && body.mock !== true && !mockEnabled({}) && typeof body.model === 'string' && body.model.trim()) {
-      const refusal = await brokerStartRefusal(req, [body.model.trim()]);
-      if (refusal) return res.status(409).json({ error: refusal, code: 'credential-missing' });
-    }
-
     // Ask Worca card link (§8.1): both or neither; the thread must exist and
     // the card must still be `proposed` BEFORE any run state is created.
     const hasAskThread = body.askThreadId !== undefined && body.askThreadId !== null;
@@ -2030,6 +2022,15 @@ const startRunHandler = async (req, res) => {
     // a read-only scan the launch never validated (D2).
     if (workflowId === WORKSPACE_SCAN_WORKFLOW_ID && !scanTarget) {
       return badRequest(res, 'the workspace scan starts from the Workspaces view');
+    }
+    // Credential broker: the run's own model, when the request names one, is checked here
+    // (an instant refusal); the harness then checks every node's model before it spawns
+    // anything (run-harness.mjs#_brokerPreflight). A workflow with no agent card (script and
+    // flow cards only) never spawns a model, so it needs no key.
+    if (!internal && body.mock !== true && !mockEnabled({}) && typeof body.model === 'string' && body.model.trim()
+      && workflowNeedsModel(workflowRow)) {
+      const refusal = await brokerStartRefusal(req, [body.model.trim()]);
+      if (refusal) return res.status(409).json({ error: refusal, code: 'credential-missing' });
     }
     // Agent memory (§7.3): the defragment run option — ONE gate for every entry point (the CLI
     // and Ask's proposal validator call the same helper). Before the target lookup.

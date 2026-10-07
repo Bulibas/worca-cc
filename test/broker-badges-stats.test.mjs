@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { credentialBadge, credentialSuffix, setCredentialData, keyPageUrl } from '../ui/public/credential-badges.mjs';
-import { missingCredentials, describeMissing, manifestModels } from '../src/core/broker-routing.mjs';
+import { missingCredentials, describeMissing, manifestModels, manifestNeedsModel, workflowNeedsModel } from '../src/core/broker-routing.mjs';
 import { foldUsageByPerson } from '../src/core/broker-client.mjs';
 import { checkRows } from './helpers/rows.mjs';
 
@@ -64,6 +64,22 @@ test('start-of-run check: every model of the run mapped to its key; each missing
   assert.match(text, /key page \(https:\/\/keys\.example\.com\)/);
   assert.match(text, /gw-x: no credential slot/);
   assert.deepEqual(missingCredentials(['claude-sonnet-5', 'qwen-local'], slotOf, DATA.slots), { missing: [], errors: [] });
+});
+
+test('start-of-run check: only a run with an agent card (or an Auto run) needs a key at all', () => {
+  const graph = (...kinds) => ({ version: 2, graph: { nodes: kinds.map((kind, i) => ({ id: `n${i}`, kind })) } });
+  assert.equal(manifestNeedsModel(graph('task', 'script', 'end')), false, 'script cards only: nothing spawns a model');
+  assert.equal(manifestNeedsModel(graph('task', 'script', 'and', 'script', 'end')), false);
+  assert.equal(manifestNeedsModel(graph('task', 'agent', 'script', 'end')), true);
+  assert.equal(manifestNeedsModel({ ...graph(), auto: { status: 'deciding' } }), true, 'an Auto run decides its graph with a model');
+  assert.equal(manifestNeedsModel({ nodes: [{ kind: 'agent', model: '' }] }), true);
+  assert.equal(manifestNeedsModel(null), true, 'an unknown shape is checked, as before');
+  assert.equal(manifestNeedsModel({ steps: [] }), true);
+  const row = (...kinds) => ({ id: 'wf_x', version: 2, nodes: kinds.map((kind, i) => ({ id: `n${i}`, kind })) });
+  assert.equal(workflowNeedsModel(row('task', 'script', 'end')), false);
+  assert.equal(workflowNeedsModel(row('task', 'agent', 'end')), true);
+  assert.equal(workflowNeedsModel({ id: 'wf_auto', version: 2, auto: true }), true, 'the Auto stub has no nodes but needs a model');
+  assert.equal(workflowNeedsModel(null), true);
 });
 
 test('usage folded per person: slots summed, most spend first', () => {

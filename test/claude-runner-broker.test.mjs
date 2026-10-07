@@ -161,6 +161,23 @@ test('run preflight: every node\'s model is checked against the paying person\'s
   await RunHarness.prototype._brokerPreflight.call(fake, manifest, {});
 });
 
+test('run preflight: a workflow of script cards only needs no key; an agent card or an Auto run still does', async () => {
+  const { RunHarness } = await import('../src/core/run-harness.mjs');
+  useBroker(multi);
+  const fake = { claude: { model: 'claude-sonnet-5', mock: false } };
+  const graph = (...kinds) => ({ version: 2, graph: { nodes: kinds.map((kind, i) => ({ id: `n${i}`, kind, ...(kind === 'agent' ? { model: '' } : {}) })) } });
+  // Ada has no Anthropic key, and the run names a Claude model: a script-only graph still starts.
+  await withBillTo('ada@acme.dev', () => RunHarness.prototype._brokerPreflight.call(fake, graph('task', 'script', 'end'), {}));
+  // Nobody to charge, and nothing to charge for: no refusal either.
+  await RunHarness.prototype._brokerPreflight.call(fake, graph('task', 'script', 'end'), {});
+  const withAgent = await withBillTo('ada@acme.dev', () => RunHarness.prototype._brokerPreflight.call(fake, graph('task', 'script', 'agent', 'end'), {})).catch((e) => e);
+  assert.match(withAgent?.message || '', /^Preflight failed: missing credentials: Anthropic API key/);
+  const auto = await withBillTo('ada@acme.dev', () => RunHarness.prototype._brokerPreflight.call(fake, { ...graph('task', 'end'), auto: { status: 'deciding' } }, {})).catch((e) => e);
+  assert.match(auto?.message || '', /^Preflight failed: missing credentials/);
+  // A mock run never needs a key, agent card or not.
+  await withBillTo('ada@acme.dev', () => RunHarness.prototype._brokerPreflight.call({ claude: { model: null, mock: true } }, graph('task', 'agent', 'end'), {}));
+});
+
 // PR #502 merge guard: the credential-broker path (runViaBroker → runReal({...opts})) must keep the
 // workspace-map run-level spawn env (wsmap D9: the fan-out concurrency cap, background tasks off)
 // and the run-scoped --agents definitions. Both arrive through runClaude's dispatch object.

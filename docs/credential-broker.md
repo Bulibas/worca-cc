@@ -394,6 +394,8 @@ spend, and optional personal caps.
 
 Before a run starts, every model its nodes use is mapped to a slot, and a person missing any
 of those credentials gets one refusal naming them all, before a worktree or a spawn exists.
+A workflow with no agent card (script and flow cards only) and a mock run spawn no model, so
+they start without any key.
 Ask checks the model picked. Pickers show a badge per model: *your key*, *no key*, *key
 rejected*, *team key* or *local*. A credential deleted or rejected mid-run, or a spent cap,
 pauses the run with a message saying where to fix it; resuming continues it.

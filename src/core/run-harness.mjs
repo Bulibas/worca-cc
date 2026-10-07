@@ -81,7 +81,7 @@ import { cachedFreeDailyCounts } from './openrouter-free.mjs';
 import { withBillTo, currentBillTo } from './billing.mjs';
 import { brokerEnabled, brokerInfo, personSlots } from './broker-client.mjs';
 import { mockEnabled } from './claude-runner.mjs';
-import { modelSlot, manifestModels, missingCredentials, describeMissing } from './broker-routing.mjs';
+import { modelSlot, manifestModels, manifestNeedsModel, missingCredentials, describeMissing } from './broker-routing.mjs';
 import { syncPluginSlots } from './plugin-broker-slots.mjs';
 import { recoveryDelayMs, sleepAbortable } from './recovery-backoff.mjs';
 import {
@@ -766,6 +766,9 @@ export class RunHarness extends EventEmitter {
         }
       }
     }
+    // A mock run stays mock across every resume (a restart's auto-resume, Resume, Away lifting):
+    // the flag rides the resume point, and a resume can only add it, never drop it.
+    if (this.opts.resume?.resumePoint?.mock === true) this.claude.mock = true;
     // The mock runner routes EVERY dontAsk spawn to the Ask Worca mock (claude-runner.mjs
     // runMock, rule R-F), so a mock pipeline role under dontAsk writes no artifact and
     // the run dies at its first artifact read with no hint why. Fail at construction
@@ -3707,6 +3710,8 @@ export class RunHarness extends EventEmitter {
    */
   async _brokerPreflight(manifest, stepModels) {
     if (!brokerEnabled() || mockEnabled({ mock: this.claude.mock })) return;
+    // Script and flow cards only: nothing spawns a model, so no key is needed.
+    if (!manifestNeedsModel(manifest)) return;
     let info;
     try { info = await brokerInfo(); } catch { return; }
     const person = info.mode === 'multi' ? currentBillTo() : 'local';
