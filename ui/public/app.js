@@ -21009,9 +21009,15 @@ function openPublishModal(screen, record, data, members) {
     const wrap = document.createElement('label');
     wrap.className = 'publish-remote-wrap';
     wrap.hidden = true;                                   // until the remotes load; else the server's default
+    const label = document.createElement('span');
+    label.className = 'publish-remote-label';
+    label.textContent = 'Push to';
+    const selWrap = document.createElement('span');
+    selWrap.className = 'select-wrap';
     const sel = document.createElement('select');
-    sel.className = 'publish-remote';
-    wrap.append('Push to', sel);
+    sel.className = 'select publish-remote';
+    selWrap.appendChild(sel);
+    wrap.append(label, selWrap);
     const statusEl = document.createElement('div');
     statusEl.className = 'publish-status hint';
     statusEl.hidden = true;
