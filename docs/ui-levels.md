@@ -127,7 +127,7 @@ be skipped by forgetting it.
 | Element | Level |
 |---|---|
 | New pipeline, Getting started, Running, History, Projects, Settings | S |
-| Ask Worca pill, sidebar spend indicator, the mode item | S |
+| Ask Worca button, sidebar spend indicator, the mode item | S |
 | Statistics, Workflow Composer, Workspaces | A |
 | Schedules | A — kept visible at every level while anything is scheduled, missed, repeating or unread |
 | Team metrics, Team policy, Nodes (Agents, Scripts) | E — Nodes is the one entry Simple never keeps: with Agents or Scripts open, the whole group stays hidden and the banner says where you are; Advanced keeps it with the open child |

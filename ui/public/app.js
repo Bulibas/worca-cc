@@ -29569,7 +29569,7 @@ function gsHops(step, g) {
       const input = document.querySelector('.ask-input');
       return [
         { id: 'pill', target: '.ask-pill', lift: ['.ask-dock'], met: () => !!(pill && pill.hidden), skipWhenMet: true,
-          text: 'Ask Worca answers questions about any run in plain language. It is on every view.' },
+          text: 'Ask Worca answers questions about any run in plain language. It\'s the round button in the corner, on every view.' },
         { id: 'question', target: '.ask-input', lift: ['.ask-dock'], met: () => !!(input && input.value.trim()),
           text: 'Try “What did my last run change?” — or anything about a run, an agent or a project.',
           already: 'A question is already typed here. Anything about a run, an agent or a project works.' },
