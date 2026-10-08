@@ -16,8 +16,8 @@
 // - A failed turn ends with `error` + `turn.failed`, and codex may still exit 0. A
 //   top-level `error` alone is not a failure: codex also reports its stream retries
 //   that way ("Reconnecting... 1/5 (…)") and may go on to complete the turn.
-import { mkdirSync, readFileSync, writeFileSync, existsSync, symlinkSync, rmSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, symlinkSync, rmSync, renameSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
@@ -147,7 +147,12 @@ export function guardedCodexHome(rulesText, { base = join(worcaHome(), 'engines'
     const file = join(dir, 'rules', 'worca.rules');
     let cur = null;
     try { cur = readFileSync(file, 'utf8'); } catch { /* new home */ }
-    if (cur !== rulesText) writeFileSync(file, rulesText);
+    // Two runs starting together may both write: each writes its own temp file and renames it into place, so
+    // codex never reads a truncated or empty rules file (no command rules while worca reports them held).
+    if (cur !== rulesText) {
+      const tmp = join(dir, 'rules', `.worca.rules.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
+      try { writeFileSync(tmp, rulesText); renameSync(tmp, file); } finally { rmSync(tmp, { force: true }); }
+    }
     const auth = join(dir, 'auth.json');
     if (!existsSync(auth) && existsSync(join(userHome, 'auth.json'))) symlinkSync(join(userHome, 'auth.json'), auth);
   } catch { /* the spawn then fails on its sign-in and says so */ }

@@ -3,7 +3,7 @@
 // the skills mount folder and the memory block intro on an engine that does not load `.claude/rules`.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, lstatSync, readlinkSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, lstatSync, readlinkSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
@@ -48,6 +48,42 @@ test('guardedCodexHome: one home per rule set, the rules written, the user\'s si
   assert.equal(readFileSync(join(a, 'rules', 'worca.rules'), 'utf8'), 'A\n');
   assert.ok(lstatSync(join(a, 'auth.json')).isSymbolicLink());
   assert.equal(readlinkSync(join(a, 'auth.json')), join(user, 'auth.json'));
+});
+
+test('guardedCodexHome: runs starting together never leave the rules file empty or partial', POSIX, async () => {
+  // Each worker calls guardedCodexHome on the same fresh homes at once (a barrier per home), then reads the
+  // rules file: it must always hold the whole rule set, never a truncated write of another run.
+  const base = tmp(); const user = tmp();
+  const rules = `${'prefix_rule(pattern=["git","push"], decision="forbidden")\n'.repeat(4000)}`;
+  const workers = 6; const rounds = 30;
+  const script = join(tmp(), 'writer.mjs');
+  writeFileSync(script, `import { workerData, parentPort } from 'node:worker_threads';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+const { guardedCodexHome } = await import(workerData.mod);
+const gate = new Int32Array(workerData.gate);
+const bad = [];
+for (let i = 0; i < workerData.rounds; i++) {
+  Atomics.add(gate, i, 1);
+  while (Atomics.load(gate, i) < workerData.workers) { /* barrier: every worker writes this home together */ }
+  const home = guardedCodexHome(workerData.rules, { base: join(workerData.base, String(i)), userHome: workerData.user });
+  const got = readFileSync(join(home, 'rules', 'worca.rules'), 'utf8');
+  if (got !== workerData.rules) bad.push(got.length);
+}
+parentPort.postMessage(bad);
+`);
+  const { Worker } = await import('node:worker_threads');
+  const gate = new SharedArrayBuffer(4 * rounds);
+  const mod = new URL('../src/core/engines/codex.mjs', import.meta.url).href;
+  const results = await Promise.all(Array.from({ length: workers }, () => new Promise((res, rej) => {
+    const w = new Worker(script, { workerData: { mod, gate, rules, base, user, rounds, workers } });
+    w.once('message', res); w.once('error', rej);
+  })));
+  assert.deepEqual(results.flat(), [], 'every read saw the complete rules file');
+  for (let i = 0; i < rounds; i++) {
+    const [home] = readdirSync(join(base, String(i)));
+    assert.deepEqual(readdirSync(join(base, String(i), home, 'rules')), ['worca.rules'], 'no temp file is left behind');
+  }
 });
 
 test('runCodexProcess: deny rules put codex under the guarded home and turn web search off; no rules leave CODEX_HOME alone', POSIX, async () => {
