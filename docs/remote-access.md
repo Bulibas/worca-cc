@@ -335,6 +335,10 @@ both set, worca posts a few seconds after start and then every 60 s:
   its key page, agents never hold a key, and costs are charged to whoever caused them.
 - Desktop features act on the server: the folder picker becomes a text field
   (`WORCA_NO_NATIVE_DIALOG=1`).
+- The in-app folder browser, adding a project by path and installing agents into a folder stay inside
+  Worca's own folders (the data dir, the projects root and the registered projects); any other path is
+  refused with `403 FS_OUTSIDE_ALLOWED`, symlinks and `..` included. Starting the server with
+  `WORCA_TERMINAL_REMOTE=1` or `WORCA_ACTIONS_REMOTE=1` lifts this, since either already grants more.
 - [Actions](actions.md) are refused (`403 ACTIONS_DISABLED`) unless the server starts with
   `WORCA_ACTIONS_REMOTE=1`. Check out, Discard, Copy command and editing the actions config keep
   working; a saved command runs only once actions are on. With agent isolation

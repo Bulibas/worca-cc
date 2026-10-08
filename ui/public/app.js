@@ -272,6 +272,7 @@ const el = {
   folderPickCount: $('#folderPickCount'),
   folderSelectMany: $('#folderSelectMany'),
   folderMsg: $('#folderMsg'),
+  folderScope: $('#folderScope'),
   title: $('#title'),
   sourceBranch: $('#sourceBranch'),
   featureBranch: $('#featureBranch'),
@@ -7276,10 +7277,32 @@ async function loadFolders(path) {
   }
 }
 
+// Limited listing (a hosted Worca, terminal and actions off): say so, and offer each allowed
+// folder, since Up stops at them. The server refuses anything outside (403 FS_OUTSIDE_ALLOWED).
+function renderFolderScope(data) {
+  if (!el.folderScope) return;
+  el.folderScope.textContent = '';
+  el.folderScope.classList.toggle('hidden', !data.limited);
+  if (!data.limited) return;
+  el.folderScope.append('This hosted Worca only browses its own data and projects folders.');
+  const roots = Array.isArray(data.roots) ? data.roots : [];
+  if (roots.length < 2) return;
+  for (const r of roots) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn btn-ghost btn-mini folder-root';
+    b.textContent = r.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || r;
+    b.title = r;
+    b.addEventListener('click', () => loadFolders(r));
+    el.folderScope.append(' ', b);
+  }
+}
+
 function renderFolders(data) {
   el.folderCurrent.textContent = data.path;
   el.folderCurrent.title = data.path;
   el.folderUp.disabled = !data.parent;
+  renderFolderScope(data);
   el.folderList.textContent = '';
   if (!data.dirs.length) {
     const li = document.createElement('li');

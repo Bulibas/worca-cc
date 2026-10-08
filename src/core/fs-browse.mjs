@@ -4,11 +4,14 @@
 // it is a folder picker, files are never shown — and hides dotfolders. Worca CC
 // is a localhost-only single-user tool (isLocalRequest in ui/server.mjs), so
 // this exposes exactly the same trust level as the manual path field it backs.
+// On a hosted Worca with the terminal and actions off, the server passes `roots`
+// (src/core/fs-scope.mjs) and the listing stays inside them.
 
 import { readdir, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { normalizeProjectPath } from './projects.mjs';
 import { defaultRoot, getProjectsRoot } from './settings.mjs';
+import { checkInside, isWithin, outsideAllowedError, realOrNull } from './fs-scope.mjs';
 
 function err(message, code) { return Object.assign(new Error(message), { code }); }
 
@@ -28,15 +31,54 @@ async function startFolder(home) {
  * can never fall through to process.cwd()). With nothing configured the two are
  * the same folder; in a container, WORCA_PROJECTS_ROOT names the mounted repos
  * while home is an empty /home/worca. `home` stays the OS home (the Home button).
+ *
+ * With `roots` (real paths from fs-scope.mjs#realRoots, at least one), the listing
+ * is limited: the path is resolved through symlinks and must lie inside a root, a
+ * blank listing opens the projects root (or the first root), `parent` is null at a
+ * root, symlinked folders that lead outside are not listed, and the answer carries
+ * `limited: true` and `roots` so the UI can offer them.
  * @param {string} input
+ * @param {{roots?: string[]|null}} [opts]
  * @returns {Promise<{path:string, parent:string|null, home:string,
- *   dirs:Array<{name:string, path:string}>}>} parent is null at the fs root.
+ *   dirs:Array<{name:string, path:string}>, limited?:true, roots?:string[]}>}
+ *   parent is null at the fs root.
  * @throws {Error & {code:'BAD_REQUEST'}} when the path does not exist, is not
  *   a directory, or cannot be read.
+ * @throws {Error & {code:'FS_OUTSIDE_ALLOWED'}} with `roots`, when the path is outside them.
  */
-export async function listFolders(input) {
+export async function listFolders(input, { roots = null } = {}) {
+  if (Array.isArray(roots)) return listLimited(input, roots);
   const home = resolve(defaultRoot());
   const path = normalizeProjectPath(input) || await startFolder(home);
+  const dirs = await readDirs(path);
+  const parent = dirname(path);
+  return { path, parent: parent === path ? null : parent, home, dirs };
+}
+
+async function listLimited(input, roots) {
+  if (!roots.length) throw err('no folder can be browsed on this server', 'BAD_REQUEST');
+  const projects = await realOrNull(resolve(getProjectsRoot()));
+  const home = projects && roots.some((r) => isWithin(projects, r)) ? projects : roots[0];
+  const asked = normalizeProjectPath(input);
+  let path = home;
+  if (asked) {
+    const { inside, real } = await checkInside(asked, roots);
+    if (!inside) throw outsideAllowedError(asked);
+    if (!real) throw err(`no such directory: ${asked}`, 'BAD_REQUEST');
+    path = real;
+  }
+  const all = await readDirs(path);
+  const dirs = [];
+  for (const d of all) {
+    const real = await realOrNull(d.path);
+    if (real && roots.some((r) => isWithin(real, r))) dirs.push(d);
+  }
+  const parent = dirname(path);
+  const atRoot = roots.includes(path) || parent === path || !roots.some((r) => isWithin(parent, r));
+  return { path, parent: atRoot ? null : parent, home, dirs, limited: true, roots: [...roots] };
+}
+
+async function readDirs(path) {
   let entries;
   try {
     entries = await readdir(path, { withFileTypes: true });
@@ -56,6 +98,5 @@ export async function listFolders(input) {
     if (isDir) dirs.push({ name: d.name, path: join(path, d.name) });
   }
   dirs.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
-  const parent = dirname(path);
-  return { path, parent: parent === path ? null : parent, home, dirs };
+  return dirs;
 }
