@@ -12,8 +12,8 @@ Railway's hosted server (`https://mcp.railway.com`) accepts OAuth sign-in only, 
    `brew install railway`, or `scoop install railway` (Windows).
 2. `railway login` — or create an account or workspace token (Railway → Account Settings → Tokens)
    and fill in **Railway account token** (passed as `RAILWAY_API_TOKEN`). Project tokens do not work.
-3. Settings → Plugins → Available → `railway-mcp` → **Install…**; then Settings → MCP servers →
-   Sets → Add server → `railway` → Save and test.
+3. Settings → Plugins → Available → `railway-mcp` → **Install…**; then Settings → Sets → a set →
+   Add server → `railway` → Save and test.
 
 Agents act with the login or token without asking — including deleting services and changing
 production variables. `railway login` and an account token reach your whole account; a workspace

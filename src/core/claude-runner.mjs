@@ -77,14 +77,30 @@ export function sigkillGraceMs() {
   return Number.isFinite(n) && n >= 0 ? n : DEFAULT_SIGKILL_GRACE_MS;
 }
 
+// Settings keys a caller's extraSettings never sets (skills registry §4.1): the runner's own guardrail `permissions`
+// and `hooks` (telemetry + the host guard), and the two that would switch those hooks off or rewrite the env the
+// host guard reads (`disableAllHooks`, `env`).
+const RUNNER_SETTINGS_KEYS = new Set(['permissions', 'hooks', 'disableAllHooks', 'env']);
+
+/** A caller's extra settings (skills registry §4.1: Ask's `disableSkillShellExecution`) minus the runner's own
+ *  keys and undefined values; null when nothing is left or the value is not a plain object. */
+function extraSettingsOf(extraSettings) {
+  if (!extraSettings || typeof extraSettings !== 'object' || Array.isArray(extraSettings)) return null;
+  const out = {};
+  for (const [k, v] of Object.entries(extraSettings)) if (!RUNNER_SETTINGS_KEYS.has(k) && v !== undefined) out[k] = v;
+  return Object.keys(out).length ? out : null;
+}
+
 /** What `--settings` carries, or null when there is nothing to carry (no hook
- *  telemetry, no permission rules, no host guard) — then the flag is omitted
+ *  telemetry, no permission rules, no host guard, no extra settings) — then the flag is omitted
  *  entirely. `hostGuard` (set by runReal, gated by hostGuardEnabled) merges the
  *  host-process-protection PreToolUse hook into the SAME single payload; the
  *  returned `hook` flag stays telemetry-only (it drives --include-hook-events,
- *  which the guard does not need). */
-export function buildSettingsPayload(permissionRules, { hostGuard = false } = {}) {
+ *  which the guard does not need). `extraSettings` (skills registry §4.1) merges in
+ *  first, so the runner's own `hooks` / `permissions` always win. */
+export function buildSettingsPayload(permissionRules, { hostGuard = false, extraSettings = null } = {}) {
   const hook = buildHookSettings();
+  const extra = extraSettingsOf(extraSettings);
   const guard = hostGuard && hostGuardEnabled() ? hostGuardHookEntry() : null;
   const hasRules = !!permissionRules && Object.values(permissionRules).some((a) => Array.isArray(a) && a.length);
   // Present-but-malformed rules (e.g. `{deny: 'Bash(curl:*)'}`) make the object
@@ -96,8 +112,8 @@ export function buildSettingsPayload(permissionRules, { hostGuard = false } = {}
       && Object.values(permissionRules).some((a) => a != null && !Array.isArray(a))) {
     console.warn('[worca] guardrails: permissionRules is malformed (deny/allow/ask must be arrays of strings) — ignoring it; this spawn carries NO permission rules');
   }
-  if (!hook && !hasRules && !guard) return null;
-  const settings = {};
+  if (!hook && !hasRules && !guard && !extra) return null;
+  const settings = { ...(extra ?? {}) };
   if (hook) settings.hooks = { ...hook.hooks };
   if (guard) {
     settings.hooks = settings.hooks ?? {};
@@ -284,11 +300,12 @@ export function buildHookSettings() {
  * [] when there is nothing to say, so the baseline argv is byte-identical.
  * @param {{deny?:string[],allow?:string[],ask?:string[]}|null|undefined} permissionRules
  * @param {string|null} [settingsFile] staged path (GH #380): `--settings <path>` carries the same JSON
- * @param {{hostGuard?:boolean}} [opts] host-process guard (runReal sets it; see buildSettingsPayload)
+ * @param {{hostGuard?:boolean, extraSettings?:object|null}} [opts] host-process guard (runReal sets it; see
+ *   buildSettingsPayload) and extra settings merged into the same payload (skills registry §4.1)
  * @returns {string[]}
  */
-export function buildSettingsArgs(permissionRules, settingsFile = null, { hostGuard = false } = {}) {
-  const payload = buildSettingsPayload(permissionRules, { hostGuard });
+export function buildSettingsArgs(permissionRules, settingsFile = null, { hostGuard = false, extraSettings = null } = {}) {
+  const payload = buildSettingsPayload(permissionRules, { hostGuard, extraSettings });
   if (!payload) return [];
   const args = [];
   if (payload.hook) args.push('--include-hook-events');
@@ -415,6 +432,10 @@ export function mockEnabled(opts) {
  * @param {string[]} [o.disallowedTools]   --disallowedTools <list>: built-ins withheld from this spawn
  *   (model bridge §5.3: WebSearch/WebFetch for a translated model). Absent/empty ⇒ flag omitted.
  * @param {Record<string, object>} [o.agents]  run-scoped sub-agent definitions (--agents; phases.mjs investigatorAgents)
+ * @param {string[]} [o.pluginDirs]  --plugin-dir <dir> per entry (skills registry §4.1: one generated plugin per set,
+ *   materializeSkillMount). Absent/empty/non-strings ⇒ nothing emitted.
+ * @param {object} [o.extraSettings]  merged into the one --settings payload (skills registry §4.1: Ask's
+ *   `disableSkillShellExecution`); never replaces `permissions` / `hooks`. Absent ⇒ unchanged.
  * @param {Record<string,string>} [o.spawnEnv]  run-level spawn env (wsmap D9: runOpts sets
  *   CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY on every fan-out node, and CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
  *   on the scan's two). Merged OVER the guardrail env and UNDER modelEnv (a catalog entry that sets the
@@ -463,6 +484,8 @@ export async function runClaude(o = {}) {
     appendSubagentSystemPrompt,
     addDirs,
     agents,
+    pluginDirs,
+    extraSettings,
     argvInlineLimit,
     // A pipeline agent (phases.mjs): runs as WORCA_AGENT_USER when the container set one
     // up (agent-user.mjs). Server-side helpers and Ask Worca leave it unset.
@@ -522,6 +545,8 @@ export async function runClaude(o = {}) {
     appendSubagentSystemPrompt,
     addDirs,
     agents,
+    pluginDirs,
+    extraSettings,
     argvInlineLimit,
     asAgent,
     billTo,
@@ -675,6 +700,7 @@ export function buildClaudeArgs({
   // --allowedTools union).
   tools: builtinTools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages,
   maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, hostGuard, addDirs, disallowedTools, agents,
+  pluginDirs, extraSettings,
 }, delivery = {}) {
   // delivery (GH #380, set only by planClaudeInvocation's staged branch):
   //   promptViaStdin   -> bare `-p`; the prompt is written to the child's stdin
@@ -697,7 +723,7 @@ export function buildClaudeArgs({
   // SINGLE inline JSON (two --settings flags would be last-wins at the CLI). [] when
   // there is neither, so the baseline argv is unchanged; a CLI that rejects these
   // flags would only ever fail when the operator opted in.
-  for (const a of buildSettingsArgs(permissionRules, settingsFile, { hostGuard })) args.push(a);
+  for (const a of buildSettingsArgs(permissionRules, settingsFile, { hostGuard, extraSettings })) args.push(a);
   if (mcpConfigPath) args.push('--mcp-config', mcpConfigPath);
   const tools = Array.isArray(allowedTools) ? allowedTools.slice() : [];
   for (const s of (Array.isArray(mcpServerGrants) ? mcpServerGrants : [])) {
@@ -750,6 +776,9 @@ export function buildClaudeArgs({
   }
   // Native-rules revision (2026-09-13): Ask Worca's memory mount. LAST, so every earlier argv
   // stays a prefix; absent / [] / non-strings ⇒ nothing (the `names` filter above).
+  // Skills registry §4.1: one generated plugin per set (materializeSkillMount), after --agents and before
+  // --add-dir; absent / [] / non-strings ⇒ nothing, so every earlier argv stays byte-identical.
+  for (const d of names(pluginDirs)) args.push('--plugin-dir', d);
   for (const d of names(addDirs)) args.push('--add-dir', d);
   return args;
 }
@@ -783,7 +812,7 @@ export function planClaudeInvocation(opts, { bin = DEFAULT_BIN, dir = null, limi
     files.push({ path: systemPromptFile, content: opts.systemPrompt });
   }
   let settingsFile = null;
-  const payload = buildSettingsPayload(opts.permissionRules, { hostGuard: opts.hostGuard });
+  const payload = buildSettingsPayload(opts.permissionRules, { hostGuard: opts.hostGuard, extraSettings: opts.extraSettings });
   if (payload) {
     settingsFile = join(dir, 'settings.json');
     files.push({ path: settingsFile, content: JSON.stringify(payload.settings) });
@@ -803,7 +832,7 @@ export function stageClaudeInvocation(opts, { bin = DEFAULT_BIN, limit = ARGV_IN
   return { ...plan, dir };
 }
 
-function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, model, effort, onEvent, signal, bin, resumeSessionId, mcpConfigPath, mcpServerGrants, permissionRules, envScrub, envAllowlist, modelEnv, spawnEnv: runSpawnEnv, redactValues, disallowedTools, tools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages, maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, addDirs, agents, argvInlineLimit, asAgent }) { // billTo/spawnKind/runId/threadId are consumed by runViaBroker
+function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, model, effort, onEvent, signal, bin, resumeSessionId, mcpConfigPath, mcpServerGrants, permissionRules, envScrub, envAllowlist, modelEnv, spawnEnv: runSpawnEnv, redactValues, disallowedTools, tools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages, maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, addDirs, agents, pluginDirs, extraSettings, argvInlineLimit, asAgent }) { // billTo/spawnKind/runId/threadId are consumed by runViaBroker
   // MCP registry §5.5.3: with registry secrets in this spawn's env, every emit, the result text and the error
   // message leave redacted — wrapped once here, so the broker path (which calls runReal) is covered too.
   const redactor = Array.isArray(redactValues) && redactValues.length ? createRedactor(redactValues) : null;
@@ -893,6 +922,7 @@ function runReal({ cwd, systemPrompt, prompt, allowedTools, permissionMode, mode
         mcpConfigPath, mcpServerGrants, permissionRules,
         tools, strictMcpConfig, settingSources, disableSlashCommands, includePartialMessages,
         maxTurns, maxBudgetUsd, appendSubagentSystemPrompt, addDirs, disallowedTools, agents,
+        pluginDirs, extraSettings,
       }, { bin: resolved.bin, limit });
     } catch (err) {
       rejectP(new Error(`Failed to stage the claude prompt files: ${err.message}`));

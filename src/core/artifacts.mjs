@@ -2791,6 +2791,9 @@ export async function readPipelineByKey(key, id) {
     // developer did about it — the History meta line's "policy · 1 override" segment.
     policy: readPolicyState(row.id),
     memory: await readMemoryLedger(dir),
+    // Skills registry §6 board 9: the set skills the run got — run.json's durable copy in the run dir
+    // (detached runs, once torn down); null otherwise.
+    skillMount: (await readJsonFile(join(dir, 'run.json')))?.skillMount ?? null,
     ...readPipelineExtras(row.id),
   };
 }

@@ -5847,6 +5847,8 @@ body.term-open .toasts{right:calc(var(--term-w,460px) + 20px);}
 .ask-pop-mcp .switch:disabled{opacity:.5;cursor:not-allowed;}
 .ask-mcp-member.is-skipped .ask-model-name{font-family:var(--mono);font-size:12px;color:var(--ink-3);}
 .ask-mcp-member.is-problem .ask-pop-row-value{color:var(--amber-ink);}
+/* Skills registry §6.8: a level-1 set row's "2 servers · 1 skill · pinned" line under the set name. */
+.ask-pop-mcp .ask-model-name small{display:block;font-size:11.5px;font-weight:400;color:var(--ink-3);}
 .ask-notice-mcp{padding:0;border:0;background:none;color:var(--blue-ink);font:inherit;cursor:pointer;}
 /* Context popover (ask-panel.mjs buildCtxPopover): the window's fill, the chat's topics, agents and
    worktrees. Above the ring (JS sets its right edge); capped, it scrolls when the lists run long. */
@@ -7781,6 +7783,8 @@ input.gv-name:focus-visible{outline:none;}
 .tp-publish-bar{display:flex;align-items:center;gap:12px;}
 .tp-publish-bar .grow{flex:1;font-size:12.5px;color:var(--ink-2);}
 .tp-json{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);padding:14px 16px;font-size:12px;line-height:1.5;overflow-x:auto;margin:0;}
+/* The Turn on skill dialog's SKILL.md (skills registry spec §6 board 10): the text, wrapped, scrolling inside the dialog. */
+.tp-skill-md{background:var(--field);border-radius:12px;padding:12px 14px;margin:14px 0 0;font-size:11.5px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;}
 .tp-msg{white-space:pre-wrap;}
 @media (max-width:900px){ .tp-edit-row{grid-template-columns:1fr;} }
 /* workspace card line (board 6) */
@@ -7912,6 +7916,49 @@ input.gv-name:focus-visible{outline:none;}
 .mcp-res-skip{color:var(--amber-ink);}
 .mcp-resolution,.mcp-proj-sets{margin-bottom:14px;}
 @media (max-width:760px){.mcp-sets{grid-template-columns:1fr;}}
+
+/* Settings › Sets: skills (mcp-view.mjs, skill-import.mjs; docs/skills.md). Layout only: cards, chips, badges,
+   switches and buttons are the shared ones, and every colour is a theme token, so light and dark both hold. */
+.sk-row{padding:14px 18px;}
+.sk-member{padding:14px 16px;margin-top:10px;}
+.sk-member .pl-enable{margin-left:0;}
+.sk-title{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-width:0;}
+.sk-title .hint{margin-top:0;}
+.sk-prefix{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.sk-facts .badge{margin-left:8px;}
+.sk-row .mono,.sk-member .mono,.sk-import-form .mono,.sk-pick .mono,.sk-update .mono,.sk-resolution .mono,.sk-members .mono,.sk-chip .mono{font-family:var(--mono);}
+.sk-drawer{margin-top:12px;background:var(--field);border-radius:12px;padding:12px 14px;}
+.sk-drawer-head{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--ink-2);margin-bottom:8px;}
+.sk-md{margin:0;font-family:var(--mono);font-size:11.5px;line-height:1.55;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;}
+.sk-tree{display:flex;flex-direction:column;gap:2px;margin-top:8px;max-height:280px;overflow:auto;}
+.sk-tree-row,.sk-delta{display:flex;align-items:center;gap:10px;padding:3px 0;font-size:12px;flex-wrap:wrap;row-gap:4px;}
+.sk-tree-row .mono,.sk-delta .mono{min-width:0;overflow-wrap:anywhere;}
+.sk-tree-row .sz{margin-left:auto;color:var(--ink-3);font-variant-numeric:tabular-nums;white-space:nowrap;}
+.sk-delta.err .mono{color:var(--red-ink);}
+.sk-delta.warn .mono{color:var(--amber-ink);}
+.sk-pick{display:flex;flex-direction:column;max-height:min(52vh,420px);overflow:auto;}
+.sk-pick-row{display:flex;align-items:center;gap:10px;padding:9px 4px;border-bottom:1px solid var(--line);font-size:13px;}
+.sk-pick-row:last-child{border-bottom:0;}
+.sk-pick-row.greyed{color:var(--ink-3);}
+.sk-pick-row .hint{margin:0 0 0 auto;}
+.sk-pick-row input{margin:0;accent-color:var(--ink);}
+.sk-import-form .seg{margin-bottom:16px;flex-wrap:wrap;}
+.sk-row-input{display:flex;gap:8px;align-items:center;}
+.sk-row-input .input{flex:1 1 auto;min-width:0;}
+.sk-preview{background:var(--field);border-radius:12px;padding:14px 16px;margin-top:10px;}
+.sk-preview .pl-head{margin-bottom:6px;}
+.sk-consent{margin-top:14px;padding:12px 14px;background:var(--field);border-radius:12px;font-size:13px;color:var(--ink-2);}
+.sk-consent b{color:var(--ink);font-weight:600;}
+.sk-consent-note{margin:6px 0 0;}
+.sk-consent-note.err{color:var(--red-ink);}
+.sk-res-group{margin-top:16px;}
+.sk-res-group > .label{display:block;margin-bottom:6px;}
+.sk-res-head{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr) minmax(0,.7fr) minmax(0,1.6fr);gap:12px;padding:0 0 6px;
+  font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);}
+.mcp-res-row.sk-from{grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr) minmax(0,.7fr) minmax(0,1.6fr);}
+.sk-kind{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;
+  background:var(--blue-bg);color:var(--blue-ink-strong);}
+@media (max-width:760px){.mcp-res-row.sk-from,.sk-res-head{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}}
 
 /* ── Actions (issue #529): run checkouts, project actions, the running-services surfaces ── */
 .tab-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-left:6px;vertical-align:middle}

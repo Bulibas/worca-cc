@@ -112,7 +112,7 @@ import {
   sweepAskWorktrees,
 } from '../src/core/ask/worktrees.mjs';
 import { createAskTurn } from '../src/core/ask/turn.mjs';
-import { validateMcpOff, resolveAskMcp, askMcpPromptInput, askMcpPreview, askMcpJoinNotice } from '../src/core/ask/mcp.mjs';
+import { validateMcpOff, resolveAskMcp, askMcpPromptInput, askMcpPreview, askMcpJoinNotice, resolveAskSkills } from '../src/core/ask/mcp.mjs';
 import { attachRunFollower } from '../src/core/ask/follow.mjs';
 import { mockEnabled, MOCK_WRITER_ROLES } from '../src/core/claude-runner.mjs';
 import { budgetStatus, readCostCapOverride, setCostCapOverride } from '../src/core/cost-budget.mjs';
@@ -133,11 +133,15 @@ import { deviationsFor, fieldsForRun, capSummary, mcpDeviations } from '../src/c
 import { resolveRegistry, cachedTeamFor, toolNameLimitFor, skipMessage, skipReasonText } from '../src/core/mcp/registry.mjs';
 import { MEMBERSHIP_KEY_RE } from '../src/core/mcp/definitions.mjs';
 import { loadCatalog } from '../src/core/mcp/catalog.mjs';
-import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, mcpRequirements, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
+import { installedPluginsMap, pluginRequirements, blockedPluginFindings, seedPolicyMarketplaces, mcpRequirements, skillRequirements, WORCA_VERSION as POLICY_WORCA_VERSION } from '../src/core/policy/local.mjs';
 import { normalizePolicyDoc } from '../src/core/policy/registry.mjs';
 import { checkTeamTotalGate, checkTeamPipelineGate, teamCapsForTarget } from '../src/core/policy/gate.mjs';
 import { readPolicyState } from '../src/core/policy/state.mjs';
-import { teamAction, teamForget } from '../src/core/mcp/team.mjs';
+import { teamAction, teamForget, teamSkillAction, teamSkillConsent, isTeamSkillId } from '../src/core/mcp/team.mjs';
+// Skills registry §2b-13: the policy routes' skill deviations. Aliased: the run-side code imports these names too.
+import { skillDeviations as policySkillDeviations } from '../src/core/policy/effective.mjs';
+import { resolveSkillRegistry as policySkillRegistry } from '../src/core/skills-registry/resolve.mjs';
+import { skillSkipReasonText as policySkillWhy } from '../src/core/skills-registry/texts.mjs';
 import { policyForScope, policyPayload } from '../src/core/policy/scope.mjs';
 import { policyCatalogModels } from '../src/core/policy/cache.mjs';
 import { pickFolderNative, pickAppNative, nativeDialogAvailable } from '../src/core/folder-dialog.mjs';
@@ -304,7 +308,7 @@ import {
 import { fetchCandidate } from '../src/core/plugin-repo.mjs';
 import { reconcileMcpStore } from '../src/core/mcp/catalog.mjs';
 import { readMcpStore } from '../src/core/mcp/store.mjs';
-import { mcpFootprint } from '../src/core/mcp/plugin-lifecycle.mjs';
+import { mcpFootprint, skillFootprint } from '../src/core/mcp/plugin-lifecycle.mjs';
 import {
   addMarketplace, listMarketplaces, syncMarketplace, refreshAllMarketplaces,
   removeMarketplace, readMarketplaces, seedBuiltinMarketplace,
@@ -360,6 +364,20 @@ import {
   viewContext, listCatalogView, listSetsView, getSetView, projectAssignmentView, teamMemberRefusal, teamDuplicateSource,
 } from '../src/core/mcp/views.mjs';
 import { testMembership, retestAfterSave, retestServers } from '../src/core/mcp/test.mjs';
+import { SETS_API_NOUNS } from '../src/core/mcp/definitions.mjs';
+import { putSkillMember, deleteSkillMember } from '../src/core/mcp/store.mjs';
+import { teamSkillMemberRefusal } from '../src/core/mcp/views.mjs';
+import { SKILL_ID_RE } from '../src/core/skills-registry/ids.mjs';
+// Skills registry (docs/skills.md). Namespace imports: the /api/skills* routes read skIds.*, skLibrary.*, … so
+// no binding here can clash with a named import the MCP, pipeline or Ask routes add from the same modules.
+import * as skIds from '../src/core/skills-registry/ids.mjs';
+import * as skInspect from '../src/core/skills-registry/inspect.mjs';
+import * as skLibrary from '../src/core/skills-registry/library.mjs';
+import * as skImport from '../src/core/skills-registry/import.mjs';
+import * as skCatalog from '../src/core/skills-registry/catalog.mjs';
+import * as skStore from '../src/core/mcp/store.mjs';
+import * as skViews from '../src/core/mcp/views.mjs';
+import * as skClone from '../src/core/clone-project.mjs';
 import { HLJS_GRAMMAR_IDS } from './public/hljs-loader.mjs';
 import { useEnvProxy, proxyNotice } from '../src/core/env-proxy.mjs';
 
@@ -2422,13 +2440,42 @@ app.post('/api/run', startRunHandler);
 // preview route serves New Pipeline, the project MCP tab and the workspace overview.
 // ---------------------------------------------------------------------------
 
-/** `mcpOptOut` (D16): at most 100 '<setId>|<serverId>' entries, de-duplicated. */
+// Skills registry, pipeline side (skills registry design §4.3, §4.5): the same preview and opt-out carry
+// a target's set skills. Namespaced imports (ES imports are hoisted), kept beside their only users so no
+// other region's imports can collide with these names.
+import * as runSkillResolve from '../src/core/skills-registry/resolve.mjs';
+import * as runSkillHost from '../src/core/skills-registry/host.mjs';
+import * as runSkillTexts from '../src/core/skills-registry/texts.mjs';
+import * as runSkillPolicy from '../src/core/policy/effective.mjs';
+
+/** `mcpOptOut` (D16): at most 100 '<setId>|<serverId>' or '<setId>|<skillId>' entries (the membership
+ *  key grammar the skills registry widened), de-duplicated. */
 function parseMcpOptOut(v) {
   if (v == null) return { list: [] };
   if (!Array.isArray(v) || v.length > 100 || !v.every((e) => typeof e === 'string' && MEMBERSHIP_KEY_RE.test(e))) {
-    return { error: 'mcpOptOut must be at most 100 "<setId>|<serverId>" entries' };
+    return { error: 'mcpOptOut must be at most 100 "<setId>|<serverId>" or "<setId>|<skillId>" entries' };
   }
   return { list: [...new Set(v)] };
+}
+
+/** The Team set's skill input of a resolver target (skills §4.2): P3's cachedSkillTeamFor over the policy cache (a
+ *  project's policy, or a workspace's policy home while it is still a member), as `{ home, required: skills.required }`. */
+async function skillTeamFor(target) {
+  const t = await runSkillResolve.cachedSkillTeamFor(target.kind === 'project' ? { projectKey: target.key } : { workspaceId: target.id });
+  return t?.requiredSkills?.length ? { home: t.home, required: t.requiredSkills } : null;
+}
+
+/** The set skills a run on the target would mount (§4.5): the resolver over the run's input. The layer
+ *  is `sideload-disabled` when this host's managed settings forbid --plugin-dir (the CLI's own flag
+ *  support is probed at run start). */
+async function skillRunPreview(target, { optOut = [] } = {}) {
+  const team = await skillTeamFor(target);
+  const result = await runSkillResolve.resolveSkillRegistry({
+    surface: 'pipeline', targets: [target], teams: { [target.kind === 'project' ? target.key : `ws:${target.id}`]: team },
+    optOut, skillCap: runSkillResolve.SKILL_CAP.pipeline,
+  });
+  const blocked = result.mounted.length && runSkillHost.skillHostFacts().sideloadDisabled ? 'sideload-disabled' : null;
+  return { result, team, blocked };
 }
 
 const mcpWorkspaceTarget = (ws) => ({
@@ -2469,9 +2516,11 @@ async function mcpRunPreview(target, { optOut = [], models = [] } = {}) {
  *  the opt-out by exact key (and adds nothing when it fails too). */
 async function knownMcpOptOut(list, target) {
   if (!list.length) return list;
-  let result;
-  try { ({ result } = await mcpResolve(target)); } catch { return list; }
+  let result, skills;
+  try { [{ result }, { result: skills }] = await Promise.all([mcpResolve(target), skillRunPreview(target)]); } catch { return list; }
   const known = new Set([...result.copies, ...result.skipped].map((m) => `${m.setId}|${m.serverId}`));
+  for (const m of skills.mounted) known.add(`${m.setId}|${m.id}`);
+  for (const s of skills.skipped) known.add(`${s.setId}|${s.skillId}`);
   return list.filter((k) => known.has(k));
 }
 
@@ -2488,14 +2537,36 @@ app.post('/api/mcp/preview', async (req, res) => {
     if (!target) return res.status(404).json({ error: 'target not found' });
     const { result, catalog, team } = await mcpRunPreview(target, { optOut: opt.list, models: b.models || [] });
     const why = (sk) => skipReasonText(sk, catalog);
+    // Skills registry §4.5: the set skills beside the servers. A skills fault leaves `skills` null and the
+    // servers' answer intact (the run resolves again at start).
+    const sr = await skillRunPreview(target, { optOut: opt.list }).catch(() => null);
+    const count = (v) => (Array.isArray(v) ? v.length : Number(v) || 0);
+    const skillSets = new Map((sr?.result.sets || []).map((s) => [s.id, s]));
+    // Both halves collect the target's sets with one rule (P2 collectSets; the Team input carries the required skills
+    // too), so the servers' `sets` already list a set that holds only skills.
+    const sets = result.sets.map((s) => ({ ...s, skills: count(skillSets.get(s.id)?.skills), startedSkills: sr?.blocked ? 0 : count(skillSets.get(s.id)?.started) }));
+    const skillWhy = (s) => runSkillTexts.skillSkipReasonText(s);
     res.json({
-      sets: result.sets,
+      sets,
       copies: result.copies,
       skipped: result.skipped.map((sk) => ({ ...sk, message: skipMessage(sk, catalog), why: why(sk) })),
       skippedTools: result.skippedTools,   // §5.6: `tool-name-too-long:<tool>`; the copy still starts
       started: result.copies.length,
       newer: !!result.newer,   // §4.5: a store written by a newer Worca resolves to nothing; say why
-      deviations: mcpDeviations(team ? { 'mcp.required': { value: team.required } } : {}, result, why),
+      deviations: [
+        ...mcpDeviations(team ? { 'mcp.required': { value: team.required } } : {}, result, why),
+        // P5's skillDeviations (none until it lands: the namespace import keeps this module loading without it).
+        ...(sr && typeof runSkillPolicy.skillDeviations === 'function'
+          ? runSkillPolicy.skillDeviations(sr.team ? { 'skills.required': { value: sr.team.required } } : {}, sr.result, skillWhy) : []),
+      ],
+      skills: sr && {
+        mounted: sr.result.mounted.map(({ dir, ...m }) => m),   // never a host path to the browser
+        plugins: sr.result.plugins,
+        skipped: sr.result.skipped.map((s) => ({ ...s, message: runSkillTexts.skillSkipMessage(s), why: skillWhy(s) })),
+        started: sr.blocked ? 0 : sr.result.mounted.length,
+        layer: { blocked: sr.blocked, text: sr.blocked ? runSkillTexts.skillLayerText(sr.blocked) : null },
+        newer: !!sr.result.newer,
+      },
     });
   } catch (err) { res.status(500).json({ error: err?.message || String(err) }); }
 });
@@ -4747,10 +4818,20 @@ app.get('/api/policy/scopes', async (req, res) => {
       const r = await resolveProjectPolicy(s.path, { discover: false }).catch(() => null);
       if (r?.ok) docs.push({ slug: r.home, doc: r.doc });
     }
-    // MCP rows from the policy cache — the source the consent routes hash against (MCP registry spec §11.3).
-    res.json({ ...scopes, requirements: pluginRequirements(docs), blockedPlugins: blockedPluginFindings(docs), mcpRequirements: await mcpRequirements() });
+    // MCP and skill rows from the policy cache — the source the consent routes hash against (MCP registry spec §11.3,
+    // skills registry spec §5).
+    res.json({ ...scopes, requirements: pluginRequirements(docs), blockedPlugins: blockedPluginFindings(docs), mcpRequirements: await mcpRequirements(), skillRequirements: await skillRequirements() });
   } catch (err) { sendPolicyError(res, err); }
 });
+
+/** Skills registry §2b-13: the Team set's skill deviations for a run on `target` — P3's resolver over the target, its
+ *  Team set from the policy cache as the MCP half takes it (`cachedTeamFor`), worded with the resolver's skip text. */
+async function policySkillNotes(fields, target, optOut = []) {
+  const project = target.kind === 'project';
+  const team = await cachedTeamFor(project ? { projectKey: target.key } : { workspaceId: target.id });
+  const result = await policySkillRegistry({ surface: 'pipeline', targets: [target], teams: { [project ? target.key : `ws:${target.id}`]: team }, optOut });
+  return policySkillDeviations(fields, result, (s) => policySkillWhy(s));
+}
 
 app.get('/api/policy', async (req, res) => {
   const scope = parseScopeParam(req.query.scope);
@@ -4767,6 +4848,12 @@ app.get('/api/policy', async (req, res) => {
         const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
         if (target) { const p = await mcpRunPreview(target); payload.deviations.push(...mcpDeviations(fields, p.result, (sk) => skipReasonText(sk, p.catalog))); }
       } catch { /* a registry fault adds no MCP deviations */ }
+    }
+    if (fields['skills.required']) {
+      try {
+        const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
+        if (target) payload.deviations.push(...(await policySkillNotes(fields, target)));
+      } catch { /* a registry fault adds no skill deviations; the policy's own card still paints */ }
     }
     res.json(payload);
   } catch (err) { sendPolicyError(res, err); }
@@ -4797,6 +4884,12 @@ app.get('/api/policy/notes', async (req, res) => {
           dev.push(...mcpDeviations(fields, p.result, (sk) => skipReasonText(sk, p.catalog)));
         }
       } catch { /* a registry fault adds no MCP notes; the policy's own notes still paint */ }
+    }
+    if (fields['skills.required']) {
+      try {
+        const target = await mcpTargetOf(scope.kind === 'project' ? { projectKey: scope.id } : { workspaceId: scope.id });
+        if (target) dev.push(...(await policySkillNotes(fields, target, optOut.list)));
+      } catch { /* a registry fault adds no skill notes */ }
     }
     res.json({ scope: meta, policy: { home: r.home, sha: r.sha, delegated: r.delegated, from: r.from, caps: capSummary(r.doc, { workspaceRun }) }, notes: dev, guardrailsDefault: fields['guardrails.default']?.value ?? null });
   } catch (err) { sendPolicyError(res, err); }
@@ -10035,6 +10128,9 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // MCP registry §9.1–9.3: General + the targets in play (the tagged dropdown fallback excluded), minus the chat's
     // picker choices — resolved ONCE per turn, so the per-turn file, the spawn and the prompt section agree.
     const mcp = await resolveAskMcp({ ctx, threadId: id, off: mcpOff !== undefined ? mcpOff : thread.mcpOff, model });
+    // Skills registry §4.4: the same targets and choices for the skills from sets — resolved ONCE per turn; the turn
+    // mounts them and appends the prompt section naming exactly what it wrote.
+    const skills = await resolveAskSkills({ ctx, threadId: id, off: mcpOff !== undefined ? mcpOff : thread.mcpOff });
     // Agent mode (#574): this chat's switch, where agent mode exists at all; a message's own value wins.
     const agentOn = askCommandsEnabled() && (agentMode !== undefined ? agentMode : thread.agentMode) !== false;
     const systemPrompt = await askSystemPromptFor(catalog, { web, mcp: await askMcpPromptInput(mcp), commands: agentOn });
@@ -10063,6 +10159,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
       pinnedScope: pinned,                          // #397: proposal defaulting + mismatch flag
       web,
       mcp: mcp.result,
+      skills: skills.result,
       agentMode: agentOn,
       timeZone: ctx.timeZone || (thread.context && thread.context.timeZone) || null,   // scheduled runs: the user's clock
       memoryProject: headerCtx.project ? { key: headerCtx.project.key, name: headerCtx.project.name || '' } : null,   // native-rules revision: the turn mounts global + this project through --add-dir
@@ -10078,7 +10175,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         onCommentMutation: ({ runId }) => { emitDiffCommentsChanged(runId); },
         onWorktreeMutation: () => { emitAskWorktrees(id); },
         // §9.1 (D17): at turn end, name the copies a worktree opened this turn brings into the next one.
-        mcpJoinNotice: () => askMcpJoinNotice({ before: mcp, ctx, threadId: id, off: askGetThread(id)?.mcpOff ?? null, model }),
+        mcpJoinNotice: () => askMcpJoinNotice({ before: { ...mcp, skills: skills.result }, ctx, threadId: id, off: askGetThread(id)?.mcpOff ?? null, model }),
         // A remember/forget in the MCP child is the same scope change a REST write makes (B29).
         // The key is parsed out of worca's OWN tool result, never written by the model; shape-check
         // it anyway before it rides a broadcast (I2-#22).
@@ -11249,8 +11346,9 @@ app.get('/api/plugins', async (req, res) => {
         ...p,
         marketplaceName: p.marketplace && mkts[p.marketplace] ? mkts[p.marketplace].name : null,
         pythonMissing: !!(notice && Number((p.scriptRuntimes || {}).python) > 0),
-        // The uninstall confirm names the MCP sets its servers leave (§4.6).
+        // The uninstall confirm names the MCP sets its servers leave (§4.6), and the sets its skills leave (skills §5).
         mcpSets: mcpFootprint(mcp, (id) => id.startsWith(`plugin:${p.name}/`)).sets,
+        skillSets: skillFootprint(mcp, (id) => id.startsWith(`skill:plugin:${p.name}/`)).sets,
       })),
       orphans: listOrphanPluginData(),
     });
@@ -11689,6 +11787,28 @@ app.use('/api/mcp', (req, res, next) => {
   next();
 });
 
+// /api/sets is the Sets API's canonical prefix (skills registry §7): every /api/mcp route answers under it too, one handler
+// for both paths. /api/sets/<noun>/<rest> (SETS_API_NOUNS: servers, projects, teams, preview) is /api/mcp/<noun>/<rest>;
+// /api/sets and /api/sets/<set id>/<rest> are /api/mcp/sets/<set id>/<rest>; letter case is ignored, as Express routes
+// ignore it. The request is dispatched again under its /api/mcp path, so routes registered anywhere in this file answer
+// it (POST /api/mcp/preview sits far above); when none does, the path is restored and the routes registered under
+// /api/sets itself answer it. On the second pass the body guard above runs for every route registered after it; a route
+// registered above it (POST /api/mcp/preview) answers without it on both paths, as /api/mcp/preview always has.
+function setsAliasPath(path) {
+  const m = /^\/api\/sets(?:\/([^/]*))?(\/.*)?$/i.exec(path);
+  if (!m) return null;
+  if (!m[1]) return m[2] ? null : '/api/mcp/sets';
+  return SETS_API_NOUNS.includes(m[1].toLowerCase()) ? `/api/mcp/${m[1]}${m[2] ?? ''}` : `/api/mcp/sets/${m[1]}${m[2] ?? ''}`;
+}
+app.use((req, res, next) => {
+  const to = setsAliasPath(req.path);
+  if (!to) return next();
+  const url = req.url;
+  const q = url.indexOf('?');
+  req.url = to + (q < 0 ? '' : url.slice(q));
+  app.handle(req, res, (err) => { req.url = url; next(err); });
+});
+
 function sendMcpError(res, err) {
   if (err instanceof McpStoreError) return res.status(err.status).json({ error: err.message });
   res.status(500).json({ error: err?.message || String(err) });
@@ -11840,6 +11960,48 @@ app.post('/api/mcp/sets/:id/members/:serverId/test', async (req, res) => {
   try { res.json(await testMembership(id, serverId)); } catch (err) { sendMcpError(res, err); }
 });
 
+// A set's skills (skills registry §7): add or switch (`{ enabled? }`), remove. Registered under both prefixes, so a set
+// whose id is an /api/sets noun (one an older Worca made) still answers at the canonical path. A Team set's skills come
+// from team policy: update only, and a never-consented skill turns on only from the team checklist (§5).
+const SET_SKILL_PATHS = ['/api/sets/:id/skills/:skillId', '/api/mcp/sets/:id/skills/:skillId'];
+// DELETE also takes any `skill:` id a set may hold (up to 1024 characters, no whitespace), so an entry a newer Worca wrote
+// (shown as missing-skill) can still be removed; PUT takes only the ids this build can parse.
+const HELD_SKILL_ID_RE = /^(?=.{1,1024}$)skill:\S+$/;
+function setSkillId(req, res, re = SKILL_ID_RE) {
+  const id = req.params.skillId;
+  if (!re.test(id)) { badRequest(res, 'invalid skill id'); return null; }
+  return id;
+}
+app.put(SET_SKILL_PATHS, async (req, res) => {
+  const id = mcpSetId(req, res);
+  const skillId = id && setSkillId(req, res);
+  if (!skillId) return;
+  const patch = req.body;
+  if (!isPlainObject(patch)) return badRequest(res, 'body must be an object');
+  const extra = Object.keys(patch).find((k) => k !== 'enabled');
+  if (extra !== undefined) return badRequest(res, `"${extra}" cannot be set on a skill`);
+  try {
+    const ctx = await viewContext();
+    const entry = ctx.skillCatalog.find((e) => e.id === skillId);
+    if (!entry) return res.status(404).json({ error: 'skill not found' });
+    const opts = { entry };
+    if (id.startsWith('team-')) {
+      const t = teamSkillMemberRefusal(ctx, id, skillId, patch);
+      if (t.status) return res.status(t.status).json({ error: t.error });
+      opts.team = { home: t.home };
+    }
+    await putSkillMember(id, skillId, { enabled: patch.enabled }, opts);
+    res.json({ ok: true });
+  } catch (err) { sendMcpError(res, err); }
+});
+app.delete(SET_SKILL_PATHS, async (req, res) => {
+  const id = mcpSetId(req, res);
+  const skillId = id && setSkillId(req, res, HELD_SKILL_ID_RE);
+  if (!skillId) return;
+  if (id.startsWith('team-')) return res.status(409).json({ error: 'Team set skills come from team policy and cannot be removed here' });
+  try { await deleteSkillMember(id, skillId); res.json({ ok: true }); } catch (err) { sendMcpError(res, err); }
+});
+
 app.get('/api/mcp/projects/:key', async (req, res) => {
   if (!PROJECT_KEY_RE.test(req.params.key)) return badRequest(res, 'invalid project key');
   try { res.json(await projectAssignmentView(req.params.key)); } catch (err) { sendMcpError(res, err); }
@@ -11875,6 +12037,281 @@ app.post('/api/mcp/teams/:home/forget', async (req, res) => {
   const home = mcpHome(req, res); if (!home) return;
   try { await teamForget(home); res.json({ ok: true }); }
   catch (err) { sendMcpError(res, err); }
+});
+// Required skills in the Team set (skills registry spec §5, §7, F8): Turn on is the only consent write — the reference
+// and the hash come from the cached policy, never the body; the consent route is what the dialog shows. Both answer
+// under /api/sets (canonical) and /api/mcp (one handler, two paths).
+function teamSkillParam(req, res) {
+  const id = req.params.skillId;
+  if (!isTeamSkillId(id)) { badRequest(res, 'skillId must be a plugin skill id'); return null; }
+  return id;
+}
+app.get(['/api/sets/teams/:home/skills/:skillId/consent', '/api/mcp/teams/:home/skills/:skillId/consent'], async (req, res) => {
+  const home = mcpHome(req, res); if (!home) return;
+  const skillId = teamSkillParam(req, res); if (!skillId) return;
+  try { res.json(await teamSkillConsent(home, skillId)); }
+  catch (err) { sendMcpError(res, err); }
+});
+app.post(['/api/sets/teams/:home/skills/:skillId/turn-on', '/api/mcp/teams/:home/skills/:skillId/turn-on'], async (req, res) => {
+  const home = mcpHome(req, res); if (!home) return;
+  const skillId = teamSkillParam(req, res); if (!skillId) return;
+  const expectHash = req.body?.expectHash;
+  if (typeof expectHash !== 'string' || !/^[0-9a-f]{64}$/.test(expectHash)) return badRequest(res, 'expectHash must be the hash the consent dialog showed');
+  try { res.json({ ok: true, ...(await teamSkillAction('turn-on', home, skillId, { expectHash })) }); }
+  catch (err) { sendMcpError(res, err); }
+});
+
+// ---------------------------------------------------------------------------
+// /api/skills/* — the skill catalog and library (docs/skills.md; skills registry spec §7): what plugins ship and
+// what was imported (a folder, a git URL, a pasted SKILL.md, one of ~/.claude/skills). Import is stage → preview →
+// commit with consent; a library skill with an origin updates through a preview, never on its own. Set memberships
+// are /api/sets/:id/skills/:skillId. Bodies never set `consent` or `hash` (MCP_REFUSED_KEYS).
+// ---------------------------------------------------------------------------
+app.use('/api/skills', (req, res, next) => {
+  if (isPlainObject(req.body)) {
+    const bad = MCP_REFUSED_KEYS.find((k) => Object.hasOwn(req.body, k));
+    if (bad) return badRequest(res, `"${bad}" cannot be set here`);
+  }
+  next();
+});
+
+const SKILL_STAGE_RE = /^[0-9a-f]{16}$/;
+const SKILL_SOURCE_KINDS = ['dir', 'paste', 'home', 'git'];
+const skillStageDir = (stage) => skLibrary.stageDirOf(stage);   // P1 checks the id again (a 400 inside the routes' try)
+// An update stage → the library hash it was checked against: Update refuses a stage checked before the copy changed. In
+// memory, like the "update available" badge: after a restart a stage applies as before.
+const skillUpdateBases = new Map();
+// One Update per skill at a time (name → the tail of its queued Updates): the base check and applyUpdate run back to
+// back, so two Updates posted together (two tabs) cannot both pass the check and leave the older copy in the library.
+const skillUpdateRuns = new Map();
+function oneUpdateAtATime(name, fn) {
+  const run = (skillUpdateRuns.get(name) ?? Promise.resolve()).then(fn);
+  const tail = run.then(() => {}, () => {});
+  skillUpdateRuns.set(name, tail);
+  void tail.then(() => { if (skillUpdateRuns.get(name) === tail) skillUpdateRuns.delete(name); });
+  return run;
+}
+// A hosted worca (remote access on): the server's folders and its user's ~/.claude/skills are not the viewer's, and on a
+// shared instance they hold other people's run checkouts. Folder and Claude Code imports stay local-only.
+const SKILL_FOLDER_IMPORTS = DEPLOYMENT !== 'hosted';
+// …and its git sources follow a hosted project clone's rules (clone-project.mjs planClone): an https:// URL that names one
+// repository, `https://host/owner/repo`, with no credentials, port, query, fragment or encoded character — P1 accepts
+// file:// (the server's own disk: other people's run checkouts), ssh:// (the server's keys), git://, http:// and ports
+// for a local Worca — and inside WORCA_CLONE_ALLOW when the deployment sets it. Host and path are read as typed, because
+// git fetches the URL as typed: WHATWG reads `%2e%2e` as `..` (`/evil/%2e%2e/acme/r` would pass an `acme/*` allowlist)
+// and ends the host at a backslash; a typed host that differs from WHATWG's (a port, a user, a backslash, a non-ASCII
+// name) is refused.
+const SKILL_HOSTED_GIT = 'a hosted Worca imports skills from an https:// git URL only';
+const SKILL_HOSTED_GIT_SHAPE = 'a hosted Worca imports skills from a URL naming one repository, like https://github.com/owner/repo (no port, credentials, query or encoded characters)';
+const SKILL_HOSTED_GIT_PATH_RE = /^\/([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*?)(?:\.git)?\/?$/;
+/** Why a hosted Worca refuses this git URL, or null. */
+function hostedGitRefusal(url) {
+  const s = String(url ?? '');
+  if (!/^https:\/\//i.test(s)) return SKILL_HOSTED_GIT;
+  let u;
+  try { u = new URL(s); } catch { return SKILL_HOSTED_GIT_SHAPE; }
+  const typed = s.slice('https://'.length);
+  const host = typed.slice(0, typed.search(/\/|$/)).toLowerCase();
+  const m = SKILL_HOSTED_GIT_PATH_RE.exec(typed.slice(host.length));
+  if (!m || host !== u.hostname) return SKILL_HOSTED_GIT_SHAPE;
+  const [, owner, repo] = m;
+  return skClone.cloneAllowed(skClone.parseCloneAllow(process.env.WORCA_CLONE_ALLOW), { host, owner, repo })
+    ? null : `${host}/${owner}/${repo} is not in WORCA_CLONE_ALLOW`;
+}
+
+/** A library error keeps what the modal acts on: `candidates` (a git repository holding several skills) and `problems`. */
+function sendSkillsError(res, err) {
+  if (err instanceof skLibrary.SkillLibraryError || err instanceof McpStoreError) {
+    return res.status(err.status || 400).json({ error: err.message,
+      ...(Array.isArray(err.candidates) ? { candidates: err.candidates } : {}), ...(Array.isArray(err.problems) ? { problems: err.problems } : {}) });
+  }
+  res.status(500).json({ error: err?.message || String(err) });
+}
+/** A stage id the preview returned (16 hex): it becomes a path segment, so nothing else passes. */
+function skillStage(res, stage) {
+  if (typeof stage !== 'string' || !SKILL_STAGE_RE.test(stage)) { badRequest(res, 'stage must be the id the preview returned'); return null; }
+  return stage;
+}
+/** `:id` of a library skill → its name; 400 for a malformed id or a plugin skill. */
+function librarySkillName(req, res) {
+  const parsed = skIds.parseSkillId(req.params.id);
+  if (!parsed) { badRequest(res, 'invalid skill id'); return null; }
+  if (parsed.source !== 'library') { badRequest(res, 'a plugin skill comes and goes with its plugin'); return null; }
+  return parsed.name;
+}
+// A library.json from a newer Worca, or one that cannot be trusted: P1 reads no entry and refuses every write (409). The
+// routes say so in P1's words (library.mjs keeps them private) instead of "skill not found" for a skill that is there.
+const SKILL_LIBRARY_NEWER = 'the skill library needs a newer Worca';
+const SKILL_LIBRARY_DAMAGED = 'the skill library file skills/library.json is damaged — fix it or remove it';
+/** The library's entries (null-prototype, by name), or null after answering 409 for a newer or damaged library.json. */
+async function librarySkillsOr409(res) {
+  const lib = await skLibrary.readSkillLibrary();
+  if (lib.newer || lib.damaged) { res.status(409).json({ error: lib.newer ? SKILL_LIBRARY_NEWER : SKILL_LIBRARY_DAMAGED }); return null; }
+  return lib.skills;
+}
+/** A library origin as the browser sees it: its kind, and where a git one points (P1 keeps credentials out of it) — never
+ *  a folder origin's host path. */
+const skillOriginView = (o) => (!o ? null : o.kind === 'git' ? { kind: 'git', url: o.url, ref: o.ref ?? null, subdir: o.subdir ?? null }
+  : o.kind === 'home' ? { kind: 'home', name: o.name } : { kind: o.kind });
+/** A staged folder's problems (spec §2b-8: limits, no frontmatter, an escaping symlink, `.claude-plugin/`). */
+async function stageProblems(dir, name) {
+  return (await skInspect.inspectSkillDir(dir, { name })).problems || [];
+}
+
+app.get('/api/skills', async (_req, res) => {
+  try {
+    const body = await skViews.buildSkillCatalogView(await skViews.viewContext());
+    const { newer, damaged, skills: lib } = await skLibrary.readSkillLibrary();
+    // The Skills view offers Check for updates only for a library skill with an origin (a pasted one has none);
+    // `folderImports` tells the Import modal whether the Folder and Claude Code sources exist here; `library` says why no
+    // imported skill is listed (a newer or damaged library.json reads as empty). No host path reaches the browser, as in
+    // /api/mcp/preview: neither the catalog's `dir` nor a folder origin's `path`.
+    res.json({ ...body, folderImports: SKILL_FOLDER_IMPORTS, library: { newer, damaged }, skills: body.skills.map(({ dir: _dir, ...s }) => ({
+      ...s, origin: s.source === 'library' && Object.hasOwn(lib, s.name) ? skillOriginView(lib[s.name].origin) : null })) });
+  } catch (err) { sendSkillsError(res, err); }
+});
+
+app.get('/api/skills/home', async (_req, res) => {
+  try { res.json({ skills: SKILL_FOLDER_IMPORTS ? await skImport.listHomeSkills() : [], folderImports: SKILL_FOLDER_IMPORTS }); }
+  catch (err) { sendSkillsError(res, err); }
+});
+
+// The read-only SKILL.md drawer: the text of a catalog skill's SKILL.md (the plugin's or the library's copy). Only a
+// regular file inside the skill's folder: a linked plugin keeps whatever links it holds (P1's readSkillMd lstat's for the
+// same reason), O_NOFOLLOW refuses a link swapped in after the realpath, and O_NONBLOCK makes a FIFO named SKILL.md a 404
+// instead of a request that holds a thread forever. The size is checked on what was read, so a file that grows between
+// the stat and the read is still capped. A file that cannot be reached (a link loop, no permission) is a 404 too: its
+// error would name a server path.
+const SKILL_MD_UNREACHABLE = new Set(['ENOENT', 'ENOTDIR', 'ELOOP', 'EACCES', 'EPERM', 'EISDIR']);
+app.get('/api/skills/:id/skill-md', async (req, res) => {
+  if (!skIds.SKILL_ID_RE.test(req.params.id)) return badRequest(res, 'invalid skill id');
+  let fh = null;
+  try {
+    const entry = (await skCatalog.loadSkillCatalog()).find((e) => e.id === req.params.id);
+    if (!entry) return res.status(404).json({ error: 'skill not found' });
+    const root = await fsp.realpath(entry.dir);
+    const real = await fsp.realpath(path.join(entry.dir, 'SKILL.md'));
+    if (!real.startsWith(root + path.sep)) return res.status(404).json({ error: 'SKILL.md not found' });
+    fh = await fsp.open(real, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0) | (fs.constants.O_NOFOLLOW ?? 0));
+    const st = await fh.stat();
+    if (!st.isFile()) return res.status(404).json({ error: 'SKILL.md not found' });
+    const tooBig = () => res.status(413).json({ error: 'SKILL.md is larger than 1 MB' });
+    if (st.size > skInspect.SKILL_LIMITS.fileBytes) return tooBig();
+    const buf = await fh.readFile();
+    if (buf.length > skInspect.SKILL_LIMITS.fileBytes) return tooBig();
+    res.json({ id: entry.id, bytes: buf.length, text: buf.toString('utf8') });
+  } catch (err) {
+    if (SKILL_MD_UNREACHABLE.has(err?.code)) return res.status(404).json({ error: 'SKILL.md not found' });
+    sendSkillsError(res, err);
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+});
+
+app.post('/api/skills/import/preview', async (req, res) => {
+  const source = req.body?.source;
+  if (!isPlainObject(source) || !SKILL_SOURCE_KINDS.includes(source.kind)) {
+    return badRequest(res, 'source must be { kind: "dir" | "paste" | "home" | "git", … }');
+  }
+  if (!SKILL_FOLDER_IMPORTS && (source.kind === 'dir' || source.kind === 'home')) {
+    return badRequest(res, 'folder imports need a local Worca: use a git URL or paste the SKILL.md');
+  }
+  const hostedGit = !SKILL_FOLDER_IMPORTS && source.kind === 'git' ? hostedGitRefusal(source.url) : null;
+  if (hostedGit) return badRequest(res, hostedGit);
+  try {
+    const { stage, name, inspection } = await skImport.stageImport(source);
+    res.json({ stage, name, inspection });
+  } catch (err) { sendSkillsError(res, err); }
+});
+
+app.post('/api/skills/import', async (req, res) => {
+  const stage = skillStage(res, req.body?.stage);
+  if (!stage) return;
+  const name = req.body?.name;
+  if (!skInspect.isValidSkillFolderName(name)) {
+    return badRequest(res, 'a skill name is lowercase letters, digits and single hyphens, up to 64 characters (not synced or anthropic-skills)');
+  }
+  try {
+    const lib = await librarySkillsOr409(res);
+    if (!lib) return;
+    if (Object.hasOwn(lib, name)) return res.status(409).json({ error: `a skill named ${name} is already in the library` });
+    const dir = skillStageDir(stage);
+    if (!fs.existsSync(dir)) return res.status(404).json({ error: 'nothing staged under that id: preview again' });
+    const problems = await stageProblems(dir, name);
+    if (problems.length) return badRequest(res, `cannot import: ${problems.join('; ')}`);
+    await skLibrary.commitImport(dir, name);
+    const id = skIds.skillIdOf({ source: 'library', name });
+    // A Check for updates still fetching when this name was removed may have marked it since: a new import starts unmarked.
+    skViews.recordSkillUpdateCheck(id, false);
+    res.json({ ok: true, id });
+  } catch (err) { sendSkillsError(res, err); }
+});
+
+app.delete('/api/skills/import/:stage', async (req, res) => {
+  const stage = skillStage(res, req.params.stage);
+  if (!stage) return;
+  try { await skImport.discardStage(stage); skillUpdateBases.delete(stage); res.json({ ok: true }); } catch (err) { sendSkillsError(res, err); }
+});
+
+// Library only. P1 checks the library first, then runs `beforeRemove` OUTSIDE the skills lock — memberships and Team
+// state (removeSkillEverywhere, MCP lock) — then removes the folder and the entry under the skills lock: the two locks are
+// never held together, and a refused sweep removes nothing (spec §3.2, the removeServerEverywhere order).
+app.delete('/api/skills/:id', async (req, res) => {
+  const name = librarySkillName(req, res);
+  if (!name) return;
+  try {
+    const lib = await librarySkillsOr409(res);
+    if (!lib) return;
+    if (!Object.hasOwn(lib, name)) return res.status(404).json({ error: 'skill not found' });
+    await skLibrary.removeLibrarySkill(name, { beforeRemove: () => skStore.removeSkillEverywhere(req.params.id) });
+    skViews.recordSkillUpdateCheck(req.params.id, false);
+    res.json({ ok: true });
+  } catch (err) { sendSkillsError(res, err); }
+});
+
+app.post('/api/skills/:id/update/preview', async (req, res) => {
+  const name = librarySkillName(req, res);
+  if (!name) return;
+  try {
+    const lib = await librarySkillsOr409(res);
+    if (!lib) return;
+    if (!Object.hasOwn(lib, name)) return res.status(404).json({ error: 'skill not found' });
+    if (!lib[name].origin) return res.status(409).json({ error: 'a pasted skill has no origin: import it again to change it' });
+    const o = lib[name].origin;   // hosted: a folder or non-https origin would re-read the server's disk
+    const hostedGit = SKILL_FOLDER_IMPORTS ? null : o.kind === 'git' ? hostedGitRefusal(o.url) : SKILL_HOSTED_GIT;
+    if (hostedGit) return res.status(409).json({ error: `this skill's origin cannot be fetched here — ${hostedGit}` });
+    const diff = await skImport.updatePreview(name);
+    skillUpdateBases.set(diff.stage, lib[name].hash ?? null);
+    // The Skills view's "update available" badge: this check's answer, kept until Update, Remove or a server restart.
+    skViews.recordSkillUpdateCheck(req.params.id, diff.added.length + diff.removed.length + diff.changed.length > 0);
+    res.json(diff);
+  } catch (err) { sendSkillsError(res, err); }
+});
+
+app.post('/api/skills/:id/update', async (req, res) => {
+  const name = librarySkillName(req, res);
+  if (!name) return;
+  const stage = skillStage(res, req.body?.stage);
+  if (!stage) return;
+  try {
+    await oneUpdateAtATime(name, async () => {   // the library is read after any Update of this skill already posted
+      const lib = await librarySkillsOr409(res);
+      if (!lib) return;
+      if (!Object.hasOwn(lib, name)) return res.status(404).json({ error: 'skill not found' });
+      const dir = skillStageDir(stage);
+      if (!fs.existsSync(dir)) return res.status(404).json({ error: 'nothing staged under that id: check for updates again' });
+      // Checked against another copy (a later Update, or a Remove and a new import, since): it would put older files back.
+      if (skillUpdateBases.has(stage) && skillUpdateBases.get(stage) !== (lib[name].hash ?? null)) {
+        return res.status(409).json({ error: 'the skill changed since this update was checked: check for updates again' });
+      }
+      const problems = await stageProblems(dir, name);
+      if (problems.length) return badRequest(res, `cannot update: ${problems.join('; ')}`);
+      await skLibrary.applyUpdate(name, dir);
+      skillUpdateBases.delete(stage);
+      skViews.recordSkillUpdateCheck(req.params.id, false);
+      res.json({ ok: true });
+    });
+  } catch (err) { sendSkillsError(res, err); }
 });
 
 // ---------------------------------------------------------------------------

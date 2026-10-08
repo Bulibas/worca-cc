@@ -20,7 +20,7 @@ import { buildNodeConfigRows, pruneNodeSelection, modifiedFieldsOf } from './nod
 import { classifyLoops } from '../../src/shared/graph/loops.mjs';
 import { portsFnFor } from '../../src/shared/graph/ports.mjs';
 import { parseMcpToolName } from '../../src/shared/mcp-tool-name.mjs';
-import { mcpSkipView, mcpCopyNote } from './mcp-run-picker.mjs';
+import { mcpSkipView, mcpCopyNote, skillSkipView } from './mcp-run-picker.mjs';
 import { notify } from './feedback.mjs';
 
 /**
@@ -1081,15 +1081,16 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     scopeBtn.dataset.minLevel = 'advanced';      // interface mode (docs/ui-levels.md): Auto scope is the simple path
     row.appendChild(scopeBtn);
 
-    // MCP registry §9.4: the per-chat MCP picker — `MCP · N` (N = copies that start next turn), hidden while no
-    // set in play has a member. Styled as the scope pill; opens like the model button's Effort sub-picker.
-    const mcpBtn = make('button', 'ask-scope-btn ask-mcp-btn');
+    // MCP registry §9.4 + skills registry §6.8: the per-chat Sets picker — `Sets · N` (N = copies and skills that start
+    // next turn), hidden while no set in play has a member or a skill. Styled as the scope pill; opens like the model
+    // button's Effort sub-picker.
+    const mcpBtn = make('button', 'ask-scope-btn ask-mcp-btn ask-sets-btn');
     mcpBtn.type = 'button';
     mcpBtn.setAttribute('data-ask-mcp-btn', '');
-    mcpBtn.title = 'MCP servers for this chat';
+    mcpBtn.title = 'Sets for this chat';
     mcpBtn.hidden = true;
     mcpBtn.dataset.minLevel = 'advanced';
-    el.mcpBtnLabel = make('span', 'ask-scope-label', 'MCP · 0');
+    el.mcpBtnLabel = make('span', 'ask-scope-label', 'Sets · 0');
     mcpBtn.appendChild(el.mcpBtnLabel);
     mcpBtn.addEventListener('click', () => openMcpPopover(mcpBtn));
     el.mcpBtn = mcpBtn;
@@ -1957,8 +1958,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     st.mcp.preview = st.mcp.failed ? null : data;
     const p = st.mcp.preview;
     // A failed preview leaves the chip as it was (the open picker says so): the user can reopen it to retry.
-    if (p) el.mcpBtn.hidden = !p.sets.some((x) => x.members > 0);
-    el.mcpBtnLabel.textContent = p ? `MCP · ${p.started}` : 'MCP · ?';
+    if (p) el.mcpBtn.hidden = !p.sets.some((x) => x.members > 0 || (x.skills || 0) > 0);
+    el.mcpBtnLabel.textContent = p ? `Sets · ${p.started + ((p.skills && p.skills.started) || 0)}` : 'Sets · ?';
     if (st.mcp.render) st.mcp.render();
   }
 
@@ -2031,6 +2032,38 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return item;
   }
 
+  const plural = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
+  /** Skills registry §6.8: a level-1 set row's small line — "2 servers · 1 skill · pinned". */
+  function setSummary(x) {
+    const route = x.routes[0]?.route;               // the resolver sorts a set's routes by rank
+    return [x.members ? plural(x.members, 'server') : '', x.skills ? plural(x.skills, 'skill') : '',
+      x.group === 'set' && route ? MCP_ROUTE_LABEL[route] || route : ''].filter(Boolean).join(' · ');
+  }
+  /** One level-2 membership: a live switch (started, or switched off in this chat), else a disabled row with its reason
+   *  (§5.7 wording: choices muted, problems amber). `key` is the membership key mcpOff.members holds. */
+  function pickerMember(panel, set, setOff, { name, key, skip, why, problem }) {
+    if (skip && skip.reason !== 'chat-off') {
+      const item = menuItem(`ask-mcp-member is-skipped${problem ? ' is-problem' : ''}`);
+      item.disabled = true;
+      item.appendChild(make('span', 'ask-model-name', name));
+      item.appendChild(make('span', 'ask-pop-row-value', why));
+      panel.appendChild(item);
+      return;
+    }
+    const row = make('div', 'ask-mcp-row');
+    row.setAttribute('role', 'none');
+    row.appendChild(make('span', 'ask-mcp-copy', name));
+    const sw = mcpSwitch(!setOff && !st.mcp.off.members.includes(key), name,
+      () => setMcpOff({ ...st.mcp.off, members: toggle(st.mcp.off.members, key) }), `member:${key}`);
+    if (setOff) { sw.disabled = true; sw.title = `${set.name} is off in this chat`; }   // the whole set is off
+    row.appendChild(sw);
+    panel.appendChild(row);
+  }
+  // Switches first, then the disabled rows (Appendix B 10, P4); by the name each shows.
+  const memberOrder = (a, b) => (Number(!!a.skip && a.skip.reason !== 'chat-off') - Number(!!b.skip && b.skip.reason !== 'chat-off'))
+    || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  const layerLine = (sk) => `skills from sets not loaded on this machine: ${sk.layer.text || sk.layer.blocked}`;
+
   function openMcpPopover(trigger) {
     const panel = openPopover({ panelClass: 'ask-pop-mcp', trigger, build: () => {}, onClose: () => { st.mcp.render = null; } });
     if (!panel) return;
@@ -2038,6 +2071,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     let first = true;
     const render = (focusKey = null) => {
       const p = st.mcp.preview || { sets: [], copies: [], skipped: [] };
+      const sk = p.skills || { mounted: [], skipped: [], started: 0, layer: { blocked: null, text: null } };
       // A re-render (a toggle, a preview landing) keeps keyboard focus on the same control.
       const keep = focusKey ?? (panel.contains(doc.activeElement) ? doc.activeElement.dataset.mcpKey || '' : null);
       panel.replaceChildren();
@@ -2050,35 +2084,35 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         panel.appendChild(back);
         panel.appendChild(make('div', 'ask-pop-divider'));
         const setOff = st.mcp.off.sets.includes(set.id);
-        const rows = [
-          ...p.copies.filter((c) => c.setId === set.id).map((c) => ({ copy: c.name, serverId: c.serverId, skip: null, note: mcpCopyNote(p, c) })),
-          ...p.skipped.filter((x) => x.setId === set.id).map((x) => ({ copy: mcpSkipView(x).name, serverId: x.serverId, skip: x, note: '' })),
-        ].sort((a, b) => (Number(!!a.skip && a.skip.reason !== 'chat-off') - Number(!!b.skip && b.skip.reason !== 'chat-off'))
-          || (a.copy < b.copy ? -1 : a.copy > b.copy ? 1 : 0));   // switches first, then the disabled rows (Appendix B 10, P4)
-        for (const m of rows) {
-          if (m.skip && m.skip.reason !== 'chat-off') {
-            // §5.7 in the New Pipeline picker's wording: choices (off, needs-consent) muted, problems amber.
-            const v = mcpSkipView(m.skip);
-            const item = menuItem(`ask-mcp-member is-skipped${v.problem ? ' is-problem' : ''}`);
-            item.disabled = true;
-            item.appendChild(make('span', 'ask-model-name', m.copy));
-            item.appendChild(make('span', 'ask-pop-row-value', v.why));
-            panel.appendChild(item);
-            continue;
-          }
-          const k = `${set.id}|${m.serverId}`;
-          const row = make('div', 'ask-mcp-row');
-          row.setAttribute('role', 'none');
-          const shown = m.note ? `${m.copy} · ${m.note}` : m.copy;   // §4.4 name provisional, §5.6 withheld tools
-          row.appendChild(make('span', 'ask-mcp-copy', shown));
-          const sw = mcpSwitch(!setOff && !st.mcp.off.members.includes(k), shown,
-            () => setMcpOff({ ...st.mcp.off, members: toggle(st.mcp.off.members, k) }), `member:${k}`);
-          if (setOff) { sw.disabled = true; sw.title = `${set.name} is off in this chat`; }   // the whole set is off
-          row.appendChild(sw);
-          panel.appendChild(row);
+        const servers = [
+          ...p.copies.filter((c) => c.setId === set.id).map((c) => {
+            const note = mcpCopyNote(p, c);                                     // §4.4 name provisional, §5.6 withheld tools
+            return { name: note ? `${c.name} · ${note}` : c.name, key: `${set.id}|${c.serverId}`, skip: null };
+          }),
+          ...p.skipped.filter((x) => x.setId === set.id).map((x) => {
+            const v = mcpSkipView(x);                                           // §5.7 in the New Pipeline picker's wording
+            return { name: v.name, key: `${set.id}|${x.serverId}`, skip: x, why: v.why, problem: v.problem };
+          }),
+        ].sort(memberOrder);
+        // Skills registry §6.8: then the set's skills; a blocked layer (§2b-14) lists none — one muted line, P4's rule.
+        const blocked = !!(sk.layer && sk.layer.blocked);
+        const skills = blocked ? [] : [
+          ...sk.mounted.filter((m) => m.setId === set.id).map((m) => ({ name: m.qualifiedName, key: `${set.id}|${m.id}`, skip: null })),
+          ...sk.skipped.filter((x) => x.setId === set.id).map((x) => {
+            const v = skillSkipView(x);                                         // P4's New Pipeline wording (needs-consent: "off — …")
+            return { name: v.name, key: `${set.id}|${x.skillId}`, skip: x, why: v.why, problem: x.problem === true };
+          }),
+        ].sort(memberOrder);
+        const hasSkills = skills.length > 0 || (blocked && (set.skills || 0) > 0);
+        if (hasSkills && servers.length) panel.appendChild(make('div', 'ask-pop-caption', 'Servers'));
+        for (const m of servers) pickerMember(panel, set, setOff, m);
+        if (hasSkills) {
+          panel.appendChild(make('div', 'ask-pop-caption', 'Skills'));
+          if (blocked) panel.appendChild(make('div', 'ask-pop-empty', layerLine(sk)));
+          for (const m of skills) pickerMember(panel, set, setOff, m);
         }
         panel.appendChild(make('div', 'ask-pop-divider'));
-        panel.appendChild(mcpManageItem(`Manage ${set.name} in Settings › MCP servers`, `#settings/mcp/sets/${encodeURIComponent(set.id)}`));
+        panel.appendChild(mcpManageItem(`Manage ${set.name} in Settings › Sets`, `#settings/mcp/sets/${encodeURIComponent(set.id)}`));
       } else {
         pane = null;
         // Level 1: one row per set in play, in the resolver's picker order (General, user sets by rank, Team).
@@ -2089,17 +2123,21 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
             () => setMcpOff({ ...st.mcp.off, sets: toggle(st.mcp.off.sets, x.id) }), `set:${x.id}`));
           const drill = menuItem('ask-mcp-set', () => { pane = x.id; render(); });
           drill.dataset.mcpKey = `drill:${x.id}`;
-          const route = x.routes[0]?.route;          // the resolver sorts a set's routes by rank
-          drill.appendChild(make('span', 'ask-model-name', x.group === 'set' && route ? `${x.name} · ${MCP_ROUTE_LABEL[route] || route}` : x.name));
-          drill.appendChild(make('span', 'ask-pop-row-value', `${x.started}/${x.members}`));
+          const name = make('span', 'ask-model-name', x.name);
+          const summary = setSummary(x);
+          if (summary) name.appendChild(make('small', null, summary));
+          drill.appendChild(name);
+          drill.appendChild(make('span', 'ask-pop-row-value', `${x.started + (x.startedSkills || 0)}/${x.members + (x.skills || 0)}`));
           drill.appendChild(make('span', 'ask-pop-row-chev', '›'));
           row.appendChild(drill);
           panel.appendChild(row);
         }
         // Before the first preview lands, or when it failed: say so rather than show an empty menu.
-        if (!p.sets.length) panel.appendChild(make('div', 'ask-pop-empty', st.mcp.failed ? 'Could not load the MCP servers — reopen to retry.' : !st.mcp.preview ? 'Loading…' : 'No MCP servers in play.'));
+        if (!p.sets.length) panel.appendChild(make('div', 'ask-pop-empty', st.mcp.failed ? 'Could not load the sets — reopen to retry.' : !st.mcp.preview ? 'Loading…' : 'No sets in play.'));
+        // Skills registry §4.1: a host whose Claude Code refuses --plugin-dir mounts no skill — one muted line.
+        if (sk.layer && sk.layer.blocked) panel.appendChild(make('div', 'ask-pop-empty', layerLine(sk)));
         panel.appendChild(make('div', 'ask-pop-divider'));
-        panel.appendChild(mcpManageItem('Manage in Settings › MCP servers', '#settings/mcp'));
+        panel.appendChild(mcpManageItem('Manage in Settings › Sets', '#settings/mcp'));
       }
       if (first || keep !== null) {
         const items = menuItems(panel);
@@ -2572,9 +2610,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       n.appendChild(a);
     }
     if (b.mcp) {
-      // MCP registry §9.1 (D17): the worktree join notice's "MCP" opens the per-chat picker.
+      // MCP registry §9.1 (D17): the worktree join notice's "Sets" opens the per-chat picker (skills registry §6.8).
       n.appendChild(doc.createTextNode(' · '));
-      const mcp = make('button', 'ask-notice-mcp', 'MCP');
+      const mcp = make('button', 'ask-notice-mcp', 'Sets');
       mcp.type = 'button';
       mcp.addEventListener('click', () => { if (el.mcpBtn) openMcpPopover(el.mcpBtn); });
       n.appendChild(mcp);
@@ -4542,6 +4580,11 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       // input preview — no op cell, since a third-party tool name has no worca verb to show.
       rowEl.appendChild(make('span', 'ask-tool-mcp', `${mcp.server} · ${mcp.tool}`));
       rowEl.appendChild(make('span', 'ask-tool-target', clipInput(block.input)));
+    } else if (block.name === 'Skill' && block.input && typeof block.input.skill === 'string') {
+      // Skills registry §4.4: a set skill the turn loaded — `skill`, then its qualified name (and its args).
+      const args = typeof block.input.args === 'string' && block.input.args ? block.input.args : '';
+      rowEl.appendChild(make('span', 'ask-tool-op', 'skill'));
+      rowEl.appendChild(make('span', 'ask-tool-target', args ? `${block.input.skill} · ${args.length > 60 ? `${args.slice(0, 60)}…` : args}` : block.input.skill));
     } else {
       const short = String(block.name || '').replace(/^mcp__worca__/, '');
       const parts = short.split('_');

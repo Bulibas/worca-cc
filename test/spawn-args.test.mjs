@@ -788,3 +788,90 @@ test('no GitHub or Azure DevOps credential reaches claude: scrub off, scrub on w
     for (const k of keys) if (prev[k] === undefined) delete process.env[k]; else process.env[k] = prev[k];
   }
 });
+
+// ── skills registry §4.1: --plugin-dir per generated set plugin; extraSettings in the ONE --settings ────
+import { planClaudeInvocation, buildSettingsPayload } from '../src/core/claude-runner.mjs';
+
+test('buildClaudeArgs: pluginDirs → one --plugin-dir per entry after --agents and before --add-dir; absent/[]/junk ⇒ byte-identical', async () => {
+  const agents = { 'worca-investigator': { description: 'd', prompt: 'p' } };
+  const base = { ...BASE, allowedTools: ['Read'], agents, addDirs: ['/m'] };
+  const legacy = buildClaudeArgs(base);
+  await checkRows([
+    { name: 'one flag per entry, in order; a path with a space stays one argument', run: () => {
+      const args = buildClaudeArgs({ ...base, pluginDirs: ['/s/billing', '/s/my shop'] });
+      assert.deepEqual(args.slice(0, legacy.indexOf('--agents')), legacy.slice(0, legacy.indexOf('--agents')));
+      assert.deepEqual(args.slice(legacy.indexOf('--agents')),
+        ['--agents', JSON.stringify(agents), '--plugin-dir', '/s/billing', '--plugin-dir', '/s/my shop', '--add-dir', '/m']);
+    } },
+    { name: 'absent, [] and non-string entries emit nothing', run: () => {
+      for (const pluginDirs of [undefined, [], [1, '', null], '/s/billing']) assert.deepEqual(buildClaudeArgs({ ...base, pluginDirs }), legacy);
+    } },
+    { name: 'with neither --agents nor --add-dir the flags close the argv', run: () => {
+      assert.deepEqual(buildClaudeArgs({ ...BASE, pluginDirs: ['/s/general'] }).slice(-2), ['--plugin-dir', '/s/general']);
+    } },
+    { name: 'staged (over the argv limit): every --plugin-dir stays inline, in place', run: () => {
+      const plan = planClaudeInvocation({ ...base, prompt: 'x'.repeat(30000), pluginDirs: ['/s/billing', '/s/my shop'] }, { dir: '/stage' });
+      assert.equal(plan.staged, true);
+      assert.deepEqual(plan.args.slice(plan.args.indexOf('--agents')),
+        ['--agents', JSON.stringify(agents), '--plugin-dir', '/s/billing', '--plugin-dir', '/s/my shop', '--add-dir', '/m']);
+    } },
+  ]);
+});
+
+test('extraSettings merge into the ONE --settings payload, never replace permissions or hooks, inline and staged alike', async () => {
+  const RULES = { deny: ['Bash'] };
+  const settingsOf = (args) => JSON.parse(args[args.indexOf('--settings') + 1]);
+  await checkRows([
+    { name: 'with permission rules: one --settings carrying both', run: () => {
+      const args = buildClaudeArgs({ ...BASE, permissionRules: RULES, extraSettings: { disableSkillShellExecution: true } });
+      assert.equal(args.filter((a) => a === '--settings').length, 1);
+      assert.deepEqual(settingsOf(args), { disableSkillShellExecution: true, permissions: RULES });
+      assert.equal(args[args.indexOf('--settings') + 1], '{"disableSkillShellExecution":true,"permissions":{"deny":["Bash"]}}',
+        'extra settings merge FIRST: the runner\'s own keys come last');
+    } },
+    { name: 'alone: --settings carries only the extra settings', run: () => {
+      assert.deepEqual(buildSettingsArgs(null, null, { extraSettings: { disableSkillShellExecution: true } }),
+        ['--settings', '{"disableSkillShellExecution":true}']);
+    } },
+    { name: "an extra permissions / hooks / disableAllHooks / env key never reaches the payload", run: () => {
+      const s = buildSettingsPayload(RULES, { extraSettings: { permissions: { allow: ['Bash'] }, hooks: { PreToolUse: [] },
+        disableAllHooks: true, env: { WORCA_HOST_PID: '1' }, disableSkillShellExecution: true } }).settings;
+      assert.deepEqual(s, { disableSkillShellExecution: true, permissions: RULES });
+      assert.equal(buildSettingsPayload(null, { extraSettings: { permissions: { allow: ['Bash'] }, hooks: {}, disableAllHooks: true, env: { X: '1' } } }), null);
+    } },
+    { name: 'absent / null / [] / {} / a string / only undefined values ⇒ byte-identical argv', run: () => {
+      const legacy = buildClaudeArgs({ ...BASE, permissionRules: RULES });
+      for (const extraSettings of [undefined, null, [], ['x'], {}, 'x', { a: undefined }]) {
+        assert.deepEqual(buildClaudeArgs({ ...BASE, permissionRules: RULES, extraSettings }), legacy);
+        assert.deepEqual(buildClaudeArgs({ ...BASE, extraSettings }), buildClaudeArgs(BASE));
+      }
+    } },
+    { name: 'staged (over the argv limit): the settings FILE holds the merged payload', run: () => {
+      const plan = planClaudeInvocation({ ...BASE, prompt: 'x'.repeat(30000), permissionRules: RULES,
+        extraSettings: { disableSkillShellExecution: true } }, { dir: '/stage' });
+      assert.equal(plan.staged, true);
+      const file = plan.files.find((f) => f.path === join('/stage', 'settings.json'));
+      assert.deepEqual(JSON.parse(file.content), { disableSkillShellExecution: true, permissions: RULES });
+    } },
+  ]);
+});
+
+test('runClaude FORWARDS pluginDirs and extraSettings to runReal (both reach the spawn)', POSIX_SHIM, async () => {
+  const dir = await tmp();
+  const out = join(dir, 'argv.txt');
+  const bin = await fakeBin(dir, out);
+  const plugins = [join(dir, 'skills', 'billing'), join(dir, 'skills', 'general')];
+  const prevMock = process.env.WORCA_MOCK;
+  delete process.env.WORCA_MOCK;                       // must reach runReal, not runMock
+  try {
+    await runClaude({ cwd: dir, bin, prompt: 'p', pluginDirs: plugins, extraSettings: { disableSkillShellExecution: true },
+      permissionRules: { deny: ['Read(.env*)'] } });
+  } finally {
+    if (prevMock === undefined) delete process.env.WORCA_MOCK;
+    else process.env.WORCA_MOCK = prevMock;
+  }
+  const argv = (await readFile(out, 'utf8')).split('\0').filter(Boolean);
+  assert.deepEqual(argv.filter((a, i) => argv[i - 1] === '--plugin-dir'), plugins);
+  assert.deepEqual(JSON.parse(argv[argv.indexOf('--settings') + 1]),
+    { disableSkillShellExecution: true, permissions: { deny: ['Read(.env*)'] } });
+});

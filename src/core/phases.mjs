@@ -721,6 +721,10 @@ export function runOpts(ctx, { role, prompt, systemPrompt, allowedTools }) {
     // Pinned investigators (D19): the run-scoped definition a pinned fan-out node's children run
     // as. undefined for every other node ⇒ nothing emitted ⇒ argv byte-identical.
     agents: investigatorAgents(ctx),
+    // Skills registry (design §4.3): one `--plugin-dir` per set plugin of this run (the generated
+    // plugins under <pipeline.dir>/skills; Agent-tool children see them too). undefined without set
+    // skills or with a blocked layer ⇒ nothing emitted ⇒ argv byte-identical.
+    pluginDirs: ctx.skillPluginDirs?.length ? ctx.skillPluginDirs : undefined,
     // Guardrails: worca policy + lifted repo deny rules as {deny,...} rules ->
     // ONE --settings payload; envScrub/envAllowlist -> spawn env. All undefined
     // when the project has no guardrails, so the argv and env stay byte-identical

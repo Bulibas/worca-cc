@@ -4,14 +4,21 @@
 // of Team consent — Install, Turn on, Update, Forget. Pure core (teamRows, consentHash, seedValues)
 // + the actions, like registry.mjs. Nothing here touches git or the network or listens to policy events; the Ask turn
 // path only reads (teamRows, through policyPayload).
+import { lstatSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { canonicalJson, sha256Hex } from './definitions.mjs';
 import { teamRecord, assignBaseNames } from './identity.mjs';
-import { teamMembers, requiredOf, skipReasonText } from './registry.mjs';
+import { teamMembers, requiredOf, requiredSkillsOf, skipReasonText } from './registry.mjs';
+import { teamSkillMembers } from './sets.mjs';
 import { resolveSet } from './views.mjs';
-import { readMcpStore, setTeamState, putPolicyServer, forgetTeamState, migrateServerFields, McpStoreError } from './store.mjs';
+import { readMcpStore, setTeamState, putPolicyServer, forgetTeamState, migrateServerFields, setTeamSkillState, McpStoreError } from './store.mjs';
 import { loadCatalog } from './catalog.mjs';
 import { cachedPolicyHomes, unreadablePolicyHomes } from '../policy/cache.mjs';
-import { mcpListComplete } from '../policy/registry.mjs';
+import { mcpListComplete, skillsListComplete } from '../policy/registry.mjs';
+import { skillIdOf, SKILL_ID_RE } from '../skills-registry/ids.mjs';
+import { loadSkillCatalog } from '../skills-registry/catalog.mjs';
+import { SKILL_LIMITS } from '../skills-registry/inspect.mjs';
+import { skillSkipReasonText } from '../skills-registry/texts.mjs';
 
 /** A user-keyed lookup (homes, server ids, plugin names): own keys only. */
 const own = (m, k) => (m != null && Object.hasOwn(m, k) ? m[k] : undefined);
@@ -85,11 +92,19 @@ export function teamRows({ slug, sha, doc }, { catalog, snapshot, pluginStates, 
 }
 
 /** §11.2: in a Team action on a present cached doc, the Team state of the entries it no longer lists goes —
- *  never while that doc carries an `mcp.required` warning (an entry this build drops is still listed). */
+ *  never while that doc carries an `mcp.required` warning (an entry this build drops is still listed); the same
+ *  for required skills and their `skills.required` warnings (skills registry spec §5). */
 async function forgetUnlisted(home, cached, snap) {
-  if (!mcpListComplete(cached.warnings)) return;
-  const listed = new Set(requiredOf(cached.doc).map((e) => serverIdOf(home, e)));
-  const gone = Object.keys(own(snap.teams, home)?.members ?? {}).filter((id) => !listed.has(id));
+  const team = own(snap.teams, home);
+  const gone = [];
+  if (mcpListComplete(cached.warnings)) {
+    const listed = new Set(requiredOf(cached.doc).map((e) => serverIdOf(home, e)));
+    gone.push(...Object.keys(team?.members ?? {}).filter((id) => !listed.has(id)));
+  }
+  if (skillsListComplete(cached.warnings)) {
+    const listed = new Set(requiredSkillsOf(cached.doc).map(skillIdOfEntry));
+    gone.push(...Object.keys(team?.skills ?? {}).filter((id) => !listed.has(id)));
+  }
   if (gone.length) await forgetTeamState(home, gone);
 }
 
@@ -143,16 +158,128 @@ export async function teamAction(action, home, serverId, { expectHash }) {
 }
 
 /**
- * Forget (§11.2). No cached doc for `home` (no project here follows it), or one that requires no MCP server: the Team
- * set is greyed, and its Team state, secrets and tests all go with its record, so the set leaves the list. While the
- * doc still requires servers, Forget is a Team action like the others: only the entries it no longer lists go. A policy
- * this build cannot fully read (a newer schema, an entry it drops) removes nothing: 409.
+ * Forget (§11.2). No cached doc for `home` (no project here follows it), or one that requires no MCP server and no
+ * skill: the Team set is greyed, and its Team state, secrets and tests all go with its record, so the set leaves the
+ * list. While the doc still requires servers or skills, Forget is a Team action like the others: only the entries it no
+ * longer lists go. A policy this build cannot fully read (a newer schema, an entry it drops) removes nothing: 409.
  */
 export async function teamForget(home) {
   const cached = cachedPolicyHomes().find((h) => h.slug === home);
   if (cached ? !mcpListComplete(cached.warnings) : unreadablePolicyHomes().has(home)) {
     throw new McpStoreError(409, `this Worca cannot read every MCP server the policy of ${home} lists — nothing was removed`);
   }
-  if (!cached || !requiredOf(cached.doc).length) return forgetTeamState(home);
+  if (cached && !skillsListComplete(cached.warnings)) {
+    throw new McpStoreError(409, `this Worca cannot read every skill the policy of ${home} lists — nothing was removed`);
+  }
+  if (!cached || (!requiredOf(cached.doc).length && !requiredSkillsOf(cached.doc).length)) return forgetTeamState(home);
   return forgetUnlisted(home, cached, await readMcpStore());
+}
+
+// ── Required skills (skills registry spec §5, §7, F8) ─────────────────────────────────────────────────────────────
+// `skills.required` lists plugin skills ({ plugin, skill }); each developer turns each one on with consent and it joins
+// the home's Team set. Consent covers the reference only: content changes reach the Team set through the plugin's
+// own update consent, so there is no Update — Turn on and Forget are the only actions.
+
+/** sha256 of canonical { plugin, skill } (§2b-10). */
+export function skillConsentHash({ plugin, skill }) { return sha256Hex(canonicalJson({ plugin, skill })); }
+
+/** A Team skill id: a plugin skill, the only kind `skills.required` lists. */
+export function isTeamSkillId(id) { return typeof id === 'string' && SKILL_ID_RE.test(id) && id.startsWith('skill:plugin:'); }
+
+const skillIdOfEntry = (e) => skillIdOf({ source: 'plugin', plugin: e.plugin, name: e.skill });
+
+/**
+ * One checklist row per `skills.required` entry of one cached home, in the policy's order (§6 board 10).
+ * state: 'needs-plugin' | 'never-consented' | 'off' | 'skipped' | 'ok' (the first that applies; 'skipped' also when the
+ * plugin is ok but ships no skill of that name); `working` = the Team set mounts it on a spawn here, as the resolver
+ * decides — what the effective table's "Yours" lists. `code` (sha7 or 'linked'), files, scripts and
+ * shell blocks are the catalog's facts the row and the consent dialog show.
+ * @param {{slug:string, sha:string|null, doc:object}} home
+ * @param {{catalog:object[], snapshot:object, pluginStates:Record<string,string>}} io  catalog = loadSkillCatalog()
+ */
+export function teamSkillRows({ slug, sha, doc }, { catalog, snapshot, pluginStates }) {
+  const required = requiredSkillsOf(doc);
+  const rec = own(snapshot.teams, slug) ?? teamRecord(slug, { takenSlugs: [] });
+  const byId = new Map(catalog.map((c) => [c.id, c]));
+  // The Team set's skills as the resolver derives them (P2 sets.mjs): in the catalog, one per name, with their state.
+  const members = new Map(teamSkillMembers(slug, required, catalog, rec.skills ?? {}).map((m) => [m.skillId, m.state]));
+  return required.map((e) => {
+    const skillId = skillIdOfEntry(e);
+    const hit = byId.get(skillId) ?? null;
+    const st = members.get(skillId) ?? null;
+    const hash = skillConsentHash(e);
+    const consented = st?.consent === hash;
+    const on = consented && st.enabled === true && !st.pending;
+    let state; let problem = null;
+    // The resolver's order (missing, invalid, then consent, then off): a skill that can never mount is never offered Turn on.
+    if (own(pluginStates, e.plugin) !== 'ok') state = 'needs-plugin';
+    else if (!hit) { state = 'skipped'; problem = `${e.plugin} does not ship a skill named ${e.skill}`; }
+    else if (!hit.valid) {
+      state = 'skipped';
+      problem = skillSkipReasonText({ setId: rec.id, setName: rec.name, skillId, name: e.skill, reason: 'invalid-skill' });
+    } else if (!consented) state = 'never-consented';
+    else if (!on) state = 'off';
+    else state = 'ok';
+    // `working` is what the resolver does, not the checklist's state: it mounts a consented, on, valid skill of an enabled
+    // plugin whatever the policy's version floor says (the floor is the plugin row's action).
+    const working = !!hit && hit.pluginEnabled !== false && hit.valid === true && on;
+    return {
+      home: slug, sha, setId: rec.id, setName: rec.name, skillId, name: e.skill, plugin: e.plugin, state, working, hash, problem,
+      code: hit?.code ?? null, files: hit?.files ?? 0, bytes: hit?.bytes ?? 0, scripts: hit?.scripts ?? [], shellBlocks: hit?.shellBlocks ?? 0,
+      description: hit?.description ?? '',
+    };
+  });
+}
+
+/** The cached home and its `skills.required` entry for `skillId` (400 / 404). */
+function cachedSkillEntry(home, skillId) {
+  if (!isTeamSkillId(skillId)) throw new McpStoreError(400, 'skillId must be a plugin skill id');
+  const cached = cachedPolicyHomes().find((h) => h.slug === home);
+  if (!cached) throw new McpStoreError(404, `no project here follows ${home}`);
+  return { cached, entry: requiredSkillsOf(cached.doc).find((e) => skillIdOfEntry(e) === skillId) ?? null };
+}
+
+/**
+ * Turn on one required skill: records consent and switches the Team member on. The reference and the hash come from
+ * the CACHED policy, never the caller; `expectHash` is the hash the consent dialog showed (409 when it moved on).
+ * @param {'turn-on'} action
+ * @returns {Promise<{setId:string, skillId:string}>}
+ */
+export async function teamSkillAction(action, home, skillId, { expectHash }) {
+  if (action !== 'turn-on') throw new McpStoreError(400, `unknown Team skill action ${action}`);
+  const { cached, entry } = cachedSkillEntry(home, skillId);
+  const snap = await readMcpStore();
+  await forgetUnlisted(home, cached, snap);   // §11.2: this is a Team action on a present doc
+  if (!entry) throw new McpStoreError(404, `${skillId} is not required by ${home}`);
+  const hash = skillConsentHash(entry);
+  if (expectHash !== hash) throw new McpStoreError(409, 'the team definition changed, review it again');
+  if (!(await loadSkillCatalog()).some((c) => c.id === skillId)) throw new McpStoreError(409, `${skillId} is not installed`);
+  await setTeamSkillState(home, skillId, { consent: hash, enabled: true });
+  return { setId: (own(snap.teams, home) ?? teamRecord(home, { takenSlugs: [] })).id, skillId };
+}
+
+/**
+ * What the Turn on dialog shows (§6 board 10): the SKILL.md text, its scripts and shell blocks, allowed tools, the
+ * plugin @ code, the home @ sha and the set it joins — read from the cached policy and the catalog, like the action.
+ */
+export async function teamSkillConsent(home, skillId) {
+  const { cached, entry } = cachedSkillEntry(home, skillId);
+  if (!entry) throw new McpStoreError(404, `${skillId} is not required by ${home}`);
+  const hit = (await loadSkillCatalog()).find((c) => c.id === skillId);
+  if (!hit) throw new McpStoreError(409, `${skillId} is not installed`);
+  const rec = own((await readMcpStore()).teams, home) ?? teamRecord(home, { takenSlugs: [] });
+  let skillMd = '';
+  try {
+    // P1's readSkillMd rule: a regular file within the limit, never read through a link — a SKILL.md linked out of the
+    // plugin, to /dev/zero or to a FIFO would show another file or block the server (this read is synchronous).
+    const file = join(hit.dir, 'SKILL.md');
+    const st = lstatSync(file);
+    if (st.isFile() && st.size <= SKILL_LIMITS.fileBytes) skillMd = readFileSync(file, 'utf8');
+  } catch { /* removed since the catalog read: the facts still show */ }
+  return {
+    home, sha: cached.sha ?? null, setId: rec.id, setName: rec.name, skillId, name: entry.skill, plugin: entry.plugin,
+    hash: skillConsentHash(entry), code: hit.code ?? null, description: hit.description ?? '', files: hit.files, bytes: hit.bytes,
+    scripts: hit.scripts, shellBlocks: hit.shellBlocks, allowedTools: hit.frontmatter?.allowedTools ?? null,
+    hooks: hit.frontmatter?.hooks === true, pluginRootRefs: hit.frontmatter?.pluginRootRefs === true, skillMd,
+  };
 }

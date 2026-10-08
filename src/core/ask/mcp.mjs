@@ -10,9 +10,17 @@ import { resolveRegistry, cachedTeamFor, toolNameLimitFor, skipReasonText } from
 import { readMcpStore } from '../mcp/store.mjs';
 import { loadCatalog } from '../mcp/catalog.mjs';
 import { MCP_STARTUP_MS } from '../mcp/timeouts.mjs';
+import { resolveSkillRegistry, cachedSkillTeamFor, SKILL_CAP } from '../skills-registry/resolve.mjs';
+import { skillSkipReasonText, skillSkipMessage, skillLayerText, SKILL_PROBLEM_REASONS } from '../skills-registry/texts.mjs';
 
 export const ASK_MCP_COPY_CAP = 12;
-const DEFAULT_DEPS = { listProjects, readWorkspace, listWorktrees: listAskWorktrees, resolveRegistry, cachedTeamFor, readMcpStore, loadCatalog };
+// Skills registry §4.4: Ask mounts at most 12 set skills per turn (SKILL_CAP.ask).
+export const ASK_SKILL_CAP = SKILL_CAP.ask;
+// cachedSkillTeamFor is P3's (= P2's cachedTeamFor): the Team input the MCP resolve gets, so both halves of a set see
+// the same policy homes and a Team set has one id, slug and plugin name on both.
+const DEFAULT_DEPS = { listProjects, readWorkspace, listWorktrees: listAskWorktrees, resolveRegistry, cachedTeamFor, readMcpStore, loadCatalog,
+  resolveSkillRegistry, cachedSkillTeamFor };
+const EMPTY_SKILLS = () => ({ mounted: [], plugins: [], skipped: [], sets: [], blocked: null });
 const EMPTY_RESULT = () => ({ servers: {}, env: {}, secretValues: [], grants: [], disallowedTools: [], copies: [], skipped: [], skippedTools: [], sets: [] });
 
 export const MCP_OFF_MAX = 100;
@@ -28,7 +36,7 @@ export function validateMcpOff(raw) {
     return { ok: false, error: `mcpOff.sets must be an array of at most ${MCP_OFF_MAX} set ids` };
   }
   if (!Array.isArray(members) || members.length > MCP_OFF_MAX || !members.every((m) => typeof m === 'string' && MEMBERSHIP_KEY_RE.test(m))) {
-    return { ok: false, error: `mcpOff.members must be an array of at most ${MCP_OFF_MAX} "<setId>|<serverId>" entries` };
+    return { ok: false, error: `mcpOff.members must be an array of at most ${MCP_OFF_MAX} "<setId>|<serverId>" or "<setId>|<skillId>" entries` };
   }
   return { ok: true, value: { sets: [...new Set(sets)], members: [...new Set(members)] } };
 }
@@ -95,6 +103,29 @@ export async function resolveAskMcp({ ctx = {}, threadId = null, off = null, mod
   }
 }
 
+/** Skills registry §4.4 — one skills resolve for an Ask turn or preview: General ∪ the sets of the targets in play
+ *  (askTargetsInPlay), minus the chat's choices (`off` holds `<setId>|<skillId>` keys too), at most 12 mounts.
+ *  `blocked: 'sideload-disabled'` when this host's managed Claude Code settings refuse --plugin-dir: the picker still
+ *  lists the rows, the turn mounts nothing. Never throws: a failure reads as no skills. */
+export async function resolveAskSkills({ ctx = {}, threadId = null, off = null } = {}, deps = {}) {
+  const d = { ...DEFAULT_DEPS, ...deps };
+  try {
+    const targets = await askTargetsInPlay({ ctx, threadId }, d);
+    const teams = Object.create(null);
+    for (const t of targets) {
+      if (t.kind === 'project') teams[t.key] = await d.cachedSkillTeamFor({ projectKey: t.key });
+      else teams[`ws:${t.id}`] = await d.cachedSkillTeamFor({ workspaceId: t.id });
+    }
+    // P3's IO shell reads this host's facts itself: `blocked` is 'sideload-disabled' when the managed settings refuse
+    // --plugin-dir (the rows still resolve), `newer` when the registry files need a newer Worca.
+    const result = await d.resolveSkillRegistry({ surface: 'ask', targets, teams, off: off || { sets: [], members: [] }, skillCap: ASK_SKILL_CAP });
+    return { targets, result: { ...EMPTY_SKILLS(), ...result, blocked: result.blocked ?? null } };
+  } catch (err) {
+    console.warn(`[worca-ask] skills resolve failed (${err?.message || err}) — no skills from sets this turn`);
+    return { targets: [], result: EMPTY_SKILLS() };
+  }
+}
+
 /** The snapshot + catalog the texts need; empty when unreadable (a missing text never fails a turn). */
 async function storeAndCatalog(d) {
   try {
@@ -121,31 +152,75 @@ export async function askMcpPromptInput({ targets, result }, deps = {}) {
   };
 }
 
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+const PICKER_GROUP = { general: 0, set: 1, team: 2 };
+
+/** The picker's set rows (skills registry §4.4): the MCP resolver's sets with their skill counts. Both resolvers
+ *  collect sets with one collectSets over one Team input, so they bring the same sets; a set only the skills list holds
+ *  (the MCP resolve failed, or the store changed between the two reads) is appended. A stable sort by group keeps each
+ *  resolver's own order; Team sets by name then id, as both resolvers sort them. */
+function pickerSets(mcpSets, skillSets, blocked) {
+  const skillsOf = new Map(skillSets.map((s) => [s.id, s]));
+  const rows = mcpSets.map((s) => ({ ...s, skills: skillsOf.get(s.id)?.skills ?? 0, startedSkills: blocked ? 0 : skillsOf.get(s.id)?.started ?? 0 }));
+  const have = new Set(rows.map((s) => s.id));
+  for (const s of skillSets) {
+    if (!have.has(s.id)) rows.push({ id: s.id, name: s.name, group: s.group, routes: s.routes, members: 0, started: 0, skills: s.skills, startedSkills: blocked ? 0 : s.started });
+  }
+  return rows.map((s, i) => [s, i])
+    .sort(([a, i], [b, j]) => ((PICKER_GROUP[a.group] ?? 3) - (PICKER_GROUP[b.group] ?? 3))
+      || (a.group === 'team' && b.group === 'team' ? cmp(a.name, b.name) || cmp(a.id, b.id) : i - j))
+    .map(([s]) => s);
+}
+
+/** Skills registry §4.4/§7 — the preview's `skills` block: what mounts next turn (never a host path), the skipped rows
+ *  with the name the picker shows (P3's `qualifiedName`: the set's plugin name over the whole store, a never-consented
+ *  Team skill too), the line and the reason P4's /api/mcp/preview gives them (`message`, `why`), and whether it is a
+ *  problem rather than a choice; `started` counts 0 when the host refuses --plugin-dir (`layer`). */
+function skillsPreview(r) {
+  return {
+    mounted: r.mounted.map(({ dir, ...m }) => m),
+    plugins: r.plugins,
+    skipped: r.skipped.map((x) => ({ ...x, message: skillSkipMessage(x), why: skillSkipReasonText(x), problem: SKILL_PROBLEM_REASONS.includes(x.reason) })),
+    started: r.blocked ? 0 : r.mounted.length,
+    layer: { blocked: r.blocked ?? null, text: r.blocked ? skillLayerText(r.blocked) : null },
+    newer: r.newer === true,
+  };
+}
+
 /** §9.4 — POST /api/ask/mcp-preview's body: the same resolve as the turn, reduced to what the picker shows.
- *  Never the servers, the env or a secret value. */
+ *  Never the servers, the env or a secret value. Skills registry §4.4: plus the turn's skills and the per-set counts. */
 export async function askMcpPreview({ ctx, threadId = null, off = null, model = null }, deps = {}) {
   const d = { ...DEFAULT_DEPS, ...deps };
   const { result } = await resolveAskMcp({ ctx, threadId, off, model }, d);
+  const { result: sk } = await resolveAskSkills({ ctx, threadId, off }, d);
   const { catalog } = result.skipped.length ? await storeAndCatalog(d) : { catalog: [] };
   return {
-    sets: result.sets, copies: result.copies, started: result.copies.length,
+    sets: pickerSets(result.sets, sk.sets, !!sk.blocked), copies: result.copies, started: result.copies.length,
     skipped: result.skipped.map((x) => ({ ...x, copy: x.copy ?? x.serverId, why: skipReasonText(x, catalog) })),
     // §5.6: tools withheld from a copy that still starts; §4.5: registry files from a newer worca (nothing resolves).
     skippedTools: result.skippedTools, newer: result.newer === true,
+    skills: skillsPreview(sk),
   };
 }
 
 /** §9.1 (D17) — at turn end: re-run the targets in play and name, per project a new worktree brought in, the copies
- *  that join from the next message. null when no worktree target joined or it brings no copy. */
+ *  that join from the next message. null when no worktree target joined or it brings no copy. Skills registry §4.4:
+ *  with `before.skills` (the turn's skills result) the skills that join are named too. */
 export async function askMcpJoinNotice({ before, ctx, threadId, off = null, model = null }, deps = {}) {
   const next = await resolveAskMcp({ ctx, threadId, off, model }, deps);
+  const nextSkills = before.skills ? (await resolveAskSkills({ ctx, threadId, off }, deps)).result : null;
   const had = new Set(before.targets.filter((t) => t.kind === 'project').map((t) => t.key));
   const old = new Set(before.result.copies.map((c) => c.name));
+  const oldSkills = new Set((before.skills?.mounted ?? []).map((m) => m.qualifiedName));
   const parts = [];
   for (const t of next.targets) {
     if (t.kind !== 'project' || t.route !== 'worktree' || had.has(t.key)) continue;   // §9.1: only an open worktree joins mid-turn
     const joined = next.result.copies.filter((c) => !old.has(c.name) && c.projects.includes(t.key)).map((c) => c.name);
-    if (joined.length) parts.push(`${t.name}'s MCP servers (${joined.join(', ')}) join from the next message`);
+    const skills = nextSkills && !nextSkills.blocked
+      ? nextSkills.mounted.filter((m) => !oldSkills.has(m.qualifiedName) && m.projects.includes(t.key)).map((m) => m.qualifiedName) : [];
+    if (joined.length && skills.length) parts.push(`${t.name}'s MCP servers (${joined.join(', ')}) and skills (${skills.join(', ')}) join from the next message`);
+    else if (joined.length) parts.push(`${t.name}'s MCP servers (${joined.join(', ')}) join from the next message`);
+    else if (skills.length) parts.push(`${t.name}'s skills (${skills.join(', ')}) join from the next message`);
   }
   return parts.length ? parts.join('; ') : null;
 }

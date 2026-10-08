@@ -174,7 +174,10 @@ enforces the set's latest definition.
   (`--strict-mcp-config`, `--allowedTools Task,Read,Grep,Glob,mcp__worca`, plus
   `ToolSearch` and one `mcp__<copy>` grant per copy when the chat has any, under
   `--permission-mode dontAsk`; see the MCP registry limitation above), user hooks/plugins/skills are dropped
-  (`--setting-sources project`, `--disable-slash-commands`), the env is
+  (`--setting-sources project`, `--disable-slash-commands`; a turn that mounts skills from the chat's sets
+  instead gets the `Skill` tool, one `--plugin-dir` per set, one `Skill(<plugin>:<skill>)` allow per skill
+  and `disableBundledSkills`, and keeps slash commands; every turn sets `disableSkillShellExecution` and
+  denies `Read` on the skill library, `<worcaHome>/skills/`), the env is
   scrubbed like a Strict run, and Task sub-agents run in the foreground of the
   same process with the same pool (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`).
   Belt-and-braces deny rules cover `Bash`/`Edit`/`Write`/`WebFetch`/… and

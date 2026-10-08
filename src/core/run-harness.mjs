@@ -20,7 +20,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, basename, dirname, resolve, sep, relative } from 'node:path';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { readFile, writeFile, readdir, mkdir, realpath, rename, stat } from 'node:fs/promises';
+import { readFile, writeFile, readdir, mkdir, realpath, rename, stat, rm } from 'node:fs/promises';
 
 import { generateTitle } from './title.mjs';
 import {
@@ -53,7 +53,7 @@ import {
   scanStrayEntries, copyRunManifestTo, removeInjectedPaths, stripClaudeMdFence,
   RETAIN_REASONS,
 } from './run-manifest.mjs';
-import { assembleRunContext, renderContextAudit, MCP_GRANT_MODE } from './run-context.mjs';
+import { assembleRunContext, renderContextAudit, renderSkillAudit, MCP_GRANT_MODE } from './run-context.mjs';
 import { createRunLogWriter, RUN_LOG_FILE, RUN_LOG_KIND } from './run-log.mjs';
 import {
   detectTools, detectToolsPerProject, runGraphifyUpdate, worktreeGraphInstruction,
@@ -105,6 +105,13 @@ import { loadCatalog } from './mcp/catalog.mjs';
 import { MCP_STARTUP_MS } from './mcp/timeouts.mjs';
 import { keepListNames } from './mcp/keep-list.mjs';
 import { expandMcpDenyRules } from './mcp/deny.mjs';
+import { resolveSkillRegistry, requiredSkillsOf, SKILL_CAP } from './skills-registry/resolve.mjs';
+import { materializeSkillMount } from './skills-registry/mount.mjs';
+import { skillHostFacts } from './skills-registry/host.mjs';
+import { SKILL_PROBLEM_REASONS, skillSkipMessage, skillSkipReasonText, skillLayerText } from './skills-registry/texts.mjs';
+// Skills registry P5 adds `skillDeviations` (policy/effective.mjs); read through the namespace so this module loads
+// without it (no Team-skill deviations until P5 lands).
+import * as policyEffective from './policy/effective.mjs';
 import { createRedactor } from './redact.mjs';
 import { finalizeWorkspaceScan } from './workspace-scan-run.mjs';
 import { readWorkspaceMap } from './workspaces.mjs';
@@ -686,7 +693,7 @@ const MCP_NAME_WARNING = MCP_TOOL_NAME_TOO_LONG;
 /** §10: the run warning for a registry copy's `system/init` status; null when it is not a problem. */
 function mcpStatusWarning(name, status, setName) {
   const set = setName ? ` (set ${setName})` : '';
-  if (status === 'failed' || status === 'needs-auth') return `${name}: failed to connect (token, URL or command) — run Test in Settings › MCP servers${setName ? ` › ${setName}` : ''}`;
+  if (status === 'failed' || status === 'needs-auth') return `${name}: failed to connect (token, URL or command) — run Test in Settings › Sets${setName ? ` › ${setName}` : ''}`;
   if (status === 'disabled') return `${name}: disabled by your Claude Code settings${set}`;
   if (status === 'absent') return `${name}: blocked by managed MCP policy${set}`;
   return null;
@@ -848,6 +855,9 @@ export class RunHarness extends EventEmitter {
     // dispatch, or null. Holds secret values: never written to run.json, events, journals or the
     // resume point.
     this.mcpLayer = null;
+    // Skills registry layer (design §4.3): { base, pluginDirs, plugins, mounted, skipped, blocked }
+    // for every dispatch, or null when the run's target brings no set skill (_resolveSkills).
+    this.skillLayer = null;
 
     this.abort = new AbortController();
     this._answeredBy = new Map();            // question id -> who answered it (identity.mjs actor)
@@ -1472,6 +1482,8 @@ export class RunHarness extends EventEmitter {
       // instead of dropping them when it rewrites `warnings`.
       if (this.runRootMode === 'detached') {
         await this._assembleContext(resolvedSkills);
+      } else {
+        await this._resolveSkillsLegacy();     // skills registry §4.3: the mount needs only pipeline.dir
       }
       this._checkAbort();
       // 3f) Agent memory: mount the store twice — the read-only rules copy into
@@ -1784,6 +1796,10 @@ export class RunHarness extends EventEmitter {
             'normally. An agent that declares `requiresSkills` may not find its skill.',
           );
         }
+      } else {
+        // Skills registry §4.3: a legacy run has no assembly, so its set skills are re-resolved and
+        // the mount rebuilt here (the detached re-assembly above does both inside _assembleContext).
+        await this._resolveSkillsLegacy({ resume: true });
       }
 
       // Agent memory on resume (§5): capture what the interrupted execution wrote,
@@ -2613,8 +2629,11 @@ export class RunHarness extends EventEmitter {
       if (alreadyReported.has(w)) continue;
       this._log('context', 'warn', w);
     }
-    await appendAudit(this.pipeline.dir, renderContextAudit(rc)).catch(() => {});
     await this._recordCapabilities();
+    // Skills registry (§4.3): after the capability probe and after the assembly rewrote
+    // run.json.warnings; before the audit line, which closes with the layer's clause.
+    await this._resolveSkills({ reported: alreadyReported });
+    await appendAudit(this.pipeline.dir, renderContextAudit(rc, this.skillLayer)).catch(() => {});
     return rc;
   }
 
@@ -2627,21 +2646,216 @@ export class RunHarness extends EventEmitter {
    */
   async _resolveMcp(taken) {
     if (this._isWorkspaceScan() || this.workflowId === MEMORY_DEFRAG_WORKFLOW_ID) return null;
-    const m = this.members[0];
-    const target = this.isWorkspace
-      ? { kind: 'workspace', id: this.workspace.id, name: this.workspace.name, members: this.members.map((x) => ({ key: x.projectKey, name: x.projectName })), rank: 0 }
-      : { kind: 'project', key: m.projectKey, name: m.projectName, rank: 0 };
+    const { target, teamKey } = this._registryTarget();
     const required = requiredOf(this.policyRun);
     const [result, catalog] = await Promise.all([
       resolveRegistry({
         surface: 'pipeline', targets: [target],
-        teams: { [this.isWorkspace ? `ws:${this.workspace.id}` : m.projectKey]: required.length ? { home: this.policyRun.home, required } : null },
+        teams: { [teamKey]: required.length ? { home: this.policyRun.home, required } : null },
         optOut: this.mcpOptOut, toolNameLimit: toolNameLimitFor([...this._mcpModels()]), copyCap: 24, taken,
         mcpTimeoutMs: MCP_STARTUP_MS.pipeline,
       }),
       loadCatalog(),
     ]);
     return { result, catalog };
+  }
+
+  /** The run's resolver target and its Team-set key (MCP §5.1, skills §4.3): the project, or the
+   *  workspace with its member projects (each brings its own sets, F7). */
+  _registryTarget() {
+    const m = this.members[0];
+    return this.isWorkspace
+      ? { teamKey: `ws:${this.workspace.id}`, target: { kind: 'workspace', id: this.workspace.id, name: this.workspace.name, members: this.members.map((x) => ({ key: x.projectKey, name: x.projectName })), rank: 0 } }
+      : { teamKey: m.projectKey, target: { kind: 'project', key: m.projectKey, name: m.projectName, rank: 0 } };
+  }
+
+  /** Skills registry: the resolver IO shell (test seam). */
+  _skillRegistry(opts) { return resolveSkillRegistry(opts); }
+
+  /** Skills registry §2b-13: off-policy findings for required Team skills — P5's `skillDeviations`, [] without it (test seam). */
+  _skillDeviations(fields, result, describe) {
+    return typeof policyEffective.skillDeviations === 'function' ? policyEffective.skillDeviations(fields, result, describe) : [];
+  }
+
+  /** Skills registry §4.1: this host's facts (test seam); unreadable ⇒ nothing installed, sideloading allowed. */
+  _skillHostFacts() {
+    try { return skillHostFacts(); } catch { return { installedPluginNames: [], sideloadDisabled: false }; }
+  }
+
+  /** `claude --help` / `--version`, parsed once per run (§8.18 V5; skills §4.1 reads `pluginDir`). */
+  _claudeCaps() { return (this._capsProbe ||= probeClaudeCapabilities(this.claude.bin)); }
+
+  /** Skills registry §4.1: does this run's `claude` advertise --plugin-dir? A mock run spawns none: yes. */
+  async _pluginDirSupported() {
+    if (this.claude.mock) return true;
+    return (await this._claudeCaps()).pluginDir === true;
+  }
+
+  /**
+   * Skills registry (design §4.3): the set skills this run's target brings, each set's as one
+   * generated plugin under `<pipeline.dir>/skills` (outside every checkout; survives a pause; goes
+   * with the pipeline dir), spawned with one `--plugin-dir` each (_execCtx → runOpts). Re-run on
+   * every resume: the mount is rebuilt from the live sets minus the stored opt-out, BEFORE the first
+   * spawn (the CLI silently ignores a missing --plugin-dir path). Workspace scans and memory-defrag
+   * runs get none. Never throws: a fault leaves the run without set skills and says so.
+   * @param {{reported?: Set<string>}} [o]  warnings this run root already reported (a resumed run)
+   * @returns {Promise<object|null>} the layer, or null when the target brings no set skill
+   */
+  async _resolveSkills({ reported = new Set() } = {}) {
+    this.skillLayer = null;
+    if (!this.pipeline?.dir || this._isWorkspaceScan() || this.workflowId === MEMORY_DEFRAG_WORKFLOW_ID) return null;
+    const base = join(this.pipeline.dir, 'skills');
+    const firstLine = (err) => String(err?.message || err).split('\n')[0];
+    // No layer this segment: no mount and no record — not even one an earlier segment left in the state or in
+    // run.json (History reads its durable copy). A fault's line is warned once and kept with the run's warnings.
+    const noLayer = async (warning = null) => {
+      await rm(base, { recursive: true, force: true }).catch(() => {});
+      delete this.state.skillMount;
+      if (warning && !reported.has(warning)) this._log('skills', 'warn', warning);
+      if (this.runRoot) {
+        try {
+          const cur = (await readRunManifest(this.runRoot)) || {};
+          const warnings = Array.isArray(cur.warnings) ? cur.warnings : [];
+          const add = warning && !warnings.includes(warning) ? [warning] : [];
+          // A run that never had a layer writes nothing (byte-identical run.json); undefined drops the key.
+          if ('skillMount' in cur || add.length) await updateRunManifest(this.runRoot, { skillMount: undefined, warnings: [...warnings, ...add] });
+        } catch { /* best-effort: the run log has the line */ }
+      }
+      return null;
+    };
+    let result;
+    try {
+      const { target, teamKey } = this._registryTarget();
+      const required = requiredSkillsOf(this.policyRun);
+      result = await this._skillRegistry({
+        surface: 'pipeline', targets: [target],
+        teams: { [teamKey]: required.length ? { home: this.policyRun.home, required } : null },
+        optOut: this.mcpOptOut, skillCap: SKILL_CAP.pipeline,
+      });
+    } catch (err) {
+      return noLayer(`skills from sets not loaded: ${firstLine(err)}`);
+    }
+    // §2b-13 off-policy findings for required Team skills — after _resolvePolicy (it resets the list
+    // on resume); the whole list is persisted, as the MCP deviations are.
+    if (this.policyRun) {
+      try {
+        const found = this._skillDeviations(this.policyRun.fields, result, (s) => skillSkipReasonText(s));
+        for (const d of found) {
+          this.policyRun.deviations.push(d.code);
+          this._log('policy', 'warn', `off-policy: ${d.text}`);
+        }
+        if (found.length) this._persistPolicyState({ deviations: [...this.policyRun.deviations] });
+      } catch (err) {
+        // A broken rule never stops the run (this method never throws): the layer still loads.
+        this._log('policy', 'warn', `skill deviations not checked: ${firstLine(err)}`);
+      }
+    }
+    const mounted = Array.isArray(result?.mounted) ? result.mounted : [];
+    const skipped = Array.isArray(result?.skipped) ? result.skipped : [];
+    if (!mounted.length && !skipped.length) return noLayer();   // and a mount an earlier segment left is removed
+    // §4.1 host gates, only when something would load: managed `disableSideloadFlags`, or a CLI
+    // without --plugin-dir. Either skips the whole layer with one warning — never a dead spawn.
+    const blocked = !mounted.length ? null
+      : this._skillHostFacts().sideloadDisabled ? 'sideload-disabled'
+      : (await this._pluginDirSupported()) ? null : 'cli-no-plugin-dir';
+    let mount = { base: null, pluginDirs: [], plugins: [], failed: [] };
+    try {
+      if (mounted.length && !blocked) {
+        mount = await materializeSkillMount({ result, base });
+        // P3 leaves out a skill it could not copy (`failed`); nothing copied at all is a mount fault.
+        if (!mount.pluginDirs.length) throw new Error(mount.failed?.[0]?.error || 'no skill could be copied');
+      } else await rm(base, { recursive: true, force: true });
+    } catch (err) {
+      return noLayer(`skills from sets not loaded: could not prepare ${base}: ${firstLine(err)}`);
+    }
+    // A skill P3 could not copy is not delivered: it leaves the layer and the plugin list and becomes a skipped
+    // row (`mount-failed`, its error as the reason) — never told to agents, the run card or the audit as loaded.
+    const setNameOf = (id) => (result.plugins || []).find((p) => p.setId === id)?.setName ?? id;
+    const notCopied = (Array.isArray(mount.failed) ? mount.failed : []).map((f) => ({
+      setId: f.setId, setName: setNameOf(f.setId), pluginName: f.pluginName, name: f.name ?? '?',
+      skillId: mounted.find((m) => m.pluginName === f.pluginName && m.name === f.name)?.id ?? null,
+      qualifiedName: `${f.pluginName}:${f.name ?? '?'}`, reason: 'mount-failed', why: firstLine(f.error),
+    }));
+    const lost = new Set(notCopied.map((f) => f.qualifiedName));
+    const kept = lost.size ? mounted.filter((m) => !lost.has(`${m.pluginName}:${m.name}`)) : mounted;
+    const copied = new Map((mount.plugins || []).map((p) => [p.pluginName, p.skills]));
+    const plugins = (result.plugins || []).filter((p) => blocked || copied.has(p.pluginName)).map((p) => ({
+      setId: p.setId, setName: p.setName, pluginName: p.pluginName, renamedPlugin: !!p.renamedPlugin, skills: [...(copied.get(p.pluginName) || p.skills)],
+    }));
+    const allSkipped = [...skipped, ...notCopied];
+    this.skillLayer = { base: mount.base, pluginDirs: blocked ? [] : mount.pluginDirs, plugins, mounted: kept, skipped: allSkipped, blocked };
+    const record = {
+      base: mount.base, plugins,
+      skipped: allSkipped.map((s) => ({
+        setId: s.setId, setName: s.setName, skillId: s.skillId, name: s.name,
+        qualifiedName: s.qualifiedName ?? (s.pluginName ? `${s.pluginName}:${s.name}` : s.name), reason: s.reason, why: s.why ?? skillSkipReasonText(s),
+      })),
+      layer: { blocked, text: blocked ? skillLayerText(blocked) : null },
+    };
+    this.state.skillMount = record;
+    // One run-log warning per renamed plugin and per problem skip (choices — off, opted out, never
+    // consented — say nothing); a resumed run does not repeat what this run root already reported.
+    const lines = blocked ? [`skills from sets not loaded on this machine: ${skillLayerText(blocked)}`] : [];
+    for (const p of plugins) {
+      if (blocked || !p.renamedPlugin) continue;
+      const slug = mounted.find((m) => m.setId === p.setId)?.setSlug || 'general';
+      lines.push(`set ${p.setName} loads as \`${p.pluginName}:\` here — a Claude Code plugin named ${slug} is installed`);
+    }
+    for (const s of skipped) if (SKILL_PROBLEM_REASONS.includes(s.reason)) lines.push(skillSkipMessage(s));
+    for (const s of notCopied) lines.push(`${s.qualifiedName} in ${s.setName} not loaded: ${s.why}`);
+    for (const w of lines) if (!reported.has(w)) this._log('skills', 'warn', w);
+    if (this.runRoot) {
+      try {
+        const cur = (await readRunManifest(this.runRoot)) || {};
+        const warnings = Array.isArray(cur.warnings) ? cur.warnings : [];
+        await updateRunManifest(this.runRoot, { skillMount: record, warnings: [...warnings, ...lines.filter((w) => !warnings.includes(w))] });
+      } catch { /* best-effort: the run log has the lines */ }
+    }
+    return this.skillLayer;
+  }
+
+  /**
+   * Skills registry safety net (design §4.1, §4.3), called by the executor: an agent's spawn was
+   * refused for --plugin-dir (a managed `disableSideloadFlags` Worca could not read). Every later
+   * spawn of this run goes without set skills — the executor dispatches the refused one again — and
+   * the run says so once (fan-out siblings may be refused at the same moment).
+   */
+  onSkillSideloadRefused() {
+    if (!this.skillLayer || this.skillLayer.blocked) return;
+    this.skillLayer = { ...this.skillLayer, pluginDirs: [], blocked: 'sideload-disabled' };
+    const record = this.state.skillMount
+      ? { ...this.state.skillMount, layer: { blocked: 'sideload-disabled', text: skillLayerText('sideload-disabled') } } : null;
+    if (record) this.state.skillMount = record;
+    const line = "skills from sets not loaded: this machine's Claude Code refuses --plugin-dir";
+    this._log('skills', 'warn', line);
+    // The durable timeline too: the assembly's audit line said what the run would load.
+    if (this.pipeline?.dir) appendAudit(this.pipeline.dir, "Set skills dropped: this machine's Claude Code refuses --plugin-dir; later agents run without them.").catch(() => {});
+    this._emit('state', this.getState());   // the run page's card turns blocked now, not at the next state frame
+    // run.json writes during dispatch share the §10 chain (an unlocked read-modify-write).
+    this._mcpChain(async () => {
+      if (!this.runRoot) return;
+      try {
+        const cur = (await readRunManifest(this.runRoot)) || {};
+        const warnings = Array.isArray(cur.warnings) ? cur.warnings : [];
+        await updateRunManifest(this.runRoot, { ...(record ? { skillMount: record } : {}), warnings: warnings.includes(line) ? warnings : [...warnings, line] });
+      } catch { /* best-effort: the run log has the line */ }
+    });
+  }
+
+  /**
+   * A legacy run (no run root, no assembly): the layer, and its own audit line. A resumed segment reads the
+   * skills warnings the run already gave from its run log (a legacy run has no run.json), so none repeats.
+   */
+  async _resolveSkillsLegacy({ resume = false } = {}) {
+    const reported = new Set();
+    if (resume) {
+      const log = await readFile(join(this.pipeline.dir, RUN_LOG_FILE), 'utf8').catch(() => '');
+      for (const l of log.split('\n')) {
+        try { const e = JSON.parse(l); if (e?.source === 'skills' && e.level === 'warn') reported.add(e.text); } catch { /* a blank or torn line */ }
+      }
+    }
+    const layer = await this._resolveSkills({ reported });
+    if (layer) await appendAudit(this.pipeline.dir, `Skills: ${renderSkillAudit(layer)}.`).catch(() => {});
   }
 
   /** §5.6: every model this run may dispatch — the manifest's, the step models' and the run's own. */
@@ -3032,7 +3246,7 @@ export class RunHarness extends EventEmitter {
       });
       return;
     }
-    const caps = await probeClaudeCapabilities(this.claude.bin);
+    const caps = await this._claudeCaps();
     if (caps.version === null) {
       // No `claude --version` at all. The first node fails loudly anyway; when the
       // cause is the Windows npm shim, record the actionable reason NOW so the

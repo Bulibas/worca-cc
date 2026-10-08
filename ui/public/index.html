@@ -414,16 +414,16 @@
                       <small class="hint" id="guardrailsHint">Applies to every agent this run spawns. Permissive = no restrictions (the legacy default).</small>
                     </div>
 
-                    <!-- MCP servers (MCP registry §6.2, D16): the registry copies this run starts, opted out
-                         per membership. app.js#paintMcpRuns fills it from POST /api/mcp/preview; hidden while
-                         the target resolves to no membership. -->
+                    <!-- Sets (MCP registry §6.2, D16; skills registry §6 board 7): the registry copies and the
+                         set skills this run gets, opted out per membership. app.js#paintMcpRuns fills it from
+                         POST /api/mcp/preview; hidden while the target resolves to no membership. -->
                     <div class="field" id="mcpRunsField" hidden>
-                      <span class="label" id="mcpRunsHead">MCP servers</span>
+                      <span class="label" id="mcpRunsHead">Sets</span>
                       <details class="mcp-runs" id="mcpRuns">
                         <summary class="select" id="mcpRunsLabel" aria-labelledby="mcpRunsHead mcpRunsLabel"></summary>
                         <div id="mcpRunsPop"></div>
                       </details>
-                      <small class="hint">Names are before any <code>_w</code> rename, which is decided at run start.</small>
+                      <small class="hint">Server names are before any <code>_w</code> rename, which is decided at run start; skills load as <code>&lt;set&gt;:&lt;skill&gt;</code>.</small>
                     </div>
 
                   </div>
@@ -1422,7 +1422,7 @@
             <button type="button" data-tab="guardrails" data-min-level="advanced" aria-pressed="false">Guardrails</button>
             <button type="button" data-tab="memory" data-min-level="advanced" aria-pressed="false">Memory</button>
             <button type="button" data-tab="plugins" data-min-level="advanced" aria-pressed="false">Plugins</button>
-            <button type="button" data-tab="mcp" data-min-level="advanced" aria-pressed="false">MCP servers</button>
+            <button type="button" data-tab="mcp" data-min-level="advanced" aria-pressed="false">Sets</button>
             <button type="button" data-tab="models" data-min-level="expert" aria-pressed="false">Models</button>
             <button type="button" data-tab="providers" data-min-level="expert" aria-pressed="false">Providers</button>
           </div>
@@ -1933,8 +1933,8 @@
               <!-- Ask web access (off by default): rendered by chat-settings-view.mjs; saved with this
                    card's Save button, and only when one of its fields was touched. -->
               <div class="field" id="ask-web-host"></div>
-              <!-- MCP servers (docs/mcp-servers.md): the General set in one line, painted by mcp-view.mjs; the
-                   Edit General set link opens Settings › MCP servers under the level banner. -->
+              <!-- Sets (docs/mcp-servers.md, docs/skills.md): the General set's servers and skills in one line, painted by
+                   mcp-view.mjs; the Edit General set link opens Settings › Sets under the level banner. -->
               <div class="field" id="ask-mcp-host"></div>
               <div class="add-project-actions" style="margin-top:14px">
                 <button type="button" id="askLimitsReset" class="btn btn-ghost btn-mini">Use defaults</button>
@@ -2041,7 +2041,7 @@
           </section>
           <!-- /pane plugins -->
 
-          <!-- ===== TAB: MCP SERVERS (docs/mcp-servers.md) — painted whole by mcp-view.mjs ===== -->
+          <!-- ===== TAB: SETS (key mcp; docs/mcp-servers.md, docs/skills.md) — painted whole by mcp-view.mjs ===== -->
           <section class="settings-pane hidden" data-tab="mcp"></section>
           <!-- /pane mcp -->
 

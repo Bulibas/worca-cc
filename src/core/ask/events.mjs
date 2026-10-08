@@ -190,6 +190,7 @@ export function labelForTool(name, input = {}, attachmentNames = {}) {
     case 'web_fetch': { let host = ''; try { host = new URL(String(input?.url ?? '')).hostname; } catch { /* label only */ } return host ? `Reading ${host}` : 'Reading a web page'; }
     case 'web_search': return 'Searching the web';
     case 'propose_web_access': return 'Asking to read a new site';
+    case 'Skill': return typeof input?.skill === 'string' && input.skill ? `Using ${input.skill.slice(0, 80)}` : 'Using a skill';   // skills registry §4.4
     default: return `Using ${n}`;
   }
 }

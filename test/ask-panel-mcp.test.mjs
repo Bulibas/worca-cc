@@ -1,5 +1,5 @@
 // test/ask-panel-mcp.test.mjs — the per-chat MCP picker (MCP registry §9.4, Appendix B 10): the composer chip
-// `MCP · N`, level 1 (a switch + a › drill button per set in play), level 2 (per membership; skipped rows
+// `Sets · N` (skills registry §6.8; skill rows: ask-panel-skills), level 1 (a switch + a › drill button per set in play), level 2 (per membership; skipped rows
 // disabled with their reason), the choices (held by the composer and sent with every message, PATCHed in order
 // once a thread exists), the notice link.
 import { test } from 'node:test';
@@ -68,10 +68,10 @@ test('MCP picker levels: set rows (switch + drill), membership rows, skipped/dis
         assert.equal(r.children[0].getAttribute('aria-checked'), 'true');
         assert.equal(r.children[1].getAttribute('role'), 'menuitem');
       }
-      assert.deepEqual(rows.map((r) => r.children[1].querySelector('.ask-model-name').textContent),
-        ['General', 'Billing · pinned', 'Shop · open worktree', 'Team · acme/platform']);
+      assert.deepEqual(rows.map((r) => { const n = r.children[1].querySelector('.ask-model-name'); return [n.firstChild.textContent, n.querySelector('small').textContent]; }),
+        [['General', '2 servers'], ['Billing', '3 servers · pinned'], ['Shop', '2 servers · open worktree'], ['Team · acme/platform', '3 servers']]);   // skills registry §6.8
       assert.deepEqual(rows.map((r) => r.children[1].querySelector('.ask-pop-row-value').textContent), ['2/2', '2/3', '2/2', '1/3']);
-      assert.match(pop(ctx).textContent, /Manage in Settings › MCP servers/);
+      assert.match(pop(ctx).textContent, /Manage in Settings › Sets/);
       // the keyboard walks the switches too (menuItems() is widened to menuitemcheckbox)
       assert.equal(ctx.doc.activeElement, rows[0].children[0], 'the first switch takes focus on open');
       rows[0].children[1].focus();
@@ -104,7 +104,7 @@ test('MCP picker levels: set rows (switch + drill), membership rows, skipped/dis
         ['linear_billingoff', true, false],                                     // a choice (§5.7): muted
         ['manual:gonethe server is no longer installed', true, true],           // no copy name: its id stands in
       ]);
-      assert.match(p.textContent, /Manage Billing in Settings › MCP servers/);
+      assert.match(p.textContent, /Manage Billing in Settings › Sets/);
       p.querySelector('[data-ask-pane-back]').click();
       assert.equal(pop(ctx).querySelectorAll('.ask-mcp-row').length, 4, 'back to level 1');
       ctx.panel.destroy();
@@ -160,7 +160,7 @@ test('MCP picker levels: set rows (switch + drill), membership rows, skipped/dis
       btn(ctx).click();                                                          // close
       state.preview = { sets: [], copies: [], skipped: [], skippedTools: [], started: 0, newer: true };
       btn(ctx).click(); await settle(ctx);                                       // reopen (e.g. from a notice): the preview lands empty
-      assert.match(pop(ctx).textContent, /No MCP servers in play\./);
+      assert.match(pop(ctx).textContent, /No sets in play\./);
       assert.doesNotMatch(pop(ctx).textContent, /Loading/);
       ctx.panel.destroy();
     } },
@@ -240,7 +240,7 @@ test('refresh: an ask-worktrees change, the page (Auto), the scope; a join notic
   await settle(ctx);
   assert.equal(state.previews.length, n + 1, 'a scope choice re-previews');
   const link = ctx.doc.querySelector('.ask-notice .ask-notice-mcp');
-  assert.equal(link.textContent, 'MCP');
+  assert.equal(link.textContent, 'Sets');
   link.click();
   await settle(ctx);
   assert.ok(pop(ctx), 'the picker is open');
@@ -260,10 +260,10 @@ test('a slower, older preview never overwrites a newer one', async () => {
   await settle(ctx);
   ctx.panel.close(); ctx.panel.open();
   await settle(ctx);
-  assert.equal(btn(ctx).textContent.trim(), 'MCP · 7');
+  assert.equal(btn(ctx).textContent.trim(), 'Sets · 7');
   release();
   await settle(ctx);
-  assert.equal(btn(ctx).textContent.trim(), 'MCP · 7', 'the stale response was dropped');
+  assert.equal(btn(ctx).textContent.trim(), 'Sets · 7', 'the stale response was dropped');
   ctx.panel.destroy();
 });
 
@@ -357,7 +357,7 @@ test('a failed preview says so in the open picker and keeps the chip so it can b
       state.preview = null;                                                      // the next preview answers no body
       ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
       await settle(ctx);
-      assert.match(pop(ctx).textContent, /Could not load the MCP servers — reopen to retry\./);
+      assert.match(pop(ctx).textContent, /Could not load the sets — reopen to retry\./);
       ctx.panel.destroy();
     } },
     { name: 'a failed preview keeps the chip, so the picker can be reopened to retry', run: async () => {
@@ -371,12 +371,12 @@ test('a failed preview says so in the open picker and keeps the chip so it can b
       await settle(ctx);
       assert.match(pop(ctx).textContent, /reopen to retry/);
       assert.equal(btn(ctx).hidden, false, 'the chip the message tells the user to reopen is still there');
-      assert.equal(btn(ctx).textContent.trim(), 'MCP · ?');
+      assert.equal(btn(ctx).textContent.trim(), 'Sets · ?');
       state.preview = PREVIEW;
       btn(ctx).click(); btn(ctx).click();                                        // close, reopen: a fresh preview
       await settle(ctx);
       assert.equal(pop(ctx).querySelectorAll('.ask-mcp-row').length, 4);
-      assert.equal(btn(ctx).textContent.trim(), 'MCP · 7');
+      assert.equal(btn(ctx).textContent.trim(), 'Sets · 7');
       ctx.panel.destroy();
     } },
   ]);

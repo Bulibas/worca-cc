@@ -768,6 +768,18 @@ function valueControl(doc, meta, entry, row) {
       wrap.append(add, box, err);
       break;
     }
+    case 'skills': {
+      // Plugin skills only (skills registry F8): one chip per { plugin, skill }, typed as plugin/skill.
+      writeItems(row, Array.isArray(v) ? v : []);
+      wrap.append(h(doc, 'div', 'tp-list'));
+      const add = h(doc, 'div', 'path-row tp-add-row');
+      const inp = h(doc, 'input', 'input tp-add tp-skill-ref'); inp.type = 'text'; inp.placeholder = 'plugin/skill, e.g. acme/deploy-checklist';
+      inp.setAttribute('aria-label', 'A required skill as plugin/skill');
+      const b = h(doc, 'button', 'btn btn-ghost btn-mini tp-add-btn', '+ add'); b.type = 'button';
+      const err = h(doc, 'small', 'hint err tp-skill-err'); err.hidden = true;
+      add.append(inp, b); wrap.append(add, err);
+      break;
+    }
     default: wrap.append(h(doc, 'span', 'muted', '—'));
   }
   return wrap;
@@ -778,8 +790,12 @@ const clipTo = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const mcpChip = (e) => (e.plugin ? `${e.server} · ${e.plugin}`
   : clipTo(`${e.name} · inline ${e.type} · ${e.type === 'stdio' ? [e.command, ...(Array.isArray(e.args) ? e.args : []).filter((a) => typeof a === 'string')].join(' ') : typeof e.url === 'string' ? e.url : 'url with fields'}`, 60));
 const chipLabel = (meta) => (it) => (meta.type === 'plugins' ? `${it.name}${it.minVersion ? ` ≥ ${it.minVersion}` : ''}${it.marketplace ? ` (${it.marketplace})` : ''}`
-  : meta.type === 'steps' ? `${it.role} ${it.model || '·'}${it.effort ? ` / ${it.effort}` : ''}` : meta.type === 'mcpServers' ? mcpChip(it) : String(it));
-const LIST_TYPES = ['string[]', 'plugins', 'steps', 'mcpServers'];
+  : meta.type === 'steps' ? `${it.role} ${it.model || '·'}${it.effort ? ` / ${it.effort}` : ''}` : meta.type === 'mcpServers' ? mcpChip(it)
+  : meta.type === 'skills' ? `${it.skill} · ${it.plugin}` : String(it));
+const LIST_TYPES = ['string[]', 'plugins', 'steps', 'mcpServers', 'skills'];
+/** "acme/deploy-checklist" → { plugin, skill }: the plugin manifest's name rule and the Agent Skills name rule, each
+ *  ≤ 64 (checked where it is read). Publish runs the full rules again (plugins.required, one name per Team set). */
+const SKILL_REF_RE = /^([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/([a-z0-9]+(?:-[a-z0-9]+)*)$/;
 const MCP_SHAPE_ERR = 'an entry is { "plugin", "server", "values"? } or an inline definition with "name" and "type"';
 /** The JSON box's check: parses, and has the shape of a plugin reference or an inline definition (what a chip shows). */
 function mcpEntryFromJson(text) {
@@ -860,7 +876,12 @@ function wireEditor(doc, root, registry) {
       const row = unset.closest('.tp-edit-row');
       row.querySelectorAll('.tp-kind-btn').forEach((b) => b.classList.remove('on'));
       const meta = metaOf(row.dataset.key);
-      if (LIST_TYPES.includes(meta.type)) { writeItems(row, []); listChips(doc, row, [], chipLabel(meta)); }
+      if (LIST_TYPES.includes(meta.type)) {
+        writeItems(row, []); listChips(doc, row, [], chipLabel(meta));
+        // Required skills: Unset also clears the typed reference and its error.
+        const skillRef = row.querySelector('.tp-skill-ref');
+        if (skillRef) { skillRef.value = ''; const err = row.querySelector('.tp-skill-err'); err.hidden = true; err.textContent = ''; }
+      }
       else if (meta.type === 'bool') { const cb = row.querySelector('.tp-val'); cb.checked = false; cb.dispatchEvent(new (doc.defaultView.Event)('change')); }
       else { const v = row.querySelector('.tp-val'); if (v) v.value = ''; const n = row.querySelector('.tp-null'); if (n) n.checked = false; }
       root.dispatchEvent(new (doc.defaultView.Event)('tp-change', { bubbles: true }));
@@ -923,6 +944,17 @@ function wireEditor(doc, root, registry) {
         const min = row.querySelector('.tp-plugin-min').value.trim(); if (min) it.minVersion = min;
         items.push(it);
         row.querySelector('.tp-plugin-name').value = ''; row.querySelector('.tp-plugin-marketplace').value = ''; row.querySelector('.tp-plugin-min').value = '';
+      } else if (meta.type === 'skills') {
+        const inp = row.querySelector('.tp-skill-ref'); const err = row.querySelector('.tp-skill-err');
+        const text = inp.value.trim();
+        if (!text) { err.hidden = true; err.textContent = ''; return; }
+        const hit = SKILL_REF_RE.exec(text);
+        const m = hit && hit[1].length <= 64 && hit[2].length <= 64 ? hit : null;
+        err.hidden = !!m; err.textContent = m ? '' : 'type plugin/skill, e.g. acme/deploy-checklist';
+        if (!m) return;
+        inp.value = '';
+        if (items.some((x) => x.plugin === m[1] && x.skill === m[2])) return;
+        items.push({ plugin: m[1], skill: m[2] });
       } else if (meta.type === 'steps') {
         const role = row.querySelector('.tp-step-role').value.trim();
         if (!role) return;
@@ -1131,7 +1163,7 @@ function rowValue(row, meta) {
     case 'enum': return row.querySelector('.tp-val').value;
     case 'string': case 'semver': { const s = row.querySelector('.tp-val').value.trim(); return s === '' ? undefined : s; }
     case 'string[]': return readItems(row);
-    case 'plugins': case 'mcpServers': return readItems(row);
+    case 'plugins': case 'mcpServers': case 'skills': return readItems(row);
     case 'steps': { const out = {}; for (const it of readItems(row)) { const s = {}; if (it.model) s.model = it.model; if (it.effort) s.effort = it.effort; out[it.role] = s; } return out; }
     case 'criteria': { const out = {}; for (const i of row.querySelectorAll('.tp-crit-val')) { const t = i.value.trim(); const n = Number(t); if (t !== '' && Number.isFinite(n)) out[i.dataset.crit] = n; } return Object.keys(out).length ? out : undefined; }
     default: return undefined;
@@ -1149,7 +1181,7 @@ export function docFromEditor(root, { registry = [] } = {}) {
     const meta = metaOf(row.dataset.key);
     const value = rowValue(row, meta);
     if (value === undefined) continue;
-    if ((meta.type === 'string[]' || meta.type === 'plugins' || meta.type === 'mcpServers') && !value.length) continue;
+    if ((meta.type === 'string[]' || meta.type === 'plugins' || meta.type === 'mcpServers' || meta.type === 'skills') && !value.length) continue;
     if (meta.type === 'steps' && !Object.keys(value).length) continue;
     const entry = { kind, value };
     // An attribute at its default is written only when the document already carried it: a fresh
@@ -1445,14 +1477,29 @@ function mcpRowParts(doc, r) {
   return { tone, state, sub, button };
 }
 
-/** The MCP tab's strip (the renderRequiredStrip family): MCP requirements only; null when none is open. */
-export function renderMcpStrip(rows = [], { doc = globalThis.document } = {}) {
+/** The MCP tab's strip (the renderRequiredStrip family): MCP requirements and required skills (`skills`, the
+ *  /api/policy/scopes → skillRequirements rows; skills registry spec §6 board 1); null when none is open. */
+export function renderMcpStrip(rows = [], { doc = globalThis.document, skills = [] } = {}) {
   const open = (rows || []).filter((r) => r.state !== 'ok');
-  if (!open.length) return null;
+  const openSkills = (skills || []).filter((r) => r.state !== 'ok');
+  if (!open.length && !openSkills.length) return null;
   const root = h(doc, 'section', 'card pl-required-card tp-mcp-strip');
   const head = h(doc, 'div', 'card-head');
-  const homes = [...new Set(open.map((r) => r.home))].join(', ');
-  head.append(h(doc, 'span', 'badge blue', 'team policy'), h(doc, 'b', null, `${homes}: ${open.length} MCP item${open.length === 1 ? '' : 's'} to set up`));
+  const homeList = [...new Set([...open, ...openSkills].map((r) => r.home))];
+  const homes = homeList.join(', ');
+  if (!open.length) {
+    // Required skills only (skills registry spec §6 board 1): what the policy requires, in the amber register.
+    // "requires" names every skill those homes require (the policy's list), and how many are still open.
+    const one = homeList.length === 1;
+    const required = (skills || []).filter((r) => homeList.includes(r.home));
+    const what = required.length === 1 ? `the skill ${required[0].name} · ${required[0].plugin}` : `${required.length} skills`;
+    const todo = openSkills.length < required.length ? ` — ${openSkills.length} to set up` : '';
+    head.append(h(doc, 'span', 'badge amber', 'Team policy'), h(doc, 'b', null, `${homes} ${one ? 'requires' : 'require'} ${what} in ${one ? 'its Team set' : 'their Team sets'}${todo}`));
+  } else {
+    const what = [`${open.length} MCP item${open.length === 1 ? '' : 's'}`,
+      openSkills.length ? `${openSkills.length} skill${openSkills.length === 1 ? '' : 's'}` : null].filter(Boolean).join(' and ');
+    head.append(h(doc, 'span', 'badge blue', 'team policy'), h(doc, 'b', null, `${homes}: ${what} to set up`));
+  }
   const actions = h(doc, 'div', 'pl-required-actions'); actions.append(btn(doc, 'pl-policy-setup', 'Set up…'));
   head.append(actions);
   root.append(head);
@@ -1460,6 +1507,14 @@ export function renderMcpStrip(rows = [], { doc = globalThis.document } = {}) {
   for (const r of open) {
     const { tone, state, sub, button } = mcpRowParts(doc, r);
     const row = h(doc, 'div', 'pl-required'); row.dataset.server = r.serverId;
+    const text = h(doc, 'span', 'pl-required-text'); text.append(h(doc, 'b', 'mono', r.name), h(doc, 'small', 'hint', sub));
+    const act = h(doc, 'span', 'pl-required-act'); if (button) act.append(button);
+    row.append(dot(doc, tone), text, state, act);
+    list.append(row);
+  }
+  for (const r of openSkills) {
+    const { tone, state, sub, button } = skillRowParts(doc, r);
+    const row = h(doc, 'div', 'pl-required'); row.dataset.skill = r.skillId;
     const text = h(doc, 'span', 'pl-required-text'); text.append(h(doc, 'b', 'mono', r.name), h(doc, 'small', 'hint', sub));
     const act = h(doc, 'span', 'pl-required-act'); if (button) act.append(button);
     row.append(dot(doc, tone), text, state, act);
@@ -1508,7 +1563,7 @@ export function renderMcpConsent(r, action, { doc = globalThis.document } = {}) 
   return root;
 }
 
-export function renderSetupChecklist({ home, requirements = [], seeds = [], trusted = false, mcp = [] }, { doc = globalThis.document } = {}) {
+export function renderSetupChecklist({ home, requirements = [], seeds = [], trusted = false, mcp = [], skills = [] }, { doc = globalThis.document } = {}) {
   const root = h(doc, 'div', 'tp-setup');
   root.append(h(doc, 'div', 'hint', 'The policy expects the items below on this machine. Nothing here runs without your click, and nothing blocks a run while an item is open.'));
   const list = h(doc, 'div', 'tp-setup-list');
@@ -1543,11 +1598,17 @@ export function renderSetupChecklist({ home, requirements = [], seeds = [], trus
     const action = doc.createDocumentFragment(); action.append(state); if (button) action.append(button);
     row(tone, main, sub, action).classList.add('tp-mcp-row');
   }
-  if (!seeds.length && !requirements.length && !mcp.length) list.append(h(doc, 'div', 'hist-empty', 'Nothing to set up.'));
+  for (const r of skills) {
+    const { tone, state, sub, button } = skillRowParts(doc, r);
+    const main = h(doc, 'span'); main.append(h(doc, 'span', 'tp-skill-kind', 'Skill '), h(doc, 'b', 'mono', r.name));
+    const action = doc.createDocumentFragment(); action.append(state); if (button) action.append(button);
+    row(tone, main, sub, action).classList.add('tp-skill-row');
+  }
+  if (!seeds.length && !requirements.length && !mcp.length && !skills.length) list.append(h(doc, 'div', 'hist-empty', 'Nothing to set up.'));
   root.append(list);
   const trust = h(doc, 'label', 'switch-row tp-trust-row');
   const cb = h(doc, 'input', 'sw-input tp-trust'); cb.type = 'checkbox'; cb.checked = !!trusted; cb.dataset.home = home || '';
-  const txt = h(doc, 'span', 'txt'); txt.append(h(doc, 'b', null, 'Trust this policy home'), h(doc, 'small', 'hint', `Install and update required plugins from ${home || 'this home'} automatically on this machine, without this checklist. Plugins run with your user privileges. MCP servers are never installed or turned on automatically. You can turn this off on the Plugins page at any time.`));
+  const txt = h(doc, 'span', 'txt'); txt.append(h(doc, 'b', null, 'Trust this policy home'), h(doc, 'small', 'hint', `Install and update required plugins from ${home || 'this home'} automatically on this machine, without this checklist. Plugins run with your user privileges. MCP servers are never installed or turned on automatically, and required skills are never turned on automatically — but updates to required skills apply without another review when you trust this home. You can turn this off on the Plugins page at any time.`));
   trust.append(cb, h(doc, 'span', 'switch switch-sm'), txt);
   root.append(trust);
   // One footer action: the modal's own Close is the way out (a "Later" here said the same twice).
@@ -1557,6 +1618,104 @@ export function renderSetupChecklist({ home, requirements = [], seeds = [], trus
   actions.append(all);
   root.append(actions);
   return root;
+}
+
+// ---- Required skills (skills registry spec §5, §6 board 10): checklist rows, the consent dialog, the click flow ----
+// `r` = one /api/policy/scopes → skillRequirements[] row. A button carries data-home / data-skill / data-state, and
+// data-consent="1" when the consent dialog opens first. There is no Update: consent covers { plugin, skill }.
+const SKILL_ROW = {   // state → [tone, badge, button, consent dialog first]
+  'needs-plugin': ['grey', null, null, false],        // the plugin's own required row is the action
+  'never-consented': ['amber', 'Off · never turned on', 'Turn on', true],
+  off: ['grey', 'Off', 'Turn on', false],
+  skipped: ['red', null, null, false],                // the badge is the problem
+  ok: ['green', 'On', null, false],
+};
+const plural = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
+function skillRowParts(doc, r) {
+  const [tone, text, label, consent] = SKILL_ROW[r.state];
+  const state = h(doc, 'span', `badge ${tone} tp-skill-state`, r.state === 'needs-plugin' ? `Needs plugin ${r.plugin}` : r.state === 'skipped' ? r.problem : text);
+  const facts = [`${r.plugin}${r.code ? ` @ ${r.code}` : ''}`, plural(r.files, 'file'),
+    ...(r.scripts.length ? [plural(r.scripts.length, 'script')] : []), ...(r.shellBlocks ? [plural(r.shellBlocks, 'shell block')] : [])];
+  let button = null;
+  if (label) {
+    button = btn(doc, 'tp-skill-act', label, consent);
+    // `state`: the row as painted — the click flow repaints instead of acting when the row has moved on since.
+    Object.assign(button.dataset, { home: r.home, skill: r.skillId, state: r.state });
+    if (consent) button.dataset.consent = '1';
+  }
+  return { tone, state, sub: r.state === 'needs-plugin' || !r.code ? `from ${r.plugin}` : facts.join(' · '), button };
+}
+
+// P1's hooks finding text (skills registry U1: src/core/skills-registry/texts.mjs SKILL_HOOKS_TEXT — the browser cannot
+// import src/core, so a test pins the two equal).
+const SKILL_HOOKS_TEXT = "declares hooks — they run shell commands outside Worca's guardrails when the skill is used";
+// Skills registry spec §4.1: `${CLAUDE_PLUGIN_ROOT}` points into the plugin Worca generates for a set, not the source plugin.
+const SKILL_PLUGIN_ROOT_TEXT = "references its plugin's other files — may not work from a set";
+const kb = (n) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} kB`);
+/** The Turn on dialog body (board 10): the GET …/consent payload — where the skill comes from, what it ships and may
+ *  run, the set it joins, and its SKILL.md as text. */
+export function renderSkillConsent(c, { doc = globalThis.document } = {}) {
+  const root = h(doc, 'div', 'tp-skill-consent');
+  const from = h(doc, 'p', 'hint tp-skill-from');
+  from.append('from plugin ', code(doc, c.plugin), ' @ ', code(doc, c.code || '?'), ` · required by ${c.home}`);
+  root.append(from, h(doc, 'p', 'confirm-message', `Agents on every project that follows ${c.home} get this skill. Worca mounts a copy; the plugin folder is never edited. Its scripts run where each run's guardrails allow; its inline shell blocks and declared hooks are not checked by them.`));
+  const facts = h(doc, 'dl', 'tp-facts tp-skill-facts');
+  const fact = (label, ...parts) => { const dd = h(doc, 'dd'); dd.append(...parts); facts.append(h(doc, 'dt', null, label), dd); };
+  fact('NAME', code(doc, c.name));
+  fact('FROM', `${c.home} · worca-policy @ ${String(c.sha || '').slice(0, 7)}`);
+  fact('FILES', `${c.files} · ${kb(c.bytes)}`);
+  fact('SCRIPTS', c.scripts.length ? code(doc, c.scripts.join(' · ')) : 'none');
+  fact('SHELL BLOCKS', c.shellBlocks ? `${c.shellBlocks} in SKILL.md — they run in pipeline runs without guardrail checks; Ask Worca never runs them` : 'none');
+  if (c.hooks) fact('HOOKS', h(doc, 'span', 'hint err', SKILL_HOOKS_TEXT));
+  if (c.pluginRootRefs) fact('PLUGIN FILES', h(doc, 'span', 'hint err', SKILL_PLUGIN_ROOT_TEXT));
+  if (c.allowedTools) fact('ALLOWED TOOLS', code(doc, c.allowedTools));
+  fact('CONSENT', 'this plugin skill; later content changes come through the plugin\'s update review');
+  fact('UPDATES', 'updates to required skills apply without another review when you trust this home');
+  fact('JOINS', `${c.setName} set`);
+  root.append(facts, h(doc, 'pre', 'tp-skill-md mono', c.skillMd || ''));
+  return root;
+}
+
+/**
+ * A Team skill row's button (board 10). The row is read again first: one that moved on since it was painted (a new
+ * policy, another tab) repaints instead of acting. A never-consented skill opens the consent dialog; Turn on posts only
+ * { expectHash } — the server reads the reference from the cached policy. A click while one is in flight acts once.
+ * `deps` (the app's side): { doc, scopes() → a fresh /api/policy/scopes body, api(method, path, body?) → { ok, data },
+ * dialog(title, body, actions), close(), owner(button) → the dialog body the click came from or null,
+ * isOpen(node) → that body is still shown, repaint({ checklist }) }.
+ */
+export async function handleTeamSkillClick(e, deps) {
+  const t = e.target.closest('.tp-skill-act');
+  if (!t) return;
+  e.stopPropagation();
+  if (t.dataset.busy === '1') return;
+  t.dataset.busy = '1';
+  try {
+    const owner = deps.owner(t);   // read before the await: a repaint meanwhile detaches `t`
+    const r = ((await deps.scopes()).skillRequirements || []).find((x) => x.home === t.dataset.home && x.skillId === t.dataset.skill);
+    if (!r || r.state !== t.dataset.state) { await deps.repaint({ checklist: !!owner }); return; }
+    const base = `/api/sets/teams/${encodeURIComponent(r.home)}/skills/${encodeURIComponent(r.skillId)}`;
+    const title = `Turn on skill: ${r.name}`;
+    const failed = async (res, fallback) => {
+      deps.dialog(title, h(deps.doc, 'p', 'form-msg err', res.data?.error || fallback));
+      await deps.repaint({ checklist: false });
+    };
+    const turnOn = async (from, expectHash) => {
+      const res = await deps.api('POST', `${base}/turn-on`, { expectHash });
+      if (!res.ok) { await failed(res, 'turn on failed'); return; }
+      if (from && deps.isOpen(from)) deps.close();   // only the dialog it came from, while that one is still shown
+      await deps.repaint({ checklist: false });
+    };
+    if (t.dataset.consent !== '1') { await turnOn(owner, r.hash); return; }
+    const c = await deps.api('GET', `${base}/consent`);
+    if (!c.ok) { await failed(c, 'the skill could not be read'); return; }
+    const body = renderSkillConsent(c.data, { doc: deps.doc });
+    let sent = false;
+    deps.dialog(title, body, [
+      ['Cancel', 'btn btn-ghost btn-mini', deps.close],
+      ['Turn on', 'btn btn-primary btn-mini', () => { if (sent) return; sent = true; void turnOn(body, c.data.hash); }],
+    ]);
+  } finally { delete t.dataset.busy; }
 }
 
 export function renderPolicyBadgeFor(origin, { doc = globalThis.document } = {}) {

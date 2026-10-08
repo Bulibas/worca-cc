@@ -172,9 +172,9 @@ import {
   renderProjectTpCell, renderProjectTpChip, projectTpSummary, renderPolicyEnableDialogBody, renderEffectiveTable, renderPolicyEditor, docFromEditor, editorDirty,
   renderPolicyEmptyState, renderPolicySyncChip, renderWsPolicyLine, renderTeamCapsReadout, renderTeamChip, renderPolicyNotesLine,
   renderRequiredStrip, renderSetupChecklist, relTime as tpRelTime,
-  renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel, renderMcpStrip, renderMcpConsent,
+  renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel, renderMcpStrip, renderMcpConsent, handleTeamSkillClick,
 } from './team-policy-view.mjs';
-import { mcpRunsLabel, renderMcpRunsPop } from './mcp-run-picker.mjs';
+import { mcpRunsLabel, renderMcpRunsPop, renderRunSkills } from './mcp-run-picker.mjs';
 import { aggregate, toCsv } from '../../src/shared/team-metrics/aggregate.mjs';
 import { buildWorkItems, prLookupFor } from '../../src/shared/team-metrics/timeline.mjs';
 import { renderTimeline, renderTimelinePopover, timelineWindow, shiftAnchor, TL_MODES, TL_ZOOMS } from './team-metrics-timeline.mjs';
@@ -2113,6 +2113,8 @@ function onState(r, msg) {
   for (const k of ['active', 'endReached', 'result', 'warnings', 'wireDeliveries', 'tokens', 'gate']) {
     if (msg[k] !== undefined) r[k] = msg[k];
   }
+  // Skills registry §6 board 9: the run's set skills (run-harness state.skillMount) for its Overview.
+  if (msg.skillMount !== undefined) r.skillMount = msg.skillMount;
   // Every state event is a new decor generation (runDecorFor memoises on it).
   r._decorSeq = (r._decorSeq || 0) + 1;
   if (msg.title && msg.title !== r.title) r.title = msg.title;
@@ -8139,11 +8141,17 @@ function buildWdOverview(sec, id) {
     + '<button type="button" class="ws-desc-save btn btn-primary btn-mini">Save</button></div>';   // static markup
   desc.append(dh, view, pane);
   sec.appendChild(desc);
-  // MCP servers a run on this workspace gets (the workspace policy's Team set, not the members').
+  // Sets from member projects (docs/skills.md; a workspace attaches no sets of its own): the servers and skills a run on
+  // this workspace gets — its members' sets and the workspace policy's Team set — each with the member(s) that bring it.
   const mcp = tagLevel(document.createElement('div'), 'advanced');
   mcp.className = 'wd-mcp';
   sec.appendChild(mcp);
-  void paintMcpResolution(mcp, { target: { workspaceId: id }, title: `MCP servers in runs on ${w.name || w.id}`, api: mcpApi });
+  const memberProjects = paths.map((p, i) => {
+    const k = Array.isArray(w.projectKeys) ? w.projectKeys[i] : null;
+    const pr = k ? projectByKey(k) : null;
+    return k ? { key: k, name: (pr && pr.name) || basenameOf(p) } : null;
+  }).filter(Boolean);
+  void paintMcpResolution(mcp, { target: { workspaceId: id }, title: w.name || w.id, members: memberProjects, api: mcpApi });
   if (!hdMarkdown.isReady()) void bindMarkdownReady().then((ok) => { if (ok) repaintWsDescription(); });
   void paintWsMetricsRows();
   void paintWsPolicyLines();
@@ -11185,7 +11193,7 @@ const PD_TABS = [
   { key: 'team', label: 'Team', level: 'expert', badge: () => null, visible: () => true, build: (sec, key) => buildPdTeam(sec, key) },
   { key: 'memory', label: 'Memory', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMemory(sec, key) },
   { key: 'away', label: 'Away mode', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdAway(sec, key) },
-  { key: 'mcp', label: 'MCP', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMcp(sec, key) },
+  { key: 'mcp', label: 'Sets', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMcp(sec, key) },
   { key: 'actions', label: 'Actions', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdActions(sec, key) },
 ];
 function initPdTabs(screen, p) {
@@ -11374,7 +11382,7 @@ function paintPdBranchCards() {
   }
 }
 
-// ---- MCP tab (docs/mcp-servers.md): the project's sets and the servers its runs get ----
+// ---- Sets tab (key mcp; docs/mcp-servers.md, docs/skills.md): the project's sets and the servers and skills its runs get ----
 function buildPdMcp(sec, key) {
   sec.innerHTML = '';
   sec.classList.add('pd-sec-mcp');
@@ -14071,7 +14079,11 @@ function setPluginsMsg(text, kind, extra) {
 }
 
 // Tiny modal shell around #plugin-modal: swap in a body element + action buttons.
+// `pluginModalAfterClose`: the open step's own Cancel, run once when the header Close dismisses it (set through
+// mcpTab's `afterClose`); every open starts without one.
+let pluginModalAfterClose = null;
 function pluginModal(title, bodyEl, actions = []) {
+  pluginModalAfterClose = null;
   el.pluginModalTitle.textContent = title;
   el.pluginModalBody.replaceChildren(bodyEl);
   el.pluginModalActions.replaceChildren(...actions.map(([label, cls, fn]) => {
@@ -14580,7 +14592,8 @@ if (el.pluginsList) el.pluginsList.addEventListener('click', async (e) => {
     const res = await confirmModal({
       title: 'Uninstall plugin',
       message: `Uninstall "${name}"?${t.dataset.mcpSets
-        ? `\n\nIts MCP servers leave these sets, with their values, secrets and test results: ${t.dataset.mcpSets}.` : ''}`,
+        ? `\n\nIts MCP servers leave these sets, with their values, secrets and test results: ${t.dataset.mcpSets}.` : ''}${t.dataset.skillSets
+        ? `\n\nIt also removes its skills from ${t.dataset.skillSets}.` : ''}`,
       confirmLabel: 'Uninstall',
       checkbox: { label: 'Also delete config, secrets and state (purge — cannot be undone)' },
     });
@@ -14663,7 +14676,10 @@ if (el.pluginAddBtn) el.pluginAddBtn.addEventListener('click', () => {
 if (el.marketplaceAdd) el.marketplaceAdd.addEventListener('click', addMarketplaceFromInput);
 if (el.pluginModalClose) el.pluginModalClose.addEventListener('click', () => {
   if (grvState.wizard) return grvCloseWizard();
+  const after = pluginModalAfterClose;
+  pluginModalAfterClose = null;
   closePluginModal();
+  if (after) void after();
 });
 
 // ---- Guardrails view (named sets: list + two-step wizard popup) ----
@@ -17841,11 +17857,17 @@ async function paintMcpRuns() {
   const valid = !!data && Array.isArray(data.sets) && Array.isArray(data.copies) && Array.isArray(data.skipped);
   // An answer prunes the opt-out to the target's memberships; no answer (no target, defrag, a
   // failed fetch) keeps it: the server drops whatever the run's target does not know.
+  // Skills registry §4.5: the target's set skills are memberships too ('<setId>|<skillId>'); a preview
+  // without a usable `skills` block (an older server, a skills fault) shows the servers alone.
+  const skills = valid && data.skills && Array.isArray(data.skills.mounted) && Array.isArray(data.skills.skipped) ? data.skills : null;
   if (valid) {
     const known = new Set([...data.copies, ...data.skipped].map((m) => `${m.setId}|${m.serverId}`));
+    for (const s of skills ? skills.mounted : []) known.add(`${s.setId}|${s.id}`);
+    for (const s of skills ? skills.skipped : []) known.add(`${s.setId}|${s.skillId}`);
     state.mcpOptOut = state.mcpOptOut.filter((k) => known.has(k));
   }
-  state.mcpPreview = valid && data.copies.length + data.skipped.length > 0 ? { ...data, workspace: kind === 'workspace' } : null;
+  const rows = valid ? data.copies.length + data.skipped.length + (skills ? skills.mounted.length + skills.skipped.length : 0) : 0;
+  state.mcpPreview = rows > 0 ? { ...data, skills, workspace: kind === 'workspace' } : null;
   renderMcpRuns();
 }
 function renderMcpRuns() {
@@ -18035,12 +18057,14 @@ async function openSetupChecklist() {
   const data = await loadTpScopes({ force: true });
   const reqs = data.requirements || [];
   const mcp = data.mcpRequirements || [];
-  const homes = [...new Set([...reqs.flatMap((r) => r.homes || []), ...mcp.map((r) => r.home)])];
+  const skills = data.skillRequirements || [];
+  const homes = [...new Set([...reqs.flatMap((r) => r.homes || []), ...mcp.map((r) => r.home), ...skills.map((r) => r.home)])];
   const home = homes[0] || (data.homes[0] && data.homes[0].slug) || '';
-  const body = renderSetupChecklist({ home, requirements: reqs, seeds: [], trusted: policyHomeTrusted(home), mcp }, { doc: document });
+  const body = renderSetupChecklist({ home, requirements: reqs, seeds: [], trusted: policyHomeTrusted(home), mcp, skills }, { doc: document });
   body.addEventListener('click', (e) => {
     if (e.target.closest('.tp-install-all')) { closePluginModal(); void installAllRequired(reqs); return; }
     if (e.target.closest('.tp-mcp-act')) { void handleMcpTeamClick(e); return; }
+    if (e.target.closest('.tp-skill-act')) { void handleTeamSkillClick(e, skillTeamDeps()); return; }
     void handlePolicyPluginClick(e);
   });
   body.addEventListener('change', (e) => {
@@ -18058,10 +18082,11 @@ async function paintMcpStrip(host) {
     host.dataset.wired = '1';
     host.addEventListener('click', (e) => {
       if (e.target.closest('.tp-mcp-act')) void handleMcpTeamClick(e);
+      else if (e.target.closest('.tp-skill-act')) void handleTeamSkillClick(e, skillTeamDeps());
       else if (e.target.closest('.pl-policy-setup')) void openSetupChecklist();
     });
   }
-  const fill = (data) => { const strip = renderMcpStrip(data.mcpRequirements || [], { doc: document }); host.replaceChildren(strip || ''); host.hidden = !strip; };
+  const fill = (data) => { const strip = renderMcpStrip(data.mcpRequirements || [], { doc: document, skills: data.skillRequirements || [] }); host.replaceChildren(strip || ''); host.hidden = !strip; };
   // P6 hands a fresh, hidden host on every paint of the pane: paint the last state at once (no flicker; a button painted
   // from it that has moved on repaints instead of acting), then read fresh — the pane repaints after each write on it
   // (a token set, a switch), and the strip must show that state.
@@ -18118,6 +18143,21 @@ async function handleMcpTeamClick(e) {
     ]);
   } finally { delete t.dataset.busy; }
 }
+// Required skills (skills registry spec §5): the Turn on flow lives in team-policy-view.mjs (handleTeamSkillClick);
+// these are its app hooks — the same modal, scopes cache and surfaces the MCP Team actions use.
+const skillTeamDeps = () => ({
+  doc: document,
+  scopes: () => loadTpScopes({ force: true }),
+  api: mcpApi,
+  dialog: pluginModal,
+  close: closePluginModal,
+  owner: (t) => (t.closest('#plugin-modal') ? el.pluginModalBody.firstElementChild : null),
+  isOpen: (node) => el.pluginModalBody.contains(node),
+  repaint: async ({ checklist }) => {
+    await loadTpScopes({ force: true });   // the checklist, the strip and the Projects cells read the new state
+    if (checklist) void openSetupChecklist(); else refreshMcpSurfaces();
+  },
+});
 // One dialog after another — a consent dialog for each missing plugin, an update preview for each
 // one below the floor — the next opens when the previous closes (done or cancelled). Nothing runs
 // without its own click; cancelling one moves on to the next.
@@ -23535,6 +23575,9 @@ function buildHdOverview(sec, record, data) {
   // not, so without it the card would read `released` for the life of the screen.)
   wrap.appendChild(grid);
   wrap.appendChild(tagLevel(hdWorktreeRow(retained ? 'retained' : 'released', wt.worktreeDir || ''), 'expert'));
+  // Skills registry §6 board 9: the set skills the run got (run.json.skillMount, in the detail payload).
+  const skillsCard = renderRunSkills(data.skillMount, { doc: document });
+  if (skillsCard) wrap.appendChild(tagLevel(skillsCard, 'advanced'));
   const filesBox = hdFilesChangedBox(sec, results);
   if (filesBox) wrap.appendChild(filesBox);
   // Agent memory (§6): what this run wrote into worca's memory, per execution.
@@ -24567,6 +24610,13 @@ function rdOvTask(r) {
   return task;
 }
 
+/** Skills registry §6 board 9: a run's set-skill card into `host` (hidden without a record). */
+function paintRunSkills(host, mount) {
+  const card = renderRunSkills(mount, { doc: document });
+  host.hidden = !card;
+  host.replaceChildren(...(card ? [card] : []));
+}
+
 function buildRdOverview(sec, ctx) {
   sec.innerHTML = '';
   const wrap = document.createElement('div');
@@ -24581,14 +24631,16 @@ function buildRdOverview(sec, ctx) {
   // Actions strip: terminal runs only, filled once the run has its pipeline id.
   const strip = document.createElement('div'); strip.className = 'act-strip'; tagLevel(strip, 'advanced');
   strip.hidden = true;
-  wrap.append(banner, strip, grid, rdOvTask(ctx.run));
+  const skills = tagLevel(document.createElement('div'), 'advanced');   // the set skills it got (§6 board 9)
+  skills.className = 'hd-ov-skills-host';
+  wrap.append(banner, strip, grid, skills, rdOvTask(ctx.run));
   sec.appendChild(wrap);
   const paintStrip = (run) => {
     const on = isTerminalStatus(run.status) && !!run.pipelineId;
     strip.hidden = !on;
     if (on && strip.dataset.runId !== run.pipelineId) paintActionsStrip(strip, run.pipelineId, rdScopeQuery(run));
   };
-  const paint = (c) => { rdOvStateBanner(banner, c.run); paintStrip(c.run); rdOvStats(grid, c.run); };
+  const paint = (c) => { rdOvStateBanner(banner, c.run); paintStrip(c.run); rdOvStats(grid, c.run); paintRunSkills(skills, c.run.skillMount); };
   paint(ctx);
   sec.__update = paint;
 }
@@ -29625,7 +29677,7 @@ const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ ask: 'advanced', guardrails: 'adv
 const VIEW_TITLES = Object.freeze({
   stats: 'Statistics', composer: 'Workflow Composer', workspaces: 'Workspaces', 'workspace-create': 'Workspaces',
   'agent-create': 'Create agent', 'team-metrics': 'Team metrics', 'team-policy': 'Team policy', agents: 'Agents', scripts: 'Scripts',
-  guardrails: 'Guardrails', plugins: 'Plugins', mcp: 'MCP servers', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
+  guardrails: 'Guardrails', plugins: 'Plugins', mcp: 'Sets', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
   schedules: 'Schedules',
 });
 function pageMinLevel() {
@@ -29987,8 +30039,8 @@ function showSettingsTab(param = '') {
   if (tab === 'mcp') void mcpTab().show(sub);
 }
 
-// Settings › MCP servers (mcp-view.mjs): one controller, made on first entry; its sub-route
-// ('', 'sets/<id>', 'servers') rides behind #settings/mcp/.
+// Settings › Sets (tab key mcp; mcp-view.mjs): one controller, made on first entry; its sub-route
+// ('', 'sets/<id>', 'servers', 'skills') rides behind #settings/mcp/.
 async function mcpApi(method, path, body) {
   try {
     const res = await fetch(path, body === undefined ? { method }
@@ -30006,7 +30058,12 @@ function mcpTab() {
       api: mcpApi,
       navigate: (hash) => { if (location.hash.slice(1) !== hash) location.hash = hash; },
       confirm: confirmModal,
-      modal: { open: pluginModal, close: closePluginModal },
+      // `shows(node)`: is this node still in the open dialog? A flow whose answer lands after the dialog's own Close, a
+      // tab switch or another dialog opens nothing (skill-import.mjs). `afterClose(fn)`: the dialog's own Close runs fn
+      // once, as the open step's Cancel (an Import preview's or an Update's staged copy is discarded).
+      modal: { open: pluginModal, close: closePluginModal,
+        shows: (node) => !el.pluginModal.classList.contains('hidden') && el.pluginModalBody.contains(node),
+        afterClose: (fn) => { pluginModalAfterClose = fn; } },
       notify: (o) => notify(o),
     });
   }

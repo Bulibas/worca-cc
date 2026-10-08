@@ -64,7 +64,7 @@ test('parseArgs: a flag that needs a value refuses a missing one (a bare --shard
   assert.equal(parseArgs(['--shard', '1/3', 'test/a.test.mjs'], {}).shard, '1/3');
 });
 
-test('a file subset runs in its own WORCA_HOME (never the shared .worca-cc-test a full run may be using) and ignores WORCA_TEST_SHARD', () => {
+test('a file subset runs in its own WORCA_HOME (never the shared .worca-cc-test a full run may be using), ignores WORCA_TEST_SHARD and never inherits CLAUDE_CONFIG_DIR', () => {
   const dir = mkdtempSync(join(tmpdir(), 'worca-cc-runner-scope-'));
   try {
     const file = join(dir, 'scope.test.mjs');
@@ -76,10 +76,11 @@ test('a file subset runs in its own WORCA_HOME (never the shared .worca-cc-test 
       '  const h = process.env.WORCA_HOME;',
       "  assert.ok(isAbsolute(h) && !h.endsWith('.worca-cc-test'), h);",
       "  assert.equal(process.env.WORCA_NO_REAL_CLAUDE_LOG, join(h, 'real-claude-spawns.log'));",
+      "  assert.equal(process.env.CLAUDE_CONFIG_DIR, undefined, 'a test never reads the developer Claude config');",
       '});',
       '',
     ].join('\n'));
-    const env = { ...process.env, NODE_TEST_CONTEXT: undefined, WORCA_TEST_SHARD: '2/4' };
+    const env = { ...process.env, NODE_TEST_CONTEXT: undefined, WORCA_TEST_SHARD: '2/4', CLAUDE_CONFIG_DIR: dir };
     const r = spawnSync(process.execPath, [join(TOOLS, 'test.mjs'), file], { encoding: 'utf8', env });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /pass 1\b/);
