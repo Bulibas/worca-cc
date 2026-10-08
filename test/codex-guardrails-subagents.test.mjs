@@ -22,6 +22,7 @@ after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true });
 const tmp = () => { const d = realpathSync(mkdtempSync(join(tmpdir(), 'codex-g-'))); dirs.push(d); return d; };
 
 test('codexRulePlan: a bare Bash and WebSearch are held, command prefixes only in part; paths, MCP tools and globs are not', () => {
+  // WebFetch is held here only because the same rules turn off both ways codex fetches a page (its shell, its web search).
   const p = codexRulePlan({ deny: ['Bash(git push)', 'Bash(git push:*)', 'Bash(npm run *)', 'Bash', 'WebSearch', 'WebFetch', 'Read(.env*)', 'Edit(*.pem)', 'mcp__pg__drop', 'Bash(rm *foo*)', 'Bash(echo "x")'], allow: ['Bash(ls:*)'] });
   assert.deepEqual(p.prefixes, [['git', 'push'], ['npm', 'run']]);
   assert.equal(p.shellOff, true);
@@ -31,6 +32,12 @@ test('codexRulePlan: a bare Bash and WebSearch are held, command prefixes only i
   assert.deepEqual(p.partial, ['Bash(git push)', 'Bash(git push:*)', 'Bash(npm run *)']);
   assert.deepEqual(unenforcedRules({ deny: ['Bash(curl:*)'] }), []);
   assert.deepEqual(partialRules({ deny: ['Bash(curl:*)'] }), ['Bash(curl:*)']);
+  // Without both, nothing stops `curl` or a web search from fetching: WebFetch is not held.
+  assert.deepEqual(unenforcedRules({ deny: ['WebFetch'] }), ['WebFetch']);
+  assert.deepEqual(unenforcedRules({ deny: ['WebFetch', 'WebSearch'] }), ['WebFetch'], 'the shell still fetches');
+  assert.deepEqual(unenforcedRules({ deny: ['WebFetch', 'Bash'] }), ['WebFetch'], 'web search still fetches');
+  assert.deepEqual(codexRulePlan({ deny: ['WebFetch', 'Bash', 'WebSearch'] }).enforced, ['WebFetch', 'Bash', 'WebSearch'], 'in any order');
+  assert.deepEqual(partialRules({ deny: ['WebFetch'] }), []);
   assert.deepEqual(codexRulePlan(null), { prefixes: [], shellOff: false, webSearchOff: false, enforced: [], partial: [], unenforced: [] });
 });
 

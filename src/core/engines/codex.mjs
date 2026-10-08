@@ -99,19 +99,23 @@ export const CODEX_COMMAND_RULE_REACH = 'they catch a command run directly, by f
  * lifted, and codex exec never asks). A `Bash(cmd…)` prefix becomes a codex command rule (decision forbidden),
  * which is only a PARTIAL guard (CODEX_COMMAND_RULE_REACH): such rules are `partial`, and the run gate treats
  * them like the rules codex cannot hold (they need --allow-unguarded-engine) while the spawn still writes them.
- * A bare `Bash` turns the shell off; `WebSearch` turns codex's web search off; `WebFetch` has no codex tool to
- * deny. Path rules (`Read(…)`, `Edit(…)`, `Write(…)`), MCP tool rules and globs cannot be held: they are `unenforced`.
+ * A bare `Bash` turns the shell off; `WebSearch` turns codex's web search off. `WebFetch` has no codex tool to deny,
+ * and codex fetches a page through its shell (`curl`) or its web search: it is held only when the same rules turn
+ * both off, else it is `unenforced`. Path rules (`Read(…)`, `Edit(…)`, `Write(…)`), MCP tool rules and globs cannot
+ * be held: they are `unenforced`.
  * @returns {{prefixes:string[][], shellOff:boolean, webSearchOff:boolean, enforced:string[], partial:string[], unenforced:string[]}}
  */
 export function codexRulePlan(permissionRules) {
   const out = { prefixes: [], shellOff: false, webSearchOff: false, enforced: [], partial: [], unenforced: [] };
   const deny = Array.isArray(permissionRules?.deny) ? permissionRules.deny : [];
+  const denied = new Set(deny.map((r) => String(r).trim()));
+  const noFetch = denied.has('Bash') && denied.has('WebSearch');
   for (const raw of deny) {
     const rule = String(raw).trim();
     if (!rule) continue;
     if (rule === 'Bash') { out.shellOff = true; out.enforced.push(rule); continue; }
     if (rule === 'WebSearch') { out.webSearchOff = true; out.enforced.push(rule); continue; }
-    if (rule === 'WebFetch') { out.enforced.push(rule); continue; }
+    if (rule === 'WebFetch') { (noFetch ? out.enforced : out.unenforced).push(rule); continue; }
     const prefix = bashPrefix(rule);
     if (prefix) {
       if (!out.prefixes.some((p) => p.join(' ') === prefix.join(' '))) out.prefixes.push(prefix);

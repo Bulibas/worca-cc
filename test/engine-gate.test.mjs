@@ -80,6 +80,23 @@ test('codex holds command rules only in part: a set of them needs --allow-unguar
   assert.deepEqual(off._engineGate().filter((l) => /deny rules/.test(l)), ['engine codex: deny rules enforced on codex: Bash, WebSearch']);
 });
 
+test('codex does not hold WebFetch while its shell or web search can still fetch: the gate asks for consent and the audit says so', () => {
+  const o = withNodes(orch({ engine: 'codex' }), {});
+  o.guardrailPermissionRules = { deny: ['WebFetch', 'WebSearch'] };
+  o.guardrailsId = 'web';
+  assert.throws(() => o._engineGate(), /guardrail set "web" has permission rules this engine cannot enforce \(WebFetch\)/);
+  const allowed = withNodes(orch({ engine: 'codex', allowUnguardedEngine: true }), {});
+  allowed.guardrailPermissionRules = { deny: ['WebFetch', 'WebSearch'] };
+  allowed.guardrailsId = 'web';
+  const lines = allowed._engineGate();
+  assert.ok(lines.includes('engine codex: deny rules enforced on codex: WebSearch'), lines.join('\n'));
+  assert.ok(lines.includes('engine codex: guardrail set "web": rules NOT enforced on codex (--allow-unguarded-engine): WebFetch'), lines.join('\n'));
+  // With the shell and web search both off, codex has no way left to fetch a page.
+  const off = withNodes(orch({ engine: 'codex' }), {});
+  off.guardrailPermissionRules = { deny: ['Bash', 'WebSearch', 'WebFetch'] };
+  assert.deepEqual(off._engineGate().filter((l) => /deny rules/.test(l)), ['engine codex: deny rules enforced on codex: Bash, WebSearch, WebFetch']);
+});
+
 test('--allow-unguarded-engine runs it anyway and says so in the audit', () => {
   const o = withNodes(orch({ engine: 'codex', allowUnguardedEngine: true }), {});
   o.guardrailPermissionRules = RULES;
@@ -483,6 +500,11 @@ test('engineStartRefusal answers before a run exists, and says when the consent 
     overridable: true,
   });
   assert.equal(await make({ engine: 'codex', allowUnguardedEngine: true }, { guardrailsId: 'normal' }).engineStartRefusal(), null);
+  // Secure was already refused for its path rules; WebFetch now joins the rules it lists, and the consent still lifts it.
+  const secure = await make({ engine: 'codex' }, { guardrailsId: 'secure' }).engineStartRefusal();
+  assert.equal(secure.overridable, true);
+  assert.match(secure.error, /guardrail set "secure" has permission rules this engine cannot enforce/);
+  assert.equal(await make({ engine: 'codex', allowUnguardedEngine: true }, { guardrailsId: 'secure' }).engineStartRefusal(), null);
 
   const prev = process.env.WORCA_BROKER_URL;
   process.env.WORCA_BROKER_URL = 'http://127.0.0.1:9';
