@@ -144,7 +144,7 @@ export function buildMockMarkers(card) {
 export function buildAskSpawnOptions({ thread = {}, turn = {}, limits = {}, mcpConfigPath, scratchDir, memoryDir = null, web = null, relayed = false, registry = null, commands = null, skills = null, engine = 'claude' } = {}) {
   if (!scratchDir) throw new Error('buildAskSpawnOptions: scratchDir is required');
   if (!mcpConfigPath) throw new Error('buildAskSpawnOptions: mcpConfigPath is required');
-  if (engine === 'codex') return buildCodexAskOptions({ thread, turn, mcpConfigPath, scratchDir, web, relayed });
+  if (engine === 'codex') return buildCodexAskOptions({ thread, turn, mcpConfigPath, scratchDir, web, relayed, commands });
   const systemPrompt = String(turn.systemPrompt ?? '') + (turn.mock ? buildMockMarkers(turn.mock.card) : '');
   const reg = registry && Array.isArray(registry.copies) && registry.copies.length ? registry : null;
   // Skills registry §4.4 (P3 probe 6): --disable-slash-commands hides the Skill tool AND every plugin skill, so a turn
@@ -212,7 +212,7 @@ export function buildAskSpawnOptions({ thread = {}, turn = {}, limits = {}, mcpC
  * an --add-dir root. Claude's levers (tool lists, permission rules, --max-turns/--max-budget-usd, routing env) do not
  * exist on codex; the caps are turn.mjs's watchdog (D14). The host-guard preamble is prepended by the adapter.
  */
-function buildCodexAskOptions({ thread, turn, mcpConfigPath, scratchDir, web, relayed }) {
+function buildCodexAskOptions({ thread, turn, mcpConfigPath, scratchDir, web, relayed, commands = null }) {
   const keyVar = !relayed ? webKeyVar(web) : null;
   return {
     engine: 'codex',
@@ -229,6 +229,9 @@ function buildCodexAskOptions({ thread, turn, mcpConfigPath, scratchDir, web, re
     envAllowlist: ['SSH_AUTH_SOCK', ...(keyVar ? [keyVar] : [])],
     ...(thread.sessionId ? { resumeSessionId: thread.sessionId } : {}),
     ...(Array.isArray(turn.images) && turn.images.length ? { images: [...turn.images] } : {}),
+    // Agent mode (#574): the command bridge token, as a Claude chat gets it — never on disk; the adapter hands an Ask
+    // chat's spawn env to its MCP servers (codex.mjs askLockdown).
+    ...(commands?.token ? { spawnEnv: { ASK_COMMAND_TOKEN: commands.token } } : {}),
     signal: turn.signal,
     onEvent: turn.onEvent,
   };

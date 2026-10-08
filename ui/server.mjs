@@ -10481,9 +10481,8 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // Skills registry §4.4: the same targets and choices for the skills from sets — resolved ONCE per turn; the turn
     // mounts them and appends the prompt section naming exactly what it wrote (a Claude chat only: turn.mjs).
     const skills = await resolveAskSkills({ ctx, threadId: id, off: mcpOff !== undefined ? mcpOff : thread.mcpOff });
-    // Agent mode (#574): this chat's switch, where agent mode exists at all; a message's own value wins. Claude chats
-    // only: a Codex chat's MCP child never receives the bridge token (turn.mjs).
-    const agentOn = engine === 'claude' && askCommandsEnabled() && (agentMode !== undefined ? agentMode : thread.agentMode) !== false;
+    // Agent mode (#574): this chat's switch, where agent mode exists at all; a message's own value wins.
+    const agentOn = askCommandsEnabled() && (agentMode !== undefined ? agentMode : thread.agentMode) !== false;
     const systemPrompt = await askSystemPromptFor(catalog, { web, mcp: engine === 'codex' ? null : await askMcpPromptInput(mcp), commands: agentOn, engine });
     // Shared terminal: what the user ran in this chat's Ask tabs since its last user turn (their commands never wake
     // the chat; an event turn leaves them for the next user turn).

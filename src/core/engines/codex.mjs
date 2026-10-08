@@ -627,12 +627,18 @@ export async function runCodexProcess({
     mcpServers = expandMcpEnvRefs(Object.fromEntries(Object.entries(all).filter(([n]) => !unattachable.has(n)).map(([n, srv]) => [n, scopeLauncherEnv(srv)])), from);
   }
   const serverEnv = codexMcpOverrides(mcpServers).env;
+  // An Ask chat (askLockdown: no shell, so nothing but codex reads its env) hands its spawn env to its MCP servers the
+  // way a Claude chat does — Claude Code passes its own env to stdio children: the agent-mode command token
+  // (ask/spawn.mjs). A pipeline node keeps it out of codex's env (its shell would read it): there it reaches the
+  // servers only through `${VAR}` references, expanded above.
+  const askEnv = askLockdown ? cleanRunEnv(runSpawnEnv) : null;
+  const ownEnv = { ...serverEnv, ...(askEnv ?? {}) };
   // Fan-out (the runner granted the sub-agent tool): worca's investigator becomes a codex agent role for this call.
   const role = Array.isArray(allowedTools) && allowedTools.some((t) => t === 'Agent' || t === 'Task') && !askLockdown
     ? codexInvestigatorRole({ agents, subagentSystemPrompt: appendSubagentSystemPrompt, inheritModel: !!endpoint }) : null;
   const normalizer = createCodexNormalizer({ model, priorUsage: thread ? loadUsage(usageDir, thread) : null, unpriced: !!endpoint,
     subagent: role ? { type: CODEX_INVESTIGATOR_ROLE, model: role.model } : null });
-  const { env } = composeSpawnEnv({ ...envOpts, ...(Object.keys(serverEnv).length ? { runEnv: serverEnv } : {}) });
+  const { env } = composeSpawnEnv({ ...envOpts, ...(Object.keys(ownEnv).length ? { runEnv: ownEnv } : {}) });
   // Guardrails: the deny rules codex can hold (codexRulePlan). Command rules live in a worca-managed CODEX_HOME.
   const plan = codexRulePlan(permissionRules);
   if (plan.prefixes.length) env.CODEX_HOME = guardedCodexHome(codexRulesFile(plan.prefixes));

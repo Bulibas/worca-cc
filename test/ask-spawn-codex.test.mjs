@@ -1,7 +1,7 @@
 // test/ask-spawn-codex.test.mjs — the Codex chat spawn (cascading-settings-design.md D13, §8 test 14).
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildAskSpawnOptions, buildMcpConfig, ASK_MCP_SERVER_PATH } from '../src/core/ask/spawn.mjs';
@@ -64,4 +64,27 @@ test('no MCP env value rides the codex argv', POSIX, async () => {
     assert.equal(fake.env().WORCA_ASK_ENGINE, 'codex');
     assert.equal(fake.env().WORCA_ASK_READER, 'Pat Example');
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('agent mode on a Codex chat: the bridge URL rides the MCP config, the token only codex\'s env (named in env_vars)', POSIX, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'worca-ask-codex-cmd-'));
+  try {
+    const fake = fakeCodex(dir, 'ok');
+    const cfg = join(dir, 'mcp.json');
+    const commands = { url: 'http://127.0.0.1:4317/api/ask/commands/', token: 'tok-secret-123' };
+    writeFileSync(cfg, JSON.stringify(buildMcpConfig({ homeBase: dir, threadId: 'ask_00000001', serverPath: ASK_MCP_SERVER_PATH, env: {}, engine: 'codex', commands })));
+    const o = buildAskSpawnOptions({ ...base({ mcpConfigPath: cfg, scratchDir: dir }), engine: 'codex', commands });
+    assert.deepEqual(o.spawnEnv, { ASK_COMMAND_TOKEN: 'tok-secret-123' });
+    await runClaude({ ...o, askLockdown: ['--disable', 'shell_tool', '--disable', 'unified_exec', '-c', 'web_search="disabled"'], bin: fake.bin });
+    const argv = fake.args().join(' ');
+    assert.match(argv, /mcp_servers\.worca\.env_vars=\[[^\]]*"ASK_COMMAND_TOKEN"/);
+    assert.match(argv, /mcp_servers\.worca\.env_vars=\[[^\]]*"WORCA_ASK_COMMANDS"/);
+    assert.doesNotMatch(argv, /tok-secret-123/);
+    assert.equal(fake.env().ASK_COMMAND_TOKEN, 'tok-secret-123');
+    assert.doesNotMatch(readFileSync(cfg, 'utf8'), /tok-secret-123/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a Codex chat without agent mode carries no spawn env', () => {
+  assert.equal('spawnEnv' in buildAskSpawnOptions({ ...base(), engine: 'codex' }), false);
 });

@@ -1094,8 +1094,7 @@ class AskTurn extends EventEmitter {
       mcpConfigPath = join(scratchDir, `mcp-${this.assistantMessageId}.json`);
       this.relay = d.agentRelay ? d.agentRelay({ threadId: this.threadId, reader: this.reader || null, web: this.web }) : null;
       // Agent mode never rides the relay: relay mode is agent isolation, where the terminal refuses agent callers.
-      // Claude chats only: codex hands its MCP servers no spawnEnv, so the bridge token would never reach the child.
-      this.commands = this.engine === 'claude' && !this.relay && this.agentMode && d.commandBridge ? d.commandBridge({ threadId: this.threadId }) : null;
+      this.commands = !this.relay && this.agentMode && d.commandBridge ? d.commandBridge({ threadId: this.threadId }) : null;
       await d.fs.writeFile(
         mcpConfigPath,
         // MCP registry §9.2: the copies ride after `worca` — refs only (`${MCPSECRET_…}`); the values go in spawnEnv.
