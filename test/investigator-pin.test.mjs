@@ -40,7 +40,7 @@ test('buildClaudeArgs: --agents rides just before --add-dir; absent keeps the ar
   assert.equal(withAgents.indexOf('--add-dir'), i + 2, '--add-dir stays last');
 });
 
-// Claude Code reads `--agents <file>` only from 2.1.281; the Docker image pins 2.1.278, which
+// Claude Code reads `--agents <file>` only from 2.1.281; Docker images built before the 2.1.294 pin carry 2.1.278, which
 // JSON-parses the value and exits at spawn. So the definition stays inline JSON on the staged
 // (over-limit) branch too — only the prompt, system prompt and settings move off the argv.
 test('planClaudeInvocation keeps --agents inline JSON on the over-limit branch (never a file)', async () => {
