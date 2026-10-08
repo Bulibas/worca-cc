@@ -16,7 +16,8 @@ import { readPipelineForResume } from '../src/core/artifacts.mjs';
 import { ENGINES } from './helpers/engines.mjs';
 import { fakeCodex } from './helpers/fake-codex.mjs';
 import { mockSpawnLog } from '../src/core/claude-runner.mjs';
-import { CODEX_DEFAULT_MODEL } from '../src/core/engines/codex.mjs';
+import { CODEX_DEFAULT_MODEL, codexRootsInWorcaHome } from '../src/core/engines/codex.mjs';
+import { worcaHome } from '../src/core/projects.mjs';
 
 useTempHome(after);
 const POSIX = process.platform === 'win32' ? { skip: 'POSIX shell fixtures' } : {};
@@ -318,6 +319,25 @@ test('runOpts names the directories a node writes its outputs to', () => {
   // A review handle names two files; the clarify step writes into the pipeline dir itself.
   const review = { projectDir: '/p', claudeOpts: {}, pipelineDir: '/pipe', outputs: { review: { kind: 'review', mdPath: '/store/reviews/r.md', jsonPath: '/pipe/r.json' } }, questionsFile: '/pipe/q.json' };
   assert.deepEqual(runOpts(review, { role: 'r', prompt: 'P', systemPrompt: 'S', allowedTools: [] }).writableDirs, ['/store/reviews', '/pipe']);
+});
+
+test('a codex run\'s own writable roots pass the Worca-home check: they live in the run store and the run\'s folder', async () => {
+  const engine = ENGINES[0];
+  const dir = tmp();
+  execSync('git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', { cwd: dir });
+  const seen = [];
+  const look = (ctx) => {
+    const o = runOpts(ctx, { role: 'r', prompt: 'P', systemPrompt: 'S', allowedTools: [] });
+    seen.push({ cwd: o.cwd, roots: [...(o.addDirs || []), ...o.writableDirs] });
+  };
+  const runners = {
+    producer: async (ctx) => { look(ctx); return { status: 'ok', summary: 'ok' }; },
+    verifier: async (ctx) => { look(ctx); return { status: 'ok', issues: [], review: { issues: [] }, summary: '' }; },
+  };
+  const res = await engine.create({ projectDir: dir, prompt: 'demo', auto: true, claude: { mock: true, engine: 'codex' }, runners }).run();
+  assert.equal(res.status, 'done', res.error);
+  assert.ok(seen.length > 1 && seen.some((s) => s.roots.some((r) => r.startsWith(worcaHome()))), JSON.stringify(seen));
+  for (const s of seen) assert.deepEqual(codexRootsInWorcaHome(s), [], JSON.stringify(s));
 });
 
 test('a codex spawn gets the output dirs as writable roots (its sandbox allows the cwd only)', POSIX, async () => {

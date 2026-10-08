@@ -3,17 +3,18 @@
 // the skills mount folder and the memory block intro on an engine that does not load `.claude/rules`.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, lstatSync, readlinkSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, lstatSync, readlinkSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { useTempHome } from './helpers/temp-home.mjs';
 import { fakeCodex } from './helpers/fake-codex.mjs';
 import {
-  codexRulePlan, codexRulesFile, unenforcedRules, partialRules, guardedCodexHome, codexInvestigatorRole, runCodexProcess, CODEX_INVESTIGATOR_ROLE,
+  codexRulePlan, codexRulesFile, unenforcedRules, partialRules, guardedCodexHome, codexRootsInWorcaHome, codexInvestigatorRole, runCodexProcess, CODEX_INVESTIGATOR_ROLE,
 } from '../src/core/engines/codex.mjs';
 import { fanOutDirective } from '../src/core/phases.mjs';
 import { assembleSkills, skillsRelFor } from '../src/core/run-context.mjs';
 import { renderMemoryBlock, MEMORY_BLOCK_INTRO } from '../src/core/memory-store.mjs';
+import { worcaHome } from '../src/core/projects.mjs';
 
 useTempHome(after);
 const POSIX = { skip: process.platform === 'win32' };
@@ -91,6 +92,38 @@ parentPort.postMessage(bad);
     const [home] = readdirSync(join(base, String(i)));
     assert.deepEqual(readdirSync(join(base, String(i), home, 'rules')), ['worca.rules'], 'no temp file is left behind');
   }
+});
+
+test('codexRootsInWorcaHome: only the run store and a run\'s own folder may be writable inside Worca\'s home', POSIX, () => {
+  const home = join(tmp(), '.worca-cc'); const out = tmp();
+  mkdirSync(join(home, 'store', 'proj-1', 'pipelines', 'p1'), { recursive: true });
+  const ok = [join(home, 'store', 'proj-1', 'plans'), join(home, 'store', 'proj-1', 'pipelines', 'p1'), join(home, 'store', 'proj-1', 'pipelines', 'p1', 'memory'),
+    join(home, 'store', 'workspaces', 'ws-1', 'reviews'), join(home, 'runs', 'p1'), join(home, 'runs', 'p1', 'repos', 'a'), join(out, 'mem')];
+  assert.deepEqual(codexRootsInWorcaHome({ cwd: join(home, 'runs', 'p1'), roots: ok, home }), []);
+  // The home itself, its state folders, the store or runs folder as a whole, and anything that holds the home.
+  const bad = [home, join(home, 'plugins', 'x'), join(home, 'mcp'), join(home, 'policy'), join(home, 'engines', 'codex'),
+    join(home, 'store'), join(home, 'runs'), dirname(home), join(home, 'store', '..', 'scripts')];
+  assert.deepEqual(codexRootsInWorcaHome({ roots: bad, home }), bad);
+  assert.deepEqual(codexRootsInWorcaHome({ cwd: dirname(home), roots: [], home }), [dirname(home)], 'a cwd holding the home is writable too');
+  assert.deepEqual(codexRootsInWorcaHome({ cwd: join(home, 'tmp', 'job'), roots: [], home }), [], 'a cwd inside the home is the job\'s own');
+  // Through a link: the real path decides.
+  const link = join(out, 'link'); symlinkSync(home, link);
+  assert.deepEqual(codexRootsInWorcaHome({ roots: [join(link, 'plugins'), join(link, 'store', 'proj-1', 'plans')], home }), [join(link, 'plugins')]);
+});
+
+test('runCodexProcess refuses a writable root inside Worca\'s home before it spawns or writes anything', POSIX, async () => {
+  const dir = tmp();
+  const fake = fakeCodex(dir, 'ok');
+  const plugins = join(worcaHome(), 'plugins');
+  await assert.rejects(() => runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', usageDir: dir, addDirs: [plugins], permissionRules: { deny: ['Bash(git push:*)'] } }),
+    (err) => err.message.includes(`it would be able to write ${plugins}, inside Worca's home`));
+  await assert.rejects(() => runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', usageDir: dir, writableDirs: [worcaHome()] }), /refusing to start codex/);
+  assert.equal(fake.args(), null, 'codex never ran');
+  assert.equal(existsSync(join(worcaHome(), 'engines', 'codex', 'homes')), false, 'no guarded home was written');
+  // A read-only spawn gets no writable roots, so nothing is refused; the store is allowed.
+  await runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', usageDir: dir, sandbox: 'read-only', addDirs: [plugins] });
+  await runCodexProcess({ cwd: dir, bin: fake.bin, prompt: 'P', usageDir: dir, writableDirs: [join(worcaHome(), 'store', 'k', 'plans')] });
+  assert.ok(fake.args().includes(join(worcaHome(), 'store', 'k', 'plans')));
 });
 
 test('runCodexProcess: deny rules put codex under the guarded home and turn web search off; no rules leave CODEX_HOME alone', POSIX, async () => {
