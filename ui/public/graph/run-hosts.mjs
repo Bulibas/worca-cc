@@ -271,12 +271,10 @@ export function mountRunGraph(hostEl, opts = {}) {
         el.setAttribute('role', 'link');
         el.tabIndex = 0;
         el.setAttribute('aria-label', `Show the live log of ${tt ? tt.textContent : el.dataset.nodeId}`);
-        el.classList.add('linked');
       } else {
         el.removeAttribute('role');
         el.removeAttribute('tabindex');
         el.removeAttribute('aria-label');
-        el.classList.remove('linked');
       }
     }
   }
