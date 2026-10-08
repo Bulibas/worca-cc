@@ -1456,6 +1456,30 @@
               </div>
             </section>
 
+            <!-- Alerts (ui/public/alerts.mjs): per browser, kept in this browser's localStorage. -->
+            <section class="card settings-card" id="alerts-card" data-min-level="simple">
+              <div class="card-head">
+                <div class="label-row">
+                  <h2>Alerts</h2>
+                  <button type="button" class="info-tip" aria-label="About alerts">i<span class="tip-content hidden">
+                    Notifications only arrive while a Worca tab is open; in the background is fine.
+                    Your operating system must allow notifications for this browser (macOS: System Settings › Notifications).
+                    A web page can't make the Dock or taskbar bounce. These choices apply to this browser only.
+                  </span></button>
+                </div>
+              </div>
+              <label class="switch-row">
+                <input id="alertsNotify" class="sw-input" type="checkbox" aria-describedby="alertsNotifyHint">
+                <span class="switch"></span><span class="txt">Desktop notifications</span>
+              </label>
+              <small class="hint" id="alertsNotifyHint" hidden></small>
+              <label class="switch-row alerts-badge-row">
+                <input id="alertsBadge" class="sw-input" type="checkbox">
+                <span class="switch"></span><span class="txt">Badge when something is waiting</span>
+              </label>
+              <button type="button" id="alertsTest" class="btn-ghost btn-mini alerts-test" disabled>Send test notification</button>
+            </section>
+
             <!-- Credential broker (docs/credential-broker.md): shown only when worca runs with one. -->
             <section class="card settings-card" id="credentials-card" data-min-level="simple" hidden>
               <div class="card-head">

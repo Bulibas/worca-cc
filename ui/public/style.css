@@ -3104,6 +3104,10 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
 .models-helpers{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:18px;margin-bottom:18px;}
 .models-helpers > .settings-card{max-width:none;margin:0;}
 
+/* Settings › General › Alerts (alerts.mjs): two switches and the test button, stacked. */
+#alerts-card .alerts-badge-row{margin-top:14px;}
+#alerts-card .alerts-test{margin-top:16px;}
+
 /* My model credentials (credential broker): one row per slot, a state chip on the right. */
 .cred-list{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
 .cred-row{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:13px;}
