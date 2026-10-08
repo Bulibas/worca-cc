@@ -7443,6 +7443,10 @@ input.gv-name:focus-visible{outline:none;}
 .run-flow.gv-host .wbadge .wfired{display:inline-block;margin:0;padding:1px 7px;border-radius:999px;background:var(--amber-bg);color:var(--amber-ink);border:1px solid var(--amber);font:700 10px/1.4 var(--mono);}
 /* History: node click drives the Logs tab */
 .hd-graph.linked .gv-world .node[data-node-id]{cursor:pointer;}
+/* Running: a card that has run opens its live log (mountRunGraph nodeClicks) */
+/* (an attribute, not a class: the contrast baselines key on a node's class list) */
+.run-flow.gv-host .gv-world .node[role="link"]{cursor:pointer;}
+.run-flow.gv-host .gv-world .node[role="link"]:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 /* quiescence banner (.rd-banners / .hd-banners / History Overview note) */
 .run-warn{margin:0;padding:11px 15px;border-radius:var(--r-card);background:var(--amber-bg);color:var(--amber-ink);font-size:12.5px;font-weight:600;border:1px solid color-mix(in srgb, var(--amber) 45%, transparent);align-self:stretch;}
 .run-warn[hidden]{display:none;}
