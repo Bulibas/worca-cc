@@ -257,3 +257,51 @@ test('bulk add from New Pipeline selects the first added project in the dropdown
   const sel = doc.querySelector('#projectSelect');
   assert.equal(sel.options[sel.selectedIndex].dataset.name, 'a');
 });
+
+test('a limited listing (hosted Worca) shows the hint and one button per allowed folder; a refused seed falls back to the start', async () => {
+  const roots = ['/data/projects', '/data/worca/.worca-cc'];
+  const at = (path, parent) => ({ path, parent, home: roots[0], dirs: [], limited: true, roots });
+  const { window } = await boot({
+    fetchHandler: (u, opts) => {
+      if (u.endsWith('/api/fs/pick-folder') && opts.method === 'POST') {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ status: 'unsupported' }) });
+      }
+      if (u.includes('/api/fs/dirs')) {
+        const q = decodeURIComponent(u.split('path=')[1] || '');
+        if (q === '/etc') return Promise.resolve({ ok: false, status: 403, json: async () => ({ error: 'outside', code: 'FS_OUTSIDE_ALLOWED' }) });
+        return Promise.resolve({ ok: true, status: 200, json: async () => (q === roots[1] ? at(roots[1], null) : at(roots[0], null)) });
+      }
+      return null;
+    },
+  });
+  openAddForm(window);
+  const doc = window.document;
+  doc.querySelector('#newProjectPath').value = '/etc';
+  click(window, doc.querySelector('#newProjectBrowse'));
+  await tick(); await tick(); await tick(); await tick();
+  const scope = doc.querySelector('#folderScope');
+  await checkRows([
+    { name: 'the refused seed falls back to the projects root', run: () => {
+      assert.equal(doc.querySelector('#folderCurrent').textContent, roots[0]);
+      assert.ok(doc.querySelector('#folderUp').disabled, 'Up stops at a root');
+    } },
+    { name: 'the hint is shown with a button per root', run: () => {
+      assert.ok(!scope.classList.contains('hidden'));
+      assert.match(scope.textContent, /only browses its own data and projects folders/);
+      assert.deepEqual([...scope.querySelectorAll('.folder-root')].map((b) => b.title), roots);
+    } },
+  ]);
+  click(window, [...scope.querySelectorAll('.folder-root')][1]);
+  await tick(); await tick();
+  assert.equal(doc.querySelector('#folderCurrent').textContent, roots[1]);
+});
+
+test('an unlimited listing keeps the hint hidden', async () => {
+  const { window } = await boot({ fetchHandler: dirsHandler({ status: 'unsupported' }) });
+  openAddForm(window);
+  const doc = window.document;
+  click(window, doc.querySelector('#newProjectBrowse'));
+  await tick(); await tick(); await tick();
+  assert.equal(doc.querySelector('#folderCurrent').textContent, '/home/me');
+  assert.ok(doc.querySelector('#folderScope').classList.contains('hidden'));
+});

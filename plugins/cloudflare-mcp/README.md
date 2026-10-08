@@ -19,5 +19,5 @@ covers their APIs.
    pipeline agents call `cloudflare` without asking, and it can reach every endpoint the token
    allows. User and account tokens both work; give an account token **Account Resources : Read**
    too, so the server can find your account. Tokens with client IP address filtering do not work.
-3. Settings → MCP servers → Sets → pick a set → Add server → `cloudflare` → paste the token into
+3. Settings → Sets → pick a set → Add server → `cloudflare` → paste the token into
    **Cloudflare API token** → Save and test. `cloudflare-docs` needs nothing.

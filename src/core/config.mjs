@@ -81,6 +81,11 @@ export { EFFORTS };
  * Sonnet 5.5 (`claude-sonnet-5-5`, 1M-only, no `[1m]` twin) joined beside Sonnet 5
  * on 2026-09-28 (verified to resolve via `claude --model`, CLI 2.1.284); nothing
  * is renamed, and the Sonnet 5 defaults (Auto classifier, defrag, scan) stay put.
+ * Haiku 5.5 (`claude-haiku-5-5`, 1M-only, no `[1m]` twin, all five efforts) joined
+ * beside Haiku 4.5 on 2026-10-07 (verified to resolve via `claude --model`, CLI
+ * 2.1.293 — 2.1.292 serves it but warns "unrecognized_model" and caps the window
+ * at 200k); nothing is renamed, and the Haiku 4.5 defaults (title model, broker
+ * probe) stay put.
  */
 export const PREDEFINED_MODELS = [
   { id: 'claude-opus-5-5',        label: 'Opus 5.5',        efforts: ['medium', 'high', 'xhigh', 'max'] },
@@ -96,6 +101,7 @@ export const PREDEFINED_MODELS = [
   { id: 'claude-sonnet-5',        label: 'Sonnet 5',        efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-sonnet-4-6',      label: 'Sonnet 4.6',      efforts: ['medium', 'high', 'max'] },
   { id: 'claude-sonnet-4-6[1m]',  label: 'Sonnet 4.6 (1M)', efforts: ['medium', 'high', 'max'] },
+  { id: 'claude-haiku-5-5',       label: 'Haiku 5.5',       efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-haiku-4-5',       label: 'Haiku 4.5',       efforts: ['medium', 'high'] },
 ];
 
@@ -526,7 +532,7 @@ export function resolveModelCost(modelId, cliCostUsd, usage, costCfg = undefined
 // ── display-only list prices ──────────────────────────────────────────────────
 // USD per MILLION tokens for the built-in ids, from Anthropic's published
 // pricing (platform.claude.com/docs/en/pricing — snapshot 2026-06-24; Opus 5.5
-// added 2026-09-22, Sonnet 5.5 2026-09-28). DISPLAY
+// added 2026-09-22, Sonnet 5.5 2026-09-28, Haiku 5.5 2026-10-07). DISPLAY
 // APPROXIMATION ONLY: it feeds the chat footer's live "≈" estimate while a turn
 // streams (ask/events.mjs `estimatedCostUsd`). The CLI's result.total_cost_usd,
 // re-priced by resolveModelCost, stays the ONLY figure any message row, thread

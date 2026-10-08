@@ -426,16 +426,16 @@
                       <small class="hint" id="guardrailsHint">Applies to every agent this run spawns. Permissive = no restrictions (the legacy default).</small>
                     </div>
 
-                    <!-- MCP servers (MCP registry §6.2, D16): the registry copies this run starts, opted out
-                         per membership. app.js#paintMcpRuns fills it from POST /api/mcp/preview; hidden while
-                         the target resolves to no membership. -->
+                    <!-- Sets (MCP registry §6.2, D16; skills registry §6 board 7): the registry copies and the
+                         set skills this run gets, opted out per membership. app.js#paintMcpRuns fills it from
+                         POST /api/mcp/preview; hidden while the target resolves to no membership. -->
                     <div class="field" id="mcpRunsField" hidden>
-                      <span class="label" id="mcpRunsHead">MCP servers</span>
+                      <span class="label" id="mcpRunsHead">Sets</span>
                       <details class="mcp-runs" id="mcpRuns">
                         <summary class="select" id="mcpRunsLabel" aria-labelledby="mcpRunsHead mcpRunsLabel"></summary>
                         <div id="mcpRunsPop"></div>
                       </details>
-                      <small class="hint">Names are before any <code>_w</code> rename, which is decided at run start.</small>
+                      <small class="hint">Server names are before any <code>_w</code> rename, which is decided at run start; skills load as <code>&lt;set&gt;:&lt;skill&gt;</code>.</small>
                     </div>
 
                   </div>
@@ -847,9 +847,16 @@
                   <span class="auto-badge" hidden></span>
                   <span class="hist-merge" hidden data-min-level="expert"></span>
                   <button type="button" class="hd-pr" hidden data-min-level="advanced">Create PR</button>
+                  <!-- Publish branch (#618): push a finished run's branch without a PR. Painted by paintHdPublish. -->
+                  <button type="button" class="hd-publish btn-ghost" hidden data-min-level="advanced">Publish branch</button>
                   <span class="act-pill-slot"></span>
                   <a class="hd-pr-link" hidden data-min-level="advanced" target="_blank" rel="noopener"></a>
                 </div>
+                <!-- "Published to <remote>/<branch>" (#618): its own line, so a long branch never squeezes the title. -->
+                <p class="hd-published hint mono" hidden data-min-level="advanced"></p>
+                <!-- Workspace runs: one line per member repo (View PR / Merged / No changes).
+                     Painted by paintHdPr; never shown for a single-project run. -->
+                <ul class="hd-pr-repos" hidden data-min-level="advanced" aria-label="Pull requests per repository"></ul>
                 <!-- Status pip leads the META line, not row 1: it reads as the icon
                      for the status WORD it now sits next to (same pairing the list
                      card uses), and row 1 stays title + PR actions. -->
@@ -1150,8 +1157,8 @@
               <h1>Agents</h1>
               <div class="sub">Built-in and custom agents — the typed ports each one reads and writes drive the Composer</div>
             </div>
-            <button type="button" id="agent-create-btn" class="btn-go" style="padding:11px 20px">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+            <button type="button" id="agent-create-btn" class="btn btn-primary btn-mini">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
               Create agent
             </button>
           </div>
@@ -1178,9 +1185,9 @@
                   </div>
                 </div>
                 <div class="agent-actions">
-                  <button type="button" class="agent-edit btn-ghost" title="Edit this agent">Edit</button>
-                  <button type="button" class="agent-duplicate btn-ghost" title="Duplicate as a user agent">Duplicate</button>
-                  <button type="button" class="agent-delete btn-danger" title="Delete this agent">Delete</button>
+                  <button type="button" class="agent-edit btn btn-ghost btn-mini" title="Edit this agent">Edit</button>
+                  <button type="button" class="agent-duplicate btn btn-ghost btn-mini" title="Duplicate as a user agent">Duplicate</button>
+                  <button type="button" class="agent-delete btn btn-danger btn-mini" title="Delete this agent">Delete</button>
                 </div>
                 <svg class="chev" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 9l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
               </div>
@@ -1452,7 +1459,7 @@
             <button type="button" data-tab="guardrails" data-min-level="advanced" aria-pressed="false">Guardrails</button>
             <button type="button" data-tab="memory" data-min-level="advanced" aria-pressed="false">Memory</button>
             <button type="button" data-tab="plugins" data-min-level="advanced" aria-pressed="false">Plugins</button>
-            <button type="button" data-tab="mcp" data-min-level="advanced" aria-pressed="false">MCP servers</button>
+            <button type="button" data-tab="mcp" data-min-level="advanced" aria-pressed="false">Sets</button>
             <button type="button" data-tab="models" data-min-level="expert" aria-pressed="false">Models</button>
             <button type="button" data-tab="providers" data-min-level="expert" aria-pressed="false">Providers</button>
           </div>
@@ -1480,6 +1487,30 @@
                 <button type="button" data-theme-mode="light" aria-pressed="false">Light</button>
                 <button type="button" data-theme-mode="dark" aria-pressed="false">Dark</button>
               </div>
+            </section>
+
+            <!-- Alerts (ui/public/alerts.mjs): per browser, kept in this browser's localStorage. -->
+            <section class="card settings-card" id="alerts-card" data-min-level="simple">
+              <div class="card-head">
+                <div class="label-row">
+                  <h2>Alerts</h2>
+                  <button type="button" class="info-tip" aria-label="About alerts">i<span class="tip-content hidden">
+                    Notifications only arrive while a Worca tab is open; in the background is fine.
+                    Your operating system must allow notifications for this browser (macOS: System Settings › Notifications).
+                    A web page can't make the Dock or taskbar bounce. These choices apply to this browser only.
+                  </span></button>
+                </div>
+              </div>
+              <label class="switch-row">
+                <input id="alertsNotify" class="sw-input" type="checkbox" aria-describedby="alertsNotifyHint">
+                <span class="switch"></span><span class="txt">Desktop notifications</span>
+              </label>
+              <small class="hint" id="alertsNotifyHint" hidden></small>
+              <label class="switch-row alerts-badge-row">
+                <input id="alertsBadge" class="sw-input" type="checkbox">
+                <span class="switch"></span><span class="txt">Badge when something is waiting</span>
+              </label>
+              <button type="button" id="alertsTest" class="btn-ghost btn-mini alerts-test" disabled>Send test notification</button>
             </section>
 
             <!-- Credential broker (docs/credential-broker.md): shown only when worca runs with one. -->
@@ -1971,8 +2002,8 @@
               <!-- Ask web access (off by default): rendered by chat-settings-view.mjs; saved with this
                    card's Save button, and only when one of its fields was touched. -->
               <div class="field" id="ask-web-host"></div>
-              <!-- MCP servers (docs/mcp-servers.md): the General set in one line, painted by mcp-view.mjs; the
-                   Edit General set link opens Settings › MCP servers under the level banner. -->
+              <!-- Sets (docs/mcp-servers.md, docs/skills.md): the General set's servers and skills in one line, painted by
+                   mcp-view.mjs; the Edit General set link opens Settings › Sets under the level banner. -->
               <div class="field" id="ask-mcp-host"></div>
               <div class="add-project-actions" style="margin-top:14px">
                 <button type="button" id="askLimitsReset" class="btn btn-ghost btn-mini">Use defaults</button>
@@ -2079,7 +2110,7 @@
           </section>
           <!-- /pane plugins -->
 
-          <!-- ===== TAB: MCP SERVERS (docs/mcp-servers.md) — painted whole by mcp-view.mjs ===== -->
+          <!-- ===== TAB: SETS (key mcp; docs/mcp-servers.md, docs/skills.md) — painted whole by mcp-view.mjs ===== -->
           <section class="settings-pane hidden" data-tab="mcp"></section>
           <!-- /pane mcp -->
 
@@ -2283,6 +2314,8 @@
           <button type="button" id="folderHome" class="btn btn-ghost btn-mini" title="Home folder">Home</button>
           <code id="folderCurrent" class="folder-current"></code>
         </div>
+        <!-- Hosted with the terminal and actions off: the listing stays inside Worca's own folders. -->
+        <div id="folderScope" class="hint folder-scope hidden"></div>
         <ul id="folderList" class="folder-list"></ul>
         <div class="add-project-actions">
           <small id="folderPickCount" class="hint folder-pick-count hidden" aria-live="polite"></small>
@@ -2504,7 +2537,7 @@
         <!-- Sync before run (#527): the base moved on the remote since this run started. -->
         <small class="hint warn" id="shipit-base-warn" hidden></small>
         <!-- Fork support: where the branch is pushed and which repo the PR opens in
-             (GitHub's "compare across forks"). Filled from GET /api/pr/remotes on
+             (GitHub's "compare across forks"; Azure DevOps opens PRs within one repository). Filled from GET /api/pr/remotes on
              open; hidden until the list arrives and stays hidden when it cannot be
              loaded (the server then applies its own defaults). -->
         <div class="shipit-remotes" hidden>
@@ -2522,6 +2555,9 @@
           </div>
           <small class="shipit-remotes-hint hint"></small>
         </div>
+        <!-- Workspace runs: one row per affected member repo (tick box, branch → base,
+             push/base remotes, per-repo status). Built by openShipItWsModal. -->
+        <div id="shipit-repos" class="shipit-repos" hidden></div>
         <!-- The PR description (optional): free-form markdown with Write / Preview tabs,
              or drafted by Generate with AI (POST /api/pr/describe) for the user to edit.
              Reset to empty on every open; empty = the PR body is the title, as before.
@@ -2547,10 +2583,32 @@
           </div>
           <div class="shipit-desc-err hint err" hidden></div>
         </div>
+        <!-- Draft is opt-in per ship (unchecked on every open). No data-min-level: the
+             controls show wherever the modal does (docs/ui-levels.md, History). The
+             "Will close" line names the run's GitHub issue source (GET /api/pr/remotes `issue`). -->
+        <div class="shipit-draft">
+          <label class="check-row" for="shipit-draft-input"><input id="shipit-draft-input" class="shipit-draft-input" type="checkbox" /> Open as draft</label>
+          <small class="shipit-closes hint" hidden></small>
+        </div>
         <div class="shipit-try" hidden data-min-level="advanced" aria-label="Try it first"></div>
         <div class="shipit-actions" data-card-actions>
           <button type="button" class="shipit-cancel btn-ghost">Cancel</button>
           <button type="button" class="shipit-ok">Open pull request</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Publish branch modal (History detail, #618) ===== -->
+    <!-- One row per repo whose branch is here (a workspace run: per member, each with a tick);
+         the push remote is the Ship-it dialog's default (GET /api/pr/remotes). No PR opens. -->
+    <div id="publish-modal" class="viewer-modal hidden" role="dialog" aria-modal="true" aria-label="Publish branch">
+      <div class="card publish-card">
+        <h2>Publish branch</h2>
+        <p class="publish-sub hint">Pushes the branch so it can be pulled and tested.<br>No pull request is opened.</p>
+        <div class="publish-repos"></div>
+        <div class="publish-actions" data-card-actions>
+          <button type="button" class="publish-cancel btn btn-mini">Cancel</button>
+          <button type="button" class="publish-ok btn btn-primary btn-mini">Publish</button>
         </div>
       </div>
     </div>

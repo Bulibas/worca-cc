@@ -52,6 +52,8 @@ import {
 import { SUBAGENT_MODELS } from '../model-env.mjs';
 import { AWAIT_PORT } from '../../shared/graph/constants.mjs';
 import { runScriptExecution } from './script-runner.mjs';
+// Skills registry §4.1: the CLI's refusal of `--plugin-dir` under managed `disableSideloadFlags` (P3's one regex).
+import { SIDELOAD_REFUSAL_RE as SIDELOAD_REFUSED_RE } from '../skills-registry/host.mjs';
 
 /** The reserved synthesized gate input. Scheduler-only: it never reaches `bindings`,
  *  is never listed in the Ports block, selects no mode, and carries no renderer. */
@@ -605,21 +607,43 @@ async function prepare(ctx) {
   return { full, ports, meta, outputs, verdict, role, systemPrompt, prompt, allowedTools, pinIgnoredWarning };
 }
 
+/** Test seam: `runClaude` stands in for the runner on every agent spawn (the sideload safety net's tests). */
+export const _testing = { runClaude: null };
+
 /**
  * Spawn through `runOpts` and capture the session id off the `session` event —
  * `runClaude` resolves `{ text, exitCode }` only. The wrapper forwards every event to
  * the caller's `onEvent` unchanged (runOpts already stamps `role` on it).
+ *
+ * Skills registry safety net (design §4.1, §4.3): a spawn that carried set plugins and exited
+ * non-zero BEFORE its init, naming `--plugin-dir` / sideloading (in its error, or in a plain line it
+ * printed on stdout), met a managed setting Worca could
+ * not read. The run drops its set skills (`onSkillSideloadRefused`) and this agent is dispatched
+ * once more without `--plugin-dir` — every other option (`--agents` included) unchanged, the same
+ * resume session (it was never reached). A second failure is the run's.
  */
 async function spawnAgent(full, { role, prompt, systemPrompt, allowedTools }) {
   const opts = runOpts(full, { role, prompt, systemPrompt, allowedTools });
   let sessionId = null;
+  let sawInit = false;
+  const said = [];   // the CLI's plain (non-JSON) lines: a refusal printed on stdout lands here, not in the error
   const inner = opts.onEvent;
   opts.onEvent = (e) => {
     if (e?.type === 'session' && e.sessionId) sessionId = String(e.sessionId);
+    if (e?.type === 'session' || (e?.type === 'system' && e.raw?.subtype === 'init')) sawInit = true;
+    if (e?.type === 'log' && typeof e.text === 'string' && said.length < 20) said.push(e.text.slice(0, 500));
     if (typeof inner === 'function') inner(e);
   };
-  const { text } = await runClaude(opts);
-  return { text, sessionId };
+  const run = _testing.runClaude || runClaude;
+  try {
+    const { text } = await run(opts);
+    return { text, sessionId };
+  } catch (err) {
+    if (!opts.pluginDirs?.length || sawInit || !SIDELOAD_REFUSED_RE.test([String(err?.message || err), ...said].join('\n'))) throw err;
+    if (typeof full.onSkillSideloadRefused === 'function') full.onSkillSideloadRefused();
+    const { text } = await run({ ...opts, pluginDirs: undefined });
+    return { text, sessionId };
+  }
 }
 
 /**

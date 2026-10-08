@@ -113,8 +113,9 @@ export function renderPluginList(plugins, { doc = globalThis.document, channelSt
       b.type = 'button';
       b.dataset.name = p.name;
       if (cls === 'pl-doctor') b.dataset.minLevel = 'expert';   // diagnostics (docs/ui-levels.md)
-      // The MCP sets this plugin's servers leave on uninstall — the confirm lists them.
+      // The MCP sets this plugin's servers leave on uninstall, and the sets its skills leave — the confirm lists them.
       if (cls === 'pl-remove' && (p.mcpSets || []).length) b.dataset.mcpSets = p.mcpSets.join(', ');
+      if (cls === 'pl-remove' && (p.skillSets || []).length) b.dataset.skillSets = p.skillSets.join(', ');
       actions.appendChild(b);
     }
     card.appendChild(actions);
@@ -284,8 +285,9 @@ export function renderUpdatePreview(preview, { doc = globalThis.document } = {})
     ...(d.newModelSecrets || []).map((k) => ['pl-delta-secret', `NEW MODEL SECRET requested: ${k}`]),
     ...(d.newModels || []).map((m) => ['pl-delta', `new model: ${m}`]),
     ...(d.removedModels || []).map((m) => ['pl-delta', `removed model: ${m}`]),
-    // MCP servers (registry §4.6): lines built server-side, where the sets are known.
+    // MCP servers (registry §4.6) and skills (skills registry §5): lines built server-side, where the sets are known.
     ...(d.mcpLines || []).map((l) => [l.red ? 'pl-delta-secret' : 'pl-delta', l.text]),
+    ...(d.skillLines || []).map((l) => [l.red ? 'pl-delta-secret' : 'pl-delta', l.text]),
   ];
   if (flags.length) {
     const box = h(doc, 'div', 'pl-manifest-delta');

@@ -127,7 +127,7 @@ be skipped by forgetting it.
 | Element | Level |
 |---|---|
 | New pipeline, Getting started, Running, History, Projects, Settings | S |
-| Ask Worca pill, sidebar spend indicator, the mode item | S |
+| Ask Worca button, sidebar spend indicator, the mode item | S |
 | Statistics, Workflow Composer, Workspaces | A |
 | Schedules | A — kept visible at every level while anything is scheduled, missed, repeating or unread |
 | Team metrics, Team policy, Nodes (Agents, Scripts) | E — Nodes is the one entry Simple never keeps: with Agents or Scripts open, the whole group stays hidden and the banner says where you are; Advanced keeps it with the open child |
@@ -144,6 +144,8 @@ be skipped by forgetting it.
 | Target switch, task source (Markdown), source and feature branch | A |
 | Advanced disclosure: guardrails, human in the loop, per-agent model and effort | A |
 | Per-agent fan-out, sub-agent model, questions; feedback-loop max cycles; "Save as workflow defaults"; memory scope | E |
+
+The **Auto** workflow option is available for both targets — a project and a workspace.
 
 ### Running
 
@@ -177,6 +179,7 @@ be skipped by forgetting it.
 | "Files changed" list on the Overview | S — the stand-in for the Diff tab |
 | Diff tab, diff pill, inline comments; Create PR / View PR; branch line; ⋯ menu (Archive, Restore, Report); Artifacts tab; Archived toggle in the Runs header (with Restore) | A |
 | Actions tab, Overview actions strip, Ship It 'Try it first' strip | A |
+| Ship It modal: Open as draft checkbox, "Will close owner/repo#N" line | A — ungated inside the modal (no `data-min-level`), so they show wherever the modal opens |
 | Running-action pill in the header, sidebar Running actions card | all — shown only while a service runs |
 | Mergeability pill; Logs tab; Agents tab; team-metrics status; MEMORY CHANGES; worktree row | E |
 
@@ -221,7 +224,7 @@ Everything on the page: the list, the runtime step, the workspace and the bench 
 
 | Element | Level |
 |---|---|
-| General: Appearance, Interface mode, Getting started, About | S |
+| General: Appearance, Alerts, Interface mode, Getting started, About | S |
 | Runs tab: Budget & cost limits | S |
 | General: root folders; Runs tab: Scheduled runs defaults, Workspaces (scan models), chat notifications; Ask Worca tab (limits, tools, web access, chat history) | A |
 | Runs tab: Actions (keep policy, port range, editor/terminal, cap) | A |

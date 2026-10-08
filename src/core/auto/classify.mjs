@@ -12,7 +12,7 @@ import { bridgeCostFor, forgetBridgeTag } from '../bridge/telemetry.mjs';
 import { safeParseJson } from '../protocol.mjs';
 import { classifyError } from '../recoverable-error.mjs';
 import { normalizeShape, ShapeError, cleanText, SHAPE_LIMITS } from '../../shared/graph/assemble.mjs';
-import { RECIPE_GUIDE, mockShapeFor } from './recipes.mjs';
+import { RECIPE_GUIDE, WORKSPACE_GUIDE, mockShapeFor } from './recipes.mjs';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { worcaHome } from '../projects.mjs';
@@ -159,7 +159,21 @@ export function shapeForPrompt(shape) {
   return { ...shape, stages: (Array.isArray(shape.stages) ? shape.stages : []).map((u) => (isObject(u) && Array.isArray(u.parallel) ? { ...u, parallel: u.parallel.map(flatStage) } : flatStage(u))) };
 }
 
-export function buildClassifierSystemPrompt({ agents = [], models = [], humanInLoop = true, repoLook = false, requireModel = false, repoRoot = null } = {}) {
+/** The workspace section: the members, which of them have a readable checkout (repo look only), and the guide. */
+function workspaceSection(workspace, repoLook) {
+  const members = Array.isArray(workspace?.members) ? workspace.members : [];
+  const lines = ['', '## Workspace',
+    `The task targets the workspace "${cleanText(workspace.name, 80) || 'workspace'}" — ${members.length} repositories: ${members.map((m) => `${cleanText(m.projectName, 60) || m.projectKey} (${m.projectKey})`).join(', ')}. The fingerprint has one block per repository.`];
+  if (repoLook) {
+    const seen = members.filter((m) => m.checkout);
+    const unseen = members.filter((m) => !m.checkout);
+    if (seen.length) lines.push(`Readable checkouts: ${seen.map((m) => `${m.projectKey} at ${m.checkout}`).join('; ')}.${unseen.length ? ` No checkout for ${unseen.map((m) => m.projectKey).join(', ')} — size those from the fingerprint.` : ''}`);
+  }
+  lines.push('', WORKSPACE_GUIDE);
+  return lines;
+}
+
+export function buildClassifierSystemPrompt({ agents = [], models = [], humanInLoop = true, repoLook = false, requireModel = false, repoRoot = null, workspace = null } = {}) {
   const modelLines = models.filter((m) => m && !m.hidden).map((m) => `- ${m.id}${m.label && m.label !== m.id ? ` (${m.label})` : ''}: efforts ${(m.efforts || []).join('/')}`);
   return [
     'You design a worca workflow for ONE software task. Reply with exactly one fenced ```json block containing a shape object and nothing else.',
@@ -185,9 +199,10 @@ export function buildClassifierSystemPrompt({ agents = [], models = [], humanInL
       '',
       '## Repository',
       repoRoot
-        ? `${repoRoot} is a read-only checkout of the repository the task targets. Before you decide, you may use the read_file, grep and glob tools (absolute paths under that folder) — at most ${REPO_LOOK_MAX_TOOL_CALLS} tool calls in total — to see how many files and subsystems the change touches and how well the task text maps onto the code. Look only to SIZE the work, never to design it; then reply with the shape.`
-        : `Your working directory is a read-only checkout of the repository the task targets. Before you decide, you may use Read, Grep and Glob — at most ${REPO_LOOK_MAX_TOOL_CALLS} tool calls in total — to see how many files and subsystems the change touches and how well the task text maps onto the code. Look only to SIZE the work, never to design it; then reply with the shape.`,
+        ? `${repoRoot} ${workspace ? 'holds read-only checkouts of the repositories listed under Workspace' : 'is a read-only checkout of the repository the task targets'}. Before you decide, you may use the read_file, grep and glob tools (absolute paths under that folder) — at most ${REPO_LOOK_MAX_TOOL_CALLS} tool calls in total — to see how many files and subsystems the change touches and how well the task text maps onto the code. Look only to SIZE the work, never to design it; then reply with the shape.`
+        : `${workspace ? 'Your working directory holds read-only checkouts of the repositories listed under Workspace' : 'Your working directory is a read-only checkout of the repository the task targets'}. Before you decide, you may use Read, Grep and Glob — at most ${REPO_LOOK_MAX_TOOL_CALLS} tool calls in total — to see how many files and subsystems the change touches and how well the task text maps onto the code. Look only to SIZE the work, never to design it; then reply with the shape.`,
     ] : []),
+    ...(workspace ? workspaceSection(workspace, repoLook) : []),
     '',
     RECIPE_GUIDE,
     '',
@@ -269,6 +284,7 @@ export async function classifyTask(input, deps = {}) {
   const {
     taskText = '', extras = [], fingerprint = '', models = [], humanInLoop = true, feedback = [], priorShape = null, registry = {}, domain = null, requireModel = false,
     model, modelEnv, engine, cwd = process.cwd(), bin, mock = false, signal, envScrub, envAllowlist, maxAttempts = 2, repoLook: lookAsked = false, timeoutMs, bridgeTag = null,
+    workspace = null, addDirs = [],
   } = input || {};
   // The repo look is Claude's Read/Grep/Glob. On codex the classifier is a read-only spawn with its shell off
   // (codex.mjs CODEX_SHELL_OFF): it looks through worca's own read_file/grep/glob over the checkout instead
@@ -284,7 +300,7 @@ export async function classifyTask(input, deps = {}) {
   }
   const known = new Set(agents.map((a) => a.key));
   const onClaude = !engine || engine === 'claude';
-  const systemPrompt = buildClassifierSystemPrompt({ agents, models, humanInLoop, repoLook, requireModel, repoRoot: repoLook && !onClaude ? cwd : null });
+  const systemPrompt = buildClassifierSystemPrompt({ agents, models, humanInLoop, repoLook, requireModel, repoRoot: repoLook && !onClaude ? cwd : null, workspace });
   const nudge = repoLook ? ' Do not spend more tool calls: reply with the shape now.' : '';
   let fb = [...feedback];
   let prior = priorShape;
@@ -293,7 +309,7 @@ export async function classifyTask(input, deps = {}) {
   // D8/D11: the classifier runs on the run's engine. Another engine gets no Claude routing env, a read-only
   // sandbox, and the repo look's file tools with its tool calls capped by the adapter (codex.mjs maxTurns).
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const mcpConfigPath = repoLook && !onClaude ? writeFilesMcpConfig({ dir: join(worcaHome(), 'tmp', 'classifier'), roots: [cwd], name: 'classifier' }) : null;
+    const mcpConfigPath = repoLook && !onClaude ? writeFilesMcpConfig({ dir: join(worcaHome(), 'tmp', 'classifier'), roots: [cwd, ...addDirs], name: 'classifier' }) : null;
     const prompt = buildClassifierUserPrompt({ taskText, extras, fingerprint, feedback: fb, priorShape: prior });
     const ctrl = new AbortController();
     let timedOut = false;
@@ -316,6 +332,8 @@ export async function classifyTask(input, deps = {}) {
         // by --max-turns (the prompt budget is smaller, so a normal reply lands first).
         allowedTools: repoLook ? [...REPO_LOOK_TOOLS] : [], tools: repoLook ? [...REPO_LOOK_TOOLS] : [],
         ...(repoLook ? { maxTurns: REPO_LOOK_MAX_TURNS } : {}),
+        // Legacy-mode workspace: the non-primary worktrees (on another engine they are file-tool roots above, never writable dirs).
+        ...(repoLook && onClaude && addDirs.length ? { addDirs: [...addDirs] } : {}),
         signal: ctrl.signal, bin, mock, envScrub, envAllowlist,
         onEvent: normalizingOnEvent((e) => {
           // ONLY the terminal `result` event is booked: its `usage` is the whole call

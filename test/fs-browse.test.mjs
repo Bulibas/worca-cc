@@ -1,7 +1,7 @@
 // test/fs-browse.test.mjs
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, symlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, parse } from 'node:path';
 import { listFolders } from '../src/core/fs-browse.mjs';
@@ -95,4 +95,102 @@ test('parent is null at the filesystem root', async () => {
 test('nonexistent and non-directory paths throw BAD_REQUEST', async () => {
   await assert.rejects(() => listFolders(join(root, 'nope')), (e) => e.code === 'BAD_REQUEST');
   await assert.rejects(() => listFolders(join(root, 'file.txt')), (e) => e.code === 'BAD_REQUEST');
+});
+
+// Limited listing (a hosted Worca with the terminal and actions off; src/core/fs-scope.mjs):
+// roots are real paths, and every path is checked after symlinks and `..` are resolved.
+test('limited listing stays inside the allowed roots', async () => {
+  const { realRoots } = await import('../src/core/fs-scope.mjs');
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'worca-cc-fsscope-')));
+  try {
+    const projects = join(base, 'projects');
+    const data = join(base, 'data');
+    const outside = join(base, 'outside');
+    await mkdir(join(projects, 'app'), { recursive: true });
+    await mkdir(join(data, 'worca'), { recursive: true });
+    await mkdir(join(outside, 'secret'), { recursive: true });
+    let linked = false;
+    try { await symlink(outside, join(projects, 'escape'), 'dir'); linked = true; } catch { /* no symlink perms */ }
+    const roots = await realRoots([projects, data, join(projects, 'app'), join(base, 'missing')]);
+    const outsideErr = (e) => e.code === 'FS_OUTSIDE_ALLOWED' && /WORCA_TERMINAL_REMOTE=1/.test(e.message);
+    await withProjectsRoot(projects, () => checkRows([
+      { name: 'roots: real, existing, nested ones folded into their parent', run: () => {
+        assert.deepEqual(roots, [projects, data]);
+      } },
+      { name: 'blank input opens the projects root, flagged limited with its roots', run: async () => {
+        const out = await listFolders('', { roots });
+        assert.equal(out.path, projects);
+        assert.equal(out.home, projects);
+        assert.equal(out.limited, true);
+        assert.deepEqual(out.roots, roots);
+        assert.equal(out.parent, null, 'Up stops at a root');
+      } },
+      { name: 'a folder inside a root lists, with its parent', run: async () => {
+        const out = await listFolders(join(projects, 'app'), { roots });
+        assert.equal(out.path, join(projects, 'app'));
+        assert.equal(out.parent, projects);
+        assert.deepEqual((await listFolders(data, { roots })).dirs.map((d) => d.name), ['worca']);
+      } },
+      { name: 'a folder outside every root is refused', run: async () => {
+        await assert.rejects(() => listFolders(outside, { roots }), outsideErr);
+        await assert.rejects(() => listFolders(base, { roots }), outsideErr);
+        await assert.rejects(() => listFolders('/', { roots }), outsideErr);
+      } },
+      { name: 'a `..` escape is refused', run: async () => {
+        await assert.rejects(() => listFolders(join(projects, '..', 'outside'), { roots }), outsideErr);
+        await assert.rejects(() => listFolders(`${projects}/app/../../outside/secret`, { roots }), outsideErr);
+      } },
+      { name: 'a missing path outside answers outside (no existence leak); a missing path inside answers BAD_REQUEST', run: async () => {
+        await assert.rejects(() => listFolders(join(outside, 'nope'), { roots }), outsideErr);
+        await assert.rejects(() => listFolders(join(projects, 'nope'), { roots }), (e) => e.code === 'BAD_REQUEST');
+      } },
+      { name: 'a symlink out of a root is refused and not listed', run: async () => {
+        if (!linked) return;
+        await assert.rejects(() => listFolders(join(projects, 'escape'), { roots }), outsideErr);
+        await assert.rejects(() => listFolders(join(projects, 'escape', 'secret'), { roots }), outsideErr);
+        assert.ok(!(await listFolders(projects, { roots })).dirs.some((d) => d.name === 'escape'));
+        assert.ok((await listFolders(projects)).dirs.some((d) => d.name === 'escape'), 'unlimited listing still shows it');
+      } },
+    ]));
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('limited roots: the filesystem root and one-segment folders are never roots; hidden folders count as outside', async () => {
+  const { realRoots, checkInside, isBroadRoot } = await import('../src/core/fs-scope.mjs');
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'worca-cc-fsscope2-')));
+  try {
+    const projects = join(base, 'projects');
+    const home = join(base, 'worca', '.worca-cc');
+    await mkdir(join(projects, 'app', '.git'), { recursive: true });
+    await mkdir(join(projects, '.secret', 'inner'), { recursive: true });
+    await mkdir(join(home, 'store'), { recursive: true });
+    const fsRoot = parse(base).root;
+    const oneSeg = join(fsRoot, base.slice(fsRoot.length).split(/[\\/]/)[0]);
+    const skipped = [];
+    const roots = await realRoots([fsRoot, oneSeg, projects, home], { onSkip: (c) => skipped.push(c) });
+    const outsideErr = (e) => e.code === 'FS_OUTSIDE_ALLOWED';
+    await withProjectsRoot(projects, () => checkRows([
+      { name: 'broad candidates are skipped and reported', run: () => {
+        assert.deepEqual(roots, [projects, home]);
+        assert.deepEqual(skipped, [fsRoot, oneSeg]);
+        for (const p of ['/', '/home', '/usr', '/root', 'C:\\', 'C:\\Users']) assert.equal(isBroadRoot(p), true, p);
+        for (const p of ['/home/worca', '/data/projects', 'C:\\Users\\me']) assert.equal(isBroadRoot(p), false, p);
+      } },
+      { name: 'a hidden folder below a root is outside (existing or not)', run: async () => {
+        assert.equal((await checkInside(join(projects, '.secret'), roots)).inside, false);
+        assert.equal((await checkInside(join(projects, '.secret', 'inner'), roots)).inside, false);
+        assert.equal((await checkInside(join(projects, 'app', '.git'), roots)).inside, false);
+        assert.equal((await checkInside(join(projects, 'app', '.ssh-missing'), roots)).inside, false);
+        await assert.rejects(() => listFolders(join(projects, '.secret'), { roots }), outsideErr);
+      } },
+      { name: 'a root whose own name is hidden (the Worca home .worca-cc) still lists', run: async () => {
+        assert.equal((await checkInside(join(home, 'store'), roots)).inside, true);
+        assert.deepEqual((await listFolders(home, { roots })).dirs.map((d) => d.name), ['store']);
+      } },
+    ]));
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });

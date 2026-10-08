@@ -18,6 +18,7 @@ case "$1" in
   --help)
     echo "Usage: claude [options] [command] [prompt]   [worca test guard]"
     echo "  --mcp-config <configs...>  Load MCP servers from JSON files or strings"
+    echo "  --plugin-dir <path>        Load a plugin from a directory for this session only"
     exit 0 ;;
   auth)
     if [ "$2" = "status" ]; then echo '{"loggedIn": true, "authMethod": "worca-test-guard"}'; exit 0; fi ;;

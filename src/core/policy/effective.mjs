@@ -72,6 +72,7 @@ export function fmtValue(meta, v) {
     case 'string[]': return v.length ? v.join(', ') : '(none)';
     case 'plugins': return v.length ? v.map((p) => `${p.name}${p.minVersion ? ` ≥ ${p.minVersion}` : ''}`).join(', ') : '(none)';
     case 'mcpServers': return v.length ? v.map(mcpLine).join(', ') : '(none)';
+    case 'skills': return v.length ? v.map((e) => `${e.skill} (${e.plugin})`).join(', ') : '(none)';
     case 'steps': return Object.entries(v).map(([r, s]) => `${r} ${s.model || '·'}${s.effort ? ` / ${s.effort}` : ''}`).join(' · ') || '(none)';
     case 'criteria': return Object.entries(v).map(([k, w]) => `${k} ${w}`).join(' · ') || '(defaults)';
     default: return String(v);
@@ -109,7 +110,7 @@ export function effectiveRows({ doc = null, workspaceRun = false, local = {} } =
       // An expectation: the run proceeds either way, deviations warn and are recorded.
       effective = { value: t.value, display: fmtValue(meta, t.value), source: 'team' };
       if (meta.key === 'metrics.record' && l && l.set && l.value === false && t.value === true) note = 'your "Include my runs" is off; the team expects recording';
-      if (meta.key === 'mcp.required' && l && t.value.length > l.value.length) note = `${t.value.length - l.value.length} missing`;
+      if ((meta.key === 'mcp.required' || meta.key === 'skills.required') && l && t.value.length > l.value.length) note = `${t.value.length - l.value.length} missing`;
     } else {
       const r = effectiveDefault({ local: l, team: t });
       effective = { value: r.value, display: fmtValue(meta, r.value), source: r.source };
@@ -203,6 +204,30 @@ export function mcpDeviations(fields, resolved, describe = (s) => s.reason) {
     else if (skip.reason === 'off' || skip.reason === 'needs-consent') d('mcp-off', `Required MCP server ${label} is off.`);
     else if (skip.reason === 'opted-out') d('mcp-opted-out', `Required MCP server ${label} is opted out of this run.`);
     else d('mcp-skipped', `Required MCP server ${label} is skipped in this run (${describe(skip)}).`);
+  }
+  return out;
+}
+
+/**
+ * Skills registry off-policy findings (spec §2b-13, §5): one per `skills.required` entry that does not mount from the
+ * Team set in `resolved` (resolveSkillSets' result for the run's target: `mounted[].id`, `skipped[].skillId`).
+ * `describe(skip)` words a problem skip (the caller passes skillSkipReasonText). Pure; never blocking.
+ * @returns {Array<{code:string, level:'warn', text:string}>}
+ */
+export function skillDeviations(fields, resolved, describe = (s) => s.reason) {
+  const required = Array.isArray(fields?.['skills.required']?.value) ? fields['skills.required'].value : [];
+  const team = (resolved?.sets || []).find((s) => s.group === 'team');
+  const out = [];
+  for (const e of required) {
+    const label = `${e.plugin}/${e.skill}`;
+    const id = `skill:plugin:${label}`;
+    if ((resolved?.mounted || []).some((m) => !!team && m.setId === team.id && m.id === id)) continue;
+    const skip = (resolved?.skipped || []).find((m) => !!team && m.setId === team.id && m.skillId === id);
+    const d = (code, text) => out.push({ code: `${code}:${label}`, level: 'warn', text });
+    if (!skip || skip.reason === 'missing-skill') d('skill-missing', `Required skill ${label} is not installed.`);
+    else if (skip.reason === 'off' || skip.reason === 'needs-consent') d('skill-off', `Required skill ${label} is off.`);
+    else if (skip.reason === 'opted-out') d('skill-opted-out', `Required skill ${label} is opted out of this run.`);
+    else d('skill-skipped', `Required skill ${label} is skipped in this run (${describe(skip)}).`);
   }
   return out;
 }

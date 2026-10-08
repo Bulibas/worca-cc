@@ -6,11 +6,25 @@ import { titleModel as storedTitleModel } from './settings.mjs';
 import { AUX_EFFORT } from './model-env.mjs';
 import { withRecoveryRetry } from './recovery-backoff.mjs';
 import { bridgeCostFor, forgetBridgeTag } from './bridge/telemetry.mjs';
+import { findBridgedEntry, providerReadiness } from './bridge/registry.mjs';
 
 // The last-resort title model: the BUILT-IN Haiku id (config.mjs PREDEFINED_MODELS),
 // not the dated API id it used to be — a global entry that shadows the built-in
 // (to route it) must match, or its routing env would never reach a title call.
+// Used only while it is a catalog member and ready; otherwise a title passes NO
+// model and the claude CLI picks its own default.
 export const DEFAULT_TITLE_MODEL = 'claude-haiku-4-5';
+const CLI_DEFAULT_LABEL = 'the CLI default model';
+
+// Whether a catalog id can be spawned right now — the Models list's ready/needs-sign-in
+// state (config.mjs composeCatalog): a bridged entry needs its provider signed in, an
+// unbridged one (the unshadowed built-in) is always ready. Never throws.
+function modelReady(id) {
+  try {
+    const bridged = findBridgedEntry(id);
+    return !bridged || providerReadiness(bridged.upstream).ok;
+  } catch { return false; }
+}
 const MAX_LEN = 70;
 
 /**
@@ -24,14 +38,16 @@ const MAX_LEN = 70;
  *   4. `opts.runModel`         — the model of the run / chat that asked for the title,
  *                                which is what makes an install with NO first-party
  *                                model produce titles with zero configuration
- *   5. DEFAULT_TITLE_MODEL     — the built-in Haiku
+ *   5. DEFAULT_TITLE_MODEL     — the built-in Haiku, only while it is a catalog member
+ *                                and ready; otherwise model null: NO --model flag, the
+ *                                claude CLI's own default (a title never hinges on Haiku)
  * Pure apart from the injectable readers. Exported for tests and for the
  * settings API (describeTitleModel below).
  * @param {{model?:string, runModel?:string}} [opts]
- * @param {{env?:NodeJS.ProcessEnv, stored?:()=>string|null, inCatalog?:(id:string)=>boolean}} [deps]
- * @returns {{model:string, source:'explicit'|'env'|'settings'|'run'|'builtin', stale:string|null}}
+ * @param {{env?:NodeJS.ProcessEnv, stored?:()=>string|null, inCatalog?:(id:string)=>boolean, ready?:(id:string)=>boolean}} [deps]
+ * @returns {{model:string|null, source:'explicit'|'env'|'settings'|'run'|'builtin', stale:string|null}}
  */
-export function resolveTitleModel(opts = {}, { env = process.env, stored = storedTitleModel, inCatalog = (id) => catalogHasModel(id, { engine: 'claude' }) } = {}) {
+export function resolveTitleModel(opts = {}, { env = process.env, stored = storedTitleModel, inCatalog = (id) => catalogHasModel(id, { engine: 'claude' }), ready = modelReady } = {}) {
   const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : '');
   const explicit = str(opts.model);
   if (explicit) return { model: explicit, source: 'explicit', stale: null };
@@ -45,7 +61,8 @@ export function resolveTitleModel(opts = {}, { env = process.env, stored = store
   }
   const runModel = str(opts.runModel);
   if (runModel) return { model: runModel, source: 'run', stale };
-  return { model: DEFAULT_TITLE_MODEL, source: 'builtin', stale };
+  const builtin = inCatalog(DEFAULT_TITLE_MODEL) && ready(DEFAULT_TITLE_MODEL) ? DEFAULT_TITLE_MODEL : null;
+  return { model: builtin, source: 'builtin', stale };
 }
 
 /**
@@ -114,25 +131,51 @@ export function isRefusalTitle(t) {
  * `permissionMode` (default 'acceptEdits') exists for Ask Worca: its title call
  * passes 'dontAsk' so the mock dispatcher can never reach a file-writing role.
  * `runModel` is the model of the run/chat asking (resolveTitleModel step 4).
+ * When the call fails on the BUILT-IN Haiku fallback (an account or provider that
+ * does not serve it), it is retried ONCE with no model — the CLI's own default.
+ * A model someone chose (explicit, env, settings, run) is never second-guessed.
  * `onError` fires ONCE when the call yields no usable title for any reason but
  * an abort (a spawn failure, a refusal, an empty reply) — the caller logs it on
- * its own channel; the return value stays '' so every existing caller is unchanged.
+ * its own channel; `model` is the last attempt's id, null for the CLI default.
+ * The return value stays '' so every existing caller is unchanged.
+ * `deps` reaches resolveTitleModel (tests).
  * @param {string} prompt
- * @param {{cwd:string, signal?:AbortSignal, model?:string, runModel?:string, storedTitle?:string, effort?:string, onError?:(info:{model:string, error:Error})=>void, bin?:string, mock?:boolean, envScrub?:boolean, envAllowlist?:string[], tools?:string[], strictMcpConfig?:boolean, settingSources?:string[], disableSlashCommands?:boolean, mcpConfigPath?:string, permissionMode?:string, onCost?:(c:{costUsd:number, usage:object|null, model:string})=>void, run?:Function, bridgeTag?:string}} opts
+ * @param {{cwd:string, signal?:AbortSignal, model?:string, runModel?:string, storedTitle?:string, effort?:string, onError?:(info:{model:string|null, error:Error})=>void, bin?:string, mock?:boolean, envScrub?:boolean, envAllowlist?:string[], tools?:string[], strictMcpConfig?:boolean, settingSources?:string[], disableSlashCommands?:boolean, mcpConfigPath?:string, permissionMode?:string, onCost?:(c:{costUsd:number, usage:object|null, model:string|null})=>void, run?:Function, bridgeTag?:string}} opts
+ * @param {Parameters<typeof resolveTitleModel>[1]} [deps]
  * @returns {Promise<string>}
  */
-export async function generateTitle(prompt, opts = {}) {
+export async function generateTitle(prompt, opts = {}, deps) {
   const text = String(prompt || '').trim();
   if (!text) return '';
   const engine = typeof opts.engine === 'string' && opts.engine && opts.engine !== 'claude' ? opts.engine : null;
-  const { model, stale } = engine
-    ? { model: (typeof opts.model === 'string' && opts.model.trim()) || undefined, stale: null }
-    : resolveTitleModel(opts, typeof opts.storedTitle === 'string' && opts.storedTitle.trim() ? { stored: () => opts.storedTitle.trim() } : undefined);
-  if (stale) console.warn(`[worca] titleModel ${JSON.stringify(stale)} is no longer in the catalog — titles use ${model}`);
-  const report = (error) => {
+  const storedTitle = typeof opts.storedTitle === 'string' && opts.storedTitle.trim() ? opts.storedTitle.trim() : null;
+  // Another engine titles on the model it was handed, or its own default — never the Claude catalog, never retried.
+  const { model, source, stale } = engine
+    ? { model: (typeof opts.model === 'string' && opts.model.trim()) || null, source: 'explicit', stale: null }
+    : resolveTitleModel(opts, storedTitle ? { ...deps, stored: () => storedTitle } : deps);
+  if (stale) console.warn(`[worca] titleModel ${JSON.stringify(stale)} is no longer in the catalog — titles use ${model || CLI_DEFAULT_LABEL}`);
+  const report = (m, error) => {
     if (typeof opts.onError !== 'function') return;
-    try { opts.onError({ model: model || `${engine}'s default model`, error }); } catch { /* a logging sink must never fail the caller */ }
+    try { opts.onError({ model: m || (engine ? `${engine}'s default model` : null), error }); } catch { /* a logging sink must never fail the caller */ }
   };
+  let tried = model;
+  let r = await titleAttempt(text, model || undefined, opts, engine);
+  if (r.thrown && source === 'builtin' && model && !opts.signal?.aborted) {
+    tried = null;
+    r = await titleAttempt(text, undefined, opts, engine);
+  }
+  if (r.aborted) return '';
+  if (r.error) report(tried, r.error);
+  return r.title || '';
+}
+
+/**
+ * One title spawn on `model` (undefined → no --model flag). Resolves `{title}`
+ * on a usable title, `{aborted:true}` on a stop, `{error}` on an empty reply or
+ * a refusal, and `{error, thrown:true}` when the call itself failed. Never
+ * throws; every priced result is booked through opts.onCost as `model`. `engine`: null for Claude.
+ */
+async function titleAttempt(text, model, opts, engine = null) {
   try {
     // A provider 429 (a shared free pool) is retried with the recovery backoff;
     // nothing else is — a title is cosmetic, and an unspawnable CLI (stamped
@@ -178,22 +221,22 @@ export async function generateTitle(prompt, opts = {}) {
         const up = opts.bridgeTag ? bridgeCostFor(opts.bridgeTag) : null;   // a bridged model: the upstream's own figure wins
         if (up) forgetBridgeTag(opts.bridgeTag);
         const c = up ? up.costUsd : resolveModelCost(model, Number(e.costUsd), usage);
-        try { opts.onCost({ costUsd: Number.isFinite(c) ? c : Number(e.costUsd), usage, model }); } catch { /* a sink never fails the title */ }
+        try { opts.onCost({ costUsd: Number.isFinite(c) ? c : Number(e.costUsd), usage, model: model || null }); } catch { /* a sink never fails the title */ }
       }),
     }), { classes: ['rate_limit'], signal: opts.signal });
     const title = sanitizeTitle(out);
-    if (!title) { report(new Error('the model returned an empty reply')); return ''; }
-    if (isRefusalTitle(title)) { report(new Error(`the model did not write a title: ${title.slice(0, 120)}`)); return ''; }
-    return title;
+    // An empty reply or a refusal is the model answering, not the model missing: not `thrown`, never retried.
+    if (!title) return { error: new Error('the model returned an empty reply') };
+    if (isRefusalTitle(title)) return { error: new Error(`the model did not write a title: ${title.slice(0, 120)}`) };
+    return { title };
   } catch (err) {
     // A bridged title call cut before its `result` (a stop) was still billed by its upstream: book that figure.
     const up = opts.bridgeTag ? bridgeCostFor(opts.bridgeTag) : null;
     if (up && typeof opts.onCost === 'function') {
       forgetBridgeTag(opts.bridgeTag);
-      try { opts.onCost({ costUsd: up.costUsd, usage: null, model }); } catch { /* a sink never fails the title */ }
+      try { opts.onCost({ costUsd: up.costUsd, usage: null, model: model || null }); } catch { /* a sink never fails the title */ }
     }
-    if (err && err.name === 'AbortError') return ''; // run was stopped — caller keeps provisional
-    report(err instanceof Error ? err : new Error(String(err)));
-    return '';
+    if (err && err.name === 'AbortError') return { aborted: true }; // run was stopped — caller keeps provisional
+    return { error: err instanceof Error ? err : new Error(String(err)), thrown: true };
   }
 }

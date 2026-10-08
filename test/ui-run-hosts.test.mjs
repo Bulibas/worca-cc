@@ -235,7 +235,7 @@ test('applyDecor band order is fan → strip → exec → result with one pip/re
 // ── the host adapters ─────────────────────────────────────────────────────────
 import { mountRunGraph, STATIC_HOST_H, HINT_TEXT } from '../ui/public/graph/run-hosts.mjs';
 
-function mountHost(mode, w = 800) {
+function mountHost(mode, w = 800, extra = {}) {
   const dom = trackDom(new JSDOM('<!doctype html><div class="run-flow-wrap"><div class="run-flow"></div></div>'));
   const { window } = dom;
   const wrap = window.document.querySelector('.run-flow-wrap');
@@ -245,7 +245,7 @@ function mountHost(mode, w = 800) {
     viewport: () => ({ left: 0, top: 0, width: w, height: mode === 'static' ? STATIC_HOST_H : 520 }),
     onRowClick: (...a) => calls.push(['row', ...a]),
     onGateClick: (...a) => calls.push(['gate', ...a]),
-    onResultClick: (...a) => calls.push(['result', ...a]) });
+    onResultClick: (...a) => calls.push(['result', ...a]), ...extra });
   return { window, wrap, host, m };
 }
 let calls = [];
@@ -351,6 +351,52 @@ test('the footer accordion opens ONE node; row / gate / result clicks report out
   assert.equal(host.querySelectorAll('.xrow').length, 1, 'open again');
   m.update('run2', MANIFEST, decorFromState(st));
   assert.equal(host.querySelectorAll('.xrow').length, 0, 'a different run collapses an OPEN accordion');
+});
+
+test('nodeClicks: a card that has run opens its running (else latest) execution; a never-run card, the footer and a pan stay inert', () => {
+  calls = [];
+  const { m, host, window } = mountHost('monitor', 800, { nodeClicks: true });
+  const click = (el) => el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const st = RUN({
+    steps: [
+      { key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'done', activeMs: 1000, costUsd: 0.1 },
+      { key: 'x:n_a:2', executionId: 'x:n_a:2', nodeId: 'n_a', ordinal: 2, status: 'start', activeMs: 500, costUsd: 0 },
+    ],
+    active: [{ nodeId: 'n_a', executionId: 'x:n_a:2' }],
+  });
+  m.update('run1', MANIFEST, decorFromState(st));
+  const card = host.querySelector('.node[data-node-id="n_a"]');
+  const end = host.querySelector('.node[data-node-id="n_end"]');
+  assert.equal(card.getAttribute('role'), 'link');
+  assert.equal(card.tabIndex, 0);
+  assert.equal(card.getAttribute('aria-label'), 'Show the live log of Planner');
+  assert.equal(end.getAttribute('role'), null, 'a card that never ran has no log to open');
+  click(card.querySelector('.nhead .tt'));
+  assert.deepEqual(calls, [['row', 'x:n_a:2', 'n_a']], 'the RUNNING execution, not the first');
+  click(end);
+  click(card.querySelector('.xtoggle'));
+  assert.equal(calls.length, 1, 'End and the strip toggle are not log links');
+  const key = new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+  card.dispatchEvent(key);
+  assert.equal(key.defaultPrevented, true);
+  assert.deepEqual(calls[1], ['row', 'x:n_a:2', 'n_a']);
+  // Settled: the latest execution.
+  m.update('run1', MANIFEST, decorFromState(RUN({ status: 'done', steps: st.steps.map((s) => ({ ...s, status: 'done' })) })));
+  click(card);
+  assert.deepEqual(calls[2], ['row', 'x:n_a:2', 'n_a']);
+});
+
+test('nodeClicks is opt-in and monitor-only: History (no flag) and static hosts leave cards untouched', () => {
+  const st = RUN({ steps: [{ key: 'x:n_a:1', executionId: 'x:n_a:1', nodeId: 'n_a', ordinal: 1, status: 'done', activeMs: 1000, costUsd: 0.1 }] });
+  for (const [mode, extra] of [['monitor', {}], ['static', { nodeClicks: true }]]) {
+    calls = [];
+    const { m, host, window } = mountHost(mode, 800, extra);
+    m.update('run1', MANIFEST, decorFromState(st));
+    const card = host.querySelector('.node[data-node-id="n_a"]');
+    assert.equal(card.getAttribute('role'), null, `${mode}: no link role`);
+    card.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    assert.deepEqual(calls, [], `${mode}: a card click reports nothing`);
+  }
 });
 
 test('update() re-renders only on a structural change and re-applies the decor only for a NEW bag', () => {

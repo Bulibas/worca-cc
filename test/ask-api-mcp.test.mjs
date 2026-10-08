@@ -65,7 +65,7 @@ test('POST /api/ask/mcp-preview validates every field before resolving', async (
 
 test('the preview equals the turn\'s resolution: General\'s copy in both, the prompt section present, no secret or env in the preview', async () => {
   const p = await (await preview({})).json();
-  assert.deepEqual(Object.keys(p).sort(), ['copies', 'newer', 'sets', 'skipped', 'skippedTools', 'started'], 'P4\'s preview fields, minus message/deviations');
+  assert.deepEqual(Object.keys(p).sort(), ['copies', 'newer', 'sets', 'skills', 'skipped', 'skippedTools', 'started'], 'P4\'s preview fields, minus message/deviations, plus the skills block (skills registry §4.4)');
   assert.equal(p.newer, false);
   assert.deepEqual(p.skippedTools, []);
   assert.deepEqual(p.copies.map((c) => c.name), ['docs']);

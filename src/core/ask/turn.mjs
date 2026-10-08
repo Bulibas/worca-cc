@@ -13,7 +13,7 @@
 // hardened options + permissionMode 'dontAsk', no signal).
 import { EventEmitter } from 'node:events';
 import { join, dirname, resolve as pathResolve } from 'node:path';
-import { mkdir, writeFile, unlink } from 'node:fs/promises';
+import { mkdir, writeFile, unlink, rm, readdir, lstat } from 'node:fs/promises';
 
 import { runClaude } from '../claude-runner.mjs';
 import { CLAUDE_SIGNED_OUT_CODE } from '../preflight.mjs';
@@ -28,6 +28,9 @@ import { redactAskText } from './redact.mjs';
 import { createTurnReducer } from './events.mjs';
 import { buildAskSpawnOptions, buildMcpConfig, ASK_MCP_SERVER_PATH } from './spawn.mjs';
 import { refreshAskMemoryMount } from './memory-deps.mjs';
+import { materializeSkillMount } from '../skills-registry/mount.mjs';
+import { SIDELOAD_REFUSAL_RE as SIDELOAD_REFUSED_RE } from '../skills-registry/host.mjs';
+import { renderSkillsSection } from './prompt.mjs';
 import { validateProposal } from './proposal.mjs';
 import { validateMetricsChange } from './metrics-deps.mjs';
 import { validateAwayChange } from './away-deps.mjs';
@@ -50,7 +53,7 @@ import { codexMemoryLine } from './prompt.mjs';
 import { resolveSetting } from '../settings-cascade.mjs';
 import { mentionedRefs } from './contexts.mjs';
 import {
-  newAskId, finishMessage, setMessageBlocks, addThreadTotals, addThreadContexts, updateThread, setThreadTitle, listAttachments,
+  newAskId, finishMessage, setMessageBlocks, addThreadTotals, addThreadContexts, updateThread, setThreadTitle, listAttachments, ASK_ID_RE,
 } from './store.mjs';
 import { recordAskCostDelta } from '../cost-budget.mjs';
 import { setPendingCardComments } from '../diff-comments.mjs';
@@ -78,6 +81,14 @@ const MCP_UNAVAILABLE = Object.freeze({
   failed: 'failed', 'needs-auth': 'needs-auth',
   disabled: 'disabled by your Claude Code settings', absent: 'blocked by managed MCP policy',
 });
+
+// Skills registry §4.4 safety net: a Claude Code that refuses --plugin-dir exits before any init — managed
+// disableSideloadFlags ("--plugin-dir is disabled by your organization's managed settings (disableSideloadFlags)…",
+// P3 probe 10) or a CLI without the flag ("unknown option '--plugin-dir'"). The regex is P3's SIDELOAD_REFUSAL_RE.
+const SKILLS_REFUSED_NOTICE = 'skills from sets not loaded (Claude Code refuses --plugin-dir here)';
+const SKILLS_MOUNT_FAILED_NOTICE = 'skills from sets not loaded (they could not be copied for this turn)';
+// The only folders the mount's sweep removes under ask/<thread>/skills/: message ids (store.mjs newAskId('askm')).
+const MESSAGE_FOLDER_RE = /^askm_[0-9a-f]{8}$/;
 
 /** The human line a classified failure carries. The block is persisted and
  *  shared by every viewer, so the wording is level-neutral: it names where a
@@ -109,6 +120,8 @@ class AskTurn extends EventEmitter {
     web = null,
     mcp = null,
     engine = 'claude', images = [], mcpCodexNote = false,
+    skills = null,
+    agentMode = true,
     deps = {},
   } = {}) {
     super();
@@ -120,6 +133,14 @@ class AskTurn extends EventEmitter {
     this._cap = null;                 // Task 10: the watchdog's verdict ('max_turns' | 'max_budget' | 'shell')
     this._toolCalls = 0;
     this._spentUsd = 0;
+    // Skills registry §4.4: resolveAskSkills()'s result for this turn; null, a blocked layer, no plugin or a Codex chat ⇒ no
+    // mount and a byte-identical spawn. Set to null again when the mount fails or the CLI refuses --plugin-dir.
+    this.skills = this.engine === 'claude' && skills && !skills.blocked && Array.isArray(skills.plugins) && skills.plugins.length ? skills : null;
+    this.skillMount = null;           // materializeSkillMount()'s answer: { base, pluginDirs, plugins, failed }
+    this.skillNames = [];             // the qualified names the mount holds — the prompt section, the note, the allow rules
+    this._promptWithoutSkills = null; // the route's system prompt, restored when the safety net drops the layer
+    this._skillBase = null;           // the per-message mount folder — removed in run()'s finally, whatever the mount did
+    this._skillsNotices = [];         // what happened to the layer: re-added to the resume-fallback retry's fresh reducer
     // MCP registry §9.2: resolveRegistry()'s result for this turn; null (or no copies) keeps the spawn byte-identical.
     this.mcp = mcp && Array.isArray(mcp.copies) && mcp.copies.length ? mcp : null;
     this._mcpNoted = new Set();       // §10: copies already given a muted line by THIS attempt's reducer
@@ -132,6 +153,9 @@ class AskTurn extends EventEmitter {
     this.reader = typeof reader === 'string' && reader ? reader : null;
     // askWebAccess() for this turn (docs/guardrails.md "Web access"): the MCP child's web tools + the sub-agent note.
     this.web = web && web.enabled === true ? web : null;
+    // Agent mode (#574): this chat's switch (the server already folded in whether commands exist here at all).
+    this.agentMode = agentMode !== false;
+    this.commands = null;
     this.assistantMessageId = assistantMessageId;
     this.userMessageId = userMessageId;
     this.prompt = prompt;
@@ -163,6 +187,9 @@ class AskTurn extends EventEmitter {
       codexModelPriced: deps.codexModelPriced ?? codexModelPriced,
       askSlot: deps.askSlot ?? askSlotOf,
       memoryMount: deps.memoryMount ?? refreshAskMemoryMount,
+      // Skills registry §4.4: the per-turn set-skill mount (P3) and its removal.
+      materializeSkillMount: deps.materializeSkillMount ?? materializeSkillMount,
+      removeSkillMount: deps.removeSkillMount ?? ((base) => rm(base, { recursive: true, force: true })),
       store: {
         finishMessage, setMessageBlocks, addThreadTotals, addThreadContexts, updateThread, setThreadTitle, listAttachments,
         ...(deps.store || {}),
@@ -198,6 +225,9 @@ class AskTurn extends EventEmitter {
       // under their own users (agent-pool.mjs): the chat's claude then runs as the person's
       // agent user and its worca tools run in the server through this relay. null = classic.
       agentRelay: deps.agentRelay ?? null,
+      // Agent mode (#574): ({threadId}) => {url, token, dispose()} | null. Set by the server only where the
+      // terminal is enabled (terminalEnabledHere). null = no command tools.
+      commandBridge: deps.commandBridge ?? null,
       serverPath: deps.serverPath ?? ASK_MCP_SERVER_PATH,
       newAskId: deps.newAskId ?? newAskId,
       setPendingCardComments: deps.setPendingCardComments ?? setPendingCardComments,
@@ -304,6 +334,18 @@ class AskTurn extends EventEmitter {
       this.reducer.addBlock({ kind: 'notice', text: `Proposal rejected: ${err?.message || err}` });
     }
     this._persistBlocks();
+  }
+
+  /** run_command RESULT (#574): one command card per block (the live state comes from ask-command frames). */
+  _onRunCommand(text, isError) {
+    if (isError) return;
+    let r = null;
+    try { r = JSON.parse(text); } catch { return; }
+    if (!r || r.ok !== true || typeof r.blockId !== 'string') return;
+    const card = { type: 'command', blockId: r.blockId, sessionId: r.sessionId, seq: r.seq, command: String(r.command || '').slice(0, 4000),
+      folder: r.folder || null, cwd: r.cwd || null, warning: r.warning || null };
+    const block = this.reducer.addBlock({ kind: 'card', id: this.deps.newAskId('card'), state: 'command', card });
+    if (block) this._persistBlocks();
   }
 
   /** track_run's card (D3/D4): the MCP child only resolved the id — deps.trackRun (ui/server.mjs askTrackRun)
@@ -589,12 +631,14 @@ class AskTurn extends EventEmitter {
     this._wfCards.set(toolUseId, cardId);
     const raw = input && typeof input === 'object' ? input : {};
     const pin = this.pinnedScope;
-    // A pinned WORKSPACE is not a default target (D19/PD17): the building card then carries projectKey null and the child's
-    // own "projectKey is required" error flips it to failed at RESULT.
-    const projectKey = (typeof raw.projectKey === 'string' && raw.projectKey.trim()) || (pin && pin.projectKey) || null;
+    // The target resolves as the tool does: an explicit projectKey, else an explicit workspaceId, else the pin.
+    const inKey = typeof raw.projectKey === 'string' ? raw.projectKey.trim() : '';
+    const inWs = typeof raw.workspaceId === 'string' ? raw.workspaceId.trim() : '';
+    const projectKey = inKey || (!inWs && pin && pin.projectKey) || null;
+    const workspaceId = projectKey ? null : (inWs || (pin && pin.workspaceId) || null);
     const mode = typeof raw.task === 'string' && raw.task.trim() ? 'task' : 'shape';
     this.reducer.addBlock({ kind: 'card', id: cardId, state: 'building', card: {
-      type: 'workflow', mode, projectKey, projectName: null,
+      type: 'workflow', mode, projectKey, projectName: null, workspaceId, workspaceName: null,
       // v7: the building payload is transient (the proposed flip replaces `card` wholesale) — cap a hand-authored shape like the task text.
       ...(mode === 'task' ? { task: String(raw.task).slice(0, 2000) } : { shape: raw.shape && typeof raw.shape === 'object' && JSON.stringify(raw.shape).length <= 8000 ? raw.shape : null }),
       name: cleanText(raw.name, 60), note: cleanText(raw.note, d.limits.workflowNoteMaxChars ?? 200), thenRun: raw.thenRun === true,
@@ -623,13 +667,16 @@ class AskTurn extends EventEmitter {
       return;
     }
     try {
-      const r = await d.revalidateWorkflow({ shape: out.shape, projectKey: out.projectKey, warnings: Array.isArray(out.warnings) ? out.warnings : [], costUsd: Number(out.costUsd) || 0, fingerprint: typeof out.fingerprint === 'string' ? out.fingerprint : '' });
-      // v4: the child's projectName first (the real child resolves it), else the parent's own lookup (the MOCK child
-      // returns null — without this every mock card, and its context-header line, would have no project name).
-      const projectName = cleanText(out.projectName, 120) || cleanText(r.project && r.project.name, 120) || null;
+      const workspaceId = typeof out.workspaceId === 'string' && out.workspaceId ? out.workspaceId : null;
+      // workspaceId rides the revalidate input only when set — a project card's input stays exactly what it was.
+      const r = await d.revalidateWorkflow({ shape: out.shape, projectKey: out.projectKey, ...(workspaceId ? { workspaceId } : {}), warnings: Array.isArray(out.warnings) ? out.warnings : [], costUsd: Number(out.costUsd) || 0, fingerprint: typeof out.fingerprint === 'string' ? out.fingerprint : '' });
+      // v4: the child's name first (the real child resolves it), else the parent's own lookup (the MOCK child
+      // returns null — without this every mock card, and its context-header line, would have no target name).
+      const workspaceName = workspaceId ? (cleanText(out.workspaceName, 120) || cleanText(r.workspace && r.workspace.name, 120) || null) : null;
+      const projectName = workspaceId ? null : (cleanText(out.projectName, 120) || cleanText(r.project && r.project.name, 120) || null);
       const flipped = this.reducer.updateBlock(cardId, { state: 'proposed', card: {
-        type: 'workflow', mode: out.mode === 'shape' ? 'shape' : 'task', projectKey: typeof out.projectKey === 'string' ? out.projectKey : null,
-        projectName, note: cleanText(out.note, 200), thenRun: out.thenRun === true,
+        type: 'workflow', mode: out.mode === 'shape' ? 'shape' : 'task', projectKey: !workspaceId && typeof out.projectKey === 'string' ? out.projectKey : null,
+        projectName, workspaceId, workspaceName, note: cleanText(out.note, 200), thenRun: out.thenRun === true,
         shape: r.shape, summary: cleanText(r.summary, 2000),
         ...r.proposal,
       } });
@@ -670,6 +717,7 @@ class AskTurn extends EventEmitter {
       onWorkflowStart: ({ toolUseId, input }) => this._onWorkflowStart(toolUseId, input),
       onWorkflowResult: ({ toolUseId, text, isError }) => this._onWorkflowResult(toolUseId, text, isError),   // the hook's `input` is not needed here: the card is rebuilt from `out`
       onTrackRun: ({ input, isError }) => this._onTrackRun(input, isError),
+      onRunCommand: ({ text, isError }) => this._onRunCommand(text, isError),
       onAwaySwitch: ({ text, isError }) => this._onAwaySwitch(text, isError),
       onMetricsProposal: ({ input, text, isError }) => this._onMetricsProposal(input, text, isError),
       onAwayProposal: ({ input, text, isError }) => this._onAwayProposal(input, text, isError),
@@ -708,6 +756,59 @@ class AskTurn extends EventEmitter {
       this.abort.signal.addEventListener('abort', () => res(), { once: true });
     });
     await Promise.race([this.reducer.settle(), aborted]);
+  }
+
+  /** Skills registry §4.4: materialize this turn's mount, then name exactly what was written — P3 leaves out a skill it
+   *  could not copy (`failed`) and a plugin left with none — in the prompt section (appended last), the sub-agent note
+   *  and the allow rules. A failure never breaks the turn: it runs without set skills and says so. Both ids become path
+   *  segments, so both are shape-checked first, and the two folders they name must be real folders, never symlinks. */
+  async _mountSkills() {
+    const d = this.deps;
+    try {
+      if (!ASK_ID_RE.test(String(this.threadId)) || !ASK_ID_RE.test(String(this.assistantMessageId))) throw new Error('not a store id');
+      const threadDir = join(d.worcaHome(), 'ask', this.threadId);
+      const parent = join(threadDir, 'skills');
+      // Hosted mode: ask/ is group-writable for every pool user (docker/entrypoint.sh: setgid 2770, no sticky bit), so
+      // another person's agent could put a symlink where ask/<thread>/ or its skills/ folder stands — the sweep and the
+      // mount below would then delete and write wherever it points, as the server. Each is a real folder or not there yet.
+      for (const p of [threadDir, parent]) {
+        const st = await lstat(p).catch((err) => { if (err?.code === 'ENOENT') return null; throw err; });
+        if (st && !st.isDirectory()) throw new Error(`${p} is not a real folder`);
+      }
+      this._skillBase = join(parent, this.assistantMessageId);
+      // A folder an earlier turn of this thread left (a server killed mid-turn never ran its finally) goes now: one turn
+      // per thread runs at a time, and the previous turn's spawn exited before its ask-done. Message folders only.
+      for (const e of await readdir(parent).catch(() => [])) {
+        if (e !== this.assistantMessageId && MESSAGE_FOLDER_RE.test(e)) await rm(join(parent, e), { recursive: true, force: true }).catch(() => {});
+      }
+      // The sweep awaited: a turn stopped meanwhile (a thread delete stops the turn, then removes ask/<thread>/ without
+      // waiting for it) mounts nothing — the synchronous P3 mount below would recreate the deleted thread's folder.
+      // Nothing yields from this check to the end of that mount.
+      if (this.abort.signal.aborted) { this.skills = null; return; }
+      const mount = await d.materializeSkillMount({ result: this.skills, base: this._skillBase });
+      const failed = new Set((Array.isArray(mount?.failed) ? mount.failed : []).map((f) => `${f.pluginName}:${f.name}`));
+      const written = new Set((Array.isArray(mount?.plugins) ? mount.plugins : []).map((p) => p.pluginName));
+      const kept = this.skills.mounted.filter((m) => written.has(m.pluginName) && !failed.has(m.qualifiedName));
+      if (!kept.length || !Array.isArray(mount.pluginDirs)) throw new Error('no skill was written');   // P3 writes no empty plugin
+      this.skillMount = mount;
+      this.skillNames = kept.map((m) => m.qualifiedName);
+      const lost = this.skills.mounted.filter((m) => !kept.includes(m)).map((m) => m.qualifiedName);
+      if (lost.length) {
+        console.warn(`[worca-ask] thread ${this.threadId}: ${lost.join(', ')} not copied (${(mount.failed || []).map((f) => f.error).join('; ')})`);
+        this._skillsNotices.push(`skills from sets not loaded: ${lost.join(', ')} (they could not be copied for this turn)`);
+        this.reducer.addBlock({ kind: 'notice', text: this._skillsNotices.at(-1) });
+        this._persistBlocks();
+      }
+      this._promptWithoutSkills = this.systemPrompt;
+      this.systemPrompt = `${this.systemPrompt}\n\n${renderSkillsSection({ skills: kept.map((m) => ({ qualifiedName: m.qualifiedName, setName: m.setName })) })}`;
+    } catch (err) {
+      this.skills = null;
+      this.skillMount = null;
+      this._skillsNotices.push(SKILLS_MOUNT_FAILED_NOTICE);
+      console.warn(`[worca-ask] thread ${this.threadId}: skills mount failed (${err?.message || err}) — this turn runs without skills from sets`);
+      this.reducer.addBlock({ kind: 'notice', text: SKILLS_MOUNT_FAILED_NOTICE });
+      this._persistBlocks();
+    }
   }
 
   /** §10 (Ask): one muted line per registry copy the CLI could not start, once per attempt's reducer. */
@@ -983,15 +1084,22 @@ class AskTurn extends EventEmitter {
         this.memoryDir = null;
         console.warn(`[worca-ask] thread ${this.threadId}: memory mount failed (${err?.message || err}) — this turn carries no memory`);
       }
+      // Skills registry §4.4: this turn's set skills, one generated plugin per set, under the thread's folder and per
+      // message like the mcp json (a deferred event turn starts before this turn's finally runs). A turn stopped before
+      // this point (its thread being deleted) writes nothing.
+      if (this.skills && !this.abort.signal.aborted) await this._mountSkills();
       const homeBase = process.env.WORCA_HOME?.trim()
         ? pathResolve(process.env.WORCA_HOME)
         : dirname(d.worcaHome());
       mcpConfigPath = join(scratchDir, `mcp-${this.assistantMessageId}.json`);
       this.relay = d.agentRelay ? d.agentRelay({ threadId: this.threadId, reader: this.reader || null, web: this.web }) : null;
+      // Agent mode never rides the relay: relay mode is agent isolation, where the terminal refuses agent callers.
+      // Claude chats only: codex hands its MCP servers no spawnEnv, so the bridge token would never reach the child.
+      this.commands = this.engine === 'claude' && !this.relay && this.agentMode && d.commandBridge ? d.commandBridge({ threadId: this.threadId }) : null;
       await d.fs.writeFile(
         mcpConfigPath,
         // MCP registry §9.2: the copies ride after `worca` — refs only (`${MCPSECRET_…}`); the values go in spawnEnv.
-        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, ...(this.reader ? { reader: this.reader } : {}), ...(this.relay ? { relay: this.relay } : {}), ...(this.web ? { web: this.web } : {}), ...(this.mcp ? { extraServers: this.mcp.servers } : {}), ...(this.engine === 'codex' ? { engine: 'codex' } : {}) }), null, 2),
+        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, ...(this.reader ? { reader: this.reader } : {}), ...(this.relay ? { relay: this.relay } : {}), ...(this.web ? { web: this.web } : {}), ...(this.mcp ? { extraServers: this.mcp.servers } : {}), ...(this.commands ? { commands: this.commands } : {}), ...(this.engine === 'codex' ? { engine: 'codex' } : {}) }), null, 2),
         // Never a key value (webKeyVar: the key rides the process env). A relayed turn runs as
         // the person's agent user (agent-pool.mjs), which reads this file through its group: the
         // scratch dir is setgid worca-share (2770), so 0640 reaches the agent users and nobody
@@ -1018,7 +1126,9 @@ class AskTurn extends EventEmitter {
     } finally {
       if (timer != null) d.clearTimeout(timer);
       if (mcpConfigPath) await d.fs.unlink(mcpConfigPath).catch(() => {});
+      if (this._skillBase) { try { await d.removeSkillMount(this._skillBase); } catch { /* best effort: the thread's folder goes with the thread */ } }
       if (this.relay) { try { this.relay.dispose(); } catch { /* already gone */ } this.relay = null; }
+      if (this.commands) { try { this.commands.dispose(); } catch { /* already gone */ } this.commands = null; }
     }
     this._kickoffTitle();
     return out;
@@ -1035,6 +1145,7 @@ class AskTurn extends EventEmitter {
         // visible while the retry streams (R-A persistence below). If the retry
         // then fails, the notice stays above the ask-error — acceptable, and
         // recorded in the Clarifications Q&A.
+        for (const text of this._skillsNotices) this.reducer.addBlock({ kind: 'notice', text });
         this.reducer.addBlock({ kind: 'notice', text: 'Context restored from history' });
         this._persistBlocks();
         // The watchdog's counts start over with the fresh codex process, as the Claude CLI's own caps do per process.
@@ -1042,6 +1153,9 @@ class AskTurn extends EventEmitter {
         this._spentUsd = 0;
         this._lastUsage = null;
       }
+      // Skills registry §4.4 safety net: this spawn's plain (non-JSON) stdout lines — a refusal printed on stdout reaches
+      // onEvent only as a `log` event, never the runner's error (built from stderr). P4's spawnAgent keeps the same 20.
+      const said = [];
       const options = buildAskSpawnOptions({
         thread: { id: this.threadId, sessionId: isRetry ? null : this.resumeSessionId }, // B-7: the only no-resume lever
         turn: {
@@ -1055,6 +1169,7 @@ class AskTurn extends EventEmitter {
           mock: this.mock, // R-F: markers on EVERY attempt
           signal: this.abort.signal,
           onEvent: (e) => {
+            if (e && e.type === 'log' && typeof e.text === 'string' && said.length < 20) said.push(e.text.slice(0, 500));
             // The adapter's own session event; the init frame's copy (`init`) repeats it.
             if (e && e.type === 'session' && !e.init && typeof e.sessionId === 'string' && e.sessionId) {
               // §6.2.4: stored on the thread immediately, not at turn end.
@@ -1079,6 +1194,9 @@ class AskTurn extends EventEmitter {
         relayed: !!this.relay,
         registry: this.mcp,   // MCP registry §9.2: EVERY attempt, the resume-fallback retry included
         ...(this.engine === 'codex' ? { engine: 'codex' } : {}),
+        commands: this.commands,
+        // Skills registry §4.4: every attempt too, until the sideload safety net drops the layer.
+        skills: this.skills && this.skillMount ? { pluginDirs: this.skillMount.pluginDirs, names: this.skillNames } : null,
       });
       // With the relay, the chat's claude runs as the person's agent user (agent-pool.mjs).
       if (this.relay) options.asAgent = true;
@@ -1114,6 +1232,21 @@ class AskTurn extends EventEmitter {
         if (/max_turns|max_budget/.test(s.resultSubtype ?? '')) {
           this._limitNotice(s.reason, limitsNow);
           return await this._complete({ kind: 'done', status: 'stopped', reason: s.reason });
+        }
+        // (2b) Skills registry §4.4 safety net: a Claude Code that refuses --plugin-dir (managed disableSideloadFlags the
+        // host check could not read, or a CLI without the flag) fails before any init — said in the runner's error
+        // (stderr), the reducer's errors or a plain stdout line (`said`). The same attempt runs again without the set
+        // skills — same prompt, same --resume (the session was never reached). Before (3), which would otherwise spend
+        // the one retry on a dead-session guess and fail again on the same flag.
+        if (!isRetry && options.pluginDirs && !s.sawInit && SIDELOAD_REFUSED_RE.test([err?.message || '', ...(s.errors || []), ...said].join('\n'))) {
+          this.skills = null;
+          if (this._promptWithoutSkills !== null) this.systemPrompt = this._promptWithoutSkills;   // no skills, no section
+          this._skillsNotices = [SKILLS_REFUSED_NOTICE];   // no skill of this turn loads: a partial-copy notice would say less
+          this._makeReducer();   // the refused spawn's events (a result, its errors, its cost) never reach the re-run
+          for (const text of this._skillsNotices) this.reducer.addBlock({ kind: 'notice', text });
+          this._persistBlocks();
+          attempt -= 1;   // the loop's += 1 repeats this attempt
+          continue;
         }
         // (3) The narrow resume-fallback predicate (F9): only a session that
         // never produced an init or said "No conversation found".
@@ -1158,7 +1291,7 @@ class AskTurn extends EventEmitter {
         // §4.6: a Codex chat titles itself on Codex, read-only (D11), with the Ask slot's model or the chat's own.
         ...(this.engine === 'codex' ? { engine: 'codex', model: d.askSlot('codex')?.model || this.model } : {}),
         onError: ({ model, error }) => console.warn(
-          `[worca-ask] thread ${this.threadId}: title generation failed (model ${model}): ${error?.message || error} — keeping the fallback title`),
+          `[worca-ask] thread ${this.threadId}: title generation failed (${model ? `model ${model}` : 'the CLI default model'}): ${error?.message || error} — keeping the fallback title`),
       })))
       .then((generated) => {
         // The route stamps NOTHING before the 202 (the header reads "Ask Worca"

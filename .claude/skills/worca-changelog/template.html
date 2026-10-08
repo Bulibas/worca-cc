@@ -72,11 +72,11 @@
 
   /* ---------- hero ---------- */
   .hero{background:linear-gradient(135deg,var(--wash) 0%,var(--wash-2) 60%,#F2EFFA 100%)}
-  .hero-grid{display:grid;grid-template-columns:6fr 5fr;gap:clamp(24px,3vw,48px);align-items:center;position:relative;z-index:2}
+  .hero-grid{display:grid;grid-template-columns:6fr 5fr;gap:clamp(24px,3vw,48px);align-items:center;position:relative}  /* no z-index: a stacking context here would put the ribbon over the text */
   @media (max-width:920px){.hero-grid{grid-template-columns:1fr}}
   .hero .shot{transform:rotate(1.6deg)}
   .hero .sec-head{position:relative;z-index:4}
-  .ribbon{position:absolute;inset:0;z-index:3;pointer-events:none}
+  .ribbon{position:absolute;inset:0;z-index:1;pointer-events:none}   /* behind the text (4) and the shot (2) */
   @media (max-width:920px){.ribbon{display:none}}
   .ribbon text{font-family:var(--mono);font-size:15px;font-weight:700;letter-spacing:.30em;fill:#fff}
   .float-chip{position:absolute;z-index:3;background:var(--card);border-radius:14px;box-shadow:var(--shadow);
@@ -212,7 +212,7 @@
   <!-- ================= HERO ================= -->
   <section class="sec hero" id="s0">
     <svg class="ribbon" viewBox="0 0 1280 640" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
-      <path id="rb" d="M -120 690 C 300 640, 540 530, 750 400 S 1120 150, 1400 160" fill="none" stroke="#4B5ED2" stroke-width="42" stroke-linecap="round" opacity=".92"></path>
+      <path id="rb" d="M -120 652 C 260 650, 560 640, 740 560 S 1060 170, 1400 120" fill="none" stroke="#4B5ED2" stroke-width="42" stroke-linecap="round" opacity=".92"></path>
       <!-- section names, uppercase, ·-separated, repeated twice -->
       <text><textPath id="rbt" href="#rb" startOffset="-12%">{{RIBBON}} · {{RIBBON}} · </textPath></text>
     </svg>

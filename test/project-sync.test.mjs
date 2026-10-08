@@ -198,7 +198,9 @@ test('startProjectSyncBackground: a failed fetch backs off until refreshMinutes'
   const { a } = await world();
   let fetches = 0;
   const later = [];   // commands run after the failed fetch
-  gitSyncTesting.setRunner((args, opts) => {
+  gitSyncTesting.setRunner(async (args, opts) => {
+    // The first tick's block ends with `git status`; landing it late (as on a busy machine) must not matter.
+    if (fetches > 0 && args[0] === 'status') await new Promise((r) => setTimeout(r, 300));
     if (fetches > 0) later.push(args);
     if (args[0] === 'fetch') {
       fetches += 1;
@@ -209,8 +211,8 @@ test('startProjectSyncBackground: a failed fetch backs off until refreshMinutes'
   const stop = startProjectSyncBackground({ tickMs: 20, log: () => {},
     listProjectsFn: async () => [{ key: projectKey(a), path: a, exists: true }] });
   stops.push(stop);
-  await waitFor(() => fetches >= 1);
-  await new Promise((r) => setTimeout(r, 100));   // let the first tick finish its block
+  // The first tick's block ends with `git status` (a is checked out on dev); nothing after it runs git.
+  await waitFor(() => later.some((c) => c[0] === 'status'));
   later.length = 0;
   // Several more ticks inside refreshMinutes: no second fetch, and no block is built at all.
   await new Promise((r) => setTimeout(r, 200));

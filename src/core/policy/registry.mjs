@@ -58,6 +58,8 @@ export const FIELDS = Object.freeze([
   { key: 'plugins.required', group: 'plugins', label: 'Required plugins', help: 'Missing or below the floor: the setup checklist offers to install, with consent. Never automatic.', type: 'plugins', kinds: ['soft'] },
   // MCP registry spec §11.1. `workspaceRuns: false`: refused in the workspaceRuns block (a workspace run takes only the workspace policy's Team set).
   { key: 'mcp.required', group: 'plugins', label: 'Required MCP servers', help: 'Each developer turns them on with consent; they join the Team set. Never automatic.', type: 'mcpServers', kinds: ['soft'], workspaceRuns: false },
+  // Skills registry spec §5 (F8): plugin skills only, { plugin, skill }; refused under workspaceRuns like mcp.required.
+  { key: 'skills.required', group: 'plugins', label: 'Required skills', help: 'Each developer turns them on with consent; they join the Team set. Never automatic.', type: 'skills', kinds: ['soft'], workspaceRuns: false },
   { key: 'plugins.blocked', group: 'plugins', label: 'Blocked plugins', help: 'An enabled blocked plugin warns and is recorded; it is never disabled for you.', type: 'string[]', kinds: ['soft'] },
   { key: 'workflows.default', group: 'runs', label: 'Default workflow', help: 'A built-in (wf_*) or plugin (wfp_*) workflow id. Applies when the project has no active workflow.', type: 'string', kinds: ['default'] },
   { key: 'run.humanInLoop', group: 'runs', label: 'Human in the loop', help: 'Applies until the project sets its own switch.', type: 'bool', kinds: ['default'] },
@@ -99,6 +101,8 @@ import { assertModelUpstream, upstreamEnvConflict, codexUpstreamProblem, CODEX_E
 import { fieldError as nightFieldError, NIGHT_EFFORTS } from '../night/config.mjs';
 // The MCP definition rules (MCP registry spec §4.1, §4.3): pure, shared with manual definitions.
 import { validateMcpDefinition, screenNonSecretValue, SERVER_NAME_RE } from '../mcp/definitions.mjs';
+// Skill names (skills registry spec §2b-9, the Agent Skills rule; two names are reserved): a pure leaf.
+import { SKILL_NAME_RE, SKILL_NAME_MAX, RESERVED_SKILL_NAMES } from '../skills-registry/ids.mjs';
 
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const clip = (v, max = TEXT_MAX) => {
@@ -182,6 +186,40 @@ export function mcpListComplete(warnings = []) {
     && (w === 'unknown field mcp.required' || (w.startsWith('mcp.required:') && !w.endsWith('treated as soft'))));
 }
 
+/** The plugin manifest's name rule (plugin-manifest.mjs PLUGIN_NAME_RE, ≤ 64), kept here: this module stays pure. */
+const SKILL_PLUGIN_RE = /^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+/** One `skills.required` entry → { entry: { plugin, skill } } (other keys dropped), or { error }. Plugin skills only (F8). */
+function normalizeSkillEntry(e) {
+  if (!isPlainObject(e)) return { error: 'must be an object' };
+  if (e.plugin === undefined) return { error: 'an entry is { "plugin", "skill" } — plugin skills only' };
+  if (!(typeof e.plugin === 'string' && SKILL_PLUGIN_RE.test(e.plugin))) return { error: `plugin "${shown(e.plugin)}" is not a valid plugin name` };
+  if (!(typeof e.skill === 'string' && e.skill.length <= SKILL_NAME_MAX && SKILL_NAME_RE.test(e.skill))) return { error: `skill "${shown(e.skill)}" is not a valid skill name` };
+  if (RESERVED_SKILL_NAMES.includes(e.skill)) return { error: `skill "${e.skill}" is a reserved name` };
+  return { entry: { plugin: e.plugin, skill: e.skill } };
+}
+const skillLabel = (e, i) => (isPlainObject(e) && typeof e.plugin === 'string' ? `${e.plugin}/${shown(e.skill)}` : `entry ${i + 1}`);
+/** Keep the valid `skills.required` entries; one "<label>: <why>" per dropped entry (a bad entry never drops the field). */
+export function normalizeSkillsRequired(list) {
+  const value = []; const dropped = [];
+  list.forEach((e, i) => {
+    const { entry, error } = normalizeSkillEntry(e);
+    // One skill name per set (skills registry spec §3.2): the Team set holds every entry, so a name is listed once.
+    const prev = entry && value.find((x) => x.skill === entry.skill);
+    const why = error || (!prev ? null : prev.plugin === entry.plugin ? 'listed twice' : `a skill named ${entry.skill} is already listed (from ${prev.plugin}) — one name per Team set`);
+    if (why) { dropped.push(`${skillLabel(e, i)}: ${why}`); return; }
+    value.push(entry);
+  });
+  return { value, dropped };
+}
+/** Did this build read every `skills.required` entry of a doc (the mcpListComplete rule)? An entry it dropped is still
+ *  listed by the team: its Team state stays. */
+export function skillsListComplete(warnings = []) {
+  // `fields: not an object — ignored`: the whole fields block was unreadable, so this build read no entry at all.
+  return !warnings.some((w) => typeof w === 'string'
+    && (w === 'unknown field skills.required' || w === 'fields: not an object — ignored'
+      || (w.startsWith('skills.required:') && !w.endsWith('treated as soft'))));
+}
+
 /**
  * Validate ONE field value against its registry type. Returns null when ok, else a message.
  * Shared by the editor (before publish) and the reader (dropping bad fields with a warning).
@@ -241,6 +279,9 @@ function baseError(meta, value) {
     case 'mcpServers':
       if (!Array.isArray(value)) return 'must be a list of MCP server entries';
       return normalizeMcpRequired(value).dropped[0] ?? null;
+    case 'skills':
+      if (!Array.isArray(value)) return 'must be a list of { plugin, skill } entries';
+      return normalizeSkillsRequired(value).dropped[0] ?? null;
     default: return 'unknown field type';
   }
 }
@@ -263,8 +304,9 @@ export function normalizeEntry(key, raw) {
     else if (kind === 'hard' && meta.kinds.includes('default')) { warning = `${key}: hard constraints are not enforced by this version — treated as default`; }
     else return { entry: null, warning: `${key}: kind "${kind}" is not allowed (accepts ${meta.kinds.join(' | ')})` };
   }
-  // mcpServers: a per-entry normalizer — bad entries are dropped one warning each, the rest stays.
-  const mcp = meta.type === 'mcpServers' && Array.isArray(raw.value) ? normalizeMcpRequired(raw.value) : null;
+  // mcpServers, skills: a per-entry normalizer — bad entries are dropped one warning each, the rest stays.
+  const perEntry = meta.type === 'mcpServers' ? normalizeMcpRequired : meta.type === 'skills' ? normalizeSkillsRequired : null;
+  const mcp = perEntry && Array.isArray(raw.value) ? perEntry(raw.value) : null;
   const err = mcp ? null : validateValue(meta, raw.value);
   if (err) return { entry: null, warning: `${key}: ${err}` };
   const entry = { kind, value: mcp ? mcp.value : raw.value };
@@ -398,13 +440,22 @@ export function normalizePolicyDoc(raw) {
       models: normalizeModels(raw.catalogs?.models, warnings),
     },
   };
-  // §11.1 cross-field rule: a plugin reference's plugin must be in the same doc's plugins.required.
+  // §11.1 cross-field rule: a plugin reference's plugin must be in the same doc's plugins.required (skills registry
+  // spec §5: every `skills.required` entry is one).
+  const plugins = new Set((doc.fields['plugins.required']?.value || []).map((p) => p.name));
   const mcp = doc.fields['mcp.required'];
   if (mcp) {
-    const plugins = new Set((doc.fields['plugins.required']?.value || []).map((p) => p.name));
     mcp.value = mcp.value.filter((e) => {
       if (!e.plugin || plugins.has(e.plugin)) return true;
       warnings.push(`mcp.required: ${e.plugin}/${e.server}: plugin ${e.plugin} is not in plugins.required — entry dropped`);
+      return false;
+    });
+  }
+  const skills = doc.fields['skills.required'];
+  if (skills) {
+    skills.value = skills.value.filter((e) => {
+      if (plugins.has(e.plugin)) return true;
+      warnings.push(`skills.required: ${e.plugin}/${e.skill}: plugin ${e.plugin} is not in plugins.required — entry dropped`);
       return false;
     });
   }

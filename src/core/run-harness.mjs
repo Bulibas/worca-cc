@@ -20,7 +20,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, basename, dirname, resolve, sep, relative } from 'node:path';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { readFile, writeFile, readdir, mkdir, realpath, rename, stat } from 'node:fs/promises';
+import { readFile, writeFile, readdir, mkdir, realpath, rename, stat, rm } from 'node:fs/promises';
 
 import { generateTitle } from './title.mjs';
 import {
@@ -54,7 +54,7 @@ import {
   scanStrayEntries, copyRunManifestTo, removeInjectedPaths, stripClaudeMdFence,
   RETAIN_REASONS,
 } from './run-manifest.mjs';
-import { assembleRunContext, renderContextAudit, MCP_GRANT_MODE, discoverProjectSettings, skillsRelFor } from './run-context.mjs';
+import { assembleRunContext, renderContextAudit, renderSkillAudit, MCP_GRANT_MODE, discoverProjectSettings, skillsRelFor } from './run-context.mjs';
 import { createRunLogWriter, RUN_LOG_FILE, RUN_LOG_KIND } from './run-log.mjs';
 import {
   detectTools, detectToolsPerProject, runGraphifyUpdate, worktreeGraphInstruction,
@@ -73,7 +73,8 @@ import { collectRequiredAssets, stageAssets } from './run-assets.mjs';
 import { loadAgentRegistry, DEFAULT_AGENTS_DIR } from './agent-registry.mjs';
 import {
   createWorktree, removeWorktree, suggestBranchName, sanitizeBranchName, resolveDefaultBranch,
-  isValidSourceRef, snapshotWorktreePatch, listLocalBranches, worktreeHead,
+  isValidSourceRef, snapshotWorktreePatch, listLocalBranches, worktreeHead, deleteBranchIfAt,
+  reusedBranchBase, isAncestor,
 } from './worktree.mjs';
 import { syncBaseForRun, ensureLocalBranch, fetchRemote, isSafeBranchName, runSyncOptions, INTERACTIVE_TIMEOUT_MS } from './git-sync.mjs';
 import { SYNC_EXECUTION_ID } from '../shared/graph/constants.mjs';
@@ -88,7 +89,7 @@ import { cachedFreeDailyCounts } from './openrouter-free.mjs';
 import { withBillTo, currentBillTo } from './billing.mjs';
 import { brokerEnabled, brokerInfo, personSlots } from './broker-client.mjs';
 import { mockEnabled } from './claude-runner.mjs';
-import { modelSlot, manifestModels, missingCredentials, describeMissing } from './broker-routing.mjs';
+import { modelSlot, manifestModels, manifestNeedsModel, missingCredentials, describeMissing } from './broker-routing.mjs';
 import { syncPluginSlots } from './plugin-broker-slots.mjs';
 import { recoveryDelayMs, sleepAbortable } from './recovery-backoff.mjs';
 import {
@@ -111,6 +112,13 @@ import { loadCatalog } from './mcp/catalog.mjs';
 import { MCP_STARTUP_MS } from './mcp/timeouts.mjs';
 import { keepListNames } from './mcp/keep-list.mjs';
 import { expandMcpDenyRules } from './mcp/deny.mjs';
+import { resolveSkillRegistry, requiredSkillsOf, SKILL_CAP } from './skills-registry/resolve.mjs';
+import { materializeSkillMount } from './skills-registry/mount.mjs';
+import { skillHostFacts } from './skills-registry/host.mjs';
+import { SKILL_PROBLEM_REASONS, skillSkipMessage, skillSkipReasonText, skillLayerText } from './skills-registry/texts.mjs';
+// Skills registry P5 adds `skillDeviations` (policy/effective.mjs); read through the namespace so this module loads
+// without it (no Team-skill deviations until P5 lands).
+import * as policyEffective from './policy/effective.mjs';
 import { createRedactor } from './redact.mjs';
 import { finalizeWorkspaceScan } from './workspace-scan-run.mjs';
 import { readWorkspaceMap } from './workspaces.mjs';
@@ -123,7 +131,7 @@ import { runNightAnalysis, readMemoryText } from './night/analysis.mjs';
 import { resolveDeciderPair } from './night/decider-model.mjs';
 import { writeNightDecision, countNightDecisions, nightCounts, nightGateCycles, nightSpendSinceUsd } from './night/store.mjs';
 import { NIGHT_ACTOR, NIGHT_TOGGLES, nightNeverDecides } from './night/config.mjs';
-import { nightModeToggle, nightModeHereSince } from './settings.mjs';
+import { nightModeToggleFor, nightModeHereSinceFor, personAwayStatus, awayPerPerson, awayPersonKey } from './settings.mjs';
 import { MCP_TOOL_NAME_400_RE, MCP_TOOL_NAME_TOO_LONG } from '../shared/mcp-tool-name.mjs';
 import { usageLimitSwitch, engineLabel } from '../shared/engine-switch.mjs';
 
@@ -193,6 +201,14 @@ function ruleNames(list) {
 /** Whether a permission-rules object carries any rule at all. */
 function hasPermissionRules(rules) {
   return !!rules && Object.values(rules).some((a) => Array.isArray(a) && a.length);
+}
+
+/** The parenthetical of a workspace member's teardown audit line. Scan + kept wording is
+ *  unchanged; an unchanged member's dropped branch says why. */
+function memberBranchNote(branch, { readOnly, dropped }) {
+  if (readOnly) return `deleted branch \`${branch}\``;
+  if (dropped) return `deleted branch \`${branch}\` — no changes`;
+  return `kept branch \`${branch}\``;
 }
 
 /** attr for a log line whose text embeds subprocess output: ERR_STREAM only
@@ -666,7 +682,7 @@ const MCP_NAME_WARNING = MCP_TOOL_NAME_TOO_LONG;
 /** §10: the run warning for a registry copy's `system/init` status; null when it is not a problem. */
 function mcpStatusWarning(name, status, setName) {
   const set = setName ? ` (set ${setName})` : '';
-  if (status === 'failed' || status === 'needs-auth') return `${name}: failed to connect (token, URL or command) — run Test in Settings › MCP servers${setName ? ` › ${setName}` : ''}`;
+  if (status === 'failed' || status === 'needs-auth') return `${name}: failed to connect (token, URL or command) — run Test in Settings › Sets${setName ? ` › ${setName}` : ''}`;
   if (status === 'disabled') return `${name}: disabled by your Claude Code settings${set}`;
   if (status === 'absent') return `${name}: blocked by managed MCP policy${set}`;
   return null;
@@ -773,6 +789,9 @@ export class RunHarness extends EventEmitter {
         this._staleResumeOwner = owner && owner !== engine ? owner : null;
       }
     }
+    // A mock run stays mock across every resume (a restart's auto-resume, Resume, Away lifting):
+    // the flag rides the resume point, and a resume can only add it, never drop it.
+    if (this.opts.resume?.resumePoint?.mock === true) this.claude.mock = true;
     // The mock runner routes EVERY dontAsk spawn to the Ask Worca mock (claude-runner.mjs
     // runMock, rule R-F), so a mock pipeline role under dontAsk writes no artifact and
     // the run dies at its first artifact read with no hint why. Fail at construction
@@ -851,6 +870,9 @@ export class RunHarness extends EventEmitter {
     // dispatch, or null. Holds secret values: never written to run.json, events, journals or the
     // resume point.
     this.mcpLayer = null;
+    // Skills registry layer (design §4.3): { base, pluginDirs, plugins, mounted, skipped, blocked }
+    // for every dispatch, or null when the run's target brings no set skill (_resolveSkills).
+    this.skillLayer = null;
 
     this.abort = new AbortController();
     this._answeredBy = new Map();            // question id -> who answered it (identity.mjs actor)
@@ -973,6 +995,9 @@ export class RunHarness extends EventEmitter {
       decisions: new Map(),                // question id -> decision record (for the answer writers)
       count: 0, flagged: 0,
       answers: 0, checks: 0,               // what the answers list shows: one per answered question
+      // B4 (WORCA_AWAY_PER_PERSON): who last resumed the run, when that is not its starter. Saved in
+      // the resume point so the owner survives a pause and a restart.
+      owner: typeof savedNight?.owner === 'string' ? savedNight.owner : null,
     };
     this._nightClock = this.opts.nightClock || { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) };
     this.state.night = this._nightSnapshot();
@@ -1080,6 +1105,22 @@ export class RunHarness extends EventEmitter {
       pq.reject(pauseErr());
     }
     return true;
+  }
+
+  /**
+   * Pause because the server is stopping (B2: SIGTERM, POST /api/drain): pause() with the
+   * distinct reason 'drain', so the resume point says why and WORCA_AUTO_RESUME can pick the run
+   * up on the next start. Who last started or resumed the run stays on state.lastAction. Returns
+   * false unless the run is currently 'running' (a run already pausing keeps its own reason).
+   */
+  pauseForDrain() {
+    if (this.state.status !== 'running') return false;
+    const la = this.state.lastAction;
+    this._drainResumeAs = la && la.kind === 'resume' && typeof la.by === 'string' && la.by ? la.by : null;
+    this._setPauseReason(REASON.DRAIN, 'Paused while worca was stopping');
+    this._log('orchestrator', 'info', 'worca is stopping — pausing the run; resume continues from here');
+    if (this.pipeline?.dir) appendAudit(this.pipeline.dir, 'Pipeline **paused**: worca was stopping.').catch(() => {});
+    return this.pause();
   }
 
   /** Who stopped / paused / resumed the run (identity.mjs actor): { kind, by, at } on the
@@ -1478,6 +1519,8 @@ export class RunHarness extends EventEmitter {
       // instead of dropping them when it rewrites `warnings`.
       if (this.runRootMode === 'detached') {
         await this._assembleContext(resolvedSkills);
+      } else {
+        await this._resolveSkillsLegacy();     // skills registry §4.3: the mount needs only pipeline.dir
       }
       this._checkAbort();
       // 3f) Agent memory: mount the store twice — the read-only rules copy into
@@ -1586,8 +1629,8 @@ export class RunHarness extends EventEmitter {
     } finally {
       this._stopHeartbeat(); // clear timer + NULL owner columns (done/stopped/launch-error/paused)
       // C1: tear the run root + worktree(s) down on done/stopped/launch-error — the branch is
-      // always kept (every member's, on a workspace run), only the disposable checkout
-      // is removed. But NEVER on a pause: the checkout (with any uncommitted agent
+      // kept (except a workspace member's branch this run never changed, and every branch of
+      // a read-only scan), only the disposable checkout is removed. But NEVER on a pause: the checkout (with any uncommitted agent
       // work) and the run root are the things we resume into (§8.13).
       if (this.state.status !== 'paused' && this.state.status !== 'pausing') {
         await this._teardownRunRoot().catch(() => {});
@@ -1610,6 +1653,8 @@ export class RunHarness extends EventEmitter {
   resume() {
     const who = currentBillTo();
     const starter = this.resumeOpts?.row?.started_by ?? this.opts.startedBy ?? null;
+    // B4: the person who resumed it owns it for Away mode from now on (only with per-person Away).
+    if (this._night && awayPerPerson() && awayPersonKey(who)) this._night.owner = who;
     // Pays: whoever resumed. Runs as: the starter's agent user, whose HOME holds the sessions.
     return withBillTo(who && who !== 'local' ? who : (starter || who), () => this._resume(), { owner: starter || who });
   }
@@ -1799,6 +1844,10 @@ export class RunHarness extends EventEmitter {
             'normally. An agent that declares `requiresSkills` may not find its skill.',
           );
         }
+      } else {
+        // Skills registry §4.3: a legacy run has no assembly, so its set skills are re-resolved and
+        // the mount rebuilt here (the detached re-assembly above does both inside _assembleContext).
+        await this._resolveSkillsLegacy({ resume: true });
       }
 
       // Agent memory on resume (§5): capture what the interrupted execution wrote,
@@ -1999,7 +2048,49 @@ export class RunHarness extends EventEmitter {
         checkpointRefs: this.checkpointRefs, branches: meta.branches || {},
       });
     }
+    // A run paused before the diff-base fix persisted the project checkout's HEAD as its base.
+    // Correct it from the recorded worktree start before anything diffs, persists or renders it.
+    await this._reconcileDiffBases();
     return resumeManifest;
+  }
+
+  /**
+   * Re-attached members only (`workDirs`): adopt the RECORDED start of each checkout as its diff
+   * base — `diffBase` (a reused branch's fork point) or `baseSha` (a fresh start) — when it differs
+   * from the persisted base and is in the checkout's history, with one audit line per change.
+   * A pending (setup-incomplete) member is not attached; the setup replay sets its base. A record
+   * with neither field keeps its base. A member with NO persisted base is left alone: its diff is
+   * skipped today, and a legacy empty dir inside the project repo would let the ancestor check pass
+   * against the user's own checkout. Shared by resume and stop-of-paused. Runs before `_rehydrated`
+   * (the 'resume' failure site), so it NEVER throws.
+   */
+  async _reconcileDiffBases() {
+    const short = (s) => (s ? String(s).slice(0, 10) : 'none');
+    try {
+      let changed = false;
+      for (const [key, dir] of this.workDirs.entries()) {
+        const rec = this.state.branches?.[key];
+        const want = rec && rec.worktreeDir ? (rec.diffBase || rec.baseSha || null) : null;
+        const had = this.checkpointRefs[key] || null;
+        if (!want || !had || want === had) continue;
+        if (!(await isAncestor(dir, want, 'HEAD'))) {
+          this._log('worktree', 'warn', `${key}: recorded start ${short(want)} is not in the checkout's history — keeping diff base ${short(had)}`);
+          continue;
+        }
+        this.checkpointRefs[key] = want;
+        changed = true;
+        if (this.pipeline?.dir) {
+          await appendAudit(this.pipeline.dir, `Diff base for \`${key}\` corrected to the worktree's start: \`${short(had)}\` → \`${short(want)}\`.`).catch(() => {});
+        }
+      }
+      if (!changed) return;                               // nothing corrected: state stays exactly as re-attached
+      const primaryKey = this.members?.[0]?.projectKey;
+      if (primaryKey && this.checkpointRefs[primaryKey]) this.checkpointRef = this.checkpointRefs[primaryKey];
+      this.state.checkpointRef = this.checkpointRef;
+      this.state.checkpointRefs = { ...this.checkpointRefs };
+    } catch (err) {
+      this._log('worktree', 'warn', `diff base check on resume failed: ${err?.message || err}`);
+    }
   }
 
   /**
@@ -2179,6 +2270,9 @@ export class RunHarness extends EventEmitter {
           return;
         }
         try {
+          // The project checkout's HEAD (_ensureGitCheckpointFor), or a replay's persisted base. Only
+          // used to say in the audit whether the diff base differs from it — never as the base itself.
+          const checkoutHead = this.checkpointRefs[m.projectKey] || null;
           // Replay (resume after a pausable setup failure): the first attempt persisted its planned
           // start below. Resume passes no `branch`, so without it a replay would re-resolve
           // resolveDefaultBranch and could start from — and record — another branch.
@@ -2225,22 +2319,28 @@ export class RunHarness extends EventEmitter {
               && pending.plannedFeature === sanitizeBranchName(featureRaw)
             ? pending.reuse
             : (await listLocalBranches(resolve(m.projectDir))).includes(sanitizeBranchName(featureRaw));
-          // D17 / C3: the checkpoint is the project dir's HEAD from BEFORE the sync. When this run
-          // moved its start (fast-forward, remote start, a source created from the remote — before
-          // the sync by _ensureLocalSource or by the Sync fetch itself), diffing against it would
-          // count every upstream commit as the run's own change. Move the member's diff base NOW —
-          // before createWorktree — so a paused setup persists it.
+          // D17 / C3: when this run moved its start (fast-forward, remote start, a source created from
+          // the remote), move the member's diff base NOW — before createWorktree — so a paused setup
+          // persists it. The final base is set after createWorktree from the worktree itself (below).
           const moved = synced.record && ['fast-forwarded', 'remote-start', 'created'].includes(synced.record.result)
             ? synced.record.to : (this._createdSources.get(m.projectKey) || null);
           const baseMoved = !willReuse && (!!moved || !!(pending && pending.baseMoved));
           if (baseMoved && moved && this.checkpointRefs[m.projectKey] !== moved) this.checkpointRefs[m.projectKey] = moved;
           const syncRecord = synced.record || (pending && pending.sync) || null;
+          // A REUSED branch ignores sourceBranch and sits on its old tip: its diff is every change on it
+          // that <remote>/<source> has not merged (plus uncommitted work). Decided before createWorktree,
+          // like the move above, so a paused setup persists it. NEVER stored as baseSha: that field is
+          // the "this run created the branch" proof _dropUnchangedMemberBranch deletes by.
+          const reuseBase = willReuse ? await this._reusedBranchBase(m, source, featureRaw, pending, syncRecord) : null;
+          if (reuseBase && this.checkpointRefs[m.projectKey] !== reuseBase.sha) this.checkpointRefs[m.projectKey] = reuseBase.sha;
           // Pending record, persisted with the checkpoint if createWorktree fails pausably (mirrored
           // into state.branch before the throw, below). It has no worktreeDir: that marks it pending.
           // `plannedFeature`, not `feature`: readers treat `feature` as "a branch this run owns".
           this.state.branches[m.projectKey] = { source, plannedFeature: sanitizeBranchName(featureRaw), reuse: willReuse,
             ...(startRef ? { startRef } : {}),
-            ...(baseMoved ? { baseMoved: true } : {}), ...(syncRecord ? { sync: syncRecord } : {}) };
+            ...(baseMoved ? { baseMoved: true } : {}),
+            ...(reuseBase ? { diffBase: reuseBase.sha, diffBaseFrom: reuseBase.against } : {}),
+            ...(syncRecord ? { sync: syncRecord } : {}) };
           const info = await createWorktree({
             projectDir: resolve(m.projectDir),              // the REAL dir: git runs here
             pipelineId: this.pipeline.id,
@@ -2261,21 +2361,35 @@ export class RunHarness extends EventEmitter {
           // info.sourceBranch would echo the startRef SHA on a remote start, so don't use it.
           // A fresh start: a new branch, or (replay) the branch the first attempt created at the
           // start point, which createWorktree now reports as reusedExisting. Only a branch that
-          // existed BEFORE this run (willReuse) ignored sourceBranch; its diff base never moved.
+          // existed BEFORE this run (willReuse) ignored sourceBranch.
           const freshStart = !willReuse;
           const baseSha = freshStart ? await worktreeHead(info.worktreeDir) : null;
-          // A fresh worktree whose start this run moved (now, or on the first attempt of a replay):
-          // its real HEAD is the diff base (a ref could also have moved in between).
-          if (baseMoved && baseSha && this.checkpointRefs[m.projectKey] !== baseSha) this.checkpointRefs[m.projectKey] = baseSha;
+          // A replayed reuse whose branch vanished while paused: createWorktree just re-created it
+          // from the source, so its real start is the worktree HEAD, not the recorded fork point.
+          const recreated = !freshStart && !info.reusedExisting;
+          // THE diff base: where this worktree started — never the project checkout's HEAD, which can
+          // sit on any other branch (sync off, up-to-date, no-upstream, a tag/SHA source, a workspace
+          // fallback). A reused branch diffs from its fork point (above); with no common history, from
+          // its tip, so upstream commits can never read as this run's changes.
+          const diffBase = freshStart ? baseSha
+            : recreated ? await worktreeHead(info.worktreeDir)
+            : (reuseBase?.sha || await worktreeHead(info.worktreeDir));
+          if (diffBase && this.checkpointRefs[m.projectKey] !== diffBase) this.checkpointRefs[m.projectKey] = diffBase;
           const keptStart = startRef && freshStart ? startRef : null;   // a reused branch ignored it
           this.state.branches[m.projectKey] = { source, feature: info.branch,
                                                 worktreeDir: info.worktreeDir,
                                                 reusedExisting: info.reusedExisting,
                                                 ...(baseSha ? { baseSha } : {}),
+                                                ...(!freshStart && diffBase ? { diffBase, diffBaseFrom: recreated ? null : (reuseBase?.against || null) } : {}),
                                                 ...(keptStart ? { startRef: keptStart } : {}),
                                                 ...(syncRecord ? { sync: syncRecord } : {}) };
-          if (baseMoved) {
-            await appendAudit(this.pipeline.dir, `Diff base for \`${m.projectKey}\` moved to the run's start \`${String(this.checkpointRefs[m.projectKey]).slice(0, 10)}\`.`).catch(() => {});
+          const short = (s) => String(s).slice(0, 10);
+          if ((freshStart || recreated) && diffBase && (baseMoved || (checkoutHead && diffBase !== checkoutHead))) {
+            await appendAudit(this.pipeline.dir, `Diff base for \`${m.projectKey}\` moved to the run's start \`${short(diffBase)}\`.`).catch(() => {});
+          } else if (!freshStart && !recreated && diffBase) {
+            await appendAudit(this.pipeline.dir, reuseBase
+              ? `Diff base for \`${m.projectKey}\` is \`${short(diffBase)}\`, where \`${info.branch}\` forks from \`${reuseBase.against}\` (reused branch).`
+              : `Diff base for \`${m.projectKey}\` is the reused branch's tip \`${short(diffBase)}\` (no common commit with \`${source}\`).`).catch(() => {});
           }
           const reuseNote = info.reusedExisting ? ' (resumed existing branch)' : '';
           await appendAudit(this.pipeline.dir,
@@ -2943,9 +3057,12 @@ export class RunHarness extends EventEmitter {
       if (alreadyReported.has(w)) continue;
       this._log('context', 'warn', w);
     }
-    await appendAudit(this.pipeline.dir, renderContextAudit(rc)).catch(() => {});
     for (const w of this._engineMcpWarnings(rc)) if (!alreadyReported.has(w)) await this._recordRunWarning(w);
     await this._recordCapabilities();
+    // Skills registry (§4.3): after the capability probe and after the assembly rewrote
+    // run.json.warnings; before the audit line, which closes with the layer's clause.
+    await this._resolveSkills({ reported: alreadyReported });
+    await appendAudit(this.pipeline.dir, renderContextAudit(rc, this.skillLayer)).catch(() => {});
     return rc;
   }
 
@@ -2958,21 +3075,218 @@ export class RunHarness extends EventEmitter {
    */
   async _resolveMcp(taken) {
     if (this._isWorkspaceScan() || this.workflowId === MEMORY_DEFRAG_WORKFLOW_ID) return null;
-    const m = this.members[0];
-    const target = this.isWorkspace
-      ? { kind: 'workspace', id: this.workspace.id, name: this.workspace.name, members: this.members.map((x) => ({ key: x.projectKey, name: x.projectName })), rank: 0 }
-      : { kind: 'project', key: m.projectKey, name: m.projectName, rank: 0 };
+    const { target, teamKey } = this._registryTarget();
     const required = requiredOf(this.policyRun);
     const [result, catalog] = await Promise.all([
       resolveRegistry({
         surface: 'pipeline', targets: [target],
-        teams: { [this.isWorkspace ? `ws:${this.workspace.id}` : m.projectKey]: required.length ? { home: this.policyRun.home, required } : null },
+        teams: { [teamKey]: required.length ? { home: this.policyRun.home, required } : null },
         optOut: this.mcpOptOut, toolNameLimit: toolNameLimitFor([...this._mcpModels()]), copyCap: 24, taken,
         mcpTimeoutMs: MCP_STARTUP_MS.pipeline,
       }),
       loadCatalog(),
     ]);
     return { result, catalog };
+  }
+
+  /** The run's resolver target and its Team-set key (MCP §5.1, skills §4.3): the project, or the
+   *  workspace with its member projects (each brings its own sets, F7). */
+  _registryTarget() {
+    const m = this.members[0];
+    return this.isWorkspace
+      ? { teamKey: `ws:${this.workspace.id}`, target: { kind: 'workspace', id: this.workspace.id, name: this.workspace.name, members: this.members.map((x) => ({ key: x.projectKey, name: x.projectName })), rank: 0 } }
+      : { teamKey: m.projectKey, target: { kind: 'project', key: m.projectKey, name: m.projectName, rank: 0 } };
+  }
+
+  /** Skills registry: the resolver IO shell (test seam). */
+  _skillRegistry(opts) { return resolveSkillRegistry(opts); }
+
+  /** Skills registry §2b-13: off-policy findings for required Team skills — P5's `skillDeviations`, [] without it (test seam). */
+  _skillDeviations(fields, result, describe) {
+    return typeof policyEffective.skillDeviations === 'function' ? policyEffective.skillDeviations(fields, result, describe) : [];
+  }
+
+  /** Skills registry §4.1: this host's facts (test seam); unreadable ⇒ nothing installed, sideloading allowed. */
+  _skillHostFacts() {
+    try { return skillHostFacts(); } catch { return { installedPluginNames: [], sideloadDisabled: false }; }
+  }
+
+  /** `claude --help` / `--version`, parsed once per run (§8.18 V5; skills §4.1 reads `pluginDir`). */
+  _claudeCaps() { return (this._capsProbe ||= probeClaudeCapabilities(this.claude.bin)); }
+
+  /** Skills registry §4.1: does this run's `claude` advertise --plugin-dir? A mock run spawns none: yes. Another
+   *  engine has no --plugin-dir (and this.claude.bin is its binary, never probed as claude): no. */
+  async _pluginDirSupported() {
+    if (this.claude.mock) return true;
+    if ((this.claude.engine || 'claude') !== 'claude') return false;
+    return (await this._claudeCaps()).pluginDir === true;
+  }
+
+  /**
+   * Skills registry (design §4.3): the set skills this run's target brings, each set's as one
+   * generated plugin under `<pipeline.dir>/skills` (outside every checkout; survives a pause; goes
+   * with the pipeline dir), spawned with one `--plugin-dir` each (_execCtx → runOpts). Re-run on
+   * every resume: the mount is rebuilt from the live sets minus the stored opt-out, BEFORE the first
+   * spawn (the CLI silently ignores a missing --plugin-dir path). Workspace scans and memory-defrag
+   * runs get none. Never throws: a fault leaves the run without set skills and says so.
+   * @param {{reported?: Set<string>}} [o]  warnings this run root already reported (a resumed run)
+   * @returns {Promise<object|null>} the layer, or null when the target brings no set skill
+   */
+  async _resolveSkills({ reported = new Set() } = {}) {
+    this.skillLayer = null;
+    if (!this.pipeline?.dir || this._isWorkspaceScan() || this.workflowId === MEMORY_DEFRAG_WORKFLOW_ID) return null;
+    const base = join(this.pipeline.dir, 'skills');
+    const firstLine = (err) => String(err?.message || err).split('\n')[0];
+    // No layer this segment: no mount and no record — not even one an earlier segment left in the state or in
+    // run.json (History reads its durable copy). A fault's line is warned once and kept with the run's warnings.
+    const noLayer = async (warning = null) => {
+      await rm(base, { recursive: true, force: true }).catch(() => {});
+      delete this.state.skillMount;
+      if (warning && !reported.has(warning)) this._log('skills', 'warn', warning);
+      if (this.runRoot) {
+        try {
+          const cur = (await readRunManifest(this.runRoot)) || {};
+          const warnings = Array.isArray(cur.warnings) ? cur.warnings : [];
+          const add = warning && !warnings.includes(warning) ? [warning] : [];
+          // A run that never had a layer writes nothing (byte-identical run.json); undefined drops the key.
+          if ('skillMount' in cur || add.length) await updateRunManifest(this.runRoot, { skillMount: undefined, warnings: [...warnings, ...add] });
+        } catch { /* best-effort: the run log has the line */ }
+      }
+      return null;
+    };
+    let result;
+    try {
+      const { target, teamKey } = this._registryTarget();
+      const required = requiredSkillsOf(this.policyRun);
+      result = await this._skillRegistry({
+        surface: 'pipeline', targets: [target],
+        teams: { [teamKey]: required.length ? { home: this.policyRun.home, required } : null },
+        optOut: this.mcpOptOut, skillCap: SKILL_CAP.pipeline,
+      });
+    } catch (err) {
+      return noLayer(`skills from sets not loaded: ${firstLine(err)}`);
+    }
+    // §2b-13 off-policy findings for required Team skills — after _resolvePolicy (it resets the list
+    // on resume); the whole list is persisted, as the MCP deviations are.
+    if (this.policyRun) {
+      try {
+        const found = this._skillDeviations(this.policyRun.fields, result, (s) => skillSkipReasonText(s));
+        for (const d of found) {
+          this.policyRun.deviations.push(d.code);
+          this._log('policy', 'warn', `off-policy: ${d.text}`);
+        }
+        if (found.length) this._persistPolicyState({ deviations: [...this.policyRun.deviations] });
+      } catch (err) {
+        // A broken rule never stops the run (this method never throws): the layer still loads.
+        this._log('policy', 'warn', `skill deviations not checked: ${firstLine(err)}`);
+      }
+    }
+    const mounted = Array.isArray(result?.mounted) ? result.mounted : [];
+    const skipped = Array.isArray(result?.skipped) ? result.skipped : [];
+    if (!mounted.length && !skipped.length) return noLayer();   // and a mount an earlier segment left is removed
+    // §4.1 host gates, only when something would load: managed `disableSideloadFlags`, or a CLI
+    // without --plugin-dir. Either skips the whole layer with one warning — never a dead spawn.
+    const blocked = !mounted.length ? null
+      : this._skillHostFacts().sideloadDisabled ? 'sideload-disabled'
+      : (await this._pluginDirSupported()) ? null : 'cli-no-plugin-dir';
+    let mount = { base: null, pluginDirs: [], plugins: [], failed: [] };
+    try {
+      if (mounted.length && !blocked) {
+        mount = await materializeSkillMount({ result, base });
+        // P3 leaves out a skill it could not copy (`failed`); nothing copied at all is a mount fault.
+        if (!mount.pluginDirs.length) throw new Error(mount.failed?.[0]?.error || 'no skill could be copied');
+      } else await rm(base, { recursive: true, force: true });
+    } catch (err) {
+      return noLayer(`skills from sets not loaded: could not prepare ${base}: ${firstLine(err)}`);
+    }
+    // A skill P3 could not copy is not delivered: it leaves the layer and the plugin list and becomes a skipped
+    // row (`mount-failed`, its error as the reason) — never told to agents, the run card or the audit as loaded.
+    const setNameOf = (id) => (result.plugins || []).find((p) => p.setId === id)?.setName ?? id;
+    const notCopied = (Array.isArray(mount.failed) ? mount.failed : []).map((f) => ({
+      setId: f.setId, setName: setNameOf(f.setId), pluginName: f.pluginName, name: f.name ?? '?',
+      skillId: mounted.find((m) => m.pluginName === f.pluginName && m.name === f.name)?.id ?? null,
+      qualifiedName: `${f.pluginName}:${f.name ?? '?'}`, reason: 'mount-failed', why: firstLine(f.error),
+    }));
+    const lost = new Set(notCopied.map((f) => f.qualifiedName));
+    const kept = lost.size ? mounted.filter((m) => !lost.has(`${m.pluginName}:${m.name}`)) : mounted;
+    const copied = new Map((mount.plugins || []).map((p) => [p.pluginName, p.skills]));
+    const plugins = (result.plugins || []).filter((p) => blocked || copied.has(p.pluginName)).map((p) => ({
+      setId: p.setId, setName: p.setName, pluginName: p.pluginName, renamedPlugin: !!p.renamedPlugin, skills: [...(copied.get(p.pluginName) || p.skills)],
+    }));
+    const allSkipped = [...skipped, ...notCopied];
+    this.skillLayer = { base: mount.base, pluginDirs: blocked ? [] : mount.pluginDirs, plugins, mounted: kept, skipped: allSkipped, blocked };
+    const record = {
+      base: mount.base, plugins,
+      skipped: allSkipped.map((s) => ({
+        setId: s.setId, setName: s.setName, skillId: s.skillId, name: s.name,
+        qualifiedName: s.qualifiedName ?? (s.pluginName ? `${s.pluginName}:${s.name}` : s.name), reason: s.reason, why: s.why ?? skillSkipReasonText(s),
+      })),
+      layer: { blocked, text: blocked ? skillLayerText(blocked) : null },
+    };
+    this.state.skillMount = record;
+    // One run-log warning per renamed plugin and per problem skip (choices — off, opted out, never
+    // consented — say nothing); a resumed run does not repeat what this run root already reported.
+    const lines = blocked ? [`skills from sets not loaded on this machine: ${skillLayerText(blocked)}`] : [];
+    for (const p of plugins) {
+      if (blocked || !p.renamedPlugin) continue;
+      const slug = mounted.find((m) => m.setId === p.setId)?.setSlug || 'general';
+      lines.push(`set ${p.setName} loads as \`${p.pluginName}:\` here — a Claude Code plugin named ${slug} is installed`);
+    }
+    for (const s of skipped) if (SKILL_PROBLEM_REASONS.includes(s.reason)) lines.push(skillSkipMessage(s));
+    for (const s of notCopied) lines.push(`${s.qualifiedName} in ${s.setName} not loaded: ${s.why}`);
+    for (const w of lines) if (!reported.has(w)) this._log('skills', 'warn', w);
+    if (this.runRoot) {
+      try {
+        const cur = (await readRunManifest(this.runRoot)) || {};
+        const warnings = Array.isArray(cur.warnings) ? cur.warnings : [];
+        await updateRunManifest(this.runRoot, { skillMount: record, warnings: [...warnings, ...lines.filter((w) => !warnings.includes(w))] });
+      } catch { /* best-effort: the run log has the lines */ }
+    }
+    return this.skillLayer;
+  }
+
+  /**
+   * Skills registry safety net (design §4.1, §4.3), called by the executor: an agent's spawn was
+   * refused for --plugin-dir (a managed `disableSideloadFlags` Worca could not read). Every later
+   * spawn of this run goes without set skills — the executor dispatches the refused one again — and
+   * the run says so once (fan-out siblings may be refused at the same moment).
+   */
+  onSkillSideloadRefused() {
+    if (!this.skillLayer || this.skillLayer.blocked) return;
+    this.skillLayer = { ...this.skillLayer, pluginDirs: [], blocked: 'sideload-disabled' };
+    const record = this.state.skillMount
+      ? { ...this.state.skillMount, layer: { blocked: 'sideload-disabled', text: skillLayerText('sideload-disabled') } } : null;
+    if (record) this.state.skillMount = record;
+    const line = "skills from sets not loaded: this machine's Claude Code refuses --plugin-dir";
+    this._log('skills', 'warn', line);
+    // The durable timeline too: the assembly's audit line said what the run would load.
+    if (this.pipeline?.dir) appendAudit(this.pipeline.dir, "Set skills dropped: this machine's Claude Code refuses --plugin-dir; later agents run without them.").catch(() => {});
+    this._emit('state', this.getState());   // the run page's card turns blocked now, not at the next state frame
+    // run.json writes during dispatch share the §10 chain (an unlocked read-modify-write).
+    this._mcpChain(async () => {
+      if (!this.runRoot) return;
+      try {
+        const cur = (await readRunManifest(this.runRoot)) || {};
+        const warnings = Array.isArray(cur.warnings) ? cur.warnings : [];
+        await updateRunManifest(this.runRoot, { ...(record ? { skillMount: record } : {}), warnings: warnings.includes(line) ? warnings : [...warnings, line] });
+      } catch { /* best-effort: the run log has the line */ }
+    });
+  }
+
+  /**
+   * A legacy run (no run root, no assembly): the layer, and its own audit line. A resumed segment reads the
+   * skills warnings the run already gave from its run log (a legacy run has no run.json), so none repeats.
+   */
+  async _resolveSkillsLegacy({ resume = false } = {}) {
+    const reported = new Set();
+    if (resume) {
+      const log = await readFile(join(this.pipeline.dir, RUN_LOG_FILE), 'utf8').catch(() => '');
+      for (const l of log.split('\n')) {
+        try { const e = JSON.parse(l); if (e?.source === 'skills' && e.level === 'warn') reported.add(e.text); } catch { /* a blank or torn line */ }
+      }
+    }
+    const layer = await this._resolveSkills({ reported });
+    if (layer) await appendAudit(this.pipeline.dir, `Skills: ${renderSkillAudit(layer)}.`).catch(() => {});
   }
 
   /** §5.6: every model this run may dispatch — the manifest's, the step models' and the run's own. */
@@ -3375,7 +3689,7 @@ export class RunHarness extends EventEmitter {
       });
       return;
     }
-    const caps = await probeClaudeCapabilities(this.claude.bin);
+    const caps = await this._claudeCaps();
     if (caps.version === null) {
       // No `claude --version` at all. The first node fails loudly anyway; when the
       // cause is the Windows npm shim, record the actionable reason NOW so the
@@ -3567,8 +3881,9 @@ export class RunHarness extends EventEmitter {
 
   /**
    * Workspace teardown (C1, N times): per member, commit its work onto its feature
-   * branch (in its own repo), remove its checkout, and KEEP the branch (a read-only
-   * Workspace scan deletes it, D5) — done, error, or stopped alike. Each member's SHA + survival flags are recorded on
+   * branch (in its own repo), remove its checkout, and KEEP the branch — except a member
+   * this run never changed (its branch is dropped) and a read-only Workspace scan (deletes
+   * every branch, D5) — done, error, or stopped alike. Each member's SHA + survival flags are recorded on
    * state.branches[projectKey]. Idempotent (guards against a double teardown by
    * clearing branchInfos); best-effort (never throws). Iterated serially so the
    * teardown commits don't contend on interleaved git index locks across repos.
@@ -3599,25 +3914,23 @@ export class RunHarness extends EventEmitter {
       for (const s of res.steps.filter((x) => !x.ok)) {
         this._log('worktree', 'warn', `teardown ${projectKey_} ${s.step} failed: ${s.stderr || 'unknown error'}`, errStreamAttr(s.stderr));
       }
+      const dropped = !readOnly && await this._dropUnchangedMemberBranch(projectKey_, info, branchRecord);
       if (this.pipeline) {
         await appendAudit(
           this.pipeline.dir,
-          `Worktree \`${projectKey_}\` removed at \`${info.worktreeDir}\` (${readOnly ? 'deleted' : 'kept'} branch \`${info.branch}\`).`,
+          `Worktree \`${projectKey_}\` removed at \`${info.worktreeDir}\` (${memberBranchNote(info.branch, { readOnly, dropped })}).`,
         ).catch(() => {});
       }
       if (branchRecord) {
         branchRecord.worktreeRemoved = true;
-        branchRecord.branchKept = !readOnly;
+        branchRecord.branchKept = !readOnly && !dropped;
       }
       this.workDirs.delete(projectKey_);
     }
     // Keep the scalar mirror coherent for late observers — but never claim a
     // retained checkout was removed (the detached twin guards the same way,
     // via !retainedMembers.length).
-    if (this.state.branch && !anyRetained) {
-      this.state.branch.worktreeRemoved = true;
-      this.state.branch.branchKept = !this._isWorkspaceScan();
-    }
+    if (!anyRetained) this._mirrorPrimaryBranchTeardown();
     this.branchInfo = null;
     this.workDir = this.projectDir;
     await this._persist().catch(() => {});
@@ -3638,7 +3951,8 @@ export class RunHarness extends EventEmitter {
    *      file is deliberately NOT in the exclusion pathspecs)
    *   3. _commitWork with the §8.8 exclusion set (+ status recheck, hook retry)
    *   4. remove this worktree's remaining injected paths
-   *   5. removeWorktree(force:true) — the branch is kept, except on a read-only Workspace scan (deleted, D5)
+   *   5. removeWorktree(force:true) — the branch is kept, except on a read-only Workspace scan
+   *      (deleted, D5) and a workspace member this run never changed (dropped)
    * then, at the run-root level: (6) the same rescue for run-root mounts, (7) the
    * §8.11 stray scan, (8) the run.json durability copy, (9) guarded rm -rf (§8.13).
    */
@@ -3703,7 +4017,8 @@ export class RunHarness extends EventEmitter {
         this.workDirs.delete(key);
         continue;
       }
-      // (5) remove the checkout; the branch is kept — except on a read-only Workspace scan (D5).
+      // (5) remove the checkout. The branch is kept — except on a read-only Workspace scan
+      // (D5), and except for a workspace member this run never changed ("affected only").
       const readOnly = this._isWorkspaceScan();   // D5: a scan leaves no branch behind
       const res = await removeWorktree({
         projectDir: resolve(this.memberByKey.get(key)?.projectDir || this.projectDir),
@@ -3714,23 +4029,21 @@ export class RunHarness extends EventEmitter {
       for (const s of res.steps.filter((x) => !x.ok)) {
         this._log('worktree', 'warn', `teardown ${key} ${s.step} failed: ${s.stderr || 'unknown error'}`, errStreamAttr(s.stderr));
       }
+      const dropped = !readOnly && await this._dropUnchangedMemberBranch(key, info, branchRecord);
       if (this.pipeline) {
         await appendAudit(
           this.pipeline.dir,
-          `Worktree \`${key}\` removed at \`${wt}\` (${readOnly ? 'deleted' : 'kept'} branch \`${info.branch}\`).`,
+          `Worktree \`${key}\` removed at \`${wt}\` (${memberBranchNote(info.branch, { readOnly, dropped })}).`,
         ).catch(() => {});
       }
       if (branchRecord) {
         branchRecord.worktreeRemoved = true;
-        branchRecord.branchKept = !readOnly;
+        branchRecord.branchKept = !readOnly && !dropped;
       }
       this.workDirs.delete(key);
     }
-    // Keep the scalar mirror coherent for late observers.
-    if (this.state.branch && !retainedMembers.length) {
-      this.state.branch.worktreeRemoved = true;
-      this.state.branch.branchKept = !this._isWorkspaceScan();
-    }
+    // Keep the scalar mirror coherent for late observers (never on a retained member).
+    if (!retainedMembers.length) this._mirrorPrimaryBranchTeardown();
     this.branchInfo = null;
     this.workDir = this.projectDir;
 
@@ -3896,6 +4209,53 @@ export class RunHarness extends EventEmitter {
    *  resume() restores this.workflowId from the resume point AFTER construction. */
   _isWorkspaceScan() {
     return this.isWorkspace && this.workflowId === WORKSPACE_SCAN_WORKFLOW_ID;
+  }
+
+  /**
+   * "Affected projects only" (workspace runs): at TERMINAL teardown — after the commit
+   * step, on the non-retained path, once the checkout is gone — a member branch this run
+   * CREATED and never moved carries no change, so it is deleted instead of left behind.
+   * `baseSha` is the "this run created it" proof: it is stamped only on a fresh start
+   * (_setupRunRoot), never on a pre-existing/reused branch, and survives resume via
+   * workspace_meta. (`reusedExisting` is NOT usable: a setup replay re-attaches the
+   * branch its own first attempt created and reports true.) The primary is treated like
+   * any other member. A scan run keeps its own unconditional delete. Returns true when the
+   * branch was deleted; any doubt keeps it. Never throws.
+   */
+  async _dropUnchangedMemberBranch(key, info, branchRecord) {
+    if (!this.isWorkspace || this._isWorkspaceScan()) return false;
+    const sha = branchRecord?.baseSha;
+    if (!sha || !info?.branch) return false;
+    const projectDir = resolve(this.memberByKey.get(key)?.projectDir || this.projectDir);
+    let res;
+    try {
+      res = await deleteBranchIfAt({ projectDir, branch: info.branch, sha });
+    } catch (e) {
+      res = { deleted: false, reason: e?.message || String(e) };
+    }
+    if (!res.deleted) {
+      // 'moved' is the ordinary "this project changed" outcome — nothing to say.
+      if (res.reason !== 'moved') {
+        this._log('worktree', 'info', `${key}: kept branch ${info.branch} (${res.reason}${res.stderr ? `: ${res.stderr}` : ''})`);
+      }
+      return false;
+    }
+    branchRecord.branchDeleted = { reason: 'unchanged', at: new Date().toISOString() };
+    this._log('worktree', 'info', `${key}: no changes — deleted branch ${info.branch}`);
+    return true;
+  }
+
+  /** Keep the scalar `state.branch` (the `pipelines.branch` column) coherent after a
+   *  non-retaining teardown. On a workspace run it mirrors the PRIMARY member's real
+   *  outcome — kept, or dropped as unchanged; a single-project run keeps today's stamp. */
+  _mirrorPrimaryBranchTeardown() {
+    if (!this.state.branch) return;
+    this.state.branch.worktreeRemoved = true;
+    const primary = this.isWorkspace ? this.state.branches?.[this.members[0]?.projectKey] : null;
+    this.state.branch.branchKept = primary && typeof primary.branchKept === 'boolean'
+      ? primary.branchKept
+      : !this._isWorkspaceScan();
+    if (primary?.branchDeleted) this.state.branch.branchDeleted = primary.branchDeleted;
   }
 
   /** Workspace scan: save the scan's map + description as the workspace's (workspace-scan-run.mjs
@@ -4074,6 +4434,8 @@ export class RunHarness extends EventEmitter {
    */
   async _brokerPreflight(manifest, stepModels) {
     if (!brokerEnabled() || mockEnabled({ mock: this.claude.mock })) return;
+    // Script and flow cards only: nothing spawns a model, so no key is needed.
+    if (!manifestNeedsModel(manifest)) return;
     let info;
     try { info = await brokerInfo(); } catch { return; }
     const person = info.mode === 'multi' ? currentBillTo() : 'local';
@@ -4474,7 +4836,8 @@ export class RunHarness extends EventEmitter {
   }
 
   _nightStateNow(config) {
-    return nightState({ config, toggle: nightModeToggle(), hereSince: nightModeHereSince(), optIn: this._night.optIn, override: this._night.override, now: this._nightClock.now() });
+    const owner = this.awayOwner();
+    return nightState({ config, toggle: nightModeToggleFor(owner), hereSince: nightModeHereSinceFor(owner), optIn: this._night.optIn, override: this._night.override, now: this._nightClock.now() });
   }
 
   /** True when night mode may currently decide (used by the team soft-cap override). */
@@ -4735,7 +5098,22 @@ export class RunHarness extends EventEmitter {
   _nightSnapshot() {
     const n = this._night;
     const open = n.q && this.pendingQuestion?.id === n.q.id && n.decidable !== false && n.openedAt != null;
-    return { optIn: n.optIn, override: n.override, decisions: n.count, flagged: n.flagged, answers: n.answers, checks: n.checks, openedAt: open ? new Date(n.openedAt).toISOString() : null };
+    const snap = { optIn: n.optIn, override: n.override, decisions: n.count, flagged: n.flagged, answers: n.answers, checks: n.checks, openedAt: open ? new Date(n.openedAt).toISOString() : null };
+    // B4: whose "I'm here / I'm away" this run follows, and that person's switch (read-only for others).
+    if (awayPerPerson()) {
+      const owner = this.awayOwner();
+      const own = personAwayStatus(owner);
+      snap.owner = awayPersonKey(owner);
+      snap.ownerToggle = own ? own.toggle : null;   // null = the owner follows the instance default
+      snap.ownerHereSince = own?.hereSince ?? null;
+    }
+    return snap;
+  }
+
+  /** B4: the person whose Away mode this run follows: who last resumed it, else who started it
+   *  (a scheduled run's starter is the schedule's creator). Null = nobody in particular. */
+  awayOwner() {
+    return this._night?.owner || this.resumeOpts?.row?.started_by || this.opts.startedBy || null;
   }
 
   /** Run-view switch. @param {'auto'|'on'|'off'} mode */
@@ -4762,7 +5140,11 @@ export class RunHarness extends EventEmitter {
   }
 
   /** Settings / project prefs changed: re-evaluate the open question. */
-  nightConfigChanged() { this._nightArm(); }
+  nightConfigChanged() {
+    // B4: an owner's switch changed: republish it for the run page's read-only line.
+    if (this._night && awayPerPerson()) { try { this.state.night = this._nightSnapshot(); } catch { /* never break re-arming */ } }
+    this._nightArm();
+  }
 
   /** Plan/task artifacts of this run for the nightDecider to read. Never throws. */
   /** What the Away mode review reads: the run's task.md and its NEWEST plan. Plans live in the
@@ -6390,7 +6772,7 @@ export class RunHarness extends EventEmitter {
       // A failed title used to vanish into a kept provisional title. Say so in
       // the run log — once per run, there is only ever one title call.
       onError: ({ model, error }) => this._log('orchestrator', 'warn',
-        `title generation failed (model ${model}): ${clipMiddle(error?.message || error, 300)} — keeping the provisional title`),
+        `title generation failed (${model ? `model ${model}` : 'the CLI default model'}): ${clipMiddle(error?.message || error, 300)} — keeping the provisional title`),
       // Same env policy as the pipeline nodes. Both undefined on an unconfigured
       // project ⇒ byte-identical spawn env (legacy parity).
       envScrub: this.guardrails?.envScrub || undefined,
@@ -6582,6 +6964,10 @@ export class RunHarness extends EventEmitter {
       // Who paused it survives a restart (rowToState reads it back).
       if (this.state.lastAction && this.state.lastAction.kind === 'pause') rp.lastAction = { ...this.state.lastAction };
       else delete rp.lastAction;
+      // B3: a drained run is resumed on the next start as whoever last resumed it (else its
+      // starter, pipelines.started_by), so the billing and attribution stay theirs.
+      if (this.pauseReason === REASON.DRAIN && this._drainResumeAs) rp.resumeAs = this._drainResumeAs;
+      else delete rp.resumeAs;
       // The token this pause is written with (_persist stamps it into the saved point as `pausedBy`).
       this._pauseToken ||= randomUUID();
     }
@@ -6856,6 +7242,22 @@ export class RunHarness extends EventEmitter {
   _pendingStart(key) {
     const b = (this.state.branches && this.state.branches[key]) || (!this.isWorkspace ? this.state.branch : null);
     return b && typeof b === 'object' && !b.worktreeDir && b.source ? b : null;
+  }
+
+  /** The diff base of a reused feature branch (see reusedBranchBase): measured against the remote the
+   *  sync used (its record), else the member's configured sync remote (default origin) — even with
+   *  sync off: the remote-tracking ref is read, never fetched. A replay keeps the first attempt's
+   *  recorded answer: nothing was fetched since, and on a resume opts.sync is absent, so memberFor()
+   *  would default the remote to origin. */
+  async _reusedBranchBase(m, source, featureRaw, pending = null, syncRecord = null) {
+    // Only for the SAME planned name — the rule willReuse already follows for pending.reuse.
+    if (pending && pending.diffBase && pending.plannedFeature === sanitizeBranchName(featureRaw)) {
+      return { sha: pending.diffBase, against: pending.diffBaseFrom || source };
+    }
+    return reusedBranchBase(resolve(m.projectDir), {
+      feature: sanitizeBranchName(featureRaw), source,
+      remote: syncRecord?.remote || this.syncOpts.memberFor(m.projectKey).remote,
+    });
   }
 
   /** A remote-only source (picked from the Remote only group / proposed by Ask) becomes a local

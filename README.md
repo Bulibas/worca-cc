@@ -4,8 +4,8 @@
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D22.13-brightgreen)](.nvmrc)
 
-Worca is a **deterministic multi-agent pipeline** that drives Claude Code
-(headless) through a software task. You point it at a project, describe the
+Worca turns a task into **reviewed, merge-ready work**. It is a
+**deterministic multi-agent pipeline**: you point it at a project, describe the
 work, and a state machine runs the agents of a workflow in sequence — by
 default **Clarify → Plan → Refine → Implement → Review** — looping until the
 work clears quality gates, pausing to ask *you* the questions that matter, and
@@ -103,7 +103,8 @@ Every finished run keeps its full record, one tab each in **Runs**: **Overview**
 - **One-click PRs** — a finished run's page offers **Create pull request**:
   *Ship it?* shows the files and +/− lines, lets you write the description or
   **Generate with AI**, then pushes the branch and opens the PR with the GitHub
-  CLI (`gh`). The button then becomes **View pull request**.
+  CLI (`gh`), or on [Azure DevOps](docs/azure-devops.md) with a personal access
+  token. The button then becomes **View pull request**.
 - **Mock mode** — the **Mock mode** switch on New pipeline (`--mock` on the
   CLI, `WORCA_MOCK=1` for a whole server) runs the pipeline against a
   deterministic offline mock — no `claude`, no tokens — for demos, development
@@ -244,9 +245,10 @@ Every finished run keeps its full record, one tab each in **Runs**: **Overview**
   **New pipeline › Advanced** offers the built-in **Permissive / Normal /
   Strict** tiers plus your own sets; Permissive, the default, adds no rules.
   Normal protects credential files (`.env*`, keys, cert stores, container
-  secrets) and blocks publication commands (`git push`,
-  `npm`/`yarn`/`pnpm publish`); Strict adds an environment scrub on agent spawn, denies
-  network-egress tools, `gh`, `docker push`, cloud CLIs and
+  secrets, Worca's own DB and settings) and blocks publication commands
+  (`git push`, `npm`/`yarn`/`pnpm publish`); Strict adds an environment scrub on agent spawn, denies
+  network-egress tools (including git clone/fetch/pull, DNS and download
+  CLIs), `gh`, `docker push`, cloud CLIs and
   `WebFetch`/`WebSearch`, and protects home-dir credential stores. A team
   policy can preset the picker and warn when a run's set ranks below its
   minimum tier.
@@ -266,16 +268,17 @@ Every finished run keeps its full record, one tab each in **Runs**: **Overview**
 ### MCP servers & credential broker
 
 - **Worca's own MCP registry** — servers installed for Worca only, never written into your
-  Claude Code config, that pipeline agents and Ask Worca can call. **Settings › MCP servers**
-  (Advanced) has two views: **Servers**, the catalog (servers shipped by plugins, added by hand
+  Claude Code config, that pipeline agents and Ask Worca can call. **Settings › Sets**
+  (Advanced) has three views: **Servers**, the catalog (servers shipped by plugins, added by hand
   with **Add MCP server** as `stdio`, `http` or `sse`, or required by a team policy), and
   **Sets**, where each server gets its values and secrets, so one server can sit in two sets
-  with different credentials. The built-in marketplace ships MCP servers as plugins (see
+  with different credentials, and **Skills**, the skill catalog ([Skills](docs/skills.md)): skills that
+  plugins ship or that you import, added to sets like servers. The built-in marketplace ships MCP servers as plugins (see
   [Plugins & chat](#plugins--chat)).
 - **Sets per project, choices per run** — Ask Worca always uses the built-in **General** set;
-  a project picks its sets on its **MCP** tab (**Include General in runs** is on by default),
-  New pipeline › Advanced › **MCP servers** switches servers off for one run, and the Ask
-  composer's **MCP · N** button picks them per chat. **Test** starts a server exactly as a run
+  a project picks its sets on its **Sets** tab (**Include General in runs** is on by default),
+  New pipeline › Advanced › **Sets** switches servers and skills off for one run, and the Ask
+  composer's **Sets · N** button picks them per chat. **Test** starts a server exactly as a run
   would and lists its tools.
 - **Secrets out of config files** — values live only in `~/.worca-cc/mcp/secrets.json`
   (mode 0600) and reach a server as spawn environment; the run's MCP config holds
@@ -584,7 +587,7 @@ Every finished run keeps its full record, one tab each in **Runs**: **Overview**
   scheduled and finished runs from every project on the machine (see
   [Pipeline](#pipeline)). See [`docs/storage.md`](docs/storage.md).
 
-![Runs page — runs from nimbus-jobs, nimbus-crm and atlas-docs grouped by project, one scheduled and one stopped, with the finished run Paginate the search endpoint open: Ready to ship, 17m 2s, $3.65, 2 files changed](docs/screenshots/history.png)
+![Runs page — runs from nimbus-jobs, nimbus-crm and lumen-docs grouped by project, one scheduled and one stopped, with the finished run Paginate the search endpoint open: Ready to ship, 17m 2s, $3.65, 2 files changed](docs/screenshots/history.png)
 
 ### Getting started & UI levels
 
@@ -807,9 +810,11 @@ The skill starts the same deterministic orchestrator as the CLI;
 - [Actions](docs/actions.md) — check out a finished run and run the project's commands from Worca
 - [Models](docs/models.md) — the catalog, providers (GitHub Copilot, OpenAI-compatible) and the built-in bridge
 - [MCP servers](docs/mcp-servers.md) — Worca's own MCP registry: catalog, sets, copies, secrets, Test
+- [Skills](docs/skills.md) — skills in sets: the library, imports, `/<set>:<skill>` names, Team required skills
 - [Credential broker](docs/credential-broker.md) — model keys stay out of Worca's container: each `claude` it starts gets a short-lived token, and the broker adds the real key on the way to the provider
 - [Voice mode](docs/speech.md) — hands-free Ask Worca: Whisper and Kokoro in the browser, or your own speech servers
 - [Voice languages](docs/speech-languages.md) — which languages work today, and the plan for more
+- [Azure DevOps](docs/azure-devops.md) — Ship-it, clone, sync, merge tracking and the Boards source on `dev.azure.com`: the token, its scopes, and what does not work yet
 - [Team metrics](docs/team-metrics.md) — git-backed, team-wide records of finished runs on a `worca-metrics` branch
 - [Team policy](docs/team-policy.md) — team-set cost caps, allowed models, required plugins, guardrail defaults and MCP servers from a `worca-policy` branch
 - [Storage](docs/storage.md) — where state lives, project keys, migration
@@ -825,6 +830,8 @@ The skill starts the same deterministic orchestrator as the CLI;
 Bug reports and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for
 the from-source setup, mock mode, the test suite, and the PR workflow.
 Development happens on the `dev` branch, and PRs target `dev`.
+Everyone taking part is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

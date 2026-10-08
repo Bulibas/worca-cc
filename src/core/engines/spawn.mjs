@@ -6,7 +6,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { strongestClass } from '../recoverable-error.mjs';
-import { stripGithubCredentials } from '../github-credentials.mjs';
+import { stripHostCredentials } from '../host-credentials.mjs';
 import { agentSpawn, killAgentGroup, shareWithAgent } from '../agent-user.mjs';
 import { agentIdentityFor } from '../agent-pool.mjs';
 import { currentOwner } from '../billing.mjs';
@@ -31,7 +31,7 @@ export function sigkillGraceMs() {
 // spawn (the 2.1.220 binary reads all of them). Cloud-provider creds
 // (AWS_*/GOOGLE_APPLICATION_CREDENTIALS/AZURE_*) are intentionally NOT here —
 // a Bedrock/Vertex/Foundry deployment allowlists them per-project (documented).
-const SPAWN_ENV_BASE = [
+export const SPAWN_ENV_BASE = [
   'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'SHELL', 'USER', 'LOGNAME', 'TERM',
   'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
   'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
@@ -86,7 +86,7 @@ export function cleanRunEnv(env) {
  * scrubbed env (undefined when scrub is off -> process.env), the run-level env
  * (cleanRunEnv) over it, the adapter's overlay (the model env) merged LAST so it
  * survives scrub and wins collisions, WORCA_HOST_PID after that, no GitHub
- * credential in any tier, and never the credential broker's own secret. With
+ * or Azure DevOps credential in any tier (host-credentials.mjs), and never the credential broker's own secret. With
  * no run env and no overlay the env is byte-identical to the scrub result.
  * @returns {{env: Record<string,string>, scrubbed: boolean}}
  */
@@ -96,7 +96,7 @@ export function composeSpawnEnv({ envScrub, envAllowlist, prefixes, runEnv, over
   if (runEnv) env = { ...(env ?? process.env), ...runEnv };
   if (overlay) env = { ...(env ?? process.env), ...overlay };
   if (hostPid != null) env = { ...(env ?? process.env), WORCA_HOST_PID: String(hostPid) };
-  env = stripGithubCredentials(env ?? process.env);
+  env = stripHostCredentials(env ?? process.env);
   delete env.WORCA_BROKER_SECRET;
   delete env.WORCA_BROKER_SECRET_FILE;
   return { env, scrubbed: !!scrubbedEnv };

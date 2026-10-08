@@ -4,11 +4,15 @@
 // removes them, uninstall removes their memberships everywhere, plus the
 // queries the uninstall confirm and the update preview need. plugin-store.mjs
 // calls these; the hooks that run after an install/link/update landed only warn.
+// The skills a plugin ships (skills registry spec §5): an update names the new,
+// removed and changed ones and removes the dropped ones from every set; an
+// uninstall removes all of them. Never automatic: the preview is the consent.
 
-import { lstatSync, readFileSync } from 'node:fs';
+import { lstatSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readMcpStore, withMcpLock, assignBases, removeServerEverywhere, migrateServerFields, mcpDir, McpStoreError } from './store.mjs';
+import { readMcpStore, withMcpLock, assignBases, removeServerEverywhere, migrateServerFields, removeSkillEverywhere, mcpDir, McpStoreError } from './store.mjs';
 import { canonicalJson } from './definitions.mjs';
+import { inspectSkillDir, isValidSkillFolderName } from '../skills-registry/inspect.mjs';
 
 /** Every membership of the servers `match` selects — user sets' members and Team
  *  sets' local state — as { setId, name, server, values }. */
@@ -148,22 +152,131 @@ function mcpUpdateLines(plugin, pin, cand, delta, snap) {
   return lines;
 }
 
-/** The update preview's MCP part: the name delta plus its lines. */
-export async function mcpUpdatePreview(plugin, pin, cand) {
+/** Every skill membership `match` selects — user sets' `skills` and Team sets' skill state — as { name, skill }. */
+function skillMembershipsOf(snap, match) {
+  const out = [];
+  for (const set of Object.values(snap.sets)) for (const m of set.skills ?? []) if (match(m.skill)) out.push({ name: set.name, skill: m.skill });
+  for (const t of Object.values(snap.teams)) for (const id of Object.keys(t.skills ?? {})) if (match(id)) out.push({ name: t.name, skill: id });
+  return out;
+}
+
+/**
+ * The skills twin of mcpFootprint: every skill id `match` selects that a set or Team state holds, and the names of
+ * the sets (user and Team) holding one — what an uninstall removes and its confirm names.
+ * @returns {{ids: string[], sets: string[]}}
+ */
+export function skillFootprint(snap, match) {
+  const ms = skillMembershipsOf(snap, match);
+  return { ids: [...new Set(ms.map((m) => m.skill))].sort(), sets: [...new Set(ms.map((m) => m.name))].sort() };
+}
+
+/** The skills a plugin version dir ships: name → folder, for every skills/<name>/SKILL.md (the catalog's rule) whose
+ *  folder name is a valid skill name (P1's rule, the reserved names included) — any other folder can never be a set
+ *  member, and its raw name (control characters included) must never reach a preview line or the terminal. */
+function shippedSkills(versionDir) {
+  const out = new Map();
+  const dir = join(versionDir, 'skills');
+  let ents;
+  try { ents = readdirSync(dir, { withFileTypes: true }); } catch { return out; }   // no skills/ folder (or not a folder): none
+  for (const d of ents) {
+    if (!isValidSkillFolderName(d.name)) continue;
+    if (d.isDirectory() && existsSync(join(dir, d.name, 'SKILL.md'))) out.set(d.name, join(dir, d.name));
+  }
+  return out;
+}
+
+/**
+ * Skill delta between two plugin version dirs (the pinned one and the candidate): names new, removed and changed
+ * (a different content hash — bytes, the file set, the exec bits — or a skill that starts or stops loading), and per
+ * changed skill the number of scripts the candidate adds.
+ * @returns {{newSkills:string[], removedSkills:string[], changedSkills:string[], addedScripts:Record<string,number>}}
+ */
+export function skillDelta(pinDir, candDir) {
+  const pin = shippedSkills(pinDir);
+  const cand = shippedSkills(candDir);
+  const changedSkills = [];
+  const addedScripts = {};
+  for (const [n, dir] of cand) {
+    if (!pin.has(n)) continue;
+    const a = inspectSkillDir(pin.get(n), { name: n });
+    const b = inspectSkillDir(dir, { name: n });
+    // The hash covers the files the walk records. A `.claude-plugin/` folder or a link the inspection refuses records
+    // none, yet it makes the catalog list the skill as invalid (never mounted): a change in what loads, so it is named.
+    if (a.hash === b.hash && (a.problems.length === 0) === (b.problems.length === 0)) continue;
+    changedSkills.push(n);
+    const more = b.scripts.filter((x) => !a.scripts.includes(x)).length;
+    if (more) addedScripts[n] = more;
+  }
+  return {
+    newSkills: [...cand.keys()].filter((n) => !pin.has(n)).sort(),
+    removedSkills: [...pin.keys()].filter((n) => !cand.has(n)).sort(),
+    changedSkills: changedSkills.sort(),
+    addedScripts,
+  };
+}
+
+/**
+ * The update preview's skill lines, in order new → removed → changed (§5): a removed or changed skill a set holds is a
+ * red line naming those sets ("+N scripts" when the change adds scripts); one no set holds is a plain line.
+ * @returns {Array<{red: boolean, text: string}>}
+ */
+export function skillUpdateLines(plugin, delta, snap) {
+  const sets = (n) => skillFootprint(snap, (x) => x === `skill:plugin:${plugin}/${n}`).sets.join(', ');
+  const plus = (n) => { const k = Object.hasOwn(delta.addedScripts ?? {}, n) ? delta.addedScripts[n] : 0; return k ? ` (+${k} script${k === 1 ? '' : 's'})` : ''; };
+  const lines = delta.newSkills.map((n) => ({ red: false, text: `new skill: ${n}` }));
+  for (const n of delta.removedSkills) {
+    const held = sets(n);
+    lines.push(held ? { red: true, text: `SKILL REMOVED: ${n} — leaves ${held}` } : { red: false, text: `removed skill: ${n}` });
+  }
+  for (const n of delta.changedSkills) {
+    const held = sets(n);
+    lines.push(held ? { red: true, text: `SKILL CHANGED: ${n} — in ${held}${plus(n)}` } : { red: false, text: `changed skill: ${n}${plus(n)}` });
+  }
+  return lines;
+}
+
+/** Uninstall (§5): every `skill:plugin:<name>/` membership and Team state the store holds. */
+export async function removePluginSkills(plugin) {
+  const prefix = `skill:plugin:${plugin}/`;
+  for (const id of skillFootprint(await readMcpStore(), (id) => id.startsWith(prefix)).ids) await removeSkillEverywhere(id);
+}
+
+/** The update preview's MCP part: the name delta plus its lines; with the two version dirs, the skill delta and its
+ *  lines too (skills registry spec §5). */
+export async function mcpUpdatePreview(plugin, pin, cand, { pinDir = null, candDir = null } = {}) {
   const delta = mcpServerDelta(pin, cand);
-  return { ...delta, mcpLines: mcpUpdateLines(plugin, pin, cand, delta, await readMcpStore()) };
+  const snap = await readMcpStore();
+  const skills = pinDir && candDir ? skillDelta(pinDir, candDir) : { newSkills: [], removedSkills: [], changedSkills: [], addedScripts: {} };
+  return {
+    ...delta, mcpLines: mcpUpdateLines(plugin, pin, cand, delta, snap),
+    newSkills: skills.newSkills, removedSkills: skills.removedSkills, changedSkills: skills.changedSkills,
+    skillLines: skillUpdateLines(plugin, skills, snap),
+  };
 }
 
 /** Apply (§4.6): a removed server is handled like an uninstall, a changed one
- *  runs the field migration, new ones get their base. Warn-only: the update
- *  already landed, and the resolver skips what a failure leaves behind. */
-export async function applyMcpUpdate(plugin, pin, cand) {
+ *  runs the field migration, new ones get their base; each of `removedSkills`
+ *  (the names the update's own preview listed as removed) leaves every set (a
+ *  changed skill stays: its copy is mounted fresh on the next spawn). Warn-only:
+ *  the update already landed, and the resolver skips what a failure leaves behind. */
+export async function applyMcpUpdate(plugin, pin, cand, { removedSkills = [] } = {}) {
   const delta = mcpServerDelta(pin, cand);
   try {
     for (const n of delta.removedMcpServers) await removeServerEverywhere(`plugin:${plugin}/${n}`);
     for (const n of delta.changedMcpServers) await migrateServerFields(`plugin:${plugin}/${n}`, pin[n], cand[n]);
   } catch (err) {
     console.warn(`[plugin-store] ${plugin}: MCP registry not updated (${err?.message || err})`);
+  }
+  // Skills (skills registry §5): the skills the preview named as removed leave every set — exactly those, never a delta
+  // recomputed from the version dirs (a rolled-back `current` or a setup step would make it differ from what the user
+  // saw). Its own warn-only step, so an MCP failure never skips it and its failure is named for what it is.
+  if (removedSkills.length) {
+    try {
+      const held = new Set(skillFootprint(await readMcpStore(), (id) => id.startsWith(`skill:plugin:${plugin}/`)).ids);
+      for (const n of removedSkills) if (held.has(`skill:plugin:${plugin}/${n}`)) await removeSkillEverywhere(`skill:plugin:${plugin}/${n}`);
+    } catch (err) {
+      console.warn(`[plugin-store] ${plugin}: skills not removed from sets (${err?.message || err})`);
+    }
   }
   await assignPluginBases(plugin, cand);
 }

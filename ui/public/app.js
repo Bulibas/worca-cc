@@ -51,10 +51,12 @@ const state = {
   historyPerson: '', // active "Started by" filter (lower-cased name); '' === everyone. Shared deployments only.
   historyError: '',  // the last /api/history load error, shown in the Runs list while it has no rows
   ghAvailable: false,// gh CLI availability, from the last /api/history load
+  adoAvailable: false,// an Azure DevOps credential is configured (prHosts.azure), same source
 
   // --- Workspaces ---
   workspaces: [],            // GET /api/workspaces read-model
   selectedWorkspaceId: '',   // '' === none; set ONLY in workspace target mode
+  wsHumanInLoop: true,       // D-W1: Auto's Human in the loop on a workspace target — per run, never stored
   runTarget: 'project',      // 'project' | 'workspace' — New Pipeline target toggle
   sync: freshSyncState(),    // #527: the New-pipeline Sync row (branch-sync.mjs#freshSyncState)
   syncChips: {},             // #527: projectKey -> SyncBlock, from GET /api/sync/projects
@@ -74,6 +76,7 @@ const state = {
 import { logLineClass, logLineTime, serializeLog, cycleSeparatorBefore, newCycleState, projectLogRecord } from './log-line.mjs';
 import { logLineVisible, logFacets, compileLogFilter } from './log-filter.mjs';
 import { alreadyApplied, noteBoot } from './ws-seq.mjs';
+import { createAlerts, mountAlertsCard } from './alerts.mjs';
 import { decorFromState, applyDecor, isGraphManifest, ledgerRows } from './graph/run-decor.mjs';
 import { mountRunGraph } from './graph/run-hosts.mjs';
 import { AWAY_GLYPH } from './away-glyph.mjs';
@@ -176,9 +179,9 @@ import {
   renderProjectTpCell, renderProjectTpChip, projectTpSummary, renderPolicyEnableDialogBody, renderEffectiveTable, renderPolicyEditor, docFromEditor, editorDirty,
   renderPolicyEmptyState, renderPolicySyncChip, renderWsPolicyLine, renderTeamCapsReadout, renderTeamChip, renderPolicyNotesLine,
   renderRequiredStrip, renderSetupChecklist, relTime as tpRelTime,
-  renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel, renderMcpStrip, renderMcpConsent,
+  renderPolicyHeader, renderPolicyStats, renderPolicyPluginsPanel, renderPolicyCatalogPanel, renderMcpStrip, renderMcpConsent, handleTeamSkillClick,
 } from './team-policy-view.mjs';
-import { mcpRunsLabel, renderMcpRunsPop } from './mcp-run-picker.mjs';
+import { mcpRunsLabel, renderMcpRunsPop, renderRunSkills } from './mcp-run-picker.mjs';
 import { aggregate, toCsv } from '../../src/shared/team-metrics/aggregate.mjs';
 import { buildWorkItems, prLookupFor } from '../../src/shared/team-metrics/timeline.mjs';
 import { renderTimeline, renderTimelinePopover, timelineWindow, shiftAnchor, TL_MODES, TL_ZOOMS } from './team-metrics-timeline.mjs';
@@ -276,6 +279,7 @@ const el = {
   folderPickCount: $('#folderPickCount'),
   folderSelectMany: $('#folderSelectMany'),
   folderMsg: $('#folderMsg'),
+  folderScope: $('#folderScope'),
   title: $('#title'),
   sourceBranch: $('#sourceBranch'),
   featureBranch: $('#featureBranch'),
@@ -594,9 +598,12 @@ function connectWS() {
     handleServerMessage(msg);
   });
 
-  ws.addEventListener('close', () => {
+  ws.addEventListener('close', (e) => {
     state.wsReady = false;
     if (terminalPane) terminalPane.onConnection(false);   // its keys are not sent until the next hello
+    // 4001: the server closed it because the sign-in token it opened with expired (W7). Reconnect
+    // straight away: the gate in front checks the session again on the new upgrade.
+    if (e?.code === 4001) { scheduleReconnect(50); return; }
     sessionGuard.check(); // behind an identity proxy, a dropped socket may be an expired sign-in
     scheduleReconnect();
   });
@@ -611,13 +618,29 @@ function connectWS() {
 }
 
 let reconnectTimer = null;
-function scheduleReconnect() {
+function scheduleReconnect(delayMs = 1500) {
   if (reconnectTimer) return;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connectWS();
-  }, 1500);
+  }, delayMs);
 }
+
+// ---------------------------------------------------------------------------
+// Alerts (alerts.mjs): desktop notifications for a run waiting on a person and the
+// waiting badge. Per browser, off until turned on in Settings › General › Alerts.
+// Storage is read lazily so a missing or throwing localStorage never stops boot.
+// ---------------------------------------------------------------------------
+const alerts = createAlerts({
+  Notification: typeof window.Notification === 'function' ? window.Notification : null,
+  doc: document,
+  nav: navigator,
+  storage: { getItem: (k) => localStorage.getItem(k), setItem: (k, v) => localStorage.setItem(k, v) },
+  win: window,
+  onOpen: (target) => { location.hash = target.schedule ? 'schedules' : rdHash(target.runId); },
+});
+/** The run as alerts.mjs names it: makeRun's '(untitled)' placeholder is no title (the id stands in). */
+const alertRun = (r) => ({ runId: r.runId, title: r.title === '(untitled)' ? '' : r.title });
 
 // ---------------------------------------------------------------------------
 // Sidebar collapse (icon rail) + the responsive nav tiers. `sidebarCollapsed` is
@@ -1163,6 +1186,7 @@ function handleServerMessage(msg) {
     return;
   }
   if (msg.type === 'notification' || msg.type === 'notifications-changed') {
+    if (msg.type === 'notification') alerts.onScheduleNotification(msg.notification);
     refreshAllCounts();
     if (currentView() === 'schedules') void schedulesView.loadFeed();
     return;
@@ -1424,6 +1448,7 @@ function onHello(msg) {
   // "unknown runId" to and hide the run's working Resume.
   if (rebooted) for (const r of runs.values()) r.staleBoot = true;
 
+  const firstHello = !helloSeeded;
   if (!helloSeeded) {
     helloSeeded = true;
     for (const r0 of list) {
@@ -1436,6 +1461,7 @@ function onHello(msg) {
 
   for (const r0 of list) {
     if (!r0 || !r0.runId) continue;
+    const prevQuestion = runs.get(r0.runId)?.pendingQuestion || null;
     const rr = upsertRun({
       runId: r0.runId,
       title: r0.title,
@@ -1459,6 +1485,12 @@ function onHello(msg) {
     // sub-agents to their real nodes BEFORE any subagent delta paints — closing
     // the window where r.stepper is null and nothing can be resolved.
     if (r0.stepper && rr.stepper == null) rr.stepper = r0.stepper;
+    // Already pending when the page loaded: it counts on the badge but never notifies. A reconnect
+    // hello can list a wait raised while the socket was down, so it notifies; one this tab has
+    // already seen is deduplicated by tag, and so is the subscribe replay below.
+    if (r0.pendingQuestion) alerts.onQuestion(alertRun(rr), r0.pendingQuestion, { backfill: firstHello });
+    // Answered while the socket was down: the upsert cleared it without a question-resolved frame.
+    else if (prevQuestion && prevQuestion.id != null) alerts.onResolved(alertRun(rr), { id: prevQuestion.id });
 
     const nonTerminal =
       r0.status === 'starting' || r0.status === 'running' || r0.status === 'pausing' ||
@@ -1682,6 +1714,7 @@ function dropPendingQuestion(r) {
 // repaint so the foot chip + stepper leave the false "paused" state. Id-aware so a
 // late or duplicate resolution cannot wipe a NEWER pending question.
 function onQuestionResolved(r, msg) {
+  alerts.onResolved(alertRun(r), msg);
   if (!r.pendingQuestion) return;
   if (msg && msg.id && r.pendingQuestion.id !== msg.id) return;
   dropPendingQuestion(r);
@@ -2129,6 +2162,8 @@ function onState(r, msg) {
   for (const k of ['active', 'endReached', 'result', 'warnings', 'wireDeliveries', 'tokens', 'gate']) {
     if (msg[k] !== undefined) r[k] = msg[k];
   }
+  // Skills registry §6 board 9: the run's set skills (run-harness state.skillMount) for its Overview.
+  if (msg.skillMount !== undefined) r.skillMount = msg.skillMount;
   // Every state event is a new decor generation (runDecorFor memoises on it).
   r._decorSeq = (r._decorSeq || 0) + 1;
   if (msg.title && msg.title !== r.title) r.title = msg.title;
@@ -2998,6 +3033,10 @@ if (typeof window !== 'undefined') {
     runStatusMeta,
     histStatusMeta,
     histPrEligible,
+    mergePrStatus,
+    histWsShippable, histWsPrChipText, wsRollupPr, histCanShip, wsMemberNote,
+    // Test seam: the live list-model row (the object the detail screen re-resolves to).
+    historyRow: (projectKey, id) => (state.historyAll || []).find((r) => r && r.id === id && r.projectKey === projectKey) || null,
     pauseRun,
     upsertRun,
     onHello,
@@ -3249,16 +3288,15 @@ async function loadWorkflowsInto(selectId) {
   list.forEach((wf) => {
     if (simplePicker && wf.id !== AUTO_WORKFLOW_ID && wf.id !== 'wf_default' && wf.id !== want) return;
     const o = option(wf.id, wf.id === AUTO_WORKFLOW_ID ? wf.name : (workflowPickerLabel(wf, enabledPluginNames) || wf.id));
-    if (wf.id === AUTO_WORKFLOW_ID && isWorkspace) { o.disabled = true; o.title = 'Auto is not available for workspaces yet'; }
     // Memory defragment holds exactly one scope, and a workspace run has no single project to
-    // resolve `project` against (the server 400s) — same treatment as Auto.
+    // resolve `project` against (the server 400s) — so it is disabled on a workspace target.
     if (wf.id === MEMORY_DEFRAG_WORKFLOW_ID && isWorkspace) { o.disabled = true; o.title = 'Memory defragment runs on one project'; }
     sel.appendChild(o);
   });
-  // Fall back to default if the wanted id is gone (e.g. a deleted workflow). D19: a workspace
-  // target SHOWS Default in Auto's place but never persists it — the project keeps its choice.
+  // Fall back to Default if the wanted id is gone (a deleted workflow). Memory defragment holds one
+  // project scope, so a workspace target SHOWS Default in its place but never persists it.
   const known = list.some((wf) => wf.id === want);
-  state.workflowId = !known || (isWorkspace && (want === AUTO_WORKFLOW_ID || want === MEMORY_DEFRAG_WORKFLOW_ID)) ? 'wf_default' : want;
+  state.workflowId = !known || (isWorkspace && want === MEMORY_DEFRAG_WORKFLOW_ID) ? 'wf_default' : want;
   sel.value = state.workflowId;
   await renderWorkflowConfig(state.workflowId);
 }
@@ -3347,13 +3385,21 @@ async function renderWorkflowConfig(workflowId) {
   // once; the policy-line repaint at the end refetches the preview for every other workflow.
   if (el.mcpRunsField) renderMcpRuns();
   if (isAuto) {
-    // Auto picks the agents per run (spec §7.2 / D20): no accordion, one switch, read from the project config.
-    // The switch is per PROJECT like the accordion's rows, and saveHumanInLoop drops the
-    // write with no project selected — so disable it there instead of accepting a flip
-    // the save discards (.sw-input:disabled + .switch is already styled).
+    // Auto picks the agents per run (spec §7.2 / D20): no accordion, one switch. On a project target
+    // the switch is per PROJECT like the accordion's rows, read from the project config, and
+    // saveHumanInLoop drops the write with no project selected — so disable it there instead of
+    // accepting a flip the save discards (.sw-input:disabled + .switch is already styled). On a
+    // workspace target it is per RUN (D-W1); agentsEditable() reads the hidden project select, so
+    // the workspace arm must not consult it.
     if (el.humanInLoop) {
-      el.humanInLoop.checked = state.config.humanInLoop !== false;   // readRunConfig echoes only `false`
-      el.humanInLoop.disabled = !agentsEditable();
+      if (state.runTarget === 'workspace') {
+        // D-W1: a workspace has no stored switch — the value lives for this form only and rides the run body.
+        el.humanInLoop.checked = state.wsHumanInLoop !== false;
+        el.humanInLoop.disabled = false;
+      } else {
+        el.humanInLoop.checked = state.config.humanInLoop !== false;   // readRunConfig echoes only `false`
+        el.humanInLoop.disabled = !agentsEditable();
+      }
     }
     // Reset what the failed-fetch arm resets, so nothing from the previous workflow lingers inside the
     // hidden accordion (#wf-feedback-config and the agents header live INSIDE #agents-config).
@@ -4018,7 +4064,10 @@ async function saveActiveWorkflow(workflowId) {
 }
 
 // Persist the Auto "Human in the loop" switch: PATCH /api/config { projectDir, humanInLoop }.
+// A workspace target keeps it for this form only — checked FIRST, because selectedProjectPath()
+// reads the hidden project select and would PATCH an unrelated project.
 async function saveHumanInLoop(on) {
+  if (state.runTarget === 'workspace') { state.wsHumanInLoop = !!on; return; }   // D-W1: no PATCH
   const projectDir = selectedProjectPath();
   if (!projectDir) return;
   try {
@@ -4762,6 +4811,7 @@ function onQuestion(r, msg) {
   r._decorSeq = (r._decorSeq || 0) + 1;   // isLive(r) reads pendingQuestion
   // A new question supersedes any half-finished answer attempt.
   r._answering = false;
+  alerts.onQuestion(alertRun(r), msg);
 }
 
 // The `?` glyph used in the panel head. Built fresh each call (a node can only
@@ -5390,7 +5440,10 @@ function buildTunablesTable(w, wf, handle) {
     effort.s.addEventListener('change', () => set(id, { effort: effort.s.value }));
     tdModel.dataset.label = 'Model'; tdEffort.dataset.label = 'Effort';
     tdModel.appendChild(model.wrap); tdEffort.appendChild(effort.wrap); tr.append(tdModel, tdEffort);
-    const tdFan = document.createElement('td'); tdFan.className = 'qtune-sw-cell'; tdFan.appendChild(sw(`Fan-out for ${name.textContent}`, n.fanOut, !n.canFanOut, (on) => set(id, { fanOut: on }))); tr.appendChild(tdFan);
+    const tdFan = document.createElement('td'); tdFan.className = 'qtune-sw-cell';
+    const fan = sw(`Fan-out for ${name.textContent}`, n.fanOut, !n.canFanOut, (on) => set(id, { fanOut: on }));
+    if (n.fanOutLocked) fan.title = 'Runs per project on a workspace';   // canFanOut is false too ⇒ checked + locked
+    tdFan.appendChild(fan); tr.appendChild(tdFan);
     const tdQ = document.createElement('td'); tdQ.className = 'qtune-sw-cell';
     if (n.asksQuestions) tdQ.appendChild(sw(`Questions for ${name.textContent}`, n.askQuestions, n.questionsLocked, (on) => set(id, { askQuestions: on })));
     else tdQ.textContent = '\u2014';
@@ -7361,10 +7414,32 @@ async function loadFolders(path) {
   }
 }
 
+// Limited listing (a hosted Worca, terminal and actions off): say so, and offer each allowed
+// folder, since Up stops at them. The server refuses anything outside (403 FS_OUTSIDE_ALLOWED).
+function renderFolderScope(data) {
+  if (!el.folderScope) return;
+  el.folderScope.textContent = '';
+  el.folderScope.classList.toggle('hidden', !data.limited);
+  if (!data.limited) return;
+  el.folderScope.append('This hosted Worca only browses its own data and projects folders.');
+  const roots = Array.isArray(data.roots) ? data.roots : [];
+  if (roots.length < 2) return;
+  for (const r of roots) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn btn-ghost btn-mini folder-root';
+    b.textContent = r.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || r;
+    b.title = r;
+    b.addEventListener('click', () => loadFolders(r));
+    el.folderScope.append(' ', b);
+  }
+}
+
 function renderFolders(data) {
   el.folderCurrent.textContent = data.path;
   el.folderCurrent.title = data.path;
   el.folderUp.disabled = !data.parent;
+  renderFolderScope(data);
   el.folderList.textContent = '';
   if (!data.dirs.length) {
     const li = document.createElement('li');
@@ -7677,6 +7752,10 @@ if (el.workspaceSelect) {
   el.workspaceSelect.addEventListener('change', () => {
     state.selectedWorkspaceId = el.workspaceSelect.value || '';
     if (state.selectedWorkspaceId) localStorage.setItem(LAST_WORKSPACE_KEY, state.selectedWorkspaceId);
+    // D-W1: Human in the loop is per run on a workspace — a new workspace starts it on again. This
+    // listener does not re-run renderWorkflowConfig, so repaint the switch here.
+    state.wsHumanInLoop = true;
+    if (state.runTarget === 'workspace' && state.workflowId === AUTO_WORKFLOW_ID && el.humanInLoop) el.humanInLoop.checked = true;
     renderWorkspaceMembers();
     renderWorkspaceSourceBranches();
     schedulePolicyLine();                   // team policy notes for the new target (design board 8)
@@ -8224,11 +8303,17 @@ function buildWdOverview(sec, id) {
     + '<button type="button" class="ws-desc-save btn btn-primary btn-mini">Save</button></div>';   // static markup
   desc.append(dh, view, pane);
   sec.appendChild(desc);
-  // MCP servers a run on this workspace gets (the workspace policy's Team set, not the members').
+  // Sets from member projects (docs/skills.md; a workspace attaches no sets of its own): the servers and skills a run on
+  // this workspace gets — its members' sets and the workspace policy's Team set — each with the member(s) that bring it.
   const mcp = tagLevel(document.createElement('div'), 'advanced');
   mcp.className = 'wd-mcp';
   sec.appendChild(mcp);
-  void paintMcpResolution(mcp, { target: { workspaceId: id }, title: `MCP servers in runs on ${w.name || w.id}`, api: mcpApi });
+  const memberProjects = paths.map((p, i) => {
+    const k = Array.isArray(w.projectKeys) ? w.projectKeys[i] : null;
+    const pr = k ? projectByKey(k) : null;
+    return k ? { key: k, name: (pr && pr.name) || basenameOf(p) } : null;
+  }).filter(Boolean);
+  void paintMcpResolution(mcp, { target: { workspaceId: id }, title: w.name || w.id, members: memberProjects, api: mcpApi });
   if (!hdMarkdown.isReady()) void bindMarkdownReady().then((ok) => { if (ok) repaintWsDescription(); });
   void paintWsMetricsRows();
   void paintWsPolicyLines();
@@ -11272,7 +11357,7 @@ const PD_TABS = [
   { key: 'team', label: 'Team', level: 'expert', badge: () => null, visible: () => true, build: (sec, key) => buildPdTeam(sec, key) },
   { key: 'memory', label: 'Memory', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMemory(sec, key) },
   { key: 'settings', label: 'Settings', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdSettings(sec, key) },
-  { key: 'mcp', label: 'MCP', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMcp(sec, key) },
+  { key: 'mcp', label: 'Sets', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdMcp(sec, key) },
   { key: 'actions', label: 'Actions', level: 'advanced', badge: () => null, visible: () => true, build: (sec, key) => buildPdActions(sec, key) },
 ];
 function initPdTabs(screen, p) {
@@ -11461,7 +11546,7 @@ function paintPdBranchCards() {
   }
 }
 
-// ---- MCP tab (docs/mcp-servers.md): the project's sets and the servers its runs get ----
+// ---- Sets tab (key mcp; docs/mcp-servers.md, docs/skills.md): the project's sets and the servers and skills its runs get ----
 function buildPdMcp(sec, key) {
   sec.innerHTML = '';
   sec.classList.add('pd-sec-mcp');
@@ -11818,13 +11903,22 @@ function setProjAddMode(mode) {
   el.projAddFolderPane.hidden = projAddMode !== 'folder';
   el.projAddClonePane.hidden = projAddMode !== 'clone';
   el.projAddSave.textContent = projAddMode === 'clone' ? 'Clone and add' : 'Add project';
-  setProjAddMsg(projAddMode === 'clone' ? 'Worca clones the repository into its projects folder with the deployment\'s GitHub credential.' : '');
+  setProjAddMsg(projAddMode === 'clone' ? 'Worca clones the repository into its projects folder with the deployment\'s credential for its host (GitHub or Azure DevOps).' : '');
   if (projAddMode === 'clone') el.projCloneUrl.focus();
 }
 
-/** "https://github.com/acme/api(.git)" -> "api", or '' when the URL does not name one repository. */
+/** The folder name worca will use for a clone URL (planClone's rule), or '' when the URL does not name one repository.
+ *  "https://github.com/acme/api(.git)" -> "api"; "https://dev.azure.com/acme/Shop/_git/My%20Repo(.git)" -> "My-Repo". */
 function repoNameFromUrl(url) {
-  const m = /^https:\/\/[^/\s]+\/[^/\s]+\/([^/\s?#]+?)(?:\.git)?\/?$/i.exec(String(url || '').trim());
+  const s = String(url || '').trim();
+  // [org@]dev.azure.com/org[/project]/_git/repo, org.visualstudio.com[/DefaultCollection][/project]/_git/repo
+  const az = /^https:\/\/(?:[^@/\s]+@)?(?:dev\.azure\.com\/[^/\s]+|[^/\s]+\.visualstudio\.com(?:\/defaultcollection)?)(?:\/[^/\s]+)?\/_git\/([^/\s?#]+?)(?:\.git)?\/?$/i.exec(s);
+  if (az) {
+    let n; try { n = decodeURIComponent(az[1]); } catch { n = az[1]; }
+    // the same fold as planClone's folderFrom (src/core/clone-project.mjs)
+    return n.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 100);
+  }
+  const m = /^https:\/\/[^/\s]+\/[^/\s]+\/([^/\s?#]+?)(?:\.git)?\/?$/i.exec(s);
   return m ? m[1] : '';
 }
 
@@ -13463,6 +13557,11 @@ try {
   if (mq && typeof mq.addEventListener === 'function') mq.addEventListener('change', () => applyTheme(document.documentElement.dataset.theme));
 } catch { /* no media queries here */ }
 
+// ---- Alerts (Settings › General) ----
+// This browser's choices (localStorage, no server round trip): painted at boot, and the
+// permission prompt is raised only by the switch's own click.
+mountAlertsCard({ doc: document, alerts });
+
 // ---- Away mode (Settings › Runs) ----
 // Settings › Away mode: the user layer (night-mode-form.mjs), its live summary and the status strip.
 /** A GET /api/away-mode body, or null. Other UI tests' fetch stubs answer unknown URLs with
@@ -14195,7 +14294,11 @@ function setPluginsMsg(text, kind, extra) {
 }
 
 // Tiny modal shell around #plugin-modal: swap in a body element + action buttons.
+// `pluginModalAfterClose`: the open step's own Cancel, run once when the header Close dismisses it (set through
+// mcpTab's `afterClose`); every open starts without one.
+let pluginModalAfterClose = null;
 function pluginModal(title, bodyEl, actions = []) {
+  pluginModalAfterClose = null;
   el.pluginModalTitle.textContent = title;
   el.pluginModalBody.replaceChildren(bodyEl);
   el.pluginModalActions.replaceChildren(...actions.map(([label, cls, fn]) => {
@@ -14704,7 +14807,8 @@ if (el.pluginsList) el.pluginsList.addEventListener('click', async (e) => {
     const res = await confirmModal({
       title: 'Uninstall plugin',
       message: `Uninstall "${name}"?${t.dataset.mcpSets
-        ? `\n\nIts MCP servers leave these sets, with their values, secrets and test results: ${t.dataset.mcpSets}.` : ''}`,
+        ? `\n\nIts MCP servers leave these sets, with their values, secrets and test results: ${t.dataset.mcpSets}.` : ''}${t.dataset.skillSets
+        ? `\n\nIt also removes its skills from ${t.dataset.skillSets}.` : ''}`,
       confirmLabel: 'Uninstall',
       checkbox: { label: 'Also delete config, secrets and state (purge — cannot be undone)' },
     });
@@ -14787,7 +14891,10 @@ if (el.pluginAddBtn) el.pluginAddBtn.addEventListener('click', () => {
 if (el.marketplaceAdd) el.marketplaceAdd.addEventListener('click', addMarketplaceFromInput);
 if (el.pluginModalClose) el.pluginModalClose.addEventListener('click', () => {
   if (grvState.wizard) return grvCloseWizard();
+  const after = pluginModalAfterClose;
+  pluginModalAfterClose = null;
   closePluginModal();
+  if (after) void after();
 });
 
 // ---- Guardrails view (named sets: list + two-step wizard popup) ----
@@ -16158,7 +16265,7 @@ async function copilotSignInFlow() {
     const poll = async () => {
       if (!mvState.signIn || mvState.signIn.deviceCode !== flow.deviceCode) return;
       try {
-        const r = await fetch(`/api/providers/copilot/login/${encodeURIComponent(flow.deviceCode)}`);
+        const r = await fetch(`/api/providers/copilot/login/${encodeURIComponent(flow.deviceCode)}`, { method: 'POST' });
         const j = await safeJson(r);
         if (!mvState.signIn || mvState.signIn.deviceCode !== flow.deviceCode) return;
         if (j.ok) {
@@ -18024,11 +18131,17 @@ async function paintMcpRuns() {
   const valid = !!data && Array.isArray(data.sets) && Array.isArray(data.copies) && Array.isArray(data.skipped);
   // An answer prunes the opt-out to the target's memberships; no answer (no target, defrag, a
   // failed fetch) keeps it: the server drops whatever the run's target does not know.
+  // Skills registry §4.5: the target's set skills are memberships too ('<setId>|<skillId>'); a preview
+  // without a usable `skills` block (an older server, a skills fault) shows the servers alone.
+  const skills = valid && data.skills && Array.isArray(data.skills.mounted) && Array.isArray(data.skills.skipped) ? data.skills : null;
   if (valid) {
     const known = new Set([...data.copies, ...data.skipped].map((m) => `${m.setId}|${m.serverId}`));
+    for (const s of skills ? skills.mounted : []) known.add(`${s.setId}|${s.id}`);
+    for (const s of skills ? skills.skipped : []) known.add(`${s.setId}|${s.skillId}`);
     state.mcpOptOut = state.mcpOptOut.filter((k) => known.has(k));
   }
-  state.mcpPreview = valid && data.copies.length + data.skipped.length > 0 ? { ...data, workspace: kind === 'workspace' } : null;
+  const rows = valid ? data.copies.length + data.skipped.length + (skills ? skills.mounted.length + skills.skipped.length : 0) : 0;
+  state.mcpPreview = rows > 0 ? { ...data, skills, workspace: kind === 'workspace' } : null;
   renderMcpRuns();
 }
 function renderMcpRuns() {
@@ -18279,12 +18392,14 @@ async function openSetupChecklist() {
   const data = await loadTpScopes({ force: true });
   const reqs = data.requirements || [];
   const mcp = data.mcpRequirements || [];
-  const homes = [...new Set([...reqs.flatMap((r) => r.homes || []), ...mcp.map((r) => r.home)])];
+  const skills = data.skillRequirements || [];
+  const homes = [...new Set([...reqs.flatMap((r) => r.homes || []), ...mcp.map((r) => r.home), ...skills.map((r) => r.home)])];
   const home = homes[0] || (data.homes[0] && data.homes[0].slug) || '';
-  const body = renderSetupChecklist({ home, requirements: reqs, seeds: [], trusted: policyHomeTrusted(home), mcp }, { doc: document });
+  const body = renderSetupChecklist({ home, requirements: reqs, seeds: [], trusted: policyHomeTrusted(home), mcp, skills }, { doc: document });
   body.addEventListener('click', (e) => {
     if (e.target.closest('.tp-install-all')) { closePluginModal(); void installAllRequired(reqs); return; }
     if (e.target.closest('.tp-mcp-act')) { void handleMcpTeamClick(e); return; }
+    if (e.target.closest('.tp-skill-act')) { void handleTeamSkillClick(e, skillTeamDeps()); return; }
     void handlePolicyPluginClick(e);
   });
   body.addEventListener('change', (e) => {
@@ -18302,10 +18417,11 @@ async function paintMcpStrip(host) {
     host.dataset.wired = '1';
     host.addEventListener('click', (e) => {
       if (e.target.closest('.tp-mcp-act')) void handleMcpTeamClick(e);
+      else if (e.target.closest('.tp-skill-act')) void handleTeamSkillClick(e, skillTeamDeps());
       else if (e.target.closest('.pl-policy-setup')) void openSetupChecklist();
     });
   }
-  const fill = (data) => { const strip = renderMcpStrip(data.mcpRequirements || [], { doc: document }); host.replaceChildren(strip || ''); host.hidden = !strip; };
+  const fill = (data) => { const strip = renderMcpStrip(data.mcpRequirements || [], { doc: document, skills: data.skillRequirements || [] }); host.replaceChildren(strip || ''); host.hidden = !strip; };
   // P6 hands a fresh, hidden host on every paint of the pane: paint the last state at once (no flicker; a button painted
   // from it that has moved on repaints instead of acting), then read fresh — the pane repaints after each write on it
   // (a token set, a switch), and the strip must show that state.
@@ -18362,6 +18478,21 @@ async function handleMcpTeamClick(e) {
     ]);
   } finally { delete t.dataset.busy; }
 }
+// Required skills (skills registry spec §5): the Turn on flow lives in team-policy-view.mjs (handleTeamSkillClick);
+// these are its app hooks — the same modal, scopes cache and surfaces the MCP Team actions use.
+const skillTeamDeps = () => ({
+  doc: document,
+  scopes: () => loadTpScopes({ force: true }),
+  api: mcpApi,
+  dialog: pluginModal,
+  close: closePluginModal,
+  owner: (t) => (t.closest('#plugin-modal') ? el.pluginModalBody.firstElementChild : null),
+  isOpen: (node) => el.pluginModalBody.contains(node),
+  repaint: async ({ checklist }) => {
+    await loadTpScopes({ force: true });   // the checklist, the strip and the Projects cells read the new state
+    if (checklist) void openSetupChecklist(); else refreshMcpSurfaces();
+  },
+});
 // One dialog after another — a consent dialog for each missing plugin, an update preview for each
 // one below the floor — the next opens when the previous closes (done or cancelled). Nothing runs
 // without its own click; cancelling one moves on to the next.
@@ -18604,6 +18735,9 @@ function mergePrStatus(a, b) {
     gh: b.gh !== 'unused' ? b.gh : a.gh,
     ghDetail: b.ghDetail ?? a.ghDetail,
     ghError: b.ghError ?? a.ghError,
+    azure: b.azure && b.azure !== 'unused' ? b.azure : (a.azure ?? b.azure),
+    azureError: b.azureError ?? a.azureError ?? null,
+    azureTruncated: [...new Set([...(a.azureTruncated || []), ...(b.azureTruncated || [])])],
     actionRepos: [...new Set([...(a.actionRepos || []), ...(b.actionRepos || [])])],
     unsupportedRepos: [...new Set([...(a.unsupportedRepos || []), ...(b.unsupportedRepos || [])])],
   };
@@ -18884,12 +19018,14 @@ function readHistoryCache() {
   } catch { localStorage.removeItem(HISTORY_CACHE_KEY); return null; }  // parse bust
 }
 
-function writeHistoryCache(pipelines, ghAvailable) {
+function writeHistoryCache(pipelines, ghAvailable, adoAvailable) {
   try {
     const slim = pipelines.slice(0, HISTORY_CACHE_MAX)
-      .map(({ pr, retainedWork, ...rest }) => rest); // never persist live PR or retention facts
+      .map(({ pr, retainedWork, ...rest }) => (Array.isArray(rest.members)
+        ? { ...rest, members: rest.members.map(({ pr: _memberPr, ...m }) => m) }   // live per-member PRs too
+        : rest)); // never persist live PR or retention facts
     localStorage.setItem(HISTORY_CACHE_KEY, JSON.stringify(
-      { v: HISTORY_CACHE_VER, ts: Date.now(), ghAvailable: !!ghAvailable, pipelines: slim }));
+      { v: HISTORY_CACHE_VER, ts: Date.now(), ghAvailable: !!ghAvailable, adoAvailable: !!adoAvailable, pipelines: slim }));
   } catch { /* quota / serialization: skip cache, never throw */ }
 }
 
@@ -18924,7 +19060,8 @@ async function loadHistoryView({ force = false } = {}) {
     if (cached) {
       state.historyAll = carryHistoryPr(cached.pipelines);
       state.ghAvailable = cached.ghAvailable;
-      paintHistory();                     // instant; rows read their last known PR until Phase 2
+      state.adoAvailable = !!cached.adoAvailable;
+      paintHistory();                    // instant; rows read their last known PR until Phase 2
     }
   }
   setHistoryLoading(true);                // the list is aria-busy until Phase 2 settles
@@ -18950,9 +19087,10 @@ async function loadHistoryView({ force = false } = {}) {
   state.historyAll = pipelines;
   state.historyError = '';
   state.ghAvailable = !!data.ghAvailable;
+  state.adoAvailable = !!(data.prHosts && data.prHosts.azure);
   paintHistory();                                        // fresh skeleton repaint
   rdRepaintOpenGlance();                                 // an open finished run reads its PR from these rows
-  if (pipelines.length) writeHistoryCache(pipelines, data.ghAvailable);  // never cache empty/error
+  if (pipelines.length) writeHistoryCache(pipelines, data.ghAvailable, state.adoAvailable);  // never cache empty/error
   requestHistoryPr(token);                               // Phase 2: ask server to push gh enrichment
   // NOTE: the spinner intentionally stays ON here; onHistoryPr (or the watchdog) clears it.
 }
@@ -19013,11 +19151,18 @@ function cssEscape(s) {
   return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/["\\\]]/g, '\\$&');
 }
 
-function patchHistoryPr({ projectKey, id, pr }) {
+// Apply a batch item's per-member PRs onto a workspace row (by memberKey).
+function applyWsMemberPrs(row, members) {
+  if (!row || !Array.isArray(row.members) || !Array.isArray(members)) return;
+  const byKey = new Map(members.filter((m) => m && m.memberKey).map((m) => [m.memberKey, m.pr || null]));
+  for (const m of row.members) if (byKey.has(m.memberKey)) m.pr = byKey.get(m.memberKey);
+}
+
+function patchHistoryPr({ projectKey, id, pr, members }) {
   // 1) Update the in-memory model (by id AND projectKey): the Runs row's word and a
-  //    later repaint read it from here.
+  //    later repaint read it from here. A workspace item also carries its per-member PRs.
   const row = state.historyAll.find((r) => r && r.id === id && r.projectKey === projectKey);
-  if (row) row.pr = pr || null;
+  if (row) { row.pr = pr || null; applyWsMemberPrs(row, members); }
 
   // 2) Keep an OPEN detail screen for this run in step.
   hdSyncPr(projectKey, id, row);
@@ -19031,11 +19176,18 @@ function patchHistoryPr({ projectKey, id, pr }) {
 // still unresolved (pr === undefined) is treated as "no PR" so its word settles.
 // Without this an eligible entry the server never sent a batch for — or a load where
 // enrichment failed entirely — would stay pending forever. Callers already gate on
-// the load token.
+// the load token. Workspace rows' members are resolved the same way, independently of
+// the row: a row whose rollup landed can still have a member no batch named.
 function finalizeHistoryPr() {
   for (const row of state.historyAll) {
-    if (!row || row.pr !== undefined) continue;        // already resolved (object or null)
-    row.pr = null;                                      // resolved: no open/merged PR
+    if (!row) continue;
+    // Workspace rows carry a per-member tri-state too (members[].pr); resolve it on its
+    // own — a row whose rollup landed can still have a member the batch never named.
+    const members = Array.isArray(row.members) ? row.members : [];
+    const memberPending = members.some((m) => m && m.pr === undefined);
+    if (row.pr !== undefined && !memberPending) continue;  // already resolved (object or null)
+    if (row.pr === undefined) row.pr = null;                // resolved: no open/merged PR
+    for (const m of members) if (m && m.pr === undefined) m.pr = null;
     // A deep-linked eligible run must not keep `pr === undefined` and never offer Create PR.
     hdSyncPr(row.projectKey, row.id, row);
   }
@@ -19247,7 +19399,7 @@ function setupDiscardWorktreeButton(node, projectDir, p, onDiscarded) {
         return;
       }
       p.retainedWork = null;
-      writeHistoryCache(state.historyAll, state.ghAvailable);
+      writeHistoryCache(state.historyAll, state.ghAvailable, state.adoAvailable);
       paintHistory();
       // Restore the control unconditionally. History never noticed it was missing
       // — paintHistory() rebuilds the node — but the Running detail reuses this
@@ -19728,7 +19880,7 @@ let histDetailState = null; // { key, id, record, data, screen } while open
 let hdCommentState = null; // { key, id, reload }
 // One-shot "open the Ship it? modal on arrival" intent, consumed by
 // openHistDetail unconditionally so it can never strand across visits.
-let pendingShipIt = null;   // { id, projectKey } | null
+let pendingShipIt = null;   // { id, projectKey, memberPrs? } | null — memberPrs: workspace click-time { [memberKey]: pr|null }
 // Spec §11. The Runs row the saved page belongs to, by DATA STAMPS rather than by
 // node: a repaint between open and close replaces the element, so closeHistDetail
 // re-queries (slide layout only; side by side focus never left the list).
@@ -19955,21 +20107,33 @@ async function loadHistDetailScreen(screen, record, parsed, ship = null) {
   paintHdGlance(screen, rec, data);
 
   if (ship && ship.id === parsed.id && ship.projectKey === parsed.projectKey) {
-    // The list button's click already proved "no PR" — but the history CACHE strips
-    // `pr` from persisted rows, so after the hop the matched record may read
-    // pr === undefined again. Honor the click-time fact instead of re-deriving
-    // (else the intent is dropped on essentially every cache-warm navigation).
-    if (rec.pr === undefined) rec.pr = null;
+    // The history CACHE strips `pr` (and every workspace member's `pr`) from persisted
+    // rows, so after the hop the matched record may read them as undefined again.
+    // Honor the click-time facts instead of re-deriving (else the intent is dropped on
+    // essentially every cache-warm navigation).
+    if (rec.target === 'workspace' && hasWsMembers(rec)) {
+      // The card's click proved per-member facts, not "no PR": a workspace card offers
+      // Create PR while SOME members already have OPEN/MERGED PRs. Restore exactly what
+      // it saw for members the cache stripped; anything it did not see stays pending.
+      const seen = ship.memberPrs && typeof ship.memberPrs === 'object' ? ship.memberPrs : {};
+      for (const m of histWsMembers(rec)) {
+        if (m.pr === undefined && Object.prototype.hasOwnProperty.call(seen, m.memberKey)) m.pr = seen[m.memberKey];
+      }
+      if (rec.pr === undefined && !histWsMembers(rec).some((m) => m.pr === undefined)) rec.pr = wsRollupPr(rec);
+    } else if (rec.pr === undefined) {
+      // Single run: the list button's click already proved "no PR".
+      rec.pr = null;
+    }
     paintHdPr(screen, rec, data);
     paintHdAfter(screen, rec, data);
-    // Two belts, both load-bearing:
-    //  - `!rec.pr` — the stale-button -> double-POST race is fixed at the source
-    //    (the ship path calls patchHistoryPr); this is the backstop.
-    //  - `histPrEligible(rec)` — MANDATORY. Without it the modal opens for a run
-    //    whose own detail button paintHdPr just deliberately hid (workspace runs,
-    //    gh gone, branch deleted between paint and click), and confirming fires a
-    //    POST /api/pr that 404s.
-    if (!rec.pr && histPrEligible(rec)) openShipItModal(rec, data);
+    // histCanShip carries both old belts plus the workspace rule:
+    //  - `!rec.pr` (single runs) — the stale-button -> double-POST race is fixed at the
+    //    source (the ship path calls patchHistoryPr); this is the backstop.
+    //  - `histPrEligible(rec)` — MANDATORY. Without it the modal opens for a run whose
+    //    own detail button paintHdPr just deliberately hid (gh gone, branch deleted
+    //    between paint and click), and confirming fires a POST /api/pr that fails.
+    //  - a workspace run never auto-opens while any member PR is unresolved.
+    if (histCanShip(rec)) openShipItModal(rec, data);
   }
 }
 
@@ -20060,16 +20224,27 @@ function fillShipItBaseSelect(select, chain, remoteName, remoteBranches, fallbac
   select.value = offered(keep) ? keep : (offered(fallback) ? fallback : (select.options[0]?.value || ''));
 }
 
-// Hint under the selects: names the cross-repo head when the two remotes point at
-// different repositories ("me:branch → up/repo main"); empty otherwise.
-function paintShipItRemotesHint(modal, remotes, record) {
-  const byName = (sel) => remotes.find((r) => r.name === modal.querySelector(sel).value);
-  const push = byName('.shipit-push-remote');
-  const base = byName('.shipit-base-remote');
+// The base label names the base remote's PR host ("Open PR in (Azure DevOps)"). The hint
+// under the selects says why that host cannot open the PR (no credential, or an Azure
+// cross-repo PR), else names the cross-repo head when the two remotes point at different
+// repositories ("me:branch → up/repo main"); empty otherwise. Pure, so the single modal
+// and each workspace row share it.
+function crossRepoHint(remotes, pushName, baseName, branch, baseBranch) {
+  const push = remotes.find((r) => r.name === pushName);
+  const base = remotes.find((r) => r.name === baseName);
   const cross = !!(push && base && push.slug && base.slug && push.slug.toLowerCase() !== base.slug.toLowerCase());
-  modal.querySelector('.shipit-remotes-hint').textContent = cross
-    ? `Cross-repo: ${push.owner}:${record.branch || ''} → ${base.slug} ${shipItChosenBase(modal, record)}`
-    : '';
+  if (base && base.prSupported === false) return base.prReason || `${base.prHost || 'This host'} pull requests are not available`;
+  if (cross && base.forge === 'azure') return `Azure DevOps pull requests between repositories (forks) are not supported yet — push to ${base.name}.`;
+  return cross ? `Cross-repo: ${push.owner}:${branch || ''} → ${base.slug} ${baseBranch}` : '';
+}
+
+function paintShipItRemotesHint(modal, remotes, record) {
+  const base = remotes.find((r) => r.name === modal.querySelector('.shipit-base-remote').value);
+  const label = modal.querySelector('label[for="shipit-base-remote"]');
+  if (label) label.textContent = base && base.prHost ? `Open PR in (${base.prHost})` : 'Open PR in';
+  modal.querySelector('.shipit-remotes-hint').textContent = crossRepoHint(remotes,
+    modal.querySelector('.shipit-push-remote').value, modal.querySelector('.shipit-base-remote').value,
+    record.branch, shipItChosenBase(modal, record));
 }
 
 function setShipItRemotesDisabled(modal, on) {
@@ -20091,11 +20266,14 @@ async function loadShipItRemotes(modal, record, gen, isClosed) {
   const branchWrap = modal.querySelector('.shipit-base-wrap');
   const branchSel = modal.querySelector('.shipit-base-branch');
   box.hidden = true;
+  modal._remotes = [];
   pushSel.innerHTML = ''; baseSel.innerHTML = '';
   branchWrap.hidden = true;
   branchSel.innerHTML = '';
   setShipItRemotesDisabled(modal, true);
   modal.querySelector('.shipit-remotes-hint').textContent = '';
+  const closes = modal.querySelector('.shipit-closes');
+  closes.hidden = true; closes.textContent = '';
   // #527: the modal is reused, so the base-moved note from a previous open goes first.
   const baseWarn = modal.querySelector('#shipit-base-warn');
   if (baseWarn) { baseWarn.hidden = true; baseWarn.textContent = ''; }
@@ -20106,8 +20284,15 @@ async function loadShipItRemotes(modal, record, gen, isClosed) {
     const res = await fetch(`/api/pr/remotes?${qs}`);
     const data = await safeJson(res);
     if (gen !== shipItRemotesGen || isClosed()) return;              // stale: cancelled or re-opened since
+    // The run's GitHub issue source: merging the PR closes it (the server adds the Closes line).
+    const issue = data && data.issue;
+    if (issue && typeof issue.slug === 'string' && Number.isInteger(issue.number)) {
+      closes.textContent = `Will close ${issue.slug}#${issue.number}`;
+      closes.hidden = false;
+    }
     const remotes = res.ok && Array.isArray(data.remotes) ? data.remotes.filter((r) => r && r.name) : [];
-    const names = (list) => (Array.isArray(list) ? list.filter((b) => typeof b === 'string' && b) : []);
+    modal._remotes = remotes;
+    const names =(list) => (Array.isArray(list) ? list.filter((b) => typeof b === 'string' && b) : []);
     const chain = names(data.chain);
     if (!remotes.length && !chain.length) return;
     if (remotes.length) {
@@ -20187,6 +20372,8 @@ function openShipItModal(record, data) {
   if (!modal) return;
   if (!modal.classList.contains('hidden')) return;  // double-open guard: a second open
                                                     // would stack a second onOk -> two POSTs
+  if (record.target === 'workspace') { openShipItWsModal(record, data); return; }
+  modal.querySelector('#shipit-repos').hidden = true;   // a previous workspace open may have shown it
   const q = (sel) => modal.querySelector(sel);
   q('.shipit-sub').textContent =
     `This opens a pull request for ${record.title || record.id} and puts it up for review.`;
@@ -20207,6 +20394,7 @@ function openShipItModal(record, data) {
   const card = q('.shipit-actions').parentElement;
   cardAlert(card, null);
   resetShipItDesc(modal);
+  q('.shipit-draft-input').checked = false;          // D1: draft is opt-in per ship, never remembered
   const okBtn = q('.shipit-ok');
   okBtn.disabled = false; okBtn.textContent = 'Open pull request';
   modal.classList.remove('hidden');
@@ -20277,6 +20465,10 @@ function openShipItModal(record, data) {
     descErr.hidden = true; descErr.textContent = '';
     const payload = { projectDir: record.projectDir || null, projectKey: record.projectKey, id: record.id };
     if (!q('.shipit-base-wrap').hidden) payload.baseBranch = q('.shipit-base-branch').value;
+    if (!q('.shipit-remotes').hidden) {
+      const baseRemote = (modal._remotes || []).find((r) => r.name === q('.shipit-base-remote').value);
+      if (baseRemote && baseRemote.forge === 'azure') payload.forge = 'azure';
+    }
     try {
       const res = await fetch('/api/pr/describe', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -20316,6 +20508,8 @@ function openShipItModal(record, data) {
     // The description as it reads NOW; blank sends nothing (the PR body is the title).
     const description = descInput.value;
     if (description.trim()) payload.body = description;
+    // Draft only when ticked; unticked sends nothing (the server's default is not a draft).
+    if (q('.shipit-draft-input').checked) payload.draft = true;
     try {
       const res = await fetch('/api/pr', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -20366,16 +20560,6 @@ function openShipItModal(record, data) {
   paintShipItTry(modal, record, gen, () => closed);
 }
 
-// THE single PR-eligibility predicate. Every caller uses it: paintHdPr (below),
-// glancePrInput and the pendingShipIt consumer.
-//
-// `target !== 'workspace'` is MANDATORY and is the ONE clause the existing list
-// gate (app.js:8571) is missing. POST /api/pr has NO workspace arm and its key
-// regex (ui/server.mjs:1637) rejects a `workspaces/...` composite with a 404 — yet
-// workspace rows DO satisfy the other three clauses, because listAllPipelines hands
-// rowToHistoryEntry the workspace's primary member dir as repoDir
-// (artifacts.mjs:1549-1556), so `survived`/`branch`/`sourceBranch` are all really
-// computed for them.
 // A finished run on the Running page reads its PR from History's rows, and gets no live
 // frames of its own: repaint its glance when those rows (or one row's PR) arrive.
 // `pipelineId` narrows it to that run; omitted, whatever run is open.
@@ -20386,9 +20570,406 @@ function rdRepaintOpenGlance(pipelineId = null) {
   paintRdGlance(runDetailState.screen, r);
 }
 
+/** Some PR host is reachable (gh, or an Azure DevOps token); the Ship-it modal and the server name the
+ *  missing one for the chosen remote (D8). */
+function prHostAvailable() { return !!(state.ghAvailable || state.adoAvailable); }
+
+// --- Ship-it, workspace mode: one row per affected member repo --------------
+
+// One Ship-it row per member repo. `row` is the mutable record the batch drives:
+// { el, member, pick, done, failed, busy, statusEl, remotesBox, pushSel, baseSel, branchWrap,
+//   branchSel, baseLabel, hint, remotes, mergeable }. `failed`: the last round's POST failed.
+function buildShipItRepoRow(member, summary, canShip) {
+  const el = document.createElement('div');
+  el.className = 'shipit-repo';
+  el.dataset.memberKey = member.memberKey;
+  const row = { el, member, pick: null, done: false, failed: false, busy: false, statusEl: null, remotesBox: null,
+    pushSel: null, baseSel: null, branchWrap: null, branchSel: null, baseLabel: null, hint: null, remotes: [], mergeable: null };
+  const head = document.createElement('label');
+  head.className = 'shipit-repo-head';
+  if (canShip) {
+    row.pick = document.createElement('input');
+    row.pick.type = 'checkbox';
+    row.pick.className = 'shipit-repo-pick';
+    row.pick.checked = true;                                   // default: every affected repo
+    row.pick.setAttribute('aria-label', `Open a pull request in ${member.name || member.memberKey}`);
+    head.appendChild(row.pick);
+  }
+  const name = document.createElement('b');
+  name.className = 'shipit-repo-name';
+  name.textContent = member.name || member.memberKey;
+  const stat = document.createElement('span');
+  stat.className = 'shipit-repo-stat mono';
+  const nFiles = summary ? (summary.filesNew || 0) + (summary.filesChanged || 0) : null;   // 'D' is inside filesChanged
+  const added = summary ? summary.linesAdded : member.added;
+  const removed = summary ? summary.linesRemoved : member.removed;
+  stat.textContent = [nFiles != null ? `${nFiles} file${nFiles === 1 ? '' : 's'}` : '',
+    `+${added || 0} −${removed || 0}`].filter(Boolean).join(' · ');   // U+2212, as the single summary
+  head.append(name, stat);
+  el.appendChild(head);
+  row.statusEl = document.createElement('div');
+  row.statusEl.className = 'shipit-repo-status hint';
+  row.statusEl.hidden = true;
+  if (!canShip) {                                               // shown for context, never offered
+    row.done = true;
+    if (prLive(member.pr)) setShipItRowOpened(row, member.pr);
+    else setShipItRowStatus(row, `${wsMemberNote(member)} — no PR can be opened.`, '');   // the exact cause
+    el.appendChild(row.statusEl);
+    return row;
+  }
+  const line = document.createElement('div');
+  line.className = 'shipit-repo-branch mono';
+  const b = document.createElement('b');
+  b.textContent = member.branch || '';
+  const arrow = document.createElement('span');
+  arrow.textContent = '→';
+  row.baseLabel = document.createElement('span');
+  row.baseLabel.textContent = member.sourceBranch || '';
+  row.branchWrap = document.createElement('span');
+  row.branchWrap.className = 'select-wrap shipit-repo-base-wrap';
+  row.branchWrap.hidden = true;
+  row.branchSel = document.createElement('select');
+  row.branchSel.className = 'select shipit-repo-base-branch';
+  row.branchSel.setAttribute('aria-label', `Base branch for ${member.name || member.memberKey}`);
+  row.branchWrap.appendChild(row.branchSel);
+  line.append(b, arrow, row.baseLabel, row.branchWrap);
+  el.appendChild(line);
+  row.remotesBox = document.createElement('div');
+  row.remotesBox.className = 'shipit-repo-remotes';
+  row.remotesBox.hidden = true;
+  const field = (label, cls) => {
+    const f = document.createElement('div');
+    f.className = 'shipit-remote-field';                        // reuses `.shipit-remote-field label`
+    const l = document.createElement('label');
+    l.textContent = label;
+    const w = document.createElement('div');
+    w.className = 'select-wrap';
+    const sel = document.createElement('select');
+    sel.className = `select ${cls}`;
+    sel.setAttribute('aria-label', `${label} (${member.name || member.memberKey})`);
+    w.appendChild(sel);
+    f.append(l, w);
+    row.remotesBox.appendChild(f);
+    return sel;
+  };
+  row.pushSel = field('Push branch to', 'shipit-repo-push-remote');
+  row.baseSel = field('Open PR in', 'shipit-repo-base-remote');
+  row.hint = document.createElement('small');
+  row.hint.className = 'shipit-remotes-hint hint';               // :empty hides it (style.css)
+  row.remotesBox.appendChild(row.hint);
+  el.append(row.remotesBox, row.statusEl);
+  return row;
+}
+
+function setShipItRowStatus(row, text, kind) {
+  row.statusEl.replaceChildren();
+  row.statusEl.textContent = text;
+  row.statusEl.classList.toggle('err', kind === 'err');
+  row.statusEl.hidden = !text;
+}
+
+function setShipItRowOpened(row, pr) {
+  row.statusEl.replaceChildren();
+  row.statusEl.classList.remove('err');
+  const merged = prStateOf(pr) === 'MERGED';
+  const a = document.createElement('a');
+  a.className = merged ? 'hd-pr-repo-link merged' : 'hd-pr-repo-link';
+  a.href = pr.url; a.target = '_blank'; a.rel = 'noopener';
+  a.textContent = merged ? 'Merged' : 'View PR';
+  row.statusEl.append(merged ? 'PR merged: ' : 'PR open: ', a);
+  row.statusEl.hidden = false;
+}
+
+function setShipItRowDisabled(row, on) {
+  for (const n of [row.pick, row.pushSel, row.baseSel, row.branchSel]) if (n) n.disabled = on;
+}
+
+const shipItRowBase = (row) => (row.branchWrap.hidden ? (row.member.sourceBranch || '') : row.branchSel.value);
+
+function shipItRowPayload(record, row) {
+  const payload = { projectDir: record.projectDir || null, projectKey: record.projectKey, id: record.id, memberKey: row.member.memberKey };
+  if (!row.remotesBox.hidden) { payload.pushRemote = row.pushSel.value; payload.baseRemote = row.baseSel.value; }
+  if (!row.branchWrap.hidden) payload.baseBranch = row.branchSel.value;
+  return payload;
+}
+
+// The single-repo loadShipItRemotes, per member row (GET /api/pr/remotes … &memberKey=).
+async function loadShipItRowRemotes(record, row, gen, isClosed) {
+  const qs = new URLSearchParams({ id: record.id, memberKey: row.member.memberKey });
+  if (record.projectKey) qs.set('projectKey', record.projectKey);
+  try {
+    const res = await fetch(`/api/pr/remotes?${qs}`);
+    const data = await safeJson(res);
+    if (gen !== shipItRemotesGen || isClosed()) return;
+    const remotes = res.ok && Array.isArray(data.remotes) ? data.remotes.filter((r) => r && r.name) : [];
+    const names = (list) => (Array.isArray(list) ? list.filter((x) => typeof x === 'string' && x) : []);
+    const chain = names(data.chain);
+    row.remotes = remotes;
+    if (remotes.length) {
+      const d = data.defaults || {};
+      fillRemoteSelect(row.pushSel, remotes, d.pushRemote);
+      fillRemoteSelect(row.baseSel, remotes, d.baseRemote);
+      row.remotesBox.hidden = false;
+    }
+    const byRemote = data.branches && typeof data.branches === 'object' ? data.branches : {};
+    const paintBranches = () => fillShipItBaseSelect(row.branchSel, chain, row.remotesBox.hidden ? null : row.baseSel.value,
+      row.remotesBox.hidden ? [] : names(byRemote[row.baseSel.value]), data.defaultBase);
+    if (chain.length) { paintBranches(); row.branchWrap.hidden = false; row.baseLabel.textContent = ''; }
+    const paintHint = () => { row.hint.textContent = crossRepoHint(row.remotes, row.pushSel.value, row.baseSel.value, row.member.branch, shipItRowBase(row)); };
+    paintHint();
+    row.pushSel.onchange = paintHint;
+    row.baseSel.onchange = () => { if (chain.length) paintBranches(); paintHint(); };
+    row.branchSel.onchange = paintHint;
+    setShipItRowDisabled(row, row.done || row.busy);         // a batch may already be running
+  } catch { /* remotes unavailable: the row POSTs without the fields (server defaults) */ }
+}
+
+// Best-effort sibling cross-linking; resolves to a user-facing note ('' = fine).
+async function crossLinkWsPrs(record) {
+  try {
+    const res = await fetch('/api/pr/crosslink', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectKey: record.projectKey, id: record.id }),
+    });
+    const dd = await safeJson(res);
+    if (!res.ok) return `The pull requests were opened but could not be cross-linked: ${(dd && dd.error) || `HTTP ${res.status}`}`;
+    const failed = Array.isArray(dd.failed) ? dd.failed : [];
+    return failed.length ? `Could not cross-link ${failed.length} pull request${failed.length === 1 ? '' : 's'} (${failed.map((f) => f.memberKey).join(', ')}).` : '';
+  } catch (e) {
+    return `The pull requests were opened but could not be cross-linked: ${e.message}`;
+  }
+}
+
+// List card + header in step after a (partial) batch: the rollup + every member's PR.
+// patchHistoryPr already repaints the OPEN detail through hdSyncPr, which is keyed on
+// histDetailState.id/key — so no explicit repaint here (an unkeyed one would paint this
+// run's repos onto whatever run the user had navigated to mid-batch). When the record
+// is not in state.historyAll (a deep link before the list landed), hdSyncPr's keyed
+// guard still repaints it from histDetailState.record.
+function syncWsPrs(record) {
+  const pr = wsRollupPr(record);
+  record.pr = pr;
+  patchHistoryPr({ projectKey: record.projectKey, id: record.id, pr,
+    members: histWsMembers(record).map((m) => ({ memberKey: m.memberKey, pr: m.pr || null })) });
+}
+
+// Is the open detail screen THIS run's? (The same key hdSyncPr uses.)
+const hdShowsRun = (record) => !!(histDetailState && histDetailState.screen
+  && histDetailState.id === record.id && histDetailState.key === record.projectKey);
+
+// After a ship, each opened repo's header line gets its mergeability pill (+ one recheck).
+// Only on THIS run's screen: another run of the same workspace carries the same
+// data-member-key values, so an unguarded selector would paint its pills.
+function paintWsMergePills(record, rows) {
+  if (!hdShowsRun(record)) return;
+  const screen = histDetailState.screen;
+  for (const r of rows) {
+    if (!r.mergeable) continue;
+    const pill = screen.querySelector(`.hd-pr-repo[data-member-key="${cssEscape(r.member.memberKey)}"] .hist-merge`);
+    if (!pill) continue;
+    setMergePill(pill, r.mergeable);
+    if (String(r.mergeable).toUpperCase() === 'UNKNOWN') {
+      scheduleMergeRecheck(pill, { projectDir: record.projectDir || null, projectKey: record.projectKey, id: record.id, memberKey: r.member.memberKey });
+    }
+  }
+}
+
+// The workspace Ship-it dialog. Its shell mirrors openShipItModal: the double-open
+// guard, shipItClose, the `closed` flag, backdrop/Escape.
+function openShipItWsModal(record, data) {
+  const modal = document.getElementById('shipit-modal');
+  if (!modal || !modal.classList.contains('hidden')) return;
+  const q = (sel) => modal.querySelector(sel);
+  const list = q('#shipit-repos');
+  const members = histWsMembers(record);
+  const shippable = new Set(histWsShippable(record).map((m) => m.memberKey));
+  const skipped = members.filter((m) => !m.affected && !prLive(m.pr));
+  const perProject = (data && data.results && data.results.perProject) || {};
+  q('.shipit-sub').textContent =
+    `This opens a pull request in each repository ${record.title || record.id} changed and puts them up for review.`;
+  q('.shipit-summary').hidden = true;                 // the single-repo summary/remotes stay out of the way
+  q('.shipit-remotes').hidden = true;
+  list.replaceChildren();
+  const rows = [];
+  for (const m of members) {
+    if (!m.affected && !prLive(m.pr)) continue;       // unchanged repos are only named below
+    const row = buildShipItRepoRow(m, perProject[m.memberKey]?.summary || null, shippable.has(m.memberKey));
+    list.appendChild(row.el);
+    rows.push(row);
+  }
+  if (skipped.length) {
+    const p = document.createElement('p');
+    p.className = 'shipit-skipped hint';
+    p.textContent = `No changes in ${skipped.map((m) => m.name || m.memberKey).join(', ')} — skipped.`;
+    list.appendChild(p);
+  }
+  list.hidden = false;
+  const card = q('.shipit-actions').parentElement;
+  cardAlert(card, null);
+  const okBtn = q('.shipit-ok');
+  let openedHere = false;
+  const picked = () => rows.filter((r) => r.pick && r.pick.checked && !r.done);
+  const paintOk = () => {
+    const sel = picked();
+    const n = sel.length;
+    if (n === 0 && openedHere) { okBtn.disabled = false; okBtn.textContent = 'Close'; return; }
+    okBtn.disabled = n === 0;
+    // "Retry" only when the pick is exactly failed rows: re-ticking a repo that was never
+    // tried (the user unticked it before the first round) makes it a plain "Open".
+    okBtn.textContent = n > 0 && sel.every((r) => r.failed)
+      ? `Retry ${n} failed` : `Open ${n} pull request${n === 1 ? '' : 's'}`;
+  };
+  for (const r of rows) if (r.pick) r.pick.onchange = paintOk;
+  paintOk();
+  modal.classList.remove('hidden');
+  okBtn.focus();
+  const gen = ++shipItRemotesGen;
+
+  let closed = false;
+  const done = () => {
+    if (closed) return;
+    closed = true;
+    modal.classList.add('hidden');
+    list.hidden = true;
+    if (shipItClose === done) shipItClose = null;
+    okBtn.removeEventListener('click', onOk);
+    q('.shipit-cancel').removeEventListener('click', onCancel);
+    modal.removeEventListener('click', onBackdrop);
+    document.removeEventListener('keydown', onKey);
+  };
+  shipItClose = done;
+  const onCancel = () => done();
+  const onBackdrop = (e) => { if (e.target === modal) done(); };
+  const onKey = (e) => { if (e.key === 'Escape') done(); };
+
+  // Sequential per repo. A failure never rolls back an opened PR; the failed rows stay
+  // ticked, so the next click retries exactly those. Cancel stops before the next repo.
+  const onOk = async () => {
+    const batch = picked();
+    if (!batch.length) { done(); return; }             // the "Close" state after a finished batch
+    okBtn.disabled = true;
+    okBtn.textContent = 'Opening…';
+    cardAlert(card, null);
+    for (const r of rows) { r.busy = true; setShipItRowDisabled(r, true); }
+    const opened = [];
+    const failedRows = [];
+    for (const r of batch) {
+      if (closed) break;
+      setShipItRowStatus(r, 'Opening…', '');
+      try {
+        const res = await fetch('/api/pr', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(shipItRowPayload(record, r)),
+        });
+        const dd = await safeJson(res);
+        if (!res.ok) throw new Error((dd && dd.error) || `HTTP ${res.status}`);
+        const pr = { state: 'OPEN', url: dd.url || '#', number: null };
+        r.member.pr = pr;
+        r.done = true;
+        r.failed = false;
+        r.mergeable = dd.mergeable || null;
+        r.pick.checked = false;
+        opened.push(r);
+        if (!closed) setShipItRowOpened(r, pr);
+      } catch (e2) {
+        r.failed = true;
+        failedRows.push(r);
+        if (!closed) setShipItRowStatus(r, `Could not open PR: ${e2.message}`, 'err');
+      }
+    }
+    // Deliberately NOT guarded on `closed`: a cancel mid-batch stops further POSTs, but
+    // the PRs that did open are real, so their bodies still get the sibling list (the
+    // crosslink route is idempotent and best-effort; its note is simply not shown).
+    const note = opened.length ? await crossLinkWsPrs(record) : '';
+    if (opened.length) { syncWsPrs(record); paintWsMergePills(record, opened); }
+    if (closed) return;                                // cancelled mid-batch: model synced, modal untouched
+    for (const r of rows) { r.busy = false; setShipItRowDisabled(r, r.done); }
+    openedHere = openedHere || opened.length > 0;
+    if (!failedRows.length && !note) { done(); return; }
+    const msgs = [];
+    if (failedRows.length) {
+      msgs.push(`${failedRows.length} of ${batch.length} pull request${batch.length === 1 ? '' : 's'} could not be opened. ` +
+        'Opened ones stay open — fix the cause and retry the rest.');
+    }
+    if (note) msgs.push(note);
+    cardAlert(card, { title: 'Not shipped', detail: msgs.join(' ') });
+    paintOk();
+  };
+  okBtn.addEventListener('click', onOk);
+  q('.shipit-cancel').addEventListener('click', onCancel);
+  modal.addEventListener('click', onBackdrop);
+  document.addEventListener('keydown', onKey);
+  for (const r of rows) if (r.pick) loadShipItRowRemotes(record, r, gen, () => closed);
+}
+
+// ── Workspace PRs: one PR per AFFECTED member repo ───────────────────────────
+// A workspace history row carries `members` ([{ memberKey, name, projectDir, branch,
+// sourceBranch, survived, affected, added, removed, pr? }], artifacts.mjs
+// workspaceMemberFacts). Its own survived/branch/sourceBranch describe the PRIMARY
+// member only, so eligibility is decided across the members, never from those.
+const prStateOf = (pr) => (pr && typeof pr === 'object' && pr.url ? String(pr.state || '').toUpperCase() : '');
+const prLive = (pr) => { const s = prStateOf(pr); return s === 'OPEN' || s === 'MERGED'; };
+function histWsMembers(p) {
+  return p && p.target === 'workspace' && Array.isArray(p.members) ? p.members.filter((m) => m && m.memberKey) : [];
+}
+// A workspace row the per-member UI applies to. A LEGACY workspace row (empty
+// workspace_meta.projects -> members: []) and a deep link's minimal record fall back
+// to the single-PR paths (link swap when a PR exists; histPrEligible keeps Create PR off).
+const hasWsMembers = (p) => histWsMembers(p).length > 0;
+// Tri-state per member, like p.pr: a member whose `pr` is still undefined has not been
+// resolved yet (enrichment in flight, or stripped by the history cache).
+const wsPrPending = (p) => p.pr === undefined || histWsMembers(p).some((m) => m.pr === undefined);
+// Members a PR can be opened for right now: changed, branch info recorded, branch still
+// local, no OPEN/MERGED PR.
+function histWsShippable(p) {
+  return histWsMembers(p).filter((m) => m.affected && m.survived && m.branch && m.sourceBranch && !prLive(m.pr));
+}
+// Why a member without a live PR cannot be (or has not been) shipped — ONE wording for
+// the header list and the dialog's context rows ("branch gone" is not the same as
+// "no branch info").
+function wsMemberNote(m) {
+  if (!m.affected) return 'No changes — skipped';
+  if (!m.branch || !m.sourceBranch) return 'No branch recorded';
+  if (!m.survived) return 'Branch no longer exists';
+  return 'No PR yet';
+}
+// The card chip (clarification: an aggregate on the card, per-repo links in the header).
+function histWsPrChipText(p) {
+  const ms = histWsMembers(p);
+  const withPr = ms.filter((m) => prLive(m.pr));
+  if (!withPr.length) return '';
+  const total = ms.filter((m) => m.affected || prLive(m.pr)).length;
+  const merged = withPr.filter((m) => prStateOf(m.pr) === 'MERGED').length;
+  return `PRs ${withPr.length}/${total}${merged ? ` · ${merged} merged` : ''}`;
+}
+// The run-level PR a workspace row reports (mirrors workspace-prs.mjs rollupMemberPrs).
+function wsRollupPr(p) {
+  const live = histWsMembers(p).filter((m) => prLive(m.pr))
+    .sort((a, b) => (a.memberKey < b.memberKey ? -1 : a.memberKey > b.memberKey ? 1 : 0));
+  if (!live.length) return null;
+  const merged = live.find((m) => prStateOf(m.pr) === 'MERGED');
+  const pick = (merged || live[0]).pr;
+  return { state: merged ? 'MERGED' : 'OPEN', url: pick.url, number: pick.number ?? null };
+}
+
+// THE single PR-eligibility predicate. Every caller uses it: paintHdPr (the saved
+// run's Create-PR control) and the pendingShipIt consumer. A workspace run is eligible when at
+// least one MEMBER can still get a PR (histWsShippable) — POST /api/pr's workspace arm
+// takes that member's `memberKey`. A single-project run keeps its three clauses.
 function histPrEligible(p) {
-  return !!(state.ghAvailable && p && p.survived && p.branch && p.sourceBranch
-    && p.target !== 'workspace');
+  if (!(prHostAvailable() && p)) return false;
+  if (p.target === 'workspace') return histWsShippable(p).length > 0;
+  return !!(p.survived && p.branch && p.sourceBranch);
+}
+// "Should the detail screen open Ship-it now?" A workspace run may already have some
+// PRs (rec.pr = the rollup) and still have repos to ship; a single run may not. A
+// workspace run with ANY unresolved member PR never auto-opens: histWsShippable reads
+// `undefined` as "no PR", so guessing here would tick (and re-POST) a repo that
+// already has an OPEN or MERGED PR.
+function histCanShip(p) {
+  if (!p) return false;
+  if (p.target === 'workspace' && hasWsMembers(p)) return !wsPrPending(p) && histPrEligible(p);
+  return !p.pr && histPrEligible(p);
 }
 
 // Keep the OPEN detail's PR control in step with the two PR-resolution paths
@@ -20472,8 +21053,7 @@ function paintHdGlance(screen, record, data) {
 
 // Detail-header PR control from the record's tri-state (undefined = enrichment
 // pending -> hidden; null = resolved/none -> Create when eligible; object = link).
-// Link-first, matching setupPrButton's order (app.js:8552-8569): a merged-but-
-// branch-gone run still shows "Merged".
+// Link-first: a merged-but-branch-gone run still shows "Merged".
 // Run chains: every pipeline can be waited for — the button deep-links to New pipeline with the pick made.
 // The record's status is the list row's (fresher than the load-time payload); a deep link's stub has
 // none, so the detail payload's stands in.
@@ -20630,6 +21210,10 @@ function paintHdPr(screen, record, data) {
   if (!btn || !link) return;
   btn.hidden = true;
   link.hidden = true;
+  const repos = screen.querySelector('.hd-pr-repos');
+  if (repos) { repos.hidden = true; repos.replaceChildren(); }
+  // Legacy workspace rows / minimal deep-link records (no members) keep the single path.
+  if (record.target === 'workspace' && hasWsMembers(record)) { paintHdWsPr(record, data, btn, repos); return; }
   const pr = record.pr && typeof record.pr === 'object' ? record.pr : null;
   const prState = pr ? String(pr.state || '').toUpperCase() : '';
   if (pr && (prState === 'OPEN' || prState === 'MERGED') && pr.url) {
@@ -20646,6 +21230,214 @@ function paintHdPr(screen, record, data) {
   // REPLACES histDetailState.record — a one-time bound listener would keep the stale
   // first record in its closure; reassigning onclick always captures the current one.
   btn.onclick = () => openShipItModal(record, data);
+}
+
+// Workspace header: every member repo on its own line (clarification: per-repo links
+// live here, the card shows the aggregate), plus Create PR while any can still ship.
+function paintHdWsPr(record, data, btn, repos) {
+  const members = histWsMembers(record);
+  if (wsPrPending(record)) return;                   // enrichment pending (row or any member)
+  if (repos && members.length) {
+    for (const m of members) repos.appendChild(hdWsRepoItem(m));
+    repos.hidden = false;
+  }
+  if (!histPrEligible(record)) return;
+  btn.hidden = false;
+  btn.onclick = () => openShipItModal(record, data);  // property, not listener (see single path)
+}
+
+function hdWsRepoItem(m) {
+  const li = document.createElement('li');
+  li.className = 'hd-pr-repo';
+  li.dataset.memberKey = m.memberKey;
+  const name = document.createElement('b');
+  name.textContent = m.name || m.memberKey;
+  // A real text node between name and status: the flex `gap` spaces them visually, but
+  // textContent (screen readers' fallback, copy/paste, the tests) would read "apiMerged".
+  li.append(name, ' ');
+  if (prLive(m.pr)) {
+    const merged = prStateOf(m.pr) === 'MERGED';
+    const a = document.createElement('a');
+    a.className = merged ? 'hd-pr-repo-link merged' : 'hd-pr-repo-link';
+    a.href = m.pr.url; a.target = '_blank'; a.rel = 'noopener';
+    a.textContent = merged ? 'Merged' : 'View PR';
+    li.appendChild(a);
+    const pill = document.createElement('span');     // post-ship mergeability, like the single header pill
+    pill.className = 'hist-merge';
+    pill.dataset.minLevel = 'expert';
+    pill.hidden = true;
+    li.appendChild(pill);
+  } else {
+    const note = document.createElement('span');
+    note.className = 'hd-pr-repo-note';
+    note.textContent = wsMemberNote(m);
+    li.appendChild(note);
+  }
+  return li;
+}
+
+// --- Publish branch (#618): push a finished run's branch without opening a PR ----
+// GET /api/runs/:id/publish answers each repo's state from refs only: 'none' (no branch here),
+// 'unpublished', 'published' or 'moved' (local commits since: the action reads Push changes).
+const PUBLISH_FINISHED = new Set(['done', 'stopped', 'error']);
+let publishPaintGen = 0;
+
+const publishScope = (record) => (record.projectKey ? { projectKey: record.projectKey } : { projectDir: record.projectDir || '' });
+const publishTarget = (m) => `${m.remote}/${m.branch}`;
+
+async function paintHdPublish(screen, record, data) {
+  const btn = screen.querySelector('.hd-publish');
+  const note = screen.querySelector('.hd-published');
+  if (!btn || !note) return;
+  const gen = ++publishPaintGen;
+  btn.hidden = true;
+  note.hidden = true;
+  const status = String((data && data.state && data.state.status) || record.status || '').toLowerCase();
+  if (!PUBLISH_FINISHED.has(status) || !record.id) return;
+  let members;
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(record.id)}/publish?${new URLSearchParams(publishScope(record))}`);
+    const d = await safeJson(res);
+    if (!res.ok || !d || !Array.isArray(d.members)) return;
+    members = d.members.filter((m) => m && m.branch && m.state && m.state !== 'none');
+  } catch { return; }
+  if (gen !== publishPaintGen || !members.length) return;
+  const pub = members.filter((m) => m.remote && m.state !== 'unpublished');
+  if (pub.length) {
+    note.textContent = record.target === 'workspace'
+      ? `Published: ${pub.map((m) => `${m.name || m.memberKey} → ${publishTarget(m)}`).join(', ')}`
+      : `Published to ${publishTarget(pub[0])}`;
+    note.hidden = false;
+  }
+  const moved = members.some((m) => m.state === 'moved');
+  if (!moved && !members.some((m) => m.state === 'unpublished')) return;
+  btn.textContent = moved ? 'Push changes' : 'Publish branch';
+  btn.hidden = false;
+  btn.onclick = () => openPublishModal(screen, record, data, members);   // property: repaints re-bind it
+}
+
+function openPublishModal(screen, record, data, members) {
+  const modal = document.getElementById('publish-modal');
+  if (!modal || !modal.classList.contains('hidden')) return;
+  const q = (sel) => modal.querySelector(sel);
+  const card = q('.publish-card');
+  const okBtn = q('.publish-ok');
+  const list = q('.publish-repos');
+  const ws = record.target === 'workspace';
+  list.replaceChildren();
+  cardAlert(card, null);
+  const rows = members.map((m) => {
+    const el = document.createElement('div');
+    el.className = 'publish-repo';
+    if (m.memberKey) el.dataset.memberKey = m.memberKey;
+    const head = document.createElement('label');
+    head.className = 'publish-repo-head';
+    const pick = document.createElement('input');
+    pick.type = 'checkbox';
+    pick.className = 'publish-pick';
+    pick.checked = m.state !== 'published';
+    pick.hidden = !ws;                                    // a project run has one branch: nothing to tick
+    pick.setAttribute('aria-label', `Publish ${m.branch}`);
+    const name = document.createElement('b');
+    name.textContent = ws ? (m.name || m.memberKey) : '';
+    const branch = document.createElement('span');
+    branch.className = 'mono';
+    branch.textContent = m.branch;
+    head.append(pick, ...(ws ? [name] : []), branch);
+    const wrap = document.createElement('label');
+    wrap.className = 'publish-remote-wrap';
+    wrap.hidden = true;                                   // until the remotes load; else the server's default
+    const label = document.createElement('span');
+    label.className = 'publish-remote-label';
+    label.textContent = 'Push to';
+    const selWrap = document.createElement('span');
+    selWrap.className = 'select-wrap';
+    const sel = document.createElement('select');
+    sel.className = 'select publish-remote';
+    selWrap.appendChild(sel);
+    wrap.append(label, selWrap);
+    const statusEl = document.createElement('div');
+    statusEl.className = 'publish-status hint';
+    statusEl.hidden = true;
+    el.append(head, wrap, statusEl);
+    list.appendChild(el);
+    return { m, pick, wrap, sel, statusEl, done: false };
+  });
+  const picked = () => rows.filter((r) => r.pick.checked && !r.done);
+  const okLabel = () => {
+    const n = picked().length;
+    okBtn.disabled = n === 0;
+    const moved = picked().some((r) => r.m.state === 'moved');
+    okBtn.textContent = n > 1 ? `${moved ? 'Push' : 'Publish'} ${n} branches` : (moved ? 'Push changes' : 'Publish');
+  };
+  for (const r of rows) r.pick.onchange = okLabel;
+  okLabel();
+  modal.classList.remove('hidden');
+  okBtn.focus();
+
+  let closed = false;
+  const done = () => {
+    if (closed) return;
+    closed = true;
+    modal.classList.add('hidden');
+    okBtn.removeEventListener('click', onOk);
+    q('.publish-cancel').removeEventListener('click', done);
+    modal.removeEventListener('click', onBackdrop);
+    document.removeEventListener('keydown', onKey);
+  };
+  const onBackdrop = (e) => { if (e.target === modal) done(); };
+  const onKey = (e) => { if (e.key === 'Escape') done(); };
+
+  // Sequential per repo, like the workspace Ship-it batch: failed rows stay ticked for a retry.
+  const onOk = async () => {
+    const batch = picked();
+    if (!batch.length) return;
+    okBtn.disabled = true;
+    cardAlert(card, null);
+    let failed = 0;
+    for (const r of batch) {
+      if (closed) break;
+      r.statusEl.hidden = false;
+      r.statusEl.textContent = 'Pushing…';
+      const body = { ...publishScope(record), ...(record.projectDir ? { projectDir: record.projectDir } : {}),
+        ...(r.m.memberKey ? { memberKey: r.m.memberKey } : {}), ...(r.wrap.hidden ? {} : { pushRemote: r.sel.value }) };
+      try {
+        const res = await fetch(`/api/runs/${encodeURIComponent(record.id)}/publish`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const dd = await safeJson(res);
+        if (!res.ok) throw new Error((dd && dd.error) || `HTTP ${res.status}`);
+        r.done = true;
+        r.pick.checked = false;
+        r.statusEl.textContent = dd.upToDate ? `Already up to date on ${dd.remote}.` : `Pushed to ${dd.remote}/${dd.branch}.`;
+      } catch (e) {
+        failed += 1;
+        r.statusEl.textContent = `Could not push: ${e.message}`;
+      }
+    }
+    paintHdPublish(screen, record, data);
+    if (closed) return;
+    if (!failed) { done(); return; }
+    cardAlert(card, { title: 'Not published', detail: `${failed} of ${batch.length} branch${batch.length === 1 ? '' : 'es'} could not be pushed. Fix the cause and retry.` });
+    okLabel();
+  };
+  okBtn.addEventListener('click', onOk);
+  q('.publish-cancel').addEventListener('click', done);
+  modal.addEventListener('click', onBackdrop);
+  document.addEventListener('keydown', onKey);
+
+  for (const r of rows) {
+    const qs = new URLSearchParams({ id: record.id, ...publishScope(record), ...(r.m.memberKey ? { memberKey: r.m.memberKey } : {}) });
+    fetch(`/api/pr/remotes?${qs}`).then(async (res) => {
+      const d = await safeJson(res);
+      const remotes = res.ok && d && Array.isArray(d.remotes) ? d.remotes.filter((x) => x && x.name) : [];
+      if (closed || !remotes.length) return;
+      // Push changes goes back to the remote the branch is on; a first publish takes the Ship-it default.
+      const chosen = r.m.remote && remotes.some((x) => x.name === r.m.remote) ? r.m.remote : (d.defaults || {}).pushRemote;
+      fillRemoteSelect(r.sel, remotes, chosen);
+      r.wrap.hidden = false;
+    }).catch(() => { /* remotes unavailable: the POST omits pushRemote (server default) */ });
+  }
 }
 
 // --- detail header: meta line, branch copy, Resume, Archive, banners --------
@@ -20780,11 +21572,14 @@ function paintHdHeaderMeta(screen, record, data) {
   const br = st.branch && typeof st.branch === 'object' ? st.branch : {};
   const feature = br.feature || (typeof st.branch === 'string' ? st.branch : '') || record.branch || '';
   const source = br.source || record.sourceBranch || '';
-  base.textContent = source ? `${source} →` : '';
-  base.hidden = !source;
-  copyBtn.hidden = !feature;
+  // A workspace member this run never changed has its branch dropped at teardown
+  // (run-harness _dropUnchangedMemberBranch): never offer a name that no longer exists.
+  const dropped = !!br.branchDeleted;
+  base.textContent = dropped ? 'No branch — no changes in this project' : (source ? `${source} →` : '');
+  base.hidden = !dropped && !source;
+  copyBtn.hidden = dropped || !feature;
   paintPageBranch(screen.querySelector('.hd-glance'), feature);
-  if (feature) {
+  if (feature && !dropped) {
     screen.querySelector('.hd-branch-name').textContent = feature;
     if (copyBtn.dataset.bound !== '1') {              // paintHdHeaderMeta re-runs (refreshHdFromRow)
       copyBtn.dataset.bound = '1';
@@ -21288,7 +22083,7 @@ function setupHdActions(screen, record, data) {
         // archiving the LAST pipeline would otherwise persist `{pipelines: []}`
         // and the next boot would paint an empty History from cache before the
         // network answers.
-        if (state.historyAll.length) writeHistoryCache(state.historyAll, state.ghAvailable);
+        if (state.historyAll.length) writeHistoryCache(state.historyAll, state.ghAvailable, state.adoAvailable);
         const m = readLastRun();
         if (m && m.pipelineId === r.id && (!m.projectKey || m.projectKey === r.projectKey)) forgetLastRun();
         paintHistory();
@@ -21379,6 +22174,7 @@ function setupHdActions(screen, record, data) {
 
   paintHdPr(screen, record, data);
   paintHdAfter(screen, record, data);
+  paintHdPublish(screen, record, data);
 }
 
 // Re-run only the IDEMPOTENT painters after the open detail's real list row
@@ -23333,6 +24129,9 @@ function buildHdOverview(sec, record, data) {
   // not, so without it the card would read `released` for the life of the screen.)
   wrap.appendChild(grid);
   wrap.appendChild(tagLevel(hdWorktreeRow(retained ? 'retained' : 'released', wt.worktreeDir || ''), 'expert'));
+  // Skills registry §6 board 9: the set skills the run got (run.json.skillMount, in the detail payload).
+  const skillsCard = renderRunSkills(data.skillMount, { doc: document });
+  if (skillsCard) wrap.appendChild(tagLevel(skillsCard, 'advanced'));
   const filesBox = hdFilesChangedBox(sec, results);
   if (filesBox) wrap.appendChild(filesBox);
   // Agent memory (§6): what this run wrote into worca's memory, per execution.
@@ -24234,6 +25033,7 @@ function rdStateCopy(r, stepName) {
   if (r.pauseReason === 'cost_pipeline_policy') return 'Paused — team cost cap reached.';
   if (r.pauseReason === 'cost_total_policy') return 'Paused — team total cap reached.';
   if (r.pauseReason === 'night_guardrail') return r.pauseDetail || 'Paused: Away mode limit reached.';
+  if (r.pauseReason === 'drain') return 'Paused while worca was stopping. Resume continues from here — the worktree and progress are kept.';
   if (r.pauseReason === 'error') {
     const why = r.pauseDetail ? `: ${r.pauseDetail}` : '';
     return `Paused after an error${why}. Fix the cause, then Resume — the worktree and progress are kept.`;
@@ -24382,6 +25182,13 @@ function rdOvTask(r) {
   return task;
 }
 
+/** Skills registry §6 board 9: a run's set-skill card into `host` (hidden without a record). */
+function paintRunSkills(host, mount) {
+  const card = renderRunSkills(mount, { doc: document });
+  host.hidden = !card;
+  host.replaceChildren(...(card ? [card] : []));
+}
+
 function buildRdOverview(sec, ctx) {
   sec.innerHTML = '';
   const wrap = document.createElement('div');
@@ -24396,14 +25203,16 @@ function buildRdOverview(sec, ctx) {
   // Actions strip: terminal runs only, filled once the run has its pipeline id.
   const strip = document.createElement('div'); strip.className = 'act-strip'; tagLevel(strip, 'advanced');
   strip.hidden = true;
-  wrap.append(banner, strip, grid, rdOvTask(ctx.run));
+  const skills = tagLevel(document.createElement('div'), 'advanced');   // the set skills it got (§6 board 9)
+  skills.className = 'hd-ov-skills-host';
+  wrap.append(banner, strip, grid, skills, rdOvTask(ctx.run));
   sec.appendChild(wrap);
   const paintStrip = (run) => {
     const on = isTerminalStatus(run.status) && !!run.pipelineId;
     strip.hidden = !on;
     if (on && strip.dataset.runId !== run.pipelineId) paintActionsStrip(strip, run.pipelineId, rdScopeQuery(run));
   };
-  const paint = (c) => { rdOvStateBanner(banner, c.run); paintStrip(c.run); rdOvStats(grid, c.run); };
+  const paint = (c) => { rdOvStateBanner(banner, c.run); paintStrip(c.run); rdOvStats(grid, c.run); paintRunSkills(skills, c.run.skillMount); };
   paint(ctx);
   sec.__update = paint;
 }
@@ -25427,6 +26236,7 @@ function statusPill(r) {
     if (r.pauseReason === 'cost_pipeline_policy') return { family: 'amber', text: 'Paused · team cap' };
     if (r.pauseReason === 'cost_total_policy') return { family: 'amber', text: 'Paused · team total' };
     if (r.pauseReason === 'night_guardrail') return { family: 'amber', text: 'Paused · Away mode limit' };
+    if (r.pauseReason === 'drain') return { family: 'amber', text: 'Paused · restart' };
     // An error pause is parked and resumable (never dead), so it stays in the amber family.
     if (r.pauseReason === 'error') return { family: 'amber', text: 'Paused · error' };
     if (r.pauseReason === 'recoverable') return { family: 'amber', text: 'Paused · recoverable' };
@@ -25779,6 +26589,8 @@ function paintGraphFor(host, stepper, decor, legacySteps) {
     slot.m = mountRunGraph(host, {
       mode: decor.mode || 'monitor',
       onRowClick: (executionId, nodeId) => focusLogExecution(slot.ctx, executionId, nodeId),
+      // Running: a card opens its live log. History links its cards itself (wireHdGraphLogLinks).
+      nodeClicks: !decor.record,
       onGateClick: () => focusQuestionPanel(slot.ctx),
       onResultClick: (path) => openRunArtifact(slot.ctx, path),
     });
@@ -27877,13 +28689,13 @@ function sigRest(tiles) {
 }
 
 // The finished headline's PR input (glanceCopy): the PR's own state, or what is known.
-// No row yet, or gh answered nothing yet -> PENDING; gh missing, or a run that cannot
+// No row yet, or the lookup answered nothing yet -> PENDING; no PR host, or a run that cannot
 // open one (workspace, branch gone) -> UNAVAILABLE; otherwise NONE.
 function glancePrInput(record) {
   const pr = record && record.pr;
   if (pr && typeof pr === 'object') return String(pr.state || '').toUpperCase() || 'UNAVAILABLE';
   if (!record) return 'PENDING';
-  if (!state.ghAvailable) return 'UNAVAILABLE';
+  if (!prHostAvailable()) return 'UNAVAILABLE';
   if (pr === undefined) return 'PENDING';
   return histPrEligible(record) ? 'NONE' : 'UNAVAILABLE';
 }
@@ -27892,7 +28704,7 @@ function glancePrInput(record) {
 const CTA_ICONS = {
   // A pull request with a plus where its head will be.
   'pr-create': '<circle cx="6" cy="6" r="2.5"/><path d="M6 8.5V21M13 6h3a2 2 0 0 1 2 2v3M18 15v6M15 18h6"/>',
-  // An open pull request is on GitHub: a box with an arrow leaving it (a new tab).
+  // An open pull request is on the code host: a box with an arrow leaving it (a new tab).
   external: '<path d="M18 13.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4.5"/><path d="M14 4h6v6M20 4l-9 9"/>',
   // Merged: two lines joining into one.
   merged: '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5V21M6 9a9 9 0 0 0 9 9h.5"/>',
@@ -28674,6 +29486,9 @@ function updateNavCounts() {
   }
   // One badge on Runs (D11): while anything needs you, the amber Needs-you count shows and
   // CSS hides the live count beside it.
+  let waiting = 0;
+  for (const r of runs.values()) if (r.pendingQuestion != null) waiting += 1;
+  alerts.updateBadge({ waitingRuns: waiting });
   const needs = runsNeedsCount();
   const nc = $('#nav-needs-count');
   if (nc) { nc.textContent = String(needs); nc.hidden = needs === 0; }
@@ -28724,6 +29539,7 @@ async function refreshAllCounts() {
 let schedulesInUse = false;
 function paintScheduleCounts(c) {
   if (!c) return;
+  if (Number.isFinite(c.unread)) alerts.updateBadge({ unreadProblems: c.unread });
   const inUse = !!((c.scheduled || 0) + (c.missed || 0) + (c.recurring || 0) + (c.unread || 0));
   if (inUse !== schedulesInUse) { schedulesInUse = inUse; paintLevelBanner(); }
   if (el.navSchedulesCount && Number.isFinite(c.scheduled)) {
@@ -29123,7 +29939,7 @@ function gsHops(step, g) {
       const input = document.querySelector('.ask-input');
       return [
         { id: 'pill', target: '.ask-pill', lift: ['.ask-dock'], met: () => !!(pill && pill.hidden), skipWhenMet: true,
-          text: 'Ask Worca answers questions about any run in plain language. It is on every view.' },
+          text: 'Ask Worca answers questions about any run in plain language. It\'s the round button in the corner, on every view.' },
         { id: 'question', target: '.ask-input', lift: ['.ask-dock'], met: () => !!(input && input.value.trim()),
           text: 'Try “What did my last run change?” — or anything about a run, an agent or a project.',
           already: 'A question is already typed here. Anything about a run, an agent or a project works.' },
@@ -29456,7 +30272,7 @@ const SETTINGS_TAB_MIN_LEVEL = Object.freeze({ ask: 'advanced', guardrails: 'adv
 const VIEW_TITLES = Object.freeze({
   stats: 'Statistics', composer: 'Workflow Composer', workspaces: 'Workspaces', 'workspace-create': 'Workspaces',
   'agent-create': 'Create agent', 'team-metrics': 'Team metrics', 'team-policy': 'Team policy', agents: 'Agents', scripts: 'Scripts',
-  guardrails: 'Guardrails', plugins: 'Plugins', mcp: 'MCP servers', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
+  guardrails: 'Guardrails', plugins: 'Plugins', mcp: 'Sets', memory: 'Memory', models: 'Models', providers: 'Providers', ask: 'Ask Worca',
   schedules: 'Schedules',
 });
 function pageMinLevel() {
@@ -29820,8 +30636,8 @@ function showSettingsTab(param = '') {
   if (tab === 'mcp') void mcpTab().show(sub);
 }
 
-// Settings › MCP servers (mcp-view.mjs): one controller, made on first entry; its sub-route
-// ('', 'sets/<id>', 'servers') rides behind #settings/mcp/.
+// Settings › Sets (tab key mcp; mcp-view.mjs): one controller, made on first entry; its sub-route
+// ('', 'sets/<id>', 'servers', 'skills') rides behind #settings/mcp/.
 async function mcpApi(method, path, body) {
   try {
     const res = await fetch(path, body === undefined ? { method }
@@ -29839,7 +30655,12 @@ function mcpTab() {
       api: mcpApi,
       navigate: (hash) => { if (location.hash.slice(1) !== hash) location.hash = hash; },
       confirm: confirmModal,
-      modal: { open: pluginModal, close: closePluginModal },
+      // `shows(node)`: is this node still in the open dialog? A flow whose answer lands after the dialog's own Close, a
+      // tab switch or another dialog opens nothing (skill-import.mjs). `afterClose(fn)`: the dialog's own Close runs fn
+      // once, as the open step's Cancel (an Import preview's or an Update's staged copy is discarded).
+      modal: { open: pluginModal, close: closePluginModal,
+        shows: (node) => !el.pluginModal.classList.contains('hidden') && el.pluginModalBody.contains(node),
+        afterClose: (fn) => { pluginModalAfterClose = fn; } },
       notify: (o) => notify(o),
     });
   }
@@ -30214,9 +31035,14 @@ function paintRdAwayPill(screen, r) {
     else if (!_awayLoading['']) _awayLoading[''] = fetchAwayMode().then((d) => { if (d && !state.awayMode) state.awayMode = d; });   // once; the 1 s tick repaints
     return;
   }
-  const d = describeRun({ config: d0.config, toggle: d0.toggle, hereSince: d0.hereSince ?? null, now: Date.now(),
+  // Per-person Away mode (B4): a run follows its owner's switch. Someone else's run shows theirs, read-only.
+  const owner = d0.perPerson && r.night && r.night.owner;
+  const other = owner && owner !== String(d0.perPerson).toLowerCase();
+  const toggle = other ? (r.night.ownerToggle ?? d0.instanceToggle ?? d0.toggle) : d0.toggle;
+  const hereSince = other ? (r.night.ownerToggle ? r.night.ownerHereSince : d0.instanceHereSince) ?? null : d0.hereSince ?? null;
+  const d = describeRun({ config: d0.config, toggle, hereSince, now: Date.now(),
     run: { ...(r.night || {}), waiting: r.pendingQuestion != null, done: RD_TERMINAL.includes(r.status) } });
-  pill.textContent = d.pill; pill.title = d.reason; pill.dataset.state = d.state;
+  pill.textContent = d.pill; pill.title = other ? `Follows ${owner}'s Away mode. ${d.reason}` : d.reason; pill.dataset.state = d.state;
 }
 /** settings-changed: refresh the user-level body and every cached project body, keeping the old ones until the new land. */
 let _awayRefreshSeq = 0;
@@ -30351,6 +31177,8 @@ askPanel = createAskPanel({
   doc: document,
   win: window,
   fetch: (...args) => fetch(...args),
+  // Shared terminal (#574): a command Ask starts in the open chat, or a click on its card, shows its tab in the pane below.
+  showTerminal: (sessionId, opts) => terminalPane?.showSession(sessionId, opts),
   sendWs: (obj) => {
     const ws = state.ws;
     if (ws && state.wsReady) {
@@ -30387,6 +31215,7 @@ terminalPane = createTerminalPane({
     try { ws.send(JSON.stringify(obj)); return true; } catch { return false; }
   },
   getPageContext,
+  confirm: confirmModal,
   storage: window.localStorage,
 });
 document.body.appendChild(terminalPane.root);

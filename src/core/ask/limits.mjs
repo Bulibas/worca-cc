@@ -69,6 +69,15 @@ export const ASK_LIMITS = Object.freeze({
   workflowNoteMaxChars: 200,               // propose_workflow note shown on the card
   proposalNoteMaxChars: 200,               // propose_run note ("why this shape") shown on the run card
   commentBodyMaxChars: 4000,               // diff_comments.body cap (pinned equal to COMMENT_BODY_MAX)
+  // Ask agent mode (#574): commands Ask runs in Worca terminals (src/core/ask/commands.mjs).
+  commandsPerThread: 3,                    // running at once per chat
+  commandMaxMs: 30 * 60_000,               // per command; stopped as ask:cap
+  commandWaitMaxSec: 240,                  // wait_for ceiling (under undici's 300 s headersTimeout)
+  commandWaitDefaultSec: 60,
+  commandOutputPageChars: 8000,            // read_output page
+  commandMaxChars: 4000,                   // one command line (= COMMAND_MAX_CHARS)
+  commandSessionIdleMs: 10 * 60_000,       // an idle Ask session closes
+  commandCardTailChars: 4000,              // the chat card's live tail
   titleMaxChars: 120,
   headerRuns: 5,
   headerCards: 5,

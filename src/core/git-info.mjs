@@ -9,7 +9,13 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, isAbsolute } from 'node:path';
-import { githubEnv, readGithubCredentials } from './github-credentials.mjs';
+import { githubEnv } from './github-credentials.mjs';
+import { gitEnvFor, githubOnlyEnv, hostLookupNeeded, stripHostCredentials } from './host-credentials.mjs';
+import { parseRemoteUrl, remoteRepoSlug, forgeOf, forgeOfPrUrl, FORGE_LABEL } from './forge.mjs';
+import * as azurePr from './pr/azure.mjs';
+import { readAzureCredentials } from './azure-credentials.mjs';
+import { parseAzurePrUrl } from '../shared/azure-remote.mjs';
+export { parseRemoteUrl, remoteRepoSlug, sameRepo } from './forge.mjs';
 
 /** Default runner: spawn `cmd args` in `cwd`, resolve { ok, stdout, stderr, code }. */
 function defaultRun(cmd, args, { cwd, timeout = 0, env = null } = {}) {
@@ -56,6 +62,15 @@ export async function diffShortstat(projectDir, source, feature) {
   const r = await _run('git', ['diff', '--shortstat', `${source}...${feature}`], { cwd: projectDir });
   if (!r.ok) return { added: 0, removed: 0 };
   return parseShortstat(r.stdout);
+}
+
+/** Commits on `feature` not on `source` (`git rev-list --count source..feature`), or null on any failure. */
+export async function commitsAhead(projectDir, source, feature) {
+  if (!projectDir || !source || !feature) return null;
+  const r = await _run('git', ['rev-list', '--count', `${source}..${feature}`], { cwd: projectDir });
+  if (!r.ok) return null;
+  const n = Number.parseInt(String(r.stdout || '').trim(), 10);
+  return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
 /**
@@ -192,12 +207,17 @@ export async function hasGh() {
   return _ghCache;
 }
 
-/** "owner/name" of `remote` on github.com in App mode (helps the App find its installation), else null. */
-async function githubRepoOf(projectDir, remote) {
-  if (readGithubCredentials().mode !== 'app') return null;
-  const r = await _run('git', ['remote', 'get-url', remote], { cwd: projectDir });
-  const p = r.ok ? parseRemoteUrl(r.stdout.trim()) : null;
-  return p && p.host === 'github.com' ? `${p.owner}/${p.repo}` : null;
+/**
+ * The write env for a push to `remote`. The host matters only in GitHub App mode, with an Azure DevOps
+ * credential, or with push-as-person (hostLookupNeeded); then the push URL picks the credential
+ * (gitEnvFor). Otherwise — and for a URL that does not parse, e.g. a local path — the host-blind
+ * GitHub env, exactly as before (minus the strip-only Boards token), with no extra git call.
+ */
+async function pushEnv(projectDir, remote) {
+  if (!hostLookupNeeded({ push: true })) return githubOnlyEnv('write', { repo: null });
+  const u = await _run('git', ['remote', 'get-url', '--push', remote], { cwd: projectDir, env: stripHostCredentials(process.env) });
+  const url = u.ok ? String(u.stdout || '').trim().split(/\r?\n/)[0] : '';
+  return parseRemoteUrl(url) ? gitEnvFor('write', url) : githubOnlyEnv('write', { repo: null });
 }
 
 /** "owner/name" of a github.com PR URL, or null. */
@@ -244,7 +264,7 @@ async function waitForGc(projectDir, { maxMs = 120_000, stepMs = 2_000, sleep = 
  */
 export async function pushBranch(projectDir, branch, remote = 'origin', { gcWait = {} } = {}) {
   const r0 = remote || 'origin';
-  const cred = await githubEnv('write', { repo: await githubRepoOf(projectDir, r0) });
+  const cred = await pushEnv(projectDir, r0);
   if (cred.error) return { ok: false, stderr: cred.error };
   const r = await _run('git', ['push', '-u', r0, branch], { cwd: projectDir, env: cred.env });
   if (r.ok || !isRemotePackFailure(r.stderr)) return { ok: r.ok, stderr: (r.stderr || '').trim() };
@@ -268,13 +288,14 @@ export async function pushBranch(projectDir, branch, remote = 'origin', { gcWait
  * head LABEL, so the form must agree with where the branch actually is.
  * On "already exists", recover the open PR's URL via `gh pr view` with the same
  * selector + repo, else from the URL gh prints on the last stderr line.
+ * `draft` adds `--draft` (a new PR only; an existing one is recovered as-is).
  * Returns { ok, url, existed } | { ok:false, error }.
  */
-export async function createPr({ projectDir, base, head, title, body = '', repo = null, headOwner = null }) {
+async function ghCreatePr({ projectDir, base, head, title, body = '', repo = null, headOwner = null, draft = false }) {
   const headRef = prHeadRef(head, headOwner);
   const repoArgs = repo ? ['--repo', repo] : [];
   const args = ['pr', 'create', ...repoArgs, '--base', base, '--head', headRef,
-    '--title', title || head, '--body', body || title || head];
+    '--title', title || head, '--body', body || title || head, ...(draft === true ? ['--draft'] : [])];
   const cred = await githubEnv('write', { repo: ownerRepo(repo) });
   if (cred.error) return { ok: false, error: cred.error };
   const r = await _run('gh', args, { cwd: projectDir, env: cred.env });
@@ -292,6 +313,43 @@ export async function createPr({ projectDir, base, head, title, body = '', repo 
     if (m) return { ok: true, url: m[0], existed: true };
   }
   return { ok: false, error: (r.stderr || '').trim() || `gh exited ${r.code}` };
+}
+
+// ── Closing the source issue from a PR body ──────────────────────────────────
+// A run whose task came from a GitHub issue (plugins/github-source stores its
+// html_url in pipelines.source_ref) ships with a closing keyword so merging the
+// PR closes the issue. Only issue URLs count: the issues API also returns PRs.
+
+const ISSUE_URL_RE = /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)\/issues\/([1-9]\d*)\/?(?:[?#].*)?$/i;
+
+/** { owner, repo, number } of a github.com issue URL (never a PR URL), else null. Pure. */
+export function parseGithubIssueUrl(url) {
+  if (typeof url !== 'string') return null;
+  const m = ISSUE_URL_RE.exec(url.trim());
+  return m ? { owner: m[1], repo: m[2], number: Number(m[3]) } : null;
+}
+
+const CLOSING_KEYWORD = '(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)';
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The line that closes the run's source issue from the PR body, or '' when none
+ * should be added: no/non-issue `sourceUrl`, or `body` already closes that issue
+ * with a GitHub closing keyword (by owner/repo#N, the full URL, or — only when the
+ * issue lives in `baseRepo` — #N). `baseRepo` is the PR's OWNER/REPO (case-insensitive);
+ * the same repo gives `Closes #N`, any other (or null) `Closes owner/repo#N`. Pure.
+ */
+export function issueClosingLine({ sourceUrl, baseRepo = null, body = '' } = {}) {
+  const issue = parseGithubIssueUrl(sourceUrl);
+  if (!issue) return '';
+  const slug = `${issue.owner}/${issue.repo}`;
+  const inBase = typeof baseRepo === 'string' && baseRepo.toLowerCase() === slug.toLowerCase();
+  const n = issue.number;
+  const refs = [`${escapeRe(slug)}#${n}`, `https://github\\.com/${escapeRe(slug)}/issues/${n}`];
+  if (inBase) refs.push(`#${n}`);
+  const already = new RegExp(`(?<![\\w-])${CLOSING_KEYWORD}:?\\s+(?:${refs.join('|')})(?!\\d)`, 'i');
+  if (already.test(String(body ?? ''))) return '';
+  return inBase ? `Closes #${n}` : `Closes ${slug}#${n}`;
 }
 
 // ── gh issue create ───────────────────────────────────────────────────────────
@@ -376,7 +434,7 @@ export function normalizeMergeable(raw) {
  * repo, which need not be the cwd's default) and wins; else the head selector
  * (`owner:branch` when `headOwner`) scoped by `repo`. UNKNOWN on any failure.
  */
-export async function prMergeable({ projectDir, head, repo = null, headOwner = null, prUrl = null }) {
+async function ghPrMergeable({ projectDir, head, repo = null, headOwner = null, prUrl = null }) {
   const selector = prUrl || (head ? prHeadRef(head, headOwner) : '');
   if (!selector) return 'UNKNOWN';
   const repoArgs = !prUrl && repo ? ['--repo', repo] : [];
@@ -408,8 +466,7 @@ const normalizePr = (pr) => ({
  * matches and selects by priority OPEN > MERGED, so a newer closed PR never
  * masks an older merged one; a closed-but-not-merged PR is ignored.
  */
-export async function findPrForBranch({ projectDir, head, prUrl = null } = {}) {
-  if (!projectDir || !head) return null;
+async function ghFindPrForBranch({ projectDir, head, prUrl = null }) {
   if (prUrl) {
     const v = await _run('gh', ['pr', 'view', prUrl, '--json', 'number,state,url'], { cwd: projectDir, env: (await githubEnv('read', { repo: ownerRepoOfPrUrl(prUrl) })).env });
     if (v.ok) {
@@ -425,7 +482,7 @@ export async function findPrForBranch({ projectDir, head, prUrl = null } = {}) {
   const r = await _run(
     'gh',
     ['pr', 'list', '--head', head, '--state', 'all', '--json', 'number,state,url', '--limit', '30'],
-    { cwd: projectDir },
+    { cwd: projectDir, env: (await githubEnv('read', { repo: null })).env },
   );
   if (!r.ok) return null;
   let arr;
@@ -439,62 +496,25 @@ export async function findPrForBranch({ projectDir, head, prUrl = null } = {}) {
   return norm.find((p) => p.state === 'OPEN') || norm[0];
 }
 
+/** A PR's current body via its (repo-agnostic) URL. { ok, body } | { ok:false, error }. Never throws. */
+export async function readPrBody({ projectDir = null, prUrl } = {}) {
+  if (!prUrl) return { ok: false, error: 'prUrl is required' };
+  const r = await _run('gh', ['pr', 'view', prUrl, '--json', 'body', '-q', '.body'],
+    { cwd: projectDir || undefined, env: (await githubEnv('read', { repo: ownerRepoOfPrUrl(prUrl) })).env });
+  if (!r.ok) return { ok: false, error: (r.stderr || '').trim() || `gh exited ${r.code}` };
+  return { ok: true, body: String(r.stdout || '').replace(/\r?\n$/, '') };
+}
+
+/** Replace a PR's body (`gh pr edit <url> --body`; argv, no shell). { ok } | { ok:false, error }. */
+export async function editPrBody({ projectDir = null, prUrl, body } = {}) {
+  if (!prUrl) return { ok: false, error: 'prUrl is required' };
+  const cred = await githubEnv('write', { repo: ownerRepoOfPrUrl(prUrl) });
+  if (cred.error) return { ok: false, error: cred.error };
+  const r = await _run('gh', ['pr', 'edit', prUrl, '--body', String(body ?? '')], { cwd: projectDir || undefined, env: cred.env });
+  return r.ok ? { ok: true } : { ok: false, error: (r.stderr || '').trim() || `gh exited ${r.code}` };
+}
+
 // ── Remotes (fork support) ──────────────────────────────────────────────────
-
-/**
- * Parse a git remote URL into { host, owner, repo } or null when it is not a
- * hosted owner/repo URL (local paths, file://, bare hosts). Accepts
- *   https://github.com/owner/repo.git   https://user@host/owner/repo
- *   ssh://git@github.com/owner/repo.git ssh://git@host:2222/owner/repo
- *   git@github.com:owner/repo.git       (scp-style, cf. marketplaces.mjs:31)
- *   git@github.com:/owner/repo.git      host:owner/repo
- *   git://host/owner/repo.git
- * Trailing `.git` / `/` are dropped; owner/repo are the LAST two path segments.
- * GitHub's SSH-over-443 alias host (`ssh.github.com`) is folded into `github.com`:
- * it names the same repository, and gh's --repo form only knows the real host.
- * Pure; never throws.
- */
-const HOST_ALIASES = { 'ssh.github.com': 'github.com' };
-
-export function parseRemoteUrl(url) {
-  const s = String(url || '').trim();
-  if (!s) return null;
-  let host = '';
-  let pathPart = '';
-  let m = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/i.exec(s);
-  if (m) {
-    host = m[1]; pathPart = m[2];
-  } else if ((m = /^(?:([^@/\s]+)@)?([^:/\s]+):(.+)$/.exec(s))) {
-    // scp-style [user@]host:path. Without a user@ prefix a leading `/` is
-    // indistinguishable from a Windows drive path (C:/repos/x) → not hosted.
-    if (!m[1] && m[3].startsWith('/')) return null;
-    host = m[2]; pathPart = m[3];
-  } else {
-    return null;
-  }
-  const segs = pathPart.replace(/\/+$/, '').replace(/\.git$/i, '').split('/').filter(Boolean);
-  if (segs.length < 2) return null;
-  const owner = segs[segs.length - 2];
-  const repo = segs[segs.length - 1];
-  if (!owner || !repo) return null;
-  const h = host.toLowerCase();
-  return { host: HOST_ALIASES[h] || h, owner, repo };
-}
-
-/** gh's `[HOST/]OWNER/REPO` form for --repo; the host is omitted for github.com. */
-export function remoteRepoSlug(parsed) {
-  if (!parsed || !parsed.owner || !parsed.repo) return null;
-  const base = `${parsed.owner}/${parsed.repo}`;
-  return parsed.host && parsed.host !== 'github.com' ? `${parsed.host}/${base}` : base;
-}
-
-/** True when two parsed remotes name the same repository (GitHub is case-insensitive). */
-export function sameRepo(a, b) {
-  if (!a || !b || !a.owner || !b.owner || !a.repo || !b.repo) return false;
-  return String(a.host || '').toLowerCase() === String(b.host || '').toLowerCase()
-    && a.owner.toLowerCase() === b.owner.toLowerCase()
-    && a.repo.toLowerCase() === b.repo.toLowerCase();
-}
 
 /** gh's PR selector for a head branch: `owner:branch` for a cross-repo head, else bare. */
 export function prHeadRef(head, headOwner) {
@@ -503,7 +523,7 @@ export function prHeadRef(head, headOwner) {
 
 /**
  * The repo's git remotes from `git remote -v`, in git's (alphabetical) order.
- * Each entry is { name, fetchUrl, pushUrl, host, owner, repo, slug } with
+ * Each entry is { name, fetchUrl, pushUrl, host, owner, repo, slug, forge, org, project } with
  * host/owner/repo/slug null when the URL is not a hosted owner/repo URL. The
  * push URL is what the branch lands on, so it is parsed first; the fetch URL is
  * the fallback. Never throws: { ok:true, remotes } | { ok:false, remotes:[], error }.
@@ -528,6 +548,7 @@ export async function listRemotes(projectDir) {
       ...e,
       host: parsed?.host ?? null, owner: parsed?.owner ?? null, repo: parsed?.repo ?? null,
       slug: remoteRepoSlug(parsed),
+      forge: forgeOf(parsed), org: parsed?.org ?? null, project: parsed?.project ?? null,
     };
   });
   return { ok: true, remotes };
@@ -558,12 +579,97 @@ export async function listRemoteBranches(projectDir, remoteNames = []) {
 // ── Check out (#529) ────────────────────────────────────────────────────────
 
 /** OPEN | MERGED | CLOSED | null — unlike findPrForBranch, CLOSED is reported (keep policy `until-pr`). */
-export async function prLifecycleState({ projectDir, prUrl }) {
-  if (!projectDir || !prUrl) return null;
+async function ghPrLifecycleState({ projectDir, prUrl }) {
   const v = await _run('gh', ['pr', 'view', prUrl, '--json', 'state'],
     { cwd: projectDir, env: (await githubEnv('read', { repo: ownerRepoOfPrUrl(prUrl) })).env });
   if (!v.ok) return null;
   try { const s = JSON.parse(v.stdout || 'null')?.state; return ['OPEN', 'MERGED', 'CLOSED'].includes(s) ? s : null; } catch { return null; }
+}
+
+// ── PR providers (dispatch by forge) ────────────────────────────────────────
+// The GitHub provider is the gh code above (so _testing.setRunner keeps intercepting it);
+// Azure DevOps goes to pr/azure.mjs. Only Azure diverts — GHE and unknown hosts keep gh (D4).
+
+const PROVIDERS = {
+  github: { forge: 'github', label: FORGE_LABEL.github,
+    available: async () => ((await hasGh()) ? { ok: true } : { ok: false, reason: 'GitHub CLI (gh) is not available' }) },
+  azure: { forge: 'azure', label: FORGE_LABEL.azure, available: () => azurePr.available() },
+};
+/** The PR provider for a base remote (a listRemotes entry). Only Azure diverts; every other host keeps gh (D4). */
+export const prProviderFor = (remote) => PROVIDERS[forgeOf(remote) === 'azure' ? 'azure' : 'github'];
+
+/** Which PR hosts worca can talk to right now (no network). */
+export async function prHostsAvailable() {
+  return { github: await hasGh(), azure: readAzureCredentials().mode !== 'none' };
+}
+export async function anyPrHost() { const h = await prHostsAvailable(); return h.github || h.azure; }
+
+/** The remote a project's PRs target with no stored PR URL: upstream, else origin, else the first (gh's own guess). */
+async function prBaseRemote(projectDir) {
+  const rl = await listRemotes(projectDir);
+  if (!rl.ok || !rl.remotes.length) return null;
+  return rl.remotes.find((r) => r.name === 'upstream') || rl.remotes.find((r) => r.name === 'origin') || rl.remotes[0];
+}
+/** The project's base remote when it is on Azure DevOps — only looked up when an Azure credential exists (D6). */
+async function azureBaseRemote(projectDir) {
+  if (!projectDir || readAzureCredentials().mode === 'none') return null;
+  const r = await prBaseRemote(projectDir);
+  return forgeOf(r) === 'azure' ? r : null;
+}
+
+/**
+ * anyPrHost() lets an Azure-only machine (no gh) into these paths for every project. A GitHub/other project there
+ * must not spawn a doomed `gh` per row: skip gh when it is missing. Checked only when an Azure credential is
+ * configured, so gh-only setups (and the runner-scripted tests, whose setRunner resets the hasGh memo) see
+ * exactly today's calls.
+ */
+async function ghUsable() {
+  return readAzureCredentials().mode === 'none' || hasGh();
+}
+
+/**
+ * Open a PR on the base remote's forge. `baseRemote` / `pushRemote` (listRemotes entries) pick the provider;
+ * without an Azure base remote this is gh's createPr (see ghCreatePr). @returns {Promise<import('./pr/azure.mjs').PrCreateResult>}
+ */
+export async function createPr(opts) {
+  if (forgeOf(opts.baseRemote) === 'azure') {
+    return azurePr.createPr({ ...opts, baseRepo: opts.baseRemote, pushRepo: opts.pushRemote || null });
+  }
+  return ghCreatePr(opts);
+}
+
+/** MERGEABLE | CONFLICTING | UNKNOWN, by the PR URL's forge, else the base remote's (see ghPrMergeable). */
+export async function prMergeable(opts = {}) {
+  if (forgeOfPrUrl(opts.prUrl) === 'azure') return (await azurePr.viewPr({ prUrl: opts.prUrl }))?.mergeable || 'UNKNOWN';
+  if (!opts.prUrl) {
+    const az = forgeOf(opts.baseRemote) === 'azure' ? opts.baseRemote : await azureBaseRemote(opts.projectDir);
+    if (az) return (await azurePr.findPrForBranch({ head: opts.head, baseRepo: az }))?.mergeable || 'UNKNOWN';
+  }
+  if (!(await ghUsable())) return 'UNKNOWN';
+  return ghPrMergeable(opts);
+}
+
+/** { state: OPEN|MERGED, url, number } | null for `head`, by forge (see ghFindPrForBranch). Never throws. */
+export async function findPrForBranch({ projectDir, head, prUrl = null } = {}) {
+  if (!projectDir || !head) return null;
+  const strip = (pr) => (pr ? { state: pr.state, url: pr.url, number: pr.number } : null);
+  if (forgeOfPrUrl(prUrl) === 'azure') {
+    const pr = await azurePr.viewPr({ prUrl });
+    if (pr && (pr.state === 'OPEN' || pr.state === 'MERGED')) return strip(pr);
+    return strip(await azurePr.findPrForBranch({ head, baseRepo: parseAzurePrUrl(prUrl) }));   // CLOSED: search the branch
+  }
+  const az = prUrl ? null : await azureBaseRemote(projectDir);
+  if (az) return strip(await azurePr.findPrForBranch({ head, baseRepo: az }));
+  if (!(await ghUsable())) return null;
+  return ghFindPrForBranch({ projectDir, head, prUrl });
+}
+
+/** OPEN | MERGED | CLOSED | null for a persisted PR URL, by its forge (see ghPrLifecycleState). */
+export async function prLifecycleState({ projectDir, prUrl }) {
+  if (!projectDir || !prUrl) return null;
+  if (forgeOfPrUrl(prUrl) === 'azure') return (await azurePr.viewPr({ prUrl }))?.state || null;
+  if (!(await ghUsable())) return null;
+  return ghPrLifecycleState({ projectDir, prUrl });
 }
 
 /** The remote whose tracking ref holds `branch` ({ remote }), preferring origin; null = not pushed. No network. */
@@ -574,6 +680,21 @@ export async function branchPushedTo(projectDir, branch) {
     .map((ref) => ref.slice('refs/remotes/'.length, ref.length - branch.length - 1));
   if (!remotes.length) return null;
   return { remote: remotes.includes('origin') ? 'origin' : remotes[0] };
+}
+
+/**
+ * The local tip of `branch` and its tip on `remote`'s tracking ref, as { local, remote } shas
+ * (each null when the ref is absent; no remote = local only). Publish branch (#618) compares
+ * them to tell "published" from "local commits since". No network. null on git failure.
+ */
+export async function branchTips(projectDir, branch, remote) {
+  if (!projectDir || !branch) return null;
+  const refs = [`refs/heads/${branch}`, ...(remote ? [`refs/remotes/${remote}/${branch}`] : [])];
+  const r = await _run('git', ['for-each-ref', '--format=%(refname) %(objectname)', ...refs], { cwd: projectDir });
+  if (!r.ok) return null;
+  // for-each-ref also matches refs UNDER a pattern (refs/heads/feat/sub), so keep exact names only.
+  const sha = new Map((r.stdout || '').split(/\r?\n/).map((l) => l.trim().split(' ')).filter((p) => p.length === 2));
+  return { local: sha.get(refs[0]) || null, remote: remote ? sha.get(refs[1]) || null : null };
 }
 
 /** Recreate a local branch from its remote-tracking ref (checkout D7). */

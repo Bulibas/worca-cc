@@ -39,6 +39,7 @@ import { defaultWorkspaceDeps } from './workspace-deps.mjs';
 import { defaultActionsDeps } from './actions-deps.mjs';
 import { defaultWebDeps } from './web-deps.mjs';
 import { defaultFileDeps } from './file-deps.mjs';
+import { defaultCommandDeps } from './command-deps.mjs';
 import { defaultBranchDeps } from './branch-deps.mjs';
 
 // The JSON-RPC server itself lives in rpc-server.mjs (re-exported: tests and the Codex file tools use it).
@@ -89,6 +90,8 @@ export function createAskToolServer({ threadId, reader = null, signal, write, lo
       ...defaultWebDeps({ threadId, signal, env }),
       // Codex chats only (WORCA_ASK_ENGINE=codex): read_file / grep / glob under the shared deny rules (D13).
       ...defaultFileDeps({ threadId, env, signal }),
+      // Agent mode (#574): present only when this turn's env names the command bridge (command-deps.mjs).
+      ...defaultCommandDeps({ env }),
       // Readers only the host process can supply (relay mode: ui/server.mjs passes
       // readLiveDiff, which needs the live runs). Absent in the classic child.
       ...extraDeps,

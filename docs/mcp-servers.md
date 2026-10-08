@@ -2,8 +2,9 @@
 
 Worca has its own MCP registry: servers installed **for worca only** — never written into your Claude
 Code config (`~/.claude.json`, `.mcp.json`) — that pipeline agents and Ask Worca can call. It lives
-in **Settings › MCP servers** (an Advanced tab) and in four files under `~/.worca-cc/mcp/`
-([storage.md](storage.md)).
+in **Settings › Sets** (an Advanced tab with the **Sets**, **Servers** and **Skills** views) and in four files
+under `~/.worca-cc/mcp/` ([storage.md](storage.md)). A set holds skills as well as servers: see
+[skills.md](skills.md).
 
 ## Catalog and sets
 
@@ -16,7 +17,7 @@ in **Settings › MCP servers** (an Advanced tab) and in four files under `~/.wo
   membership has its own values and secrets. The same server can sit in several sets with different
   credentials. There is no per-server and no per-project configuration.
 - **General** is built in. Ask Worca always uses it, and so do a project's runs until the project turns it off (below).
-- A project picks any number of sets on its **MCP** tab (Projects → a project → MCP). **Include
+- A project picks any number of sets on its **Sets** tab (Projects → a project → Sets). **Include
   General in runs** (on by default) adds General to its pipeline runs; Ask Worca always includes
   General, and a workspace run includes it when any member does. A project with no sets, General
   off and no team policy requiring MCP servers gets no registry servers ("No MCP servers in runs on
@@ -123,15 +124,16 @@ taken too it is skipped). In a pipeline, a deny rule on `mcp__linear__…` reach
 
 - **Pipelines:** every agent of a run gets the servers of the sets its project (or, for a workspace,
   its members) resolves to, plus its policy's Team set (for a workspace run, the workspace policy's
-  only). New Pipeline › Advanced › **MCP servers**
+  only). New Pipeline › Advanced › **Sets**
   lets you switch memberships off for one run (schedules keep the choice); skipped memberships show
-  their reason. Workspace scans and memory defragment runs get none.
+  their reason. Workspace scans and memory defragment runs get none. A workspace attaches no sets of its
+  own: its Overview lists what its runs get, each row with the member project that brings it.
 - **Ask Worca:** General plus the sets of every project in play — the pinned or page project (a
   workspace brings its members) and **every project the chat has a worktree on** — and the Team set of
   each one's policy (a workspace's own policy, not its members'). The chat's model
-  can open a worktree on any registered project without asking, and that project's servers join
-  from the next message; the chat says so. The composer's **MCP · N** button is a per-chat picker
-  (sets, then servers) whose choices apply from the next message.
+  can open a worktree on any registered project without asking, and that project's servers and skills join
+  from the next message; the chat says so. The composer's **Sets · N** button is a per-chat picker
+  (sets, then their servers and skills) whose choices apply from the next message.
 - Problems at start (`failed`, `needs-auth`, disabled by your Claude Code settings, blocked by
   managed policy) become run warnings or a muted line in the chat.
 
@@ -151,8 +153,8 @@ taken too it is skipped). In a pipeline, a deny rule on `mcp__linear__…` reach
   measured for five slow servers). A change of servers between messages costs one prompt-cache miss.
   In a pipeline agent the limit also covers your own Claude Code servers, which load in the same
   spawn. Through Cloudflare ([remote-access.md](remote-access.md)), which ends a request after
-  100 s, a longer Test shows `HTTP 524`; worca still finishes it, and reopening **Settings › MCP
-  servers** shows the result.
+  100 s, a longer Test shows `HTTP 524`; worca still finishes it, and reopening **Settings ›
+  Sets** shows the result.
 
 ## What can still read a secret
 

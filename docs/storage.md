@@ -19,6 +19,8 @@ project's working tree, so nothing is ever committed to your repo.
     pipelines/  <DD-MM-YY>-<slug>-<id>/              (one folder per run)
       prompt.md          the prompt text (or copied markdown brief)
       diff-patch.patch   the run's captured diff (written when the run completes)
+      skills/            the run's set skills (docs/skills.md): one generated plugin per set, passed
+                         with --plugin-dir; rebuilt on resume, never inside a checkout
       extras/            any optional extra files you attached
                          Internal, line-anchored review comments on that diff are DB
                          rows (diff_comments), never files; ask_card_comments carries
@@ -51,6 +53,8 @@ project's working tree, so nothing is ever committed to your repo.
   ask/<threadId>/wt/<worktreeId>/       Ask Worca chat worktrees: read-only DETACHED git
                                         checkouts the assistant opens (registry: ask_worktrees;
                                         removed with the thread, reconciled at boot)
+  ask/<threadId>/skills/<messageId>/    an Ask turn's set skills, one generated plugin per set;
+                                        written before the turn's spawn, removed when the turn ends
   tmp/ask/                              the Ask Worca assistant's scratch cwd + per-turn
                                         mcp-<messageId>.json, mode 0600 (never a project folder)
   logs/ask-web.jsonl                    Ask Worca web access: one line per web_fetch/web_search
@@ -72,11 +76,23 @@ project's working tree, so nothing is ever committed to your repo.
                                         registry ("MCP registry files need a newer Worca")
     servers.json                         manual definitions, consented team-policy definitions, and
                                          the persisted base name of every server id (never reassigned)
-    sets.json                            user sets (General is implicit until first edited), retired set
-                                         ids, Team set state per policy home, project assignments
+    sets.json                            user sets (General is implicit until first edited) with their
+                                         servers and their skills (`skills[]`: skill id + switch),
+                                         retired set ids, Team set state per policy home (servers and
+                                         skills, with consent), project assignments
     secrets.json                         set secrets — the only place a registry secret value is stored;
                                          runs and chats get them as spawn env, never in a file
     tests.json                           the last Test per set and server (tools, stale fingerprint)
+  skills/                               the skill library (docs/skills.md): imported skills, never
+                                        written to ~/.claude or a repository; written under
+                                        skills/.lock (folders 0700, files 0600, exec bits kept)
+    library.json                         schema 1: one entry per imported skill — its origin (a folder,
+                                         a git URL and ref, ~/.claude/skills; none when pasted), hash,
+                                         file and script counts, import and update times
+    <name>/                              the skill's own folder (SKILL.md, scripts/, references/…)
+  tmp/skills/<stage>/                   an import or update staged for its preview (beside <stage>.json, its
+                                        origin); gone on Import, Update, Back or Cancel, an abandoned one
+                                        a day later
   plugins/                              installed plugin checkouts
   agents/                               installed agent registry checkouts
   workflows/                            saved workflow templates

@@ -19,6 +19,7 @@ const CASES = [
   ['Read(//**/.worca-cc/tmp/**)', `${W}/tmp/ask/mcp-askm_00000001.json`],
   ['Read(//**/.worca-cc/logs/**)', `${W}/logs/ask-web.jsonl`],
   ['Read(//**/.worca-cc/mcp/**)', `${W}/mcp/servers.json`],
+  ['Read(//**/.worca-cc/skills/**)', `${W}/skills/library/demo/SKILL.md`],
   ['Read(~/.ssh/**)', `${HOME}/.ssh/id_ed25519`],
   ['Read(~/.aws/**)', `${HOME}/.aws/credentials`],
   ['Read(~/.gnupg/**)', `${HOME}/.gnupg/pubring.kbx`],

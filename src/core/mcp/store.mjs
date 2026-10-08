@@ -17,7 +17,8 @@ import { worcaHome } from '../projects.mjs';
 import { PROJECT_KEY_RE } from '../store.mjs';
 import { withLock } from '../metrics/lock.mjs';
 import { writeJsonAtomic } from '../json-atomic.mjs';
-import { validateMcpDefinition, screenNonSecretValue, canonicalJson, sha256Hex, MCP_ENV_VAR_RE, URL_SAFE_SECRET_RE } from './definitions.mjs';
+import { validateMcpDefinition, screenNonSecretValue, canonicalJson, sha256Hex, MCP_ENV_VAR_RE, URL_SAFE_SECRET_RE, SETS_API_NOUNS } from './definitions.mjs';
+import { parseSkillId, SKILL_ID_RE } from '../skills-registry/ids.mjs';
 import { assignBaseNames, newSetId, slugFor, teamRecord, teamRecordsFor } from './identity.mjs';
 
 export class McpStoreError extends Error {
@@ -68,6 +69,32 @@ function readJson(name, strict) {
   return map();
 }
 
+// Skills in sets (skills registry §3.2), additive to schema 1: `sets[id].skills` — a skill id at most once and a skill name at
+// most once per set — and `teams[home].skills`, Team state per required skill. A hand-edited entry that is not an object, a
+// `skill` that is not text, a repeated id or a repeated name reads as absent; every kept entry stays as written (keys a newer
+// Worca adds included). No skills ⇒ no `skills` key, in the snapshot as in the file: readers take `set.skills ?? []` and
+// `team.skills ?? {}`, and a registry without skills reads and writes exactly as before.
+const skillNameOf = (id) => parseSkillId(id)?.name ?? null;
+function readSetSkills(set) {
+  if (set.skills === undefined) return;
+  const ids = new Set();
+  const names = new Set();
+  const kept = Array.isArray(set.skills) ? set.skills.filter((k) => {
+    if (!isMap(k) || typeof k.skill !== 'string' || ids.has(k.skill)) return false;
+    const name = skillNameOf(k.skill);
+    if (name !== null && names.has(name)) return false;
+    ids.add(k.skill);
+    if (name !== null) names.add(name);
+    return true;
+  }) : [];
+  if (kept.length) set.skills = kept; else delete set.skills;
+}
+function readTeamSkills(t) {
+  if (t.skills === undefined) return;
+  if (isMap(t.skills)) dropNonMaps(t.skills);
+  if (!isMap(t.skills) || !Object.keys(t.skills).length) delete t.skills;
+}
+
 // A (set, server) pair whose secrets and test are kept: a user set's member, or a Team set member with
 // persisted Team state (Team state is removed only by the §11.2 actions, never by this sweep; its secrets
 // are written only after it, so a Forget or uninstall interrupted between the two files leaves an orphan).
@@ -107,6 +134,7 @@ function load(strict = false) {
     const seen = new Set(); // §4.2: a server at most once per set — a hand-edited repeat reads as absent
     set.members = Array.isArray(set.members) ? set.members.filter((m) => isMap(m) && typeof m.server === 'string' && !seen.has(m.server) && seen.add(m.server)) : [];
     for (const m of set.members) m.values = orMap(m.values);
+    readSetSkills(set);
   }
   if (!Object.hasOwn(s.sets, 'general')) s.sets.general = { name: 'General', members: [] };
   dropNonMaps(s.teams);
@@ -114,6 +142,7 @@ function load(strict = false) {
     t.members = orMap(t.members);
     dropNonMaps(t.members);
     for (const st of Object.values(t.members)) { st.values = orMap(st.values); st.seeded = orMap(st.seeded); }
+    readTeamSkills(t);
   }
   // A slug, Team id or Team name that is not text (a hand edit; copy names template the slug) is computed again
   // as at creation (§4.2, §4.4), over the slugs that are text. General has no slug.
@@ -159,7 +188,7 @@ function fileOf(name, s) {
   if (name === 'servers') return { manual: s.manual, policy: s.policy, bases: s.bases };
   if (name === 'sets') {
     const sets = { ...s.sets };
-    if (!sets.general.members.length) delete sets.general; // implicit until its first edit
+    if (!sets.general.members.length && !sets.general.skills?.length) delete sets.general; // implicit until it holds a member or a skill
     return { sets, retired: s.retired, teams: s.teams, projects: s.projects };
   }
   return name === 'secrets' ? { sets: s.secrets } : { tests: s.tests };
@@ -201,8 +230,9 @@ export function withMcpLock(fn, lockOpts) {
 
 const allSlugs = (s) => [...Object.values(s.sets), ...Object.values(s.teams)].map((x) => x.slug).filter(Boolean);
 // Ids a new set may not take (§4.2): every set's, and every id a project assignment still names — a set removed
-// by hand (or read as junk) was never retired, and a new set under its id would inherit that assignment.
-const takenIds = (s) => [...Object.keys(s.sets), ...Object.values(s.projects).flatMap((p) => p.sets)];
+// by hand (or read as junk) was never retired, and a new set under its id would inherit that assignment — and the
+// words /api/sets/<word> uses for the rest of the Sets API (skills registry §7).
+const takenIds = (s) => [...Object.keys(s.sets), ...Object.values(s.projects).flatMap((p) => p.sets), ...SETS_API_NOUNS];
 
 function checkSetName(s, name, selfId) {
   const n = typeof name === 'string' ? name.trim() : '';
@@ -256,14 +286,15 @@ export async function deleteSet(id) {
 }
 
 /**
- * §4.2: a new user set with the source's members, values and secrets (secrets written first, §4.5).
- * A Team source needs `team = { home, members }` — the Team set's derived member ids (§11.2); each
- * gets its local state's switch and values, or off with none.
+ * §4.2: a new user set with the source's members, values and secrets (secrets written first, §4.5), and its skills
+ * (skills registry §3.2). A Team source needs `team = { home, members, skills? }` — the Team set's derived member ids
+ * (§11.2) and skill ids; each gets its local state's switch (and values), or off with none.
  */
 export async function duplicateSet(id, name, { team } = {}) {
   return withMcpLock(async (tx) => {
     const s = tx.snapshot;
     let members;
+    let skills;
     if (isTeamId(id)) {
       if (typeof team?.home !== 'string' || !Array.isArray(team.members)) fail(400, 'duplicating a Team set needs its home and members');
       const rec = Object.hasOwn(s.teams, team.home) ? s.teams[team.home] : null;
@@ -273,9 +304,14 @@ export async function duplicateSet(id, name, { team } = {}) {
         // An interrupted Team write stays skipped in the copy too (§4.5 pending).
         return { server, enabled: st?.enabled === true, values: structuredClone(st?.values ?? {}), ...(st?.pending === true ? { pending: true } : {}) };
       });
+      skills = [...new Set(Array.isArray(team.skills) ? team.skills : [])].map((skill) => {
+        const st = rec?.skills && Object.hasOwn(rec.skills, skill) ? rec.skills[skill] : null;
+        return { skill, enabled: st?.enabled === true && st.pending !== true };
+      });
     } else {
       if (!Object.hasOwn(s.sets, id)) fail(404, `no MCP set "${id}"`);
       members = structuredClone(s.sets[id].members);
+      skills = structuredClone(s.sets[id].skills ?? []);
     }
     const n = checkSetName(s, name);
     const newId = newSetId(n, { taken: takenIds(s), retired: s.retired });
@@ -285,7 +321,7 @@ export async function duplicateSet(id, name, { team } = {}) {
     const secrets = map();
     for (const m of members) if (Object.hasOwn(from, m.server)) secrets[m.server] = structuredClone(from[m.server]);
     if (Object.keys(secrets).length) { s.secrets[newId] = secrets; await tx.write('secrets'); }
-    s.sets[newId] = { name: n, slug, members };
+    s.sets[newId] = { name: n, slug, members, ...(skills.length ? { skills } : {}) };
     await tx.write('sets');
     return { id: newId, name: n, slug };
   });
@@ -576,7 +612,8 @@ export async function putPolicyServer(key, { def, hash }) {
   });
 }
 
-/** Forget (§11.2): a home's Team state, its Team set's secrets and tests — for `serverIds`, or all.
+/** Forget (§11.2): a home's Team state, its Team set's secrets and tests — for `serverIds` (server and skill ids, skills
+ *  registry §5; a list of skill ids alone writes only sets.json, as a skill holds no secret and no test), or all.
  *  Forgetting a whole home also drops its record, so a greyed Team set leaves the list. */
 export async function forgetTeamState(homeSlug, serverIds) {
   if (serverIds !== undefined && !Array.isArray(serverIds)) fail(400, 'serverIds must be an array of server ids');
@@ -586,11 +623,121 @@ export async function forgetTeamState(homeSlug, serverIds) {
     const t = s.teams[homeSlug];
     const hit = (id) => serverIds === undefined || serverIds.includes(id);
     if (serverIds === undefined) delete s.teams[homeSlug];
-    else for (const id of Object.keys(t.members)) if (hit(id)) delete t.members[id];
+    else {
+      for (const id of Object.keys(t.members)) if (hit(id)) delete t.members[id];
+      for (const id of Object.keys(t.skills ?? {})) if (hit(id)) delete t.skills[id];
+      if (t.skills && !Object.keys(t.skills).length) delete t.skills;
+    }
     await tx.write('sets');
+    // A skill holds no secret and no test (skills registry §3.2): a list of skill ids alone writes only sets.json.
+    if (serverIds !== undefined && serverIds.length && serverIds.every((id) => typeof id === 'string' && id.startsWith('skill:'))) return;
     if (Object.hasOwn(s.secrets, t.id)) for (const id of Object.keys(s.secrets[t.id])) if (hit(id)) setSecretsEntry(s, t.id, id, {});
     await tx.write('secrets');
     for (const k of Object.keys(s.tests)) if (k.startsWith(`${t.id}|`) && hit(k.slice(t.id.length + 1))) delete s.tests[k];
     await tx.write('tests');
+  });
+}
+
+// ── Skills in sets (skills registry §3.2, §5) ────────────────────────────────
+
+const isPluginSkillId = (id) => typeof id === 'string' && SKILL_ID_RE.test(id) && id.startsWith('skill:plugin:');
+
+/**
+ * Add a skill to a set or switch it (skills registry §3.2, §7). `entry` = the skill's catalog entry (the caller looked it
+ * up). A user set (or General) holds a skill id at most once and a skill name at most once — the name is the id's last
+ * part, so the check runs on the snapshot inside the lock. A Team set's skills derive from team policy: `team = { home }`,
+ * the state lives in `teams[home].skills` (the first write persists the record), plugin skills only (F8); callers enforce
+ * the Team locks (update only; a never-consented skill turns on only from the team checklist).
+ */
+export async function putSkillMember(setId, skillId, { enabled } = {}, { team, entry } = {}) {
+  return withMcpLock(async (tx) => {
+    const s = tx.snapshot;
+    if (typeof skillId !== 'string' || !SKILL_ID_RE.test(skillId)) fail(400, 'invalid skill id');
+    if (!isMap(entry) || entry.id !== skillId) fail(400, 'the skill catalog entry is required');
+    if (enabled !== undefined && typeof enabled !== 'boolean') fail(400, 'enabled must be true or false');
+    if (isTeamId(setId)) {
+      const home = team?.home;
+      if (typeof home !== 'string') fail(400, 'a Team set write needs its home');
+      const rec = Object.hasOwn(s.teams, home) ? s.teams[home] : null;
+      if ((rec?.id ?? teamRecord(home).id) !== setId) fail(404, `no Team set "${setId}" for ${home}`);
+      if (!isPluginSkillId(skillId)) fail(400, 'Team set skills are plugin skills');
+      const before = rec?.skills && Object.hasOwn(rec.skills, skillId) ? rec.skills[skillId] : null;
+      const next = { ...(before ?? { enabled: false, consent: null }), enabled: enabled ?? before?.enabled === true };
+      delete next.pending;
+      if (before && canonicalJson(before) === canonicalJson(next)) return;
+      const t = ensureTeam(s, home);
+      if (!t.skills) t.skills = map();
+      t.skills[skillId] = next;
+      await tx.write('sets');
+      return;
+    }
+    if (!Object.hasOwn(s.sets, setId)) fail(404, `no MCP set "${setId}"`);
+    const set = s.sets[setId];
+    const list = set.skills ?? [];
+    const i = list.findIndex((k) => k.skill === skillId);
+    const name = skillNameOf(skillId);
+    if (i < 0 && list.some((k) => skillNameOf(k.skill) === name)) fail(409, `a skill named "${name}" is already in this set`);
+    const before = i < 0 ? null : list[i];
+    const next = { ...(before ?? { skill: skillId }), enabled: enabled ?? (before ? before.enabled === true : true) };
+    delete next.pending;
+    if (before && canonicalJson(before) === canonicalJson(next)) return;
+    set.skills = i < 0 ? [...list, next] : list.map((k, j) => (j === i ? next : k));
+    await tx.write('sets');
+  });
+}
+
+/** Remove a skill from a user set or General (a Team set's skills come from team policy). The last one leaves no key. */
+export async function deleteSkillMember(setId, skillId) {
+  return withMcpLock(async (tx) => {
+    const s = tx.snapshot;
+    if (typeof skillId !== 'string') fail(400, 'invalid skill id');
+    if (isTeamId(setId)) fail(400, 'Team set skills are not removed by hand');
+    if (!Object.hasOwn(s.sets, setId)) fail(404, `no MCP set "${setId}"`);
+    const set = s.sets[setId];
+    const kept = (set.skills ?? []).filter((k) => k.skill !== skillId);
+    if (kept.length === (set.skills ?? []).length) fail(404, `${skillId} is not in this set`);
+    if (kept.length) set.skills = kept; else delete set.skills;
+    await tx.write('sets');
+  });
+}
+
+/** A skill leaves the registry (library Remove, plugin uninstall or update, skills registry §3.2, §5): every set's
+ *  membership and every home's Team state, in one sets.json write — the caller removes the library entry and folder only
+ *  after, under the skills lock (the two locks are never held together). */
+export async function removeSkillEverywhere(skillId) {
+  return withMcpLock(async (tx) => {
+    const s = tx.snapshot;
+    let hit = false;
+    for (const set of Object.values(s.sets)) {
+      if (!set.skills) continue;
+      const kept = set.skills.filter((k) => k.skill !== skillId);
+      if (kept.length === set.skills.length) continue;
+      hit = true;
+      if (kept.length) set.skills = kept; else delete set.skills;
+    }
+    for (const t of Object.values(s.teams)) {
+      if (!t.skills || !Object.hasOwn(t.skills, skillId)) continue;
+      hit = true;
+      delete t.skills[skillId];
+      if (!Object.keys(t.skills).length) delete t.skills;
+    }
+    if (hit) await tx.write('sets');
+  });
+}
+
+/** Team skill consent writes (skills registry §5, F8): `patch` ⊂ { enabled, consent }, each replacing its key (consent is
+ *  the consented hash, or null). Plugin skills only; the first write for a home persists its record. */
+export async function setTeamSkillState(homeSlug, skillId, patch) {
+  if (typeof homeSlug !== 'string') fail(400, 'a Team set write needs its home');
+  if (!isPluginSkillId(skillId)) fail(400, 'Team set skills are plugin skills');
+  if (!isMap(patch)) fail(400, 'patch must be an object');
+  if (patch.enabled !== undefined && typeof patch.enabled !== 'boolean') fail(400, 'enabled must be true or false');
+  if (patch.consent !== undefined && patch.consent !== null && typeof patch.consent !== 'string') fail(400, 'consent must be text or null');
+  return withMcpLock(async (tx) => {
+    const t = ensureTeam(tx.snapshot, homeSlug);
+    if (!t.skills) t.skills = map();
+    const st = Object.hasOwn(t.skills, skillId) ? t.skills[skillId] : (t.skills[skillId] = { enabled: false, consent: null });
+    for (const k of ['enabled', 'consent']) if (patch[k] !== undefined) st[k] = patch[k];
+    await tx.write('sets');
   });
 }

@@ -66,3 +66,11 @@ test('terminalEnv: run vars, action ports, stripped secrets, pipes extras', () =
   assert.equal(single.TERM, 'xterm-256color');
   assert.equal(single.PAGER, undefined);
 });
+
+test('terminalEnv agent: no pager, no git prompt, no user rc, even under a pty', () => {
+  const env = terminalEnv({ base: { PATH: '/bin' }, sessionId: 't-1', mode: 'pty', cwd: '/w', agent: true });
+  assert.equal(env.PAGER, 'cat'); assert.equal(env.GIT_PAGER, 'cat');
+  assert.equal(env.GIT_TERMINAL_PROMPT, '0'); assert.equal(env.WORCA_TERMINAL_NORC, '1');
+  const person = terminalEnv({ base: { PATH: '/bin' }, sessionId: 't-2', mode: 'pty', cwd: '/w' });
+  assert.equal(person.PAGER, undefined); assert.equal(person.WORCA_TERMINAL_NORC, undefined);
+});

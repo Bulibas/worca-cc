@@ -14,7 +14,7 @@ plugin API 4 — can ship the **declared forms** its agents ask questions with.
 | `connector/*.mjs` (via `taskSources[].module`) | task-source connector | **Yes** — in an ephemeral child process |
 | `scripts/<key>.meta.json` + the program it names | pipeline scripts (node / shell / python) | **Yes** — worca spawns the program per execution |
 | `agents/<key>.md` + `<key>.meta.json` | pipeline agents (meta v2 sidecar: typed input/output ports; `ask.forms` from API 4) | No — prompt text fed to `claude -p`, forms drawn by the host |
-| `skills/<name>/SKILL.md` | agent skills | No — copied into the run worktree |
+| `skills/<name>/SKILL.md` | agent skills | No — copied into the run worktree for an agent that requires it; a user can add any of them to a set, and runs and Ask Worca then get it as `/<set>:<name>` |
 | `workflows/*.json` | pipeline templates (v2 graph JSON — one Task node, one End node) | No — validated into DB rows |
 | `mcpServers` in the manifest (API 5) | MCP servers for worca's registry | **Yes** — a stdio server is started per spawn once a user adds it to a set |
 
@@ -423,11 +423,36 @@ names the block instead). That list is read from your `accept` patterns alone, b
 installed and without running a line of your code — so keep `accept` as narrow as the form really
 needs.
 
+## Skills
+
+A plugin's `skills/<name>/SKILL.md` folders reach agents two ways:
+
+- **Required by an agent** (`requiresSkills` on its sidecar): copied into the run's checkout.
+- **Through sets** (`docs/skills.md`): installing adds every skill to the catalog (Settings › Sets › Skills);
+  a user adds one to a set, and every run and Ask Worca turn of that set's projects gets it as
+  `/<set>:<name>` — one generated plugin per set, through `--plugin-dir`. A team policy can require one
+  (`skills.required: [{ "plugin": "acme", "skill": "deploy-checklist" }]`); each developer turns it on.
+
+For a skill that works from a set:
+
+- The folder name is the skill name and equals the frontmatter `name`: `^[a-z0-9]+(-[a-z0-9]+)*$`, at most
+  64 characters, not `synced` or `anthropic-skills`. A skill that breaks a rule is listed invalid and never
+  mounted.
+- Refer to the skill's own files with `${CLAUDE_SKILL_DIR}`, never `${CLAUDE_PLUGIN_ROOT}`: from a set the
+  skill sits in a generated plugin that holds only `skills/`, so a plugin-root path breaks (the catalog flags it).
+- At most 300 files, 1000 links and folders, 1 MB per file, 8 MB in all; no `.claude-plugin/` folder inside.
+- Ask Worca never runs inline shell blocks (`` !`cmd` ``). Pipeline runs DO run them, without guardrail checks:
+  Claude Code runs them when it renders the skill, not as a tool call a guardrail sees — so keep them read-only.
+  A `.sh` script is badged "shell scripts — Windows".
+- Updates list `new skill: x`; a skill a set holds reads `SKILL CHANGED: x — in <sets>` or
+  `SKILL REMOVED: x — leaves <sets>` (it leaves those sets); uninstalling the plugin takes its skills out of
+  every set.
+
 ## MCP servers (API 5)
 
 A plugin can ship **MCP server definitions** for worca's own registry — never written into anyone's
 Claude Code config. Installing starts nothing: a user adds a server to one or more **sets** in
-Settings › MCP servers, fills in that set's values and secrets, and assigns sets to projects; pipeline
+Settings › Sets, fills in that set's values and secrets, and assigns sets to projects; pipeline
 agents and Ask Worca then get one copy per (set, server). The consent card lists each server with its
 command or URL.
 

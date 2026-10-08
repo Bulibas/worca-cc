@@ -921,9 +921,22 @@ async function uiStart(a) {
       .then((r) => { if (r) openBrowser(url); })
       .catch(() => {});
   }
+  // Hand a stop to the server and wait for it (B2). In a container this process is what tini
+  // signals (tini -> entrypoint -> `worca ui`), and without a handler Node exited at once on
+  // SIGTERM: the server never saw the stop, so it neither paused its runs nor shut down cleanly.
+  // Forwarding is safe twice over: a terminal's Ctrl+C already reaches the server too, and the
+  // server's shutdown runs once.
+  const forward = (sig) => () => { try { child.kill(sig); } catch { /* already gone */ } };
+  const handlers = { SIGTERM: forward('SIGTERM'), SIGINT: forward('SIGINT'), SIGHUP: forward('SIGHUP') };
+  for (const [sig, fn] of Object.entries(handlers)) process.on(sig, fn);
+  const unhook = () => { for (const [sig, fn] of Object.entries(handlers)) process.off(sig, fn); };
   return new Promise((res) => {
-    child.on('exit', (code) => res(code ?? 0));
+    child.on('exit', (code, signal) => {
+      unhook();
+      res(code ?? (signal === 'SIGTERM' ? 143 : signal === 'SIGINT' ? 130 : 0));
+    });
     child.on('error', (err) => {
+      unhook();
       process.stderr.write(`Failed to launch UI: ${err.message}\n`);
       res(1);
     });
@@ -2011,6 +2024,7 @@ async function cmdPlugin(argv) {
         for (const ag of delta.newAgents || []) out(c('yellow', `  new agent: ${ag}`));
         if (delta.setupChanged) out(c('yellow', '  setup commands changed'));
         for (const l of delta.mcpLines || []) out(c(l.red ? 'red' : 'yellow', `  ${l.text}`));
+        for (const l of delta.skillLines || []) out(c(l.red ? 'red' : 'yellow', `  ${l.text}`));
         if (a.diff && cand.diffFull) out(cand.diffFull);
         if (!(await confirmPlugin('Update?', !!a.yes))) {
           out('aborted (still pinned)');

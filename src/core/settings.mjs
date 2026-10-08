@@ -844,6 +844,75 @@ export async function setNightModeToggle(v, { now = Date.now() } = {}) {
   return persistSettings(settings);
 }
 
+// ── Away mode per person (B4, opt-in) ──────────────────────────────────────────
+// With WORCA_AWAY_PER_PERSON=1 (a team instance with a per-person sign-in), "I'm here / I'm away"
+// belongs to each signed-in person and applies only to the runs they started or last resumed.
+// It lives in its own file, keyed by the identity name (identity.mjs, lowercased). Unset = the
+// one instance-wide nightModeToggle above, exactly as before; a person with no record of their
+// own also follows that instance value.
+export function awayPerPerson(env = process.env) {
+  return /^(1|true|yes|on)$/i.test(String(env.WORCA_AWAY_PER_PERSON || '').trim());
+}
+
+/** The person key a record is stored under, or null ('local' and blanks are nobody in particular). */
+export function awayPersonKey(person) {
+  const k = typeof person === 'string' ? person.trim().toLowerCase() : '';
+  return k && k !== 'local' && k.length <= 200 ? k : null;
+}
+
+export function awayPeopleFile() {
+  return join(defaultRoot(), '.worca-cc', 'away-people.json');
+}
+
+function readAwayPeople() {
+  try {
+    const data = JSON.parse(readFileSync(awayPeopleFile(), 'utf8'));
+    return isObj(data) ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+/** This person's own { toggle, hereSince } (hereSince in ms or null), or null when per-person
+ *  Away mode is off, the person is nobody in particular, or they never set it. */
+export function personAwayStatus(person) {
+  if (!awayPerPerson()) return null;
+  const k = awayPersonKey(person);
+  if (!k) return null;
+  const r = readAwayPeople()[k];
+  if (!isObj(r)) return null;
+  const t = Date.parse(r.hereSince);
+  return { toggle: NIGHT_TOGGLES.includes(r.toggle) ? r.toggle : 'auto', hereSince: Number.isFinite(t) ? t : null };
+}
+
+/** The live switch that applies to `person`'s runs: their own when they have one, else the instance's. */
+export function nightModeToggleFor(person) {
+  return personAwayStatus(person)?.toggle ?? nightModeToggle();
+}
+
+/** nightModeHereSince for `person`'s runs (see nightModeToggleFor). */
+export function nightModeHereSinceFor(person) {
+  const own = personAwayStatus(person);
+  return own ? own.hereSince : nightModeHereSince();
+}
+
+/** Write `person`'s own switch (same inputs as setNightModeToggle). Returns false, writing nothing,
+ *  when per-person Away mode is off or the person is nobody in particular: the caller then sets the
+ *  instance value. */
+export async function setPersonNightModeToggle(person, v, { now = Date.now() } = {}) {
+  assertNightModeToggleInput(v);
+  const k = awayPersonKey(person);
+  if (!awayPerPerson() || !k) return false;
+  const all = readAwayPeople();
+  all[k] = { toggle: v === 'here' ? 'auto' : v, ...(v === 'here' ? { hereSince: new Date(now).toISOString() } : {}) };
+  await mkdir(join(defaultRoot(), '.worca-cc'), { recursive: true });
+  const file = awayPeopleFile();
+  const tmp = `${file}.${randomBytes(4).toString('hex')}.tmp`;
+  await writeFile(tmp, JSON.stringify(all, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
+  await rename(tmp, file);
+  return true;
+}
+
 /** The web card's "Always allow": one exact host joins the stored allowlist; everything else is kept. */
 export async function addAskWebHost(host) {
   const h = normalizeDomainPattern(host);

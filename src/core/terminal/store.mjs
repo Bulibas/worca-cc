@@ -94,6 +94,15 @@ export function listBlocks({ sessionId = null, runId = null, afterSeq = 0, limit
   }
   return [];
 }
+/** The newest blocks, any session (shared blocks for Ask's list_blocks, #574): of a run, a project's sessions, or all. */
+export function listRecentBlocks({ runId = null, projectKey = null, limit = 20 } = {}) {
+  if (runId) return listBlocks({ runId, limit });
+  if (projectKey) {
+    return prepare(`SELECT b.* FROM terminal_blocks b JOIN terminal_sessions s ON s.id = b.session_id
+        WHERE s.project_key = ? ORDER BY b.started_at DESC, b.id DESC LIMIT ?`).all(projectKey, limitOf(limit, 20)).map((r) => blockOf(r, false));
+  }
+  return prepare('SELECT * FROM terminal_blocks ORDER BY started_at DESC, id DESC LIMIT ?').all(limitOf(limit, 20)).map((r) => blockOf(r, false));
+}
 export const countBlocks = (sessionId, afterSeq = 0) =>
   prepare('SELECT COUNT(*) AS n FROM terminal_blocks WHERE session_id = ? AND seq > ?').get(sessionId, Number(afterSeq) || 0).n;
 

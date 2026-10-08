@@ -21,9 +21,13 @@ any page. On a run or a project page it shows a live shell right away: it reatta
 | Any other page | no new terminal: the pane shows the most recent one that is still running. |
 
 The header holds the title and **×**, which hides the pane: the shell keeps running, and opening the
-pane again on the same page reattaches it. Below it is a tab for each open terminal of the page, then a
+pane again on the same page reattaches it. Below it is a tab for each open terminal of the page (and each
+of Ask Worca's, on every page: see [below](#ask-worca-agent-mode)), then a
 small **+** tab that starts another shell in the same folder (a second shell of a folder is numbered,
-like `demo · main 2`). Click a tab to switch; `exit` in a shell closes it. Below it is the terminal's folder, with a warning or the member select when they apply. Worca starts a shell for a page at
+like `demo · main 2`). Click a tab to switch. The **×** on a tab closes that terminal, or type `exit` in
+it. A terminal that has run a command asks first; one that has not closes at once. In a shell without
+recorded commands (sh, fish, cmd.exe) any line you submitted counts. Closing the shown terminal switches
+to the page's next one, or leaves the line that starts a new one on Enter. Below it is the terminal's folder, with a warning or the member select when they apply. Worca starts a shell for a page at
 most once each time you open the pane. When the shell ends (you typed `exit`, or it died) or Worca
 restarts, the terminal says so and starts a new one only when you press Enter.
 
@@ -43,7 +47,7 @@ remote or tag reaches, is never removed automatically; the DELETE needs `force: 
 
 Each terminal has an id, a folder, a status (`running`, `exited`, `closed`, `interrupted`), an exit
 code and its output. It survives a page reload: the pane replays the last 512 KB. It ends when the
-shell exits (type `exit`), when `DELETE /api/terminal/sessions/<id>` closes it, or when Worca stops. A terminal left running by a
+shell exits (type `exit`), when its tab's **×** or `DELETE /api/terminal/sessions/<id>` closes it, or when Worca stops. A terminal left running by a
 Worca that crashed is stopped on the next start and shows as `interrupted`. At most 16 run at once.
 
 When a run finishes, its worktree is removed (and re-created if a keep policy keeps it). A terminal
@@ -104,7 +108,7 @@ at, so the first Ctrl+C also reaches those background jobs. A stop through the A
 stopped it. In a shell without blocks (sh, fish, cmd.exe), Worca cannot tell when a command ends, so
 the stop API sends Ctrl+C only and never escalates.
 
-To end a terminal, type `exit`; `DELETE /api/terminal/sessions/<id>` closes it from outside. The stop
+To end a terminal, type `exit` or press its tab's **×**; `DELETE /api/terminal/sessions/<id>` closes it from outside. The stop
 and close APIs always work, even when the terminal is turned off. Discarding a run's checkout closes
 the terminals open in it, as it stops the run's Actions.
 
@@ -126,6 +130,64 @@ time. Blocks and audit rows are kept. `GET /api/terminal/audit?runId=<id>` lists
 - Only pages served by this Worca can use it. A page on another port of the same machine (another dev
   server, or a service an Action started) is refused with `403 TERMINAL_CROSS_ORIGIN` and sees no terminal
   traffic.
+
+## Ask Worca (agent mode)
+
+With the **Agent** switch on (in the Ask composer, on by default for every chat), Ask Worca can run shell
+commands in Worca terminals to check and finish work: tests, builds, linters, `git status`, and file
+changes through commands when you ask for them. It runs in a run's folder, a project's own folder, or the
+chat's pinned project. Turn the switch off and the next turn has no command tools; a command that is
+already running keeps running and still reports.
+
+- **A shared terminal.** Ask opens its own terminals, labeled `Ask · <chat title> · <folder>`, at most 3
+  per chat. Their tabs show in this pane on every page, next to the page's own terminal, with the same
+  live output, and you can type in them. Ask never types into a terminal you opened.
+  - **The pane follows Ask.** When Ask starts a command in the chat you have open, the pane shows that
+    tab: the first command of a chat opens a closed pane (close it, and that chat's later commands leave
+    it closed); an open pane switches to the tab unless you are typing in another one. It never takes
+    the keyboard. Click the folder on a command card to show its tab and type there. Moving to another
+    page brings back that page's own terminal; Ask's tab stays a tab.
+  - **Your commands in Ask's tab.** They never wake the chat. Your next message carries a line in its
+    context listing what you ran there since then (command, exit code, block id, redacted like other
+    command text, the newest 3), so "I ran the migration, continue" works, and Ask can read the output.
+  - **The shell is kept.** A `cd`, `export` or activated virtualenv (yours or Ask's) carries over to
+    Ask's next command, as long as the shell is still inside the target folder (the project's folder, or
+    the run's checkout). Each command is checked against the folder the shell is really in. A shell that
+    left the folder is never used: Ask opens a fresh one in the folder and leaves yours alone. If you are
+    running something in Ask's tab, Ask uses another of its terminals.
+  - **When all 3 are yours.** If every Ask terminal of the chat is busy with your commands, or you moved
+    them out of the folder, Ask's command is refused with a message saying so; free one or `cd` back.
+    Ask reuses one of its terminals for another folder only if you have not typed there for 10 minutes.
+  - **Idle close.** An Ask terminal closes after 10 idle minutes (your typing and commands there count
+    as activity) and when the chat is deleted.
+- **In the chat.** Each command shows as a card with its live output and a **Stop** button. When a command
+  ends, the chat wakes with `[worca event] terminal block <id> exited <code>`, unless Ask already saw the
+  end while it waited. Ask can also list and read the commands you ran here (`list_blocks`), so "why did
+  this fail?" works on your own commands.
+- **Environment.** Ask's shells start from a cleaned environment: `PATH`, `HOME`, locale, proxy and CA
+  variables and `SSH_AUTH_SOCK`, and nothing else from the server. No model, GitHub or server tokens. Your
+  shell rc files (`.bashrc`, `.zshrc`, `.zshenv`) are not loaded, so tools put on `PATH` only there (nvm,
+  pyenv) come from the server's own `PATH` instead. Pagers are off and git never asks for a password.
+- **The command check.** Before anything is typed, Worca refuses a command that names its own files or
+  credential paths (`~/.worca-cc`, the database, `.env*`, `~/.ssh`, `~/.aws`, `~/.claude`, …), calls
+  Worca's own HTTP API, or is hard to undo (`git push --force`/`--delete`, `rm -r` outside the folder,
+  `sudo`/`doas`, `mkfs`, `dd` to a device, `shutdown`). The check follows `cd` between steps, looks
+  through wrappers (`xargs`, `nice`, `timeout`, `env`, …), `bash -c "…"`/`eval`, and git's global
+  options, and treats an `rm -r` target built from `$(…)` or piped into `xargs` as outside the folder.
+  It also refuses `gh auth token` (and `gh auth status --show-token`), and a command with a newline.
+  Command lines and output that reach the model or the card are redacted. This check
+  is a rail against mistakes and naive prompt injection, **not a sandbox**: an obfuscated command (a path
+  built from variables, a `../../..` walk out of a run's checkout) can get around it.
+- **Limits.** At most 3 commands run at once per chat. A command is stopped after 30 minutes
+  (`stopped_by: ask:cap`). `wait_for` waits at most 240 seconds; longer work ends the reply and waits for
+  the event.
+- **Audit.** Ask's commands are recorded like yours, with `actor: ask:<chat id>` in the audit log and
+  `source: ask` on the block. Opening an Ask terminal on a run adds "Terminal opened by Ask Worca" to the
+  run's audit.
+- **Where it is off.** On a hosted Worca, agent mode follows the terminal: off unless
+  `WORCA_TERMINAL_REMOTE=1`. With agent isolation on, agent mode is off (and the switch is hidden): the
+  shell would run as the server user, not the agent user. Only bash and zsh record commands, so a terminal
+  with another shell (sh, fish, cmd.exe) cannot run Ask's commands.
 
 ## Without node-pty
 

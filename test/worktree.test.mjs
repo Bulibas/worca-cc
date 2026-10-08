@@ -18,10 +18,14 @@ import {
   resolveDefaultBranch,
   createWorktree,
   removeWorktree,
+  deleteBranchIfAt,
   isValidSourceRef,
   worktreePathForBranch,
   createDetachedWorktree,
   worktreeHead,
+  commitOf,
+  isAncestor,
+  reusedBranchBase,
   runGitCapture,
   ASK_GIT_ENV,
 } from '../src/core/worktree.mjs';
@@ -414,4 +418,85 @@ test('createDetachedWorktree: prunes a stale registration first, throws on git f
   await assert.rejects(
     () => createDetachedWorktree({ projectDir: repo, worktreeDir: join(base, 'wt_0000000b'), ref: 'main', signal: ac.signal }),
     (err) => { assert.equal(err.name, 'AbortError'); return true; });
+});
+
+const revParse = (dir, ref) => spawnSync('git', ['-C', dir, 'rev-parse', ref]).stdout.toString().trim();
+
+test('deleteBranchIfAt: deletes a branch still at its start commit', async () => {
+  const repo = await freshRepo();
+  const sha = revParse(repo, 'main');
+  spawnSync('git', ['-C', repo, 'branch', 'worca-cc/empty-1', sha]);
+  const res = await deleteBranchIfAt({ projectDir: repo, branch: 'worca-cc/empty-1', sha });
+  assert.deepEqual(res, { deleted: true });
+  assert.ok(!(await listLocalBranches(repo)).includes('worca-cc/empty-1'));
+});
+
+test('deleteBranchIfAt: keeps a branch that moved past its start commit', async () => {
+  const repo = await freshRepo();
+  const sha = revParse(repo, 'main');
+  const wt = join(repo, '.wt-moved');
+  spawnSync('git', ['-C', repo, 'worktree', 'add', '-b', 'worca-cc/moved-1', '--', wt, 'main']);
+  await writeFile(join(wt, 'x.txt'), 'x\n');
+  spawnSync('git', ['-C', wt, 'add', '-A']);
+  spawnSync('git', ['-C', wt, 'commit', '-qm', 'agent']);
+  spawnSync('git', ['-C', repo, 'worktree', 'remove', '--force', wt]);
+  const res = await deleteBranchIfAt({ projectDir: repo, branch: 'worca-cc/moved-1', sha });
+  assert.equal(res.deleted, false);
+  assert.equal(res.reason, 'moved');
+  assert.ok((await listLocalBranches(repo)).includes('worca-cc/moved-1'));
+});
+
+test('deleteBranchIfAt: keeps a branch that is checked out in a live worktree', async () => {
+  const repo = await freshRepo();
+  const sha = revParse(repo, 'main');
+  const wt = join(repo, '.wt-live');
+  spawnSync('git', ['-C', repo, 'worktree', 'add', '-b', 'worca-cc/live-1', '--', wt, 'main']);
+  const res = await deleteBranchIfAt({ projectDir: repo, branch: 'worca-cc/live-1', sha });
+  assert.deepEqual([res.deleted, res.reason], [false, 'checked-out']);
+  assert.ok((await listLocalBranches(repo)).includes('worca-cc/live-1'));
+});
+
+test('deleteBranchIfAt: missing branch, unknown base and option-shaped input are refused, never thrown', async () => {
+  const repo = await freshRepo();
+  const sha = revParse(repo, 'main');
+  assert.equal((await deleteBranchIfAt({ projectDir: repo, branch: 'nope', sha })).reason, 'missing');
+  spawnSync('git', ['-C', repo, 'branch', 'worca-cc/b-1']);
+  assert.equal((await deleteBranchIfAt({ projectDir: repo, branch: 'worca-cc/b-1', sha: 'f'.repeat(40) })).reason, 'unknown-base');
+  assert.equal((await deleteBranchIfAt({ projectDir: repo, branch: '--force', sha })).reason, 'invalid');
+  assert.equal((await deleteBranchIfAt({ projectDir: repo, branch: 'worca-cc/b-1', sha: '-q' })).reason, 'invalid');
+  assert.equal((await deleteBranchIfAt({})).reason, 'invalid');
+  assert.ok((await listLocalBranches(repo)).includes('worca-cc/b-1'), 'nothing was deleted');
+});
+
+test('reusedBranchBase / isAncestor / commitOf: fork point vs <remote>/<source> first, then local source; null on unrelated or bad input', async () => {
+  const repo = await freshRepo();
+  const g = (...a) => spawnSync('git', a, { cwd: repo, encoding: 'utf8' }).stdout.trim();
+  const fork = g('rev-parse', 'HEAD');
+  g('checkout', '-q', '-b', 'feat/x'); await writeFile(join(repo, 'x.txt'), 'x\n'); g('add', '-A'); g('commit', '-qm', 'x');
+  g('checkout', '-q', 'main'); await writeFile(join(repo, 'm.txt'), 'm\n'); g('add', '-A'); g('commit', '-qm', 'm');
+  await checkRows([
+    { name: 'local source only', run: async () => {
+      assert.deepEqual(await reusedBranchBase(repo, { feature: 'feat/x', source: 'main' }), { sha: fork, against: 'main' });
+    } },
+    { name: 'remote-tracking ref preferred over the local source', run: async () => {
+      g('update-ref', 'refs/remotes/origin/main', fork);
+      try {
+        assert.deepEqual(await reusedBranchBase(repo, { feature: 'feat/x', source: 'main', remote: 'origin' }), { sha: fork, against: 'origin/main' });
+      } finally {
+        g('update-ref', '-d', 'refs/remotes/origin/main');   // checkRows runs the later rows even after a failure
+      }
+    } },
+    { name: 'unrelated history / bad input → null', run: async () => {
+      g('checkout', '-q', '--orphan', 'island'); g('commit', '-q', '--allow-empty', '-m', 'island'); g('checkout', '-q', 'main');
+      assert.equal(await reusedBranchBase(repo, { feature: 'island', source: 'main' }), null);
+      assert.equal(await reusedBranchBase(repo, { feature: '', source: 'main' }), null);
+      assert.equal(await reusedBranchBase(repo, { feature: 'feat/x', source: '--output=x' }), null);
+      assert.equal(await commitOf(repo, '-x'), null);
+    } },
+    { name: 'isAncestor', run: async () => {
+      assert.equal(await isAncestor(repo, fork, 'feat/x'), true);
+      assert.equal(await isAncestor(repo, 'feat/x', 'main'), false);
+      assert.equal(await isAncestor(repo, 'nope', 'main'), false);
+    } },
+  ]);
 });

@@ -19,7 +19,7 @@ import { readVerdict, missingVerdictWarning } from './exec-io.mjs';
 import { AWAIT_PORT, PARAMS_PORT } from '../../shared/graph/constants.mjs';
 import { DEFAULT_EXIT_CODES, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, SCRIPT_RUNTIMES, pythonMissingSentence, overlayWiredParams } from '../../shared/graph/script-meta.mjs';
 import { probePython } from './python-probe.mjs';
-import { stripGithubCredentials } from '../github-credentials.mjs';
+import { stripHostCredentials } from '../host-credentials.mjs';
 import { agentIdentity, agentSpawn, killAgentGroupSync } from '../agent-user.mjs';
 import { agentIdentityFor } from '../agent-pool.mjs';
 import { currentOwner } from '../billing.mjs';
@@ -110,7 +110,8 @@ export function buildEnvelope(ctx) {
   }
   const detached = Boolean(ctx.runRoot) && Boolean(ctx.workspace);
   const repos = detached && Array.isArray(ctx.repos) && ctx.repos.length
-    ? ctx.repos.map((r) => ({ key: r.projectKey, dir: r.dir }))
+    // A member's own diff base rides its entry (additive): the scalar ctx.checkpointRef is the PRIMARY's only.
+    ? ctx.repos.map((r) => ({ key: r.projectKey, dir: r.dir, ...(r.checkpointRef ? { checkpointRef: r.checkpointRef } : {}) }))
     : null;
   return {
     apiVersion: 1,
@@ -175,8 +176,8 @@ export function envForShell(envelope, baseEnv = process.env) {
  *  environment than the agents beside it. Scrub off: the server's env (D11). */
 export function scriptBaseEnv(claudeOpts, platform = process.platform) {
   const scrubbed = buildSpawnEnv(claudeOpts?.envScrub, claudeOpts?.envAllowlist);
-  // Never a GitHub credential, like the agents (src/core/github-credentials.mjs).
-  return stripGithubCredentials(scrubbed ? { ...scrubbedEnv(platform), ...scrubbed } : process.env);
+  // Never a GitHub or Azure DevOps credential, like the agents (src/core/host-credentials.mjs).
+  return stripHostCredentials(scrubbed ? { ...scrubbedEnv(platform), ...scrubbed } : process.env);
 }
 
 export function parseFrame(text) {

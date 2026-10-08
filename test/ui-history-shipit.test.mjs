@@ -158,15 +158,15 @@ function historyArms(box) {
     if (url.endsWith('/api/history/pr')) return ok({ ok: true });
     if (url.endsWith('/diff')) return fail(404, { error: 'no diff' });
     if (url.endsWith('/log')) return fail(404, { error: 'no log' });
-    if (url.endsWith('/api/history')) return ok({ pipelines: box.rows, ghAvailable: box.gh });
+    if (url.endsWith('/api/history')) return ok({ pipelines: box.rows, ghAvailable: box.gh, ...(box.prHosts ? { prHosts: box.prHosts } : {}) });
     if (url.endsWith(DETAIL_URL) || url.endsWith(WKS_DETAIL_URL)) return ok(box.detail);
     if (url.endsWith('/api/budget')) return ok(box.budget);
     return null;
   };
 }
 
-async function bootShip({ rows = [row()], detail = DETAIL, gh = true, arms = null, deepLink = false, remotes = REMOTES, hooks = null } = {}) {
-  const box = { rows, detail, gh, remotes, budget: okBudget() };
+async function bootShip({ rows = [row()], detail = DETAIL, gh = true, prHosts = null, arms = null, deepLink = false, remotes = REMOTES, hooks = null } = {}) {
+  const box = { rows, detail, gh, prHosts, remotes, budget: okBudget() };
   const base = historyArms(box);
   const ctx = await boot({
     fetchHandler: (url, opts) => (arms && arms(url, opts, box)) || base(url, opts),
@@ -593,10 +593,9 @@ test('OPEN/MERGED records render links, not the button, even when the merged bra
 
 test('Create PR eligibility: never for workspace runs (detail or list, histPrEligible), hidden when gh is unavailable', async () => {
   await checkRows([
-    { name: 'workspace runs never show Create PR', run: async () => {
-      // POST /api/pr has NO workspace arm — its key regex (ui/server.mjs:1637) rejects
-      // a `workspaces/…` composite with a 404 — yet workspace rows satisfy every other
-      // clause because listAllPipelines hands rowToHistoryEntry the primary member dir.
+    { name: 'a workspace run with no member facts never shows Create PR', run: async () => {
+      // `members` absent (legacy/lite row) ⇒ no affected member ⇒ not eligible — even
+      // though the row satisfies every primary-only clause (survived/branch/sourceBranch).
       const ctx = await bootShip({
         rows: [row({ projectKey: WKS_KEY, target: 'workspace' })],
       });
@@ -622,7 +621,7 @@ test('Create PR eligibility: never for workspace runs (detail or list, histPrEli
       assert.equal(isOpen(ctx.window), false, 'the ship-it modal never opens for a workspace run');
       assert.equal(prPosts(ctx).length, 0, 'and no POST /api/pr is fired');
     } },
-    { name: 'histPrEligible rejects a workspace run that satisfies every other clause', run: async () => {
+    { name: 'histPrEligible: a workspace row is judged by its members, never the primary-only clauses', run: async () => {
       const ctx = await bootShip();
       await openDetail(ctx);                                   // state.ghAvailable is true here
       const { histPrEligible } = ctx.window.__np;
@@ -1105,3 +1104,146 @@ test('base warning: shown when baseStatus.movedSinceRun > 0 on the chosen base r
   ]);
 });
 
+// ---------------------------------------------------------------------------
+// Azure DevOps (D8): eligibility by any PR host, the host name on the base remote,
+// no cross-repo PRs, the missing-credential reason, and `forge` on Generate
+// ---------------------------------------------------------------------------
+
+const AZ_BASE = { name: 'origin', slug: 'dev.azure.com/acme/Shop/api', owner: 'acme/Shop', forge: 'azure', prHost: 'Azure DevOps', prSupported: true };
+const AZ_FORK = { name: 'fork', slug: 'dev.azure.com/acme/Shop/api-fork', owner: 'acme/Shop', forge: 'azure', prHost: 'Azure DevOps', prSupported: true };
+const azRemotes = (list, defaults = { pushRemote: 'origin', baseRemote: 'origin' }) => ({ ...REMOTES, remotes: list, defaults });
+const baseLabelOf = (modal) => modal.querySelector('label[for="shipit-base-remote"]').textContent;
+const hintOf = (modal) => modal.querySelector('.shipit-remotes-hint').textContent;
+
+test('(e) Create PR eligibility reads any PR host: an Azure DevOps token alone offers it, no host hides it', async () => {
+  await checkRows([
+    { name: 'gh missing, Azure configured', run: async () => {
+      const ctx = await bootShip({ gh: false, prHosts: { github: false, azure: true } });
+      await openDetail(ctx);
+      assert.equal(hdPr(ctx.window).hidden, false);
+      assert.equal(ctx.window.__np.histPrEligible(ROW), true);
+    } },
+    { name: 'neither host', run: async () => {
+      const ctx = await bootShip({ gh: false, prHosts: { github: false, azure: false } });
+      await openDetail(ctx);
+      assert.equal(hdPr(ctx.window).hidden, true);
+      assert.equal(ctx.window.__np.histPrEligible(ROW), false);
+    } },
+  ]);
+});
+
+test('(a)(b)(c)(g) the Ship-it modal names the base remote\'s PR host and says why an Azure PR cannot open', async () => {
+  await checkRows([
+    { name: '(a) the base label names Azure DevOps', run: async () => {
+      const modal = await openModal(await bootShip({ remotes: azRemotes([AZ_BASE]) }));
+      assert.equal(baseLabelOf(modal), 'Open PR in (Azure DevOps)');
+      assert.equal(hintOf(modal), '');
+    } },
+    { name: '(b) a fork push into an Azure base says forks are not supported, not Cross-repo', run: async () => {
+      const modal = await openModal(await bootShip({ remotes: azRemotes([AZ_BASE, AZ_FORK], { pushRemote: 'fork', baseRemote: 'origin' }) }));
+      assert.equal(hintOf(modal), 'Azure DevOps pull requests between repositories (forks) are not supported yet — push to origin.');
+    } },
+    { name: '(c) a missing credential shows the server\'s reason', run: async () => {
+      const prReason = 'Azure DevOps is not configured: set WORCA_ADO_TOKEN (a PAT with Code: Read & Write) where worca runs';
+      const modal = await openModal(await bootShip({ remotes: azRemotes([{ ...AZ_BASE, prSupported: false, prReason }]) }));
+      assert.equal(hintOf(modal), prReason);
+    } },
+    { name: '(g) a remote with no known PR host keeps the plain label', run: async () => {
+      const modal = await openModal(await bootShip({
+        remotes: azRemotes([{ name: 'origin', slug: 'gitlab.com/g/api', owner: 'g', forge: null, prHost: null, prSupported: true }]),
+      }));
+      assert.equal(baseLabelOf(modal), 'Open PR in');
+    } },
+  ]);
+});
+
+test('(d) Generate with AI sends forge:azure for an Azure base remote, and no forge for GitHub', async () => {
+  const describeBody = async (remotes) => {
+    const bodies = [];
+    const ctx = await bootShip({
+      remotes,
+      arms: (url, opts) => (url.endsWith('/api/pr/describe') ? (bodies.push(JSON.parse(opts.body)), ok({ body: 'drafted' })) : null),
+    });
+    const modal = await openModal(ctx);
+    click(ctx.window, genBtnOf(modal));
+    await settle(ctx.window, 6);
+    assert.equal(bodies.length, 1);
+    return bodies[0];
+  };
+  await checkRows([
+    { name: 'Azure base remote', run: async () => assert.equal((await describeBody(azRemotes([AZ_BASE]))).forge, 'azure') },
+    { name: 'GitHub base remote', run: async () => assert.equal('forge' in (await describeBody(REMOTES)), false) },
+  ]);
+});
+
+test('(f) the Azure PR-host flag survives the history cache', async () => {
+  const ctx = await bootShip({ gh: false, prHosts: { github: false, azure: true } });
+  go(ctx.window, 'runs');
+  await settle(ctx.window, 6);                       // /api/history answered, writeHistoryCache ran
+  const blob = JSON.parse(ctx.window.localStorage.getItem('worca-cc.history.cache.v1'));
+  assert.equal(blob.adoAvailable, true);
+  assert.equal(blob.ghAvailable, false);
+});
+
+
+// ---------------------------------------------------------------------------
+// Open as draft + the source issue's "Will close" line
+// ---------------------------------------------------------------------------
+const ISSUE_REMOTES = { ...REMOTES, issue: { slug: 'up/repo', number: 42 } };
+const draftBox = (modal) => modal.querySelector('.shipit-draft-input');
+const closesLine = (modal) => modal.querySelector('.shipit-closes');
+
+test('Open as draft: unchecked on every open; ticked sends draft:true, unticked sends no draft field', async () => {
+  const ctx = await bootShip({ remotes: ISSUE_REMOTES, arms: prArm(PR_OK) });
+  let modal = await openModal(ctx);
+  await checkRows([
+    { name: 'the checkbox exists, labelled, and starts unchecked', run: () => {
+      const box = draftBox(modal);
+      assert.ok(box, 'checkbox present');
+      assert.equal(box.type, 'checkbox');
+      assert.equal(box.checked, false);
+      assert.match(box.closest('label').textContent, /Open as draft/);
+    } },
+    { name: 'ticked and cancelled: unchecked again on the next open (D1)', run: async () => {
+      draftBox(modal).checked = true;
+      click(ctx.window, modal.querySelector('.shipit-cancel'));
+      await settle(ctx.window);
+      modal = await openModal(ctx);
+      assert.equal(draftBox(modal).checked, false);
+    } },
+    { name: 'ticked: the POST carries draft:true', run: async () => {
+      draftBox(modal).checked = true;
+      click(ctx.window, modal.querySelector('.shipit-ok'));
+      await settle(ctx.window, 6);
+      assert.equal(JSON.parse(prPosts(ctx)[0].opts.body).draft, true);
+    } },
+  ]);
+});
+
+test('Open as draft left unticked: the POST has no draft field (today\'s request)', async () => {
+  const ctx = await bootShip({ arms: prArm(PR_OK) });
+  const modal = await openModal(ctx);
+  click(ctx.window, modal.querySelector('.shipit-ok'));
+  await settle(ctx.window, 6);
+  assert.ok(!('draft' in JSON.parse(prPosts(ctx)[0].opts.body)));
+});
+
+test('"Will close owner/repo#N" shows only for an issue-sourced run', async () => {
+  await checkRows([
+    { name: 'issue source -> one muted line', run: async () => {
+      const ctx = await bootShip({ remotes: ISSUE_REMOTES, arms: prArm(PR_OK) });
+      const modal = await openModal(ctx);
+      assert.equal(closesLine(modal).hidden, false);
+      assert.equal(closesLine(modal).textContent, 'Will close up/repo#42');
+      assert.ok(closesLine(modal).classList.contains('hint'));
+    } },
+    { name: 'no issue source (issue:null or absent) -> nothing', run: async () => {
+      for (const remotes of [REMOTES, { ...REMOTES, issue: null }]) {
+        const ctx = await bootShip({ remotes, arms: prArm(PR_OK) });
+        const modal = await openModal(ctx);
+        assert.equal(closesLine(modal).hidden, true);
+        assert.equal(closesLine(modal).textContent, '');
+      }
+    } },
+  ]);
+});

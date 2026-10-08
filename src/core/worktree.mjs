@@ -352,6 +352,37 @@ export async function removeWorktree({ projectDir, worktreeDir, branch, force = 
 }
 
 /**
+ * Delete local branch `branch` ONLY while it still points at `sha` — the proof that a
+ * run left nothing on it — and no worktree has it checked out. Used by workspace
+ * teardown to drop the branch of a member the run never changed. The delete is a
+ * compare-and-swap (`update-ref -d <ref> <old>`): a commit landing between the check and
+ * the delete makes git refuse, so a branch carrying work is never discarded. Every
+ * doubt (unknown base, moved tip, live checkout, git failure) keeps the branch.
+ * Never throws.
+ * @returns {Promise<{deleted:true}|{deleted:false, reason:string, stderr?:string}>}
+ */
+export async function deleteBranchIfAt({ projectDir, branch, sha } = {}) {
+  if (!projectDir || typeof branch !== 'string' || !branch || /^-/.test(branch)
+      || typeof sha !== 'string' || !sha || /^-/.test(sha)) {
+    return { deleted: false, reason: 'invalid' };
+  }
+  const ref = `refs/heads/${branch}`;
+  const tip = await git(projectDir, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  const tipSha = tip.ok ? tip.stdout.trim() : '';
+  if (!tipSha) return { deleted: false, reason: 'missing' };
+  const base = await git(projectDir, ['rev-parse', '--verify', '--quiet', `${sha}^{commit}`]);
+  const baseSha = base.ok ? base.stdout.trim() : '';
+  if (!baseSha) return { deleted: false, reason: 'unknown-base' };
+  if (tipSha !== baseSha) return { deleted: false, reason: 'moved' };
+  // Reap stale registrations first: worktreePathForBranch does not skip prunable entries,
+  // so a just-removed checkout could otherwise read as "in use".
+  await git(projectDir, ['worktree', 'prune']);
+  if (await worktreePathForBranch(projectDir, branch)) return { deleted: false, reason: 'checked-out' };
+  const r = await git(projectDir, ['update-ref', '-d', ref, tipSha]);
+  return r.ok ? { deleted: true } : { deleted: false, reason: 'update-ref', stderr: r.stderr.trim() };
+}
+
+/**
  * Create a DETACHED worktree at `worktreeDir` checking out `ref` — the Ask
  * Worca inspection checkout (ask-worca-worktrees-design.md §3). Detached by
  * construction: no branch is created, locked or deleted, so the pipeline
@@ -382,6 +413,46 @@ export async function createDetachedWorktree({ projectDir, worktreeDir, ref, sig
 export async function worktreeHead(dir) {
   const r = await git(dir, ['rev-parse', 'HEAD']);
   return r.ok ? r.stdout.trim() : null;
+}
+
+/** Full SHA of `ref^{commit}` in `dir`, or null. Rejects a leading '-' (a git option). */
+export async function commitOf(dir, ref) {
+  if (typeof ref !== 'string' || !ref || /^-/.test(ref)) return null;
+  const r = await git(dir, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  return r.ok && r.stdout.trim() ? r.stdout.trim() : null;
+}
+
+/** True iff commit `a` is an ancestor of (or equal to) `b` in `dir`. False on any failure. */
+export async function isAncestor(dir, a, b) {
+  const [x, y] = await Promise.all([commitOf(dir, a), commitOf(dir, b)]);
+  if (!x || !y) return false;
+  return (await git(dir, ['merge-base', '--is-ancestor', x, y])).ok;
+}
+
+/**
+ * The diff base of a REUSED feature branch: where it forks from the source — the remote's copy
+ * first (`<remote>/<source>`: what is merged upstream is not this branch's change), else the local
+ * source. Every unmerged commit on the branch (plus uncommitted work) is then its diff, and the
+ * source moving on never reads as deletions. Returns { sha, against } or null (no candidate
+ * resolves, or the histories are unrelated). Never throws.
+ */
+export async function reusedBranchBase(projectDir, { feature, source, remote = 'origin' } = {}) {
+  if (typeof feature !== 'string' || !feature || typeof source !== 'string' || !source || /^-/.test(source)) return null;
+  const tip = await commitOf(projectDir, `refs/heads/${feature}`);
+  if (!tip) return null;
+  const candidates = [];
+  if (typeof remote === 'string' && /^[A-Za-z0-9._-]+$/.test(remote)) {
+    candidates.push({ ref: `refs/remotes/${remote}/${source}`, against: `${remote}/${source}` });
+  }
+  candidates.push({ ref: source, against: source });
+  for (const c of candidates) {
+    const at = await commitOf(projectDir, c.ref);
+    if (!at) continue;
+    const mb = await git(projectDir, ['merge-base', tip, at]);
+    const sha = mb.ok ? mb.stdout.trim() : '';
+    if (sha) return { sha, against: c.against };
+  }
+  return null;
 }
 
 /**

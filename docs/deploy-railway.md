@@ -205,13 +205,38 @@ author.
 An App can only reach repositories owned by the account that owns the App. If a repository moves
 to an organisation, create and install a new App there first, then swap the variables.
 
+## Azure DevOps
+
+For repositories on `dev.azure.com` (or `*.visualstudio.com`), set a personal access token on the
+`worca` service. It works next to the GitHub credential; each call uses the one for its host.
+
+```bash
+node tools/railway/worca-railway.mjs set mydeploy WORCA_ADO_TOKEN --yes    # paste the PAT (stdin)
+```
+
+Then seal it. A read/write pair (`WORCA_ADO_READ_TOKEN`, `WORCA_ADO_WRITE_TOKEN`) works as for
+GitHub. "Push as me" is GitHub-only, so `WORCA_GH_AS_PERSON=required` does not refuse an Azure
+push. To make `verify --in-container` test the token too, set `WORCA_ADO_PROBE_ORG` to your
+organisation's name on the service. PAT scopes, the Boards token, URL shapes and what does not
+work yet: [Azure DevOps](azure-devops.md).
+
 ## Operate your deployment
 
 A deployment is a fixed image plus service variables. Pushing to the repository never changes it:
 you decide when it upgrades, and every change below is one command. Each one restarts the `worca`
 service: Railway stops the old container before starting the new one (a volume can't be attached
-to two), running agents get SIGTERM and pause, and you resume them afterwards. Projects, runs,
-settings and the database are on `/data` and survive; schema migrations run on boot.
+to two). On the stop's SIGTERM worca drains: it starts nothing new, pauses every active run (the
+resume point is saved, as on a Pause click) and waits up to `WORCA_DRAIN_TIMEOUT_MS` (20 s by
+default) before it exits, well inside the 60 s `drainingSeconds` set above. The container exits 0
+after a stop (the image's tini reports the server's 143 as 0): Railway keeps a deployment whose
+container exited non-zero after a stop marked as running, so a stop would never finish. Keep the
+image's entrypoint; a custom start command for the `worca` service must start with
+`tini -s -e 143 --`. The runs come back
+**paused** ("worca was restarting") and you resume them afterwards, or set `WORCA_AUTO_RESUME=1`
+on the `worca` service to have the new container resume them by itself, as the person who last
+started or resumed each one. A run still busy after the drain timeout comes back `interrupted`,
+as every run did before. Projects, runs, settings and the database are on `/data` and survive;
+schema migrations run on boot.
 
 ### The operations tool
 
@@ -284,6 +309,7 @@ Not in Railway at all:
 | Claude token from `claude setup-token` | about a year | a new token, `set … CLAUDE_CODE_OAUTH_TOKEN` |
 | GitHub fine-grained tokens | what you chose at creation | a new token, `set` it |
 | GitHub App installation tokens | an hour, minted per call | nothing to do |
+| Azure DevOps PATs | what you chose at creation, at most a year | a new PAT, `set … WORCA_ADO_TOKEN` |
 | Access service token | what you chose at creation | Zero Trust → Service Auth, then update your local token file |
 
 ### Verify

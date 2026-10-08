@@ -37,7 +37,7 @@ import { normalizeScriptMeta, resolvePlatformValue } from '../shared/graph/scrip
 import { pluginModelSecretStatus } from './plugin-models.mjs';
 import { referencedPluginModels } from './config.mjs';
 import { clearBindingsForPlugin } from './source-bindings.mjs';
-import { assignPluginBases, checkMcpStoreWritable, removePluginServers, applyMcpUpdate, mcpServerDelta } from './mcp/plugin-lifecycle.mjs';
+import { assignPluginBases, checkMcpStoreWritable, removePluginServers, applyMcpUpdate, mcpServerDelta, removePluginSkills } from './mcp/plugin-lifecycle.mjs';
 import { parseFrontmatter } from './frontmatter.mjs';
 import { agentIdentity } from './agent-user.mjs';
 
@@ -468,15 +468,17 @@ export async function updatePlugin(name, { exec = defaultExec } = {}) {
   if (cand.candidateSha === entry.pinnedSha) return { ok: true, updated: false, ...cand };
   const { versionDir, warnings } = await exportVersion(name, cand.candidateSha, { exec });
   const prevCurrent = currentTarget(name);
-  // The pinned side's honoured MCP servers, read before the swap (§4.6 apply).
+  // The pinned side's honoured MCP servers, read before the swap (§4.6 apply), and the skills the preview above names
+  // as removed: the apply removes exactly those (skills registry §5 — the preview is the consent).
   const mcpBefore = readManifestAt(pluginCurrentDir(name))?.mcpServers ?? {};
+  const removedSkills = cand.manifestDelta?.removedSkills ?? [];
   try {
     const manifest = validated(name, versionDir);
     // MCP registry (§4.6): the apply below removes or migrates servers after the
     // swap, so a registry file it could not write refuses the update HERE —
     // decided on the apply's own inputs, before setup, the swap and the lock.
     const mcpDelta = mcpServerDelta(mcpBefore, manifest.mcpServers);
-    if (mcpDelta.removedMcpServers.length || mcpDelta.changedMcpServers.length) await checkMcpStoreWritable(name);
+    if (mcpDelta.removedMcpServers.length || mcpDelta.changedMcpServers.length || removedSkills.length) await checkMcpStoreWritable(name);
     await runSetup(versionDir, manifest, { exec });
     await shareVersionDir(name, versionDir, exec);
     precheck(versionDir, manifest);
@@ -504,7 +506,7 @@ export async function updatePlugin(name, { exec = defaultExec } = {}) {
     } catch (err) {
       console.warn(`[plugin-store] ${name}: workflow import failed (${err?.message || err}) — plugin updated; re-import via update`);
     }
-    await applyMcpUpdate(name, mcpBefore, manifest.mcpServers);
+    await applyMcpUpdate(name, mcpBefore, manifest.mcpServers, { removedSkills });
     const ignored = ignoredContributions(name, versionDir, workflowSkips ? { workflowSkips } : {});
     return { ok: true, updated: true, inventory, warnings, ignored, ...cand };
   } catch (err) {
@@ -627,8 +629,9 @@ export async function uninstallPlugin(name, { purge = false } = {}) {
   await checkMcpStoreWritable(name);
   await removePluginWorkflows(name); // throws its ReferencedError with the referencing list
   // MCP registry (§4.6): after every guard, so a refused uninstall keeps them and
-  // `worca plugin remove` does it too.
+  // `worca plugin remove` does it too — its skills' memberships and Team state as well (skills registry §5).
   await removePluginServers(name);
+  await removePluginSkills(name);
   // Bindings live in the DB, not in the plugin's data dir, so they would
   // outlive the uninstall: a stale row silently rebinds a project the moment
   // the plugin is reinstalled with a same-named profile — possibly pointing at

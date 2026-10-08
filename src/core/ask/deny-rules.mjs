@@ -25,6 +25,7 @@ export const ASK_DENY_RULES = Object.freeze([
   'Read(//**/.worca-cc/tmp/**)',       // the chat's own scratch cwd (per-turn mcp-*.json)
   'Read(//**/.worca-cc/logs/**)',      // ask-web.jsonl: every thread's fetched URLs
   'Read(//**/.worca-cc/mcp/**)',       // the MCP registry: servers, sets, secrets, tests (MCP registry §5.5.4)
+  'Read(//**/.worca-cc/skills/**)',    // the skill library (skills registry §2b-7); a turn reads only its own mount under ask/<thread>/
   'Read(~/.ssh/**)',
   'Read(~/.aws/**)',
   'Read(~/.gnupg/**)',

@@ -88,6 +88,13 @@ screenshot swaps sides; the eye keeps moving.
 
 ## Components
 
+- **`.ribbon`** (hero) — the band sits *behind* everything in the hero:
+  ribbon `z-index:1`, shot wrapper `2`, `.sec-head` `4`. `.hero-grid` takes
+  no `z-index`: a stacking context there would lift the ribbon over the
+  headline, sub and chips. The path runs low under the text column and only
+  climbs behind the screenshot; keep it that way when editing it, and check
+  the hero at 1440, 1100 and 960 px wide (it hides below 920).
+
 - **`.kicker`** — pill with a dot. Text is 1–2 words, uppercase by CSS.
 - **`.chip`** — pill fact. `.chip.acc` is the dark one; only the hero's first
   chip uses it. `<b>` inside a chip is mono and dark — for numbers.

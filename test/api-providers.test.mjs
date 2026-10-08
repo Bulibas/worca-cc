@@ -90,12 +90,12 @@ test('device flow: start → pending → ok stores the sign-in; state shows the 
   const start = await post('/api/providers/copilot/login');
   assert.equal(start.status, 200, JSON.stringify(start.body));
   assert.equal(start.body.userCode, 'WXYZ-9876');
-  const p1 = await jfetch(`/api/providers/copilot/login/${start.body.deviceCode}`);
+  const p1 = await jfetch(`/api/providers/copilot/login/${start.body.deviceCode}`, { method: 'POST' });
   assert.deepEqual(p1.body, { pending: true, interval: 1 });
   pollState = 'ok';
-  const p2 = await jfetch(`/api/providers/copilot/login/${start.body.deviceCode}`);
+  const p2 = await jfetch(`/api/providers/copilot/login/${start.body.deviceCode}`, { method: 'POST' });
   assert.deepEqual(p2.body, { ok: true, login: 'octo' });
-  const unknown = await jfetch('/api/providers/copilot/login/nope');
+  const unknown = await jfetch('/api/providers/copilot/login/nope', { method: 'POST' });
   assert.match(unknown.body.error, /unknown or expired/);
 
   const st = await jfetch('/api/providers?quota=1');

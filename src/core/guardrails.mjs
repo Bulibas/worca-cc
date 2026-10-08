@@ -51,6 +51,28 @@ const NORMAL_DENY = [
   'Bash(pnpm publish)', 'Bash(pnpm publish:*)',
 ];
 
+// Worca's own state (Read+Edit protected): the DB, MCP/plugin secrets, settings
+// and the MCP registry. `//` = absolute from the fs root (a bare `**/x` would
+// anchor to cwd — same convention as ASK_DENY_RULES in ask/spawn.mjs). Only the
+// conventional `.worca-cc` home basename is matched; a custom WORCA_HOME (e.g.
+// Docker's /worca) is not, same as Ask. runs/ and store/ are deliberately NOT
+// denied: agents' worktrees live in <home>/runs/<id>/ and artifacts in <home>/store/.
+const WORCA_STATE_PROTECTED = [
+  '//**/worca-cc.db*', '//**/worca.db*',
+  '//**/.worca-cc/plugins/*/data/secrets.json',  // exact path: a broader secrets.json glob would also match a project's own file inside <home>/runs/<id>/
+  '//**/.worca-cc/settings.json',
+  '//**/.worca-cc/mcp/**',
+];
+
+// Code the Worca server later loads: Edit-only denies (agents may still READ
+// plugin skills etc.), so a prompt-injected agent can't plant host code or
+// tamper with guardrail policy.
+const WORCA_STATE_DENY = [
+  'Edit(//**/.worca-cc/plugins/**)', 'Edit(//**/.worca-cc/scripts/**)',
+  'Edit(//**/.worca-cc/agents/**)', 'Edit(//**/.worca-cc/workflows/**)',
+  'Edit(//**/.worca-cc/policy/**)',
+];
+
 /**
  * The built-in levels. `custom` is not here — it resolves from storage.
  * permissive IS DEFAULT_GUARDRAILS (same object): an unconfigured project and a
@@ -58,6 +80,7 @@ const NORMAL_DENY = [
  * Normal: protect credential files, block publication; never breaks a pipeline
  * (git commit / npm install / npm test / curl localhost all untouched).
  * Secure++: Normal + env scrub (the real exfil control) + egress binaries +
+ * git network subcommands + DNS/socat/openssl s_client/download CLIs +
  * publish channels + cloud-credential CLIs + WebFetch/WebSearch (defense against
  * frontmatter-widened agents). Still functional: project file Read/Write/Edit,
  * npm install/test, and local git commits are untouched.
@@ -68,8 +91,8 @@ export const GUARDRAIL_PRESETS = deepFreeze({
     honorProjectSettings: true,
     envScrub: false,
     envAllowlist: [],
-    protectedPaths: [...NORMAL_PROTECTED],
-    deny: [...NORMAL_DENY],
+    protectedPaths: [...NORMAL_PROTECTED, ...WORCA_STATE_PROTECTED],
+    deny: [...NORMAL_DENY, ...WORCA_STATE_DENY],
   },
   secure: {
     honorProjectSettings: true,
@@ -77,6 +100,7 @@ export const GUARDRAIL_PRESETS = deepFreeze({
     envAllowlist: [],
     protectedPaths: [
       ...NORMAL_PROTECTED,
+      ...WORCA_STATE_PROTECTED,
       '.npmrc', '.netrc',            // token-bearing rc files (project-level)
       '*.tfstate*',                  // terraform state embeds raw secrets
       '*.keystore', '*.jks',
@@ -85,9 +109,11 @@ export const GUARDRAIL_PRESETS = deepFreeze({
       '~/.git-credentials',          // git credential-store: plaintext https://user:token@ lines
       '~/.ssh/**', '~/.aws/**', '~/.config/gcloud/**', '~/.kube/**', '~/.config/gh/**',  // gh hosts.yml holds the OAuth token
       '~/.npmrc', '~/.netrc', '~/.docker/config.json',
+      '~/.claude/.credentials.json', '~/.gnupg/**',  // NOT ~/.claude/**: agents load skills from ~/.claude/skills
     ],
     deny: [
       ...NORMAL_DENY,
+      ...WORCA_STATE_DENY,
       'Bash(curl)', 'Bash(curl:*)', 'Bash(wget)', 'Bash(wget:*)',
       'Bash(nc)', 'Bash(nc:*)', 'Bash(ncat)', 'Bash(ncat:*)', 'Bash(netcat)', 'Bash(netcat:*)',
       'Bash(telnet)', 'Bash(telnet:*)',
@@ -96,6 +122,13 @@ export const GUARDRAIL_PRESETS = deepFreeze({
       'Bash(gh)', 'Bash(gh:*)',
       'Bash(docker push)', 'Bash(docker push:*)',
       'Bash(aws)', 'Bash(aws:*)', 'Bash(gcloud)', 'Bash(gcloud:*)', 'Bash(az)', 'Bash(az:*)',
+      'Bash(git clone)', 'Bash(git clone:*)', 'Bash(git fetch)', 'Bash(git fetch:*)',
+      'Bash(git pull)', 'Bash(git pull:*)', 'Bash(git ls-remote)', 'Bash(git ls-remote:*)',
+      'Bash(git remote add)', 'Bash(git remote add:*)', 'Bash(git remote set-url)', 'Bash(git remote set-url:*)',
+      'Bash(dig)', 'Bash(dig:*)', 'Bash(nslookup)', 'Bash(nslookup:*)',
+      'Bash(socat)', 'Bash(socat:*)',
+      'Bash(openssl s_client)', 'Bash(openssl s_client:*)',
+      'Bash(aria2c)', 'Bash(aria2c:*)', 'Bash(lynx)', 'Bash(lynx:*)', 'Bash(w3m)', 'Bash(w3m:*)',
       'WebFetch', 'WebSearch',
     ],
   },

@@ -16,6 +16,9 @@ services:
   worca:
     image: ghcr.io/sinishadjukic/worca:${WORCA_TAG:-latest}
     init: true
+    # A stop pauses active runs before the server exits (WORCA_DRAIN_TIMEOUT_MS, 20 s by default);
+    # Docker's own default of 10 s would SIGKILL it halfway.
+    stop_grace_period: 30s
     user: "${WORCA_UID:-1000}:${WORCA_GID:-1000}"
     ports:
       # Loopback only. The server's Host/Origin guard accepts localhost, and
@@ -35,6 +38,9 @@ services:
       GIT_COMMITTER_NAME: ${GIT_AUTHOR_NAME:-}
       GIT_COMMITTER_EMAIL: ${GIT_AUTHOR_EMAIL:-}
       GH_TOKEN: ${GH_TOKEN:-}
+      WORCA_ADO_TOKEN: ${WORCA_ADO_TOKEN:-}
+      WORCA_ADO_READ_TOKEN: ${WORCA_ADO_READ_TOKEN:-}
+      WORCA_ADO_WRITE_TOKEN: ${WORCA_ADO_WRITE_TOKEN:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}

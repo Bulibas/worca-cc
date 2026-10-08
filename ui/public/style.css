@@ -1487,6 +1487,7 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
   background:transparent;font-family:inherit;font-size:13px;color:var(--ink);cursor:pointer;}
 .folder-list .folder-item:hover{background:var(--hover-on-field);}
 .folder-empty{padding:10px 12px;}
+.folder-scope{padding:0 0 8px;line-height:1.9;}
 /* Multi mode: a tick box left of each folder name (the name still opens the folder). */
 .folder-list .folder-row{display:flex;align-items:center;gap:2px;padding-left:10px;}
 .folder-list .folder-row .folder-item{flex:1 1 auto;min-width:0;}
@@ -2317,7 +2318,9 @@ input.bench-case-name{width:100%;padding:9px 12px;font-size:13px;}
   .script-card{flex-direction:column;align-items:stretch;}
   .scripts-tools .script-filter{width:100%;}
 }
-.agent-actions { display:flex; gap:8px; }
+.agent-actions { display:flex; gap:8px; flex:0 0 auto; }
+/* Same metrics as the Scripts card's Open/Duplicate (.script-actions .btn-mini). */
+.agent-actions .btn-mini { font-size:11.5px; padding:5px 10px; }
 .chip-select { display:flex; flex-wrap:wrap; gap:8px; }
 .chip-select label { display:inline-flex; gap:6px; align-items:center; font-size:12.5px; border:1px solid var(--line); border-radius:999px; padding:4px 10px; cursor:pointer; }
 
@@ -3100,6 +3103,10 @@ button.tl-tile[aria-pressed="true"]{border-color:var(--ink);}
    above the catalog, so short cards do not push it a screen down; one column once they would squeeze. */
 .models-helpers{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:18px;margin-bottom:18px;}
 .models-helpers > .settings-card{max-width:none;margin:0;}
+
+/* Settings › General › Alerts (alerts.mjs): two switches and the test button, stacked. */
+#alerts-card .alerts-badge-row{margin-top:14px;}
+#alerts-card .alerts-test{margin-top:16px;}
 
 /* My model credentials (credential broker): one row per slot, a state chip on the right. */
 .cred-list{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
@@ -4019,6 +4026,16 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .hd-pr:hover{box-shadow:inset 0 0 0 999px var(--solid-hover);transform:translateY(-1px);}
 .hd-pr-link{flex:0 0 auto;font:600 12.5px var(--sans);}
 .hd-pr-link[hidden]{display:none;}
+/* Workspace runs: one line per member repo under the header row. */
+.hd-pr-repos{display:flex;flex-wrap:wrap;gap:6px 16px;margin:10px 0 0;padding:0;list-style:none;font:500 12.5px var(--sans);}
+.hd-pr-repos[hidden]{display:none;}
+.hd-pr-repo{display:inline-flex;align-items:center;gap:8px;}
+.hd-pr-repo-link{font-weight:600;color:var(--green-ink);text-decoration:none;}
+.hd-pr-repo-link:hover{text-decoration:underline;}
+.hd-pr-repo-link.merged{color:var(--ink-3);}
+.hd-pr-repo-note{color:var(--ink-3);}
+.hd-after{display:inline-flex;align-items:center;gap:8px;padding:8px 15px;flex:0 0 auto;}
+.hd-after[hidden]{display:none;}
 
 /* WIDTH GOES ON `#shipit-modal .card`, NOT `.shipit-card`. The markup is
    `<div class="card shipit-card">` inside `.viewer-modal`, and
@@ -4054,12 +4071,12 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 /* The base-branch pick stands where the plain base name was, inline in the
    summary line: a compact house select (cf. `.step-config select`) on the
    --field pill, not the full-width form field. */
-.shipit-summary .select-wrap{max-width:100%;}
-.shipit-summary .select{width:auto;max-width:100%;padding:6px 30px 6px 10px;font:inherit;color:var(--ink);
+.shipit-summary .select-wrap,.shipit-repo-branch .select-wrap{max-width:100%;}
+.shipit-summary .select,.shipit-repo-branch .select{width:auto;max-width:100%;padding:6px 30px 6px 10px;font:inherit;color:var(--ink);
   background:var(--surface);border-color:var(--line-2);border-radius:10px;}
-.shipit-summary .select:focus{border-color:var(--ink);}
-.shipit-summary .select-wrap::after{right:11px;}
-.shipit-summary select:disabled{opacity:.55;cursor:not-allowed;}
+.shipit-summary .select:focus,.shipit-repo-branch .select:focus{border-color:var(--ink);}
+.shipit-summary .select-wrap::after,.shipit-repo-branch .select-wrap::after{right:11px;}
+.shipit-summary select:disabled,.shipit-repo-branch select:disabled{opacity:.55;cursor:not-allowed;}
 .shipit-actions{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:22px;}
 .shipit-ok{padding:11px 22px;border:1.5px solid var(--ink);border-radius:999px;background:var(--ink);
   font:600 13.5px var(--sans);color:var(--on-ink);cursor:pointer;}
@@ -4070,12 +4087,45 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .shipit-remotes[hidden]{display:none;}
 .shipit-remote-field label{display:block;margin:0 0 6px 2px;font:600 11.5px/1.2 var(--sans);color:var(--ink-2);
   text-transform:uppercase;letter-spacing:.04em;}
-.shipit-remotes .select{padding:10px 36px 10px 12px;font-size:13px;}
-.shipit-remotes .select-wrap::after{right:13px;}
-.shipit-remotes select:disabled{opacity:.55;cursor:not-allowed;}
+.shipit-remotes .select,.shipit-repo-remotes .select{padding:10px 36px 10px 12px;font-size:13px;}
+.shipit-remotes .select-wrap::after,.shipit-repo-remotes .select-wrap::after{right:13px;}
+.shipit-remotes select:disabled,.shipit-repo-remotes select:disabled{opacity:.55;cursor:not-allowed;}
 .shipit-remotes-hint{grid-column:1/-1;margin:0;font-size:12px;color:var(--ink-3);word-break:break-all;}
 .shipit-remotes-hint:empty{display:none;}
-@media (max-width:520px){.shipit-remotes{grid-template-columns:1fr;}}
+
+/* Workspace Ship-it: one row per affected member repo (tick box, branch → base,
+   its own remotes, its own status line). Every node the JS hides has a [hidden] twin. */
+.shipit-repos{display:grid;gap:10px;margin-top:14px;max-height:50vh;overflow:auto;text-align:left;}
+.shipit-repos[hidden]{display:none;}
+.shipit-repo{display:grid;gap:6px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;}
+.shipit-repo-head{display:flex;align-items:center;gap:8px;cursor:pointer;}
+.shipit-repo-stat{margin-left:auto;font-size:12px;color:var(--ink-3);}
+.shipit-repo-branch{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;}
+.shipit-repo-remotes{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;}
+.shipit-repo-remotes[hidden]{display:none;}
+.shipit-repo-status[hidden]{display:none;}   /* .hint sets display:block */
+.shipit-skipped{margin:0;}
+@media (max-width:520px){.shipit-remotes,.shipit-repo-remotes{grid-template-columns:1fr;}}
+
+/* Publish branch (#618): the header's outline pill + "Published to …" note, and its dialog
+   (one row per repo: tick for a workspace member, name, branch, push remote, status). */
+.hd-publish{padding:8px 16px;border:1.5px solid var(--ink);border-radius:999px;
+  font:600 12.5px var(--sans);cursor:pointer;flex:0 0 auto;}
+.hd-publish[hidden],.hd-published[hidden]{display:none;}
+.hd-published{margin:8px 0 0;font-size:12px;color:var(--ink-3);overflow-wrap:anywhere;}
+#publish-modal .card{width:min(520px,100%);padding:24px;}
+.publish-card h2{margin:0;font:700 17px/1.25 var(--sans);letter-spacing:-.015em;}
+.publish-sub{margin:8px 0 0;font:400 13.5px/1.6 var(--sans);color:var(--ink-2);}
+.publish-repos{display:grid;gap:10px;margin-top:16px;max-height:50vh;overflow:auto;text-align:left;}
+.publish-repo{display:grid;gap:12px;padding:14px;background:var(--field);border-radius:var(--r-ctrl);}
+.publish-repo-head{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12.5px;color:var(--ink);word-break:break-all;}
+.publish-pick[hidden],.publish-remote-wrap[hidden],.publish-status[hidden]{display:none;}
+.publish-remote-wrap{display:grid;gap:6px;}
+.publish-remote-label{font:600 11.5px/1.2 var(--sans);color:var(--ink-2);text-transform:uppercase;letter-spacing:.04em;}
+.publish-repo .select{padding:10px 36px 10px 12px;font-size:13px;background:var(--surface);}
+.publish-repo .select-wrap::after{right:13px;}
+.publish-status{margin:0;font-size:12px;}
+.publish-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:22px;}
 
 /* The PR description: label, Write / Preview tabs and Generate with AI on one row,
    the textarea (or its rendered preview) under it. Left-aligned inside the centered
@@ -4096,6 +4146,9 @@ button.hd-mem-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px
 .shipit-desc-preview[hidden]{display:none;}
 .shipit-desc-err{margin-top:8px;}
 .shipit-desc-err[hidden]{display:none;}
+.shipit-draft{margin-top:10px;}
+.shipit-closes{margin-top:4px;}
+.shipit-closes[hidden]{display:none;}
 /* The Generate-with-AI veil over the editor (or its preview) while a draft is in
    flight: a haze over the old text, a violet light band swept left to right across
    it, a breathing violet edge, and a shimmering label. It keeps pointer-events, so
@@ -5215,7 +5268,13 @@ body.term-open .toasts{right:calc(var(--term-w,460px) + 20px);}
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;}
 .term-tab:hover{color:var(--ink);background:var(--hover);}
 .term-tab[aria-selected="true"]{color:var(--ink);background:var(--panel);border-color:var(--line);}
-.term-tab-ended{font-style:italic;}
+.term-tab-item{position:relative;display:flex;flex:0 1 auto;min-width:0;max-width:180px;}
+.term-tab-item .term-tab{flex:1 1 auto;max-width:none;padding-right:26px;}
+.term-tab-close{position:absolute;right:4px;top:4px;width:20px;height:20px;padding:0;border:0;border-radius:var(--r-ctrl);background:none;
+  color:var(--ink-3);font:14px/1 var(--sans);cursor:pointer;}
+.term-tab-close:hover{color:var(--ink);background:var(--hover);}
+.term-tab-close:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
+.term-tab-ended .term-tab{font-style:italic;}
 .term-tab-add{flex:none;width:28px;padding:0;font-size:16px;}
 .term-tab:focus-visible{outline:2px solid var(--ink);outline-offset:-2px;}
 .term-icon{display:inline-flex;align-items:center;justify-content:center;min-width:30px;height:30px;padding:0 6px;font-size:16px;line-height:1;color:var(--ink-2);}
@@ -5242,27 +5301,56 @@ body.term-open .toasts{right:calc(var(--term-w,460px) + 20px);}
   body.term-open .ask-dock>.ask-pill{display:none;}
  }
 
-.ask-pill{pointer-events:auto;display:flex;align-items:center;gap:10px;padding:11px 18px 11px 14px;
-  border:1.5px solid var(--line-2);border-radius:999px;background:var(--panel);color:var(--ink);
-  font-family:inherit;font-weight:600;font-size:13.5px;cursor:pointer;
-  box-shadow:var(--shadow-pop);transition:border-color .15s;}
-.ask-pill:hover{border-color:var(--hover-outline);}
+/* The launcher: a 48px round icon button in the dock's bottom-right corner, taken out of the dock's flex flow
+   so the sheet's centring and size do not change. Coming back from a closed sheet (display:none -> flex) replays
+   the pop-in; hiding stays instant. The label is kept for screen readers, the shortcut lives in the tooltip. */
+.ask-pill{pointer-events:auto;position:absolute;right:24px;bottom:calc(24px + env(safe-area-inset-bottom,0px));
+  display:flex;align-items:center;justify-content:center;width:48px;height:48px;padding:0;box-sizing:border-box;
+  border:1.5px solid var(--line-2);border-radius:50%;background:var(--panel);color:var(--ink);cursor:pointer;
+  box-shadow:var(--shadow-pop);animation:ask-pill-pop .22s cubic-bezier(.34,1.56,.64,1);
+  transition:transform .16s ease-out,border-color .16s ease-out,box-shadow .16s ease-out;}
+.ask-pill:hover{border-color:var(--hover-outline);transform:translateY(-2px) scale(1.04);box-shadow:var(--shadow-sheet);}
+.ask-pill:active{transform:scale(.94);}
 .ask-pill:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 .ask-pill[hidden]{display:none;}
-/* "Thinking" on the collapsed pill: the label shimmers, the same sweep the live
-   thinking row paints on .ask-thinking-label (gradient clipped to the glyphs,
-   swept by the shared ask-shimmer keyframes). At rest the label needs no rule:
-   the pill's own color/weight paint it. Toggled with the .is-live class by
-   ask-panel.mjs updateSendStop(), alongside the mark<->orb morph below. */
-.ask-pill.is-live .ask-pill-label{background:linear-gradient(100deg,var(--ink-3) 0%,var(--ink-3) 34%,var(--ink) 50%,var(--ink-3) 66%,var(--ink-3) 100%);
-  background-size:220% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:ask-shimmer 2.4s linear infinite;}
-.ask-pill-logo{width:22px;height:22px;border-radius:50%;display:inline-block;flex:0 0 auto;background:var(--ink);
+@keyframes ask-pill-pop{from{opacity:0;transform:scale(.6)}to{opacity:1;transform:scale(1)}}
+.ask-pill-label{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+  clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0;}
+/* "Thinking" on the collapsed button: a thin violet conic ring turns round it while the mark morphs into the orb
+   (below). Toggled with the .is-live class by ask-panel.mjs updateSendStop(). It fades in on the morph's .52s and
+   out on its .8s; a transition reads its timing from the AFTER-change style, so the live rule carries the first. */
+.ask-pill::before{content:"";position:absolute;inset:-3.5px;border-radius:50%;pointer-events:none;opacity:0;
+  background:conic-gradient(from 0deg,transparent 0%,var(--violet) 100%);
+  -webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),var(--ink) calc(100% - 1.5px));
+  mask:radial-gradient(farthest-side,transparent calc(100% - 2px),var(--ink) calc(100% - 1.5px));
+  transition:opacity .8s cubic-bezier(.22,1,.36,1);}
+.ask-pill.is-live::before{opacity:1;transition-duration:.52s;animation:ask-ring 1.6s linear infinite;}
+@keyframes ask-ring{to{transform:rotate(360deg)}}
+/* The unread dot: a turn ended while the sheet was closed (.has-unread, ask-panel.mjs). Scales in once. */
+.ask-pill.has-unread::after{content:"";position:absolute;top:1px;right:1px;width:10px;height:10px;border-radius:50%;
+  background:var(--violet);box-shadow:0 0 0 2px var(--panel);animation:ask-dot-in .24s cubic-bezier(.34,1.56,.64,1);}
+@keyframes ask-dot-in{from{transform:scale(0)}to{transform:scale(1)}}
+/* The tooltip: left of the button, vertically centred on it (8px gap). Shown by ask-panel.mjs (.is-shown): after a
+   400ms hover, at once on keyboard focus. Touch devices never show it. */
+.ask-tip{position:absolute;right:calc(24px + 48px + 8px);bottom:calc(24px + 24px + env(safe-area-inset-bottom,0px));
+  display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:var(--r-ctrl);
+  background:var(--ink);color:var(--panel);font:500 12.5px/1.2 var(--sans);white-space:nowrap;
+  opacity:0;pointer-events:none;transform:translate(4px,50%);
+  transition:opacity .12s ease-out,transform .12s ease-out;}
+.ask-tip.is-shown{opacity:1;transform:translate(0,50%);}
+.ask-tip .ask-kbd{background:var(--panel);color:var(--ink);}
+@media (hover:none){.ask-tip{display:none;}}
+@media (max-width:760px){
+  .ask-pill{right:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px));}
+  .ask-tip{right:calc(16px + 48px + 8px);bottom:calc(16px + 24px + env(safe-area-inset-bottom,0px));}
+}
+.ask-pill-logo{width:26px;height:26px;border-radius:50%;display:inline-block;flex:0 0 auto;background:var(--ink);
   -webkit-mask:url(/assets/worca-mark-mask.png) center/contain no-repeat;-webkit-mask-mode:luminance;
   mask:url(/assets/worca-mark-mask.png) center/contain no-repeat;mask-mode:luminance;}
 /* The mark slot: the masked logo and the pill's own thinking orb stacked in one
-   22px host. A CSS mask clips children, so the orb is a SIBLING of the masked
-   span, absolutely stacked on it; the host is what the pill's flex row sizes,
-   so the label and the kbd never move. The morph between them is these
+   26px host. A CSS mask clips children, so the orb is a SIBLING of the masked
+   span, absolutely stacked on it; the host is what the button's flex centring
+   sizes, so nothing moves. The morph between them is these
    transitions, keyed off .is-live: lighting shrinks and fades the mark while
    the orb fades in (.52s — the canvas grows its dots out of the centre on the
    same clock, thinking-orb morphTo, so no CSS scale on the orb: a scaled
@@ -5272,7 +5360,7 @@ body.term-open .toasts{right:calc(var(--term-w,460px) + 20px);}
    morph-back one. Under prefers-reduced-motion the `*{transition:none}`
    blanket makes this an instant swap and the orb snaps its tween too; no rule
    of its own is needed. */
-.ask-pill-mark{position:relative;width:22px;height:22px;flex:0 0 auto;display:inline-block;line-height:0;}
+.ask-pill-mark{position:relative;width:26px;height:26px;flex:0 0 auto;display:inline-block;line-height:0;}
 .ask-pill-mark>.ask-pill-logo{position:absolute;inset:0;
   transition:opacity .8s cubic-bezier(.22,1,.36,1),transform .8s cubic-bezier(.22,1,.36,1);}
 .ask-pill-mark>.ask-orb{position:absolute;inset:0;opacity:0;transition:opacity .8s cubic-bezier(.22,1,.36,1);}
@@ -5376,7 +5464,10 @@ body.term-open .toasts{right:calc(var(--term-w,460px) + 20px);}
    this only restores a legible fill under the clipped background. */
 @media (prefers-reduced-motion: reduce){
   .ask-thinking-label{background:none;-webkit-background-clip:border-box;background-clip:border-box;color:var(--ink-2);}
-  .ask-pill.is-live .ask-pill-label{background:none;-webkit-background-clip:border-box;background-clip:border-box;color:var(--ink-2);}
+  /* Pseudo-elements do not inherit the dock blanket's `animation:none`, so the ring and the dot are named: the
+     states still show, as a static violet ring and a dot, without movement. */
+  .ask-pill.is-live::before{animation:none;transition:none;background:var(--violet);}
+  .ask-pill.has-unread::after{animation:none;}
 }
 .ask-tool-row{display:flex;align-items:center;gap:9px;min-width:0;}
 .ask-tool-op{width:38px;flex:0 0 38px;font-family:var(--mono);font-size:10px;letter-spacing:.06em;
@@ -5821,6 +5912,8 @@ body.term-open .toasts{right:calc(var(--term-w,460px) + 20px);}
 .ask-pop-mcp .switch:disabled{opacity:.5;cursor:not-allowed;}
 .ask-mcp-member.is-skipped .ask-model-name{font-family:var(--mono);font-size:12px;color:var(--ink-3);}
 .ask-mcp-member.is-problem .ask-pop-row-value{color:var(--amber-ink);}
+/* Skills registry §6.8: a level-1 set row's "2 servers · 1 skill · pinned" line under the set name. */
+.ask-pop-mcp .ask-model-name small{display:block;font-size:11.5px;font-weight:400;color:var(--ink-3);}
 .ask-notice-mcp{padding:0;border:0;background:none;color:var(--blue-ink);font:inherit;cursor:pointer;}
 /* Context popover (ask-panel.mjs buildCtxPopover): the window's fill, the chat's topics, agents and
    worktrees. Above the ring (JS sets its right edge); capped, it scrolls when the lists run long. */
@@ -6018,6 +6111,37 @@ body.term-open .toasts{right:calc(var(--term-w,460px) + 20px);}
 .ask-rc-banner[hidden]{display:none;}
 .ask-rc-reason{margin-top:10px;font-size:12px;color:var(--red-ink);}
 .ask-rc-reason[hidden]{display:none;}
+
+/* Ask agent mode (issue 574): one command Ask ran (ask-command-card.mjs). Tokens only, so light and dark both work. */
+.ask-card.ask-cmd{gap:8px;padding:12px 15px;border-width:1px;animation:wr-rise .2s cubic-bezier(.2,.7,.3,1) both;}
+.ask-cmd>*{min-width:0;}
+.ask-cmd-head{display:flex;align-items:center;gap:8px;min-height:28px;}
+.ask-cmd-kicker{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;background:var(--violet-bg);color:var(--violet-ink);white-space:nowrap;}
+.ask-cmd-pill{display:inline-flex;align-items:center;height:22px;padding:0 9px;border-radius:999px;font-family:var(--mono);font-size:11px;font-weight:700;white-space:nowrap;}
+.ask-cmd-pill.st-peach{background:var(--peach-bg);color:var(--h-peach-ink);}
+.ask-cmd-pill.st-green{background:var(--green-bg);color:var(--h-green-ink);}
+.ask-cmd-pill.st-red{background:var(--red-bg);color:var(--red-ink);}
+.ask-cmd-pill.st-amber{background:var(--amber-bg);color:var(--amber-ink);}
+.ask-cmd.is-live .ask-cmd-pill{animation:dotpulse 1.3s ease-in-out infinite;}
+.ask-cmd-folder{min-width:0;padding:0;border:0;background:none;color:var(--ink-2);font:inherit;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;}
+.ask-cmd-folder:hover{color:var(--ink);text-decoration:underline;}
+.ask-cmd-folder:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.ask-cmd-stop{display:inline-flex;align-items:center;height:28px;padding:0 12px;border:0;border-radius:999px;background:var(--ink);color:var(--panel);font:inherit;font-weight:600;font-size:12px;white-space:nowrap;cursor:pointer;transition:.15s;}
+.ask-cmd-stop:hover{box-shadow:inset 0 0 0 999px var(--solid-hover);}
+.ask-cmd-stop:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+.ask-cmd-stop:disabled{opacity:.5;cursor:default;}
+.ask-cmd-stop[hidden]{display:none;}
+.ask-cmd-line{font-family:var(--mono);font-size:12px;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere;}
+.ask-cmd-warning{padding:7px 10px;border-left:3px solid var(--amber-line);border-radius:6px;background:var(--field);color:var(--ink);font-size:12px;}
+.ask-cmd-warning[hidden]{display:none;}
+.ask-cmd-out{margin:0;max-height:16em;overflow:auto;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r-ctrl);background:var(--field);color:var(--ink);font-family:var(--mono);font-size:11.5px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere;}
+.ask-cmd-out[hidden]{display:none;}
+/* The composer's Agent switch: the shared .switch, scaled to the 30px pill. */
+.ask-agent-btn[hidden]{display:none;}
+.ask-agent-btn .switch{width:26px;height:16px;flex:none;cursor:inherit;}
+.ask-agent-btn .switch::after{top:2px;left:2px;width:12px;height:12px;}
+.ask-agent-btn .switch.on::after{left:12px;}
+.ask-agent-btn[aria-pressed="true"]{color:var(--ink);}
 .ask-rc-graph{position:relative;margin-top:14px;min-height:120px;overflow:hidden;border:1px solid var(--line);border-radius:12px;cursor:pointer;
   background:var(--canvas-2) radial-gradient(circle,var(--line-2) 1.1px,transparent 1.1px);background-size:22px 22px;transition:height .24s cubic-bezier(.2,.7,.3,1);}
 .ask-rc-graph[hidden]{display:none;}
@@ -7332,6 +7456,10 @@ input.gv-name:focus-visible{outline:none;}
 .run-flow.gv-host .wbadge .wfired{display:inline-block;margin:0;padding:1px 7px;border-radius:999px;background:var(--amber-bg);color:var(--amber-ink);border:1px solid var(--amber);font:700 10px/1.4 var(--mono);}
 /* History: node click drives the Logs tab */
 .hd-graph.linked .gv-world .node[data-node-id]{cursor:pointer;}
+/* Running: a card that has run opens its live log (mountRunGraph nodeClicks) */
+/* (an attribute, not a class: the contrast baselines key on a node's class list) */
+.run-flow.gv-host .gv-world .node[role="link"]{cursor:pointer;}
+.run-flow.gv-host .gv-world .node[role="link"]:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
 /* quiescence banner (.rd-banners / .hd-banners / History Overview note) */
 .run-warn{margin:0;padding:11px 15px;border-radius:var(--r-card);background:var(--amber-bg);color:var(--amber-ink);font-size:12.5px;font-weight:600;border:1px solid color-mix(in srgb, var(--amber) 45%, transparent);align-self:stretch;}
 .run-warn[hidden]{display:none;}
@@ -7729,6 +7857,8 @@ input.gv-name:focus-visible{outline:none;}
 .tp-publish-bar{display:flex;align-items:center;gap:12px;}
 .tp-publish-bar .grow{flex:1;font-size:12.5px;color:var(--ink-2);}
 .tp-json{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);padding:14px 16px;font-size:12px;line-height:1.5;overflow-x:auto;margin:0;}
+/* The Turn on skill dialog's SKILL.md (skills registry spec §6 board 10): the text, wrapped, scrolling inside the dialog. */
+.tp-skill-md{background:var(--field);border-radius:12px;padding:12px 14px;margin:14px 0 0;font-size:11.5px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;}
 .tp-msg{white-space:pre-wrap;}
 @media (max-width:900px){ .tp-edit-row{grid-template-columns:1fr;} }
 /* workspace card line (board 6) */
@@ -7860,6 +7990,49 @@ input.gv-name:focus-visible{outline:none;}
 .mcp-res-skip{color:var(--amber-ink);}
 .mcp-resolution,.mcp-proj-sets{margin-bottom:14px;}
 @media (max-width:760px){.mcp-sets{grid-template-columns:1fr;}}
+
+/* Settings › Sets: skills (mcp-view.mjs, skill-import.mjs; docs/skills.md). Layout only: cards, chips, badges,
+   switches and buttons are the shared ones, and every colour is a theme token, so light and dark both hold. */
+.sk-row{padding:14px 18px;}
+.sk-member{padding:14px 16px;margin-top:10px;}
+.sk-member .pl-enable{margin-left:0;}
+.sk-title{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-width:0;}
+.sk-title .hint{margin-top:0;}
+.sk-prefix{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.sk-facts .badge{margin-left:8px;}
+.sk-row .mono,.sk-member .mono,.sk-import-form .mono,.sk-pick .mono,.sk-update .mono,.sk-resolution .mono,.sk-members .mono,.sk-chip .mono{font-family:var(--mono);}
+.sk-drawer{margin-top:12px;background:var(--field);border-radius:12px;padding:12px 14px;}
+.sk-drawer-head{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--ink-2);margin-bottom:8px;}
+.sk-md{margin:0;font-family:var(--mono);font-size:11.5px;line-height:1.55;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;}
+.sk-tree{display:flex;flex-direction:column;gap:2px;margin-top:8px;max-height:280px;overflow:auto;}
+.sk-tree-row,.sk-delta{display:flex;align-items:center;gap:10px;padding:3px 0;font-size:12px;flex-wrap:wrap;row-gap:4px;}
+.sk-tree-row .mono,.sk-delta .mono{min-width:0;overflow-wrap:anywhere;}
+.sk-tree-row .sz{margin-left:auto;color:var(--ink-3);font-variant-numeric:tabular-nums;white-space:nowrap;}
+.sk-delta.err .mono{color:var(--red-ink);}
+.sk-delta.warn .mono{color:var(--amber-ink);}
+.sk-pick{display:flex;flex-direction:column;max-height:min(52vh,420px);overflow:auto;}
+.sk-pick-row{display:flex;align-items:center;gap:10px;padding:9px 4px;border-bottom:1px solid var(--line);font-size:13px;}
+.sk-pick-row:last-child{border-bottom:0;}
+.sk-pick-row.greyed{color:var(--ink-3);}
+.sk-pick-row .hint{margin:0 0 0 auto;}
+.sk-pick-row input{margin:0;accent-color:var(--ink);}
+.sk-import-form .seg{margin-bottom:16px;flex-wrap:wrap;}
+.sk-row-input{display:flex;gap:8px;align-items:center;}
+.sk-row-input .input{flex:1 1 auto;min-width:0;}
+.sk-preview{background:var(--field);border-radius:12px;padding:14px 16px;margin-top:10px;}
+.sk-preview .pl-head{margin-bottom:6px;}
+.sk-consent{margin-top:14px;padding:12px 14px;background:var(--field);border-radius:12px;font-size:13px;color:var(--ink-2);}
+.sk-consent b{color:var(--ink);font-weight:600;}
+.sk-consent-note{margin:6px 0 0;}
+.sk-consent-note.err{color:var(--red-ink);}
+.sk-res-group{margin-top:16px;}
+.sk-res-group > .label{display:block;margin-bottom:6px;}
+.sk-res-head{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr) minmax(0,.7fr) minmax(0,1.6fr);gap:12px;padding:0 0 6px;
+  font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);}
+.mcp-res-row.sk-from{grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr) minmax(0,.7fr) minmax(0,1.6fr);}
+.sk-kind{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;
+  background:var(--blue-bg);color:var(--blue-ink-strong);}
+@media (max-width:760px){.mcp-res-row.sk-from,.sk-res-head{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}}
 
 /* ── Actions (issue #529): run checkouts, project actions, the running-services surfaces ── */
 .tab-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-left:6px;vertical-align:middle}

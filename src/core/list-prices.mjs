@@ -4,9 +4,11 @@
 // credential broker (src/broker/usage.mjs: per-person budgets) price from one table.
 //
 // From Anthropic's published pricing (platform.claude.com/docs/en/pricing — snapshot
-// 2026-06-24; Opus 5.5 added 2026-09-22, Sonnet 5.5 2026-09-28). `[1m]` twins and
-// dated ids resolve to their base row (the long-context premium is not modelled).
-// cacheWrite = 1.25× input (5-minute TTL), cacheWrite1h = 2× input, cacheRead =
+// 2026-06-24; Opus 5.5 added 2026-09-22, Sonnet 5.5 2026-09-28, Haiku 5.5 2026-10-07).
+// `[1m]` twins and dated ids resolve to their base row (the long-context premium is
+// not modelled). Haiku 5.5 is priced by prompt length; its row is the prompts-up-to-
+// 100k tier, and prompts over 100k (5× every rate: $0.50 / $2.50) are under-priced
+// here. cacheWrite = 1.25× input (5-minute TTL), cacheWrite1h = 2× input, cacheRead =
 // 0.1× input except Fable 5.1 (0.025×) and Opus 5.5 (0.05×). Refresh by hand when
 // Anthropic moves a price.
 export const PREDEFINED_LIST_PRICES = Object.freeze({
@@ -19,6 +21,7 @@ export const PREDEFINED_LIST_PRICES = Object.freeze({
   'claude-sonnet-5-5': { input: 2,  output: 10, cacheRead: 0.2,  cacheWrite: 2.5,  cacheWrite1h: 4 },
   'claude-sonnet-5':   { input: 2,  output: 10, cacheRead: 0.2,  cacheWrite: 2.5,  cacheWrite1h: 4 },
   'claude-sonnet-4-6': { input: 3,  output: 15, cacheRead: 0.3,  cacheWrite: 3.75, cacheWrite1h: 6 },
+  'claude-haiku-5-5':  { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125, cacheWrite1h: 0.2 },
   'claude-haiku-4-5':  { input: 1,  output: 5,  cacheRead: 0.1,  cacheWrite: 1.25, cacheWrite1h: 2 },
 });
 

@@ -1,0 +1,73 @@
+name: Bug report
+description: Something in Worca doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Found a security problem? Don't file it here: email security@worca.dev, as the [security policy](https://github.com/SinishaDjukic/worca-cc/security/policy) describes.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start a run with …
+        2. Open …
+        3. See …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Worca version
+      description: The output of `worca --version`.
+      placeholder: worca 1.9.0
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How Worca runs
+      options:
+        - npm install
+        - Docker
+        - Hosted (Railway or similar)
+        - Mock mode (WORCA_MOCK=1)
+        - From source
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: macOS 26, Ubuntu 24.04, Windows 11 …
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      description: The output of `node --version`.
+  - type: input
+    id: claude
+    attributes:
+      label: Claude Code version
+      description: The output of `claude --version`.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Terminal output, server log or the run's log. It is shown as code.
+      render: shell
+  - type: checkboxes
+    id: secrets
+    attributes:
+      label: Before you submit
+      options:
+        - label: I removed secrets, keys and tokens from everything I pasted.
+          required: true

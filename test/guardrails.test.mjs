@@ -108,12 +108,19 @@ test('preset table snapshot — changing a preset is a deliberate, release-noted
     honorProjectSettings: true,
     envScrub: false,
     envAllowlist: [],
-    protectedPaths: ['.env*', '*.pem', '*.key', 'id_rsa', 'id_ed25519', '*.p12', '*.pfx', '//run/secrets/**'],
+    protectedPaths: [
+      '.env*', '*.pem', '*.key', 'id_rsa', 'id_ed25519', '*.p12', '*.pfx', '//run/secrets/**',
+      '//**/worca-cc.db*', '//**/worca.db*', '//**/.worca-cc/plugins/*/data/secrets.json',
+      '//**/.worca-cc/settings.json', '//**/.worca-cc/mcp/**',
+    ],
     deny: [
       'Bash(git push)', 'Bash(git push:*)',
       'Bash(npm publish)', 'Bash(npm publish:*)',
       'Bash(yarn publish)', 'Bash(yarn publish:*)',
       'Bash(pnpm publish)', 'Bash(pnpm publish:*)',
+      'Edit(//**/.worca-cc/plugins/**)', 'Edit(//**/.worca-cc/scripts/**)',
+      'Edit(//**/.worca-cc/agents/**)', 'Edit(//**/.worca-cc/workflows/**)',
+      'Edit(//**/.worca-cc/policy/**)',
     ],
   });
   assert.deepEqual(GUARDRAIL_PRESETS.secure, {
@@ -122,16 +129,22 @@ test('preset table snapshot — changing a preset is a deliberate, release-noted
     envAllowlist: [],
     protectedPaths: [
       '.env*', '*.pem', '*.key', 'id_rsa', 'id_ed25519', '*.p12', '*.pfx', '//run/secrets/**',
+      '//**/worca-cc.db*', '//**/worca.db*', '//**/.worca-cc/plugins/*/data/secrets.json',
+      '//**/.worca-cc/settings.json', '//**/.worca-cc/mcp/**',
       '.npmrc', '.netrc', '*.tfstate*', '*.keystore', '*.jks',
       '**/secrets/**', '**/.git/config', '~/.git-credentials',
       '~/.ssh/**', '~/.aws/**', '~/.config/gcloud/**', '~/.kube/**', '~/.config/gh/**',
       '~/.npmrc', '~/.netrc', '~/.docker/config.json',
+      '~/.claude/.credentials.json', '~/.gnupg/**',
     ],
     deny: [
       'Bash(git push)', 'Bash(git push:*)',
       'Bash(npm publish)', 'Bash(npm publish:*)',
       'Bash(yarn publish)', 'Bash(yarn publish:*)',
       'Bash(pnpm publish)', 'Bash(pnpm publish:*)',
+      'Edit(//**/.worca-cc/plugins/**)', 'Edit(//**/.worca-cc/scripts/**)',
+      'Edit(//**/.worca-cc/agents/**)', 'Edit(//**/.worca-cc/workflows/**)',
+      'Edit(//**/.worca-cc/policy/**)',
       'Bash(curl)', 'Bash(curl:*)', 'Bash(wget)', 'Bash(wget:*)',
       'Bash(nc)', 'Bash(nc:*)', 'Bash(ncat)', 'Bash(ncat:*)', 'Bash(netcat)', 'Bash(netcat:*)',
       'Bash(telnet)', 'Bash(telnet:*)',
@@ -140,6 +153,13 @@ test('preset table snapshot — changing a preset is a deliberate, release-noted
       'Bash(gh)', 'Bash(gh:*)',
       'Bash(docker push)', 'Bash(docker push:*)',
       'Bash(aws)', 'Bash(aws:*)', 'Bash(gcloud)', 'Bash(gcloud:*)', 'Bash(az)', 'Bash(az:*)',
+      'Bash(git clone)', 'Bash(git clone:*)', 'Bash(git fetch)', 'Bash(git fetch:*)',
+      'Bash(git pull)', 'Bash(git pull:*)', 'Bash(git ls-remote)', 'Bash(git ls-remote:*)',
+      'Bash(git remote add)', 'Bash(git remote add:*)', 'Bash(git remote set-url)', 'Bash(git remote set-url:*)',
+      'Bash(dig)', 'Bash(dig:*)', 'Bash(nslookup)', 'Bash(nslookup:*)',
+      'Bash(socat)', 'Bash(socat:*)',
+      'Bash(openssl s_client)', 'Bash(openssl s_client:*)',
+      'Bash(aria2c)', 'Bash(aria2c:*)', 'Bash(lynx)', 'Bash(lynx:*)', 'Bash(w3m)', 'Bash(w3m:*)',
       'WebFetch', 'WebSearch',
     ],
   });
@@ -149,6 +169,55 @@ test('preset table snapshot — changing a preset is a deliberate, release-noted
   }
   // Presets are deep-frozen — mutation attempts throw or no-op, never corrupt the table.
   assert.throws(() => { GUARDRAIL_PRESETS.normal.deny.push('Bash(x)'); }, TypeError);
+});
+
+test('Strict denies the extra egress commands (exact+prefix); Normal denies none', () => {
+  const cmds = [
+    'git clone', 'git fetch', 'git pull', 'git ls-remote', 'git remote add', 'git remote set-url',
+    'dig', 'nslookup', 'socat', 'openssl s_client', 'aria2c', 'lynx', 'w3m',
+  ];
+  for (const c of cmds) {
+    assert.ok(GUARDRAIL_PRESETS.secure.deny.includes(`Bash(${c})`), `secure denies Bash(${c})`);
+    assert.ok(GUARDRAIL_PRESETS.secure.deny.includes(`Bash(${c}:*)`), `secure denies Bash(${c}:*)`);
+    assert.ok(!GUARDRAIL_PRESETS.normal.deny.includes(`Bash(${c})`), `normal must not deny Bash(${c})`);
+    assert.ok(!GUARDRAIL_PRESETS.normal.deny.includes(`Bash(${c}:*)`), `normal must not deny Bash(${c}:*)`);
+  }
+});
+
+test('Strict leaves local git, interpreters and installs usable', () => {
+  for (const r of ['Bash(git)', 'Bash(git:*)', 'Bash(node:*)', 'Bash(python:*)', 'Bash(npm install:*)']) {
+    assert.ok(!GUARDRAIL_PRESETS.secure.deny.includes(r), `secure must not deny ${r}`);
+  }
+});
+
+test('worca state: DB/secrets/MCP are Read+Edit denied; plugins etc. are Edit-only', () => {
+  const rules = guardrailsToPermissionRules(GUARDRAIL_PRESETS.normal).deny;
+  for (const r of ['Read(//**/worca-cc.db*)', 'Edit(//**/.worca-cc/mcp/**)', 'Edit(//**/.worca-cc/plugins/**)']) {
+    assert.ok(rules.includes(r), `${r} present`);
+  }
+  const pluginReads = rules.filter((r) => r.startsWith('Read(') && r.includes('.worca-cc/plugins'));
+  assert.deepEqual(pluginReads, ['Read(//**/.worca-cc/plugins/*/data/secrets.json)'], 'plugins stay readable except their secrets');
+});
+
+test('worca state: runs/store/memory and ~/.claude/** are deliberately not denied', () => {
+  for (const level of ['normal', 'secure']) {
+    const rules = guardrailsToPermissionRules(GUARDRAIL_PRESETS[level]).deny;
+    for (const r of rules) {
+      assert.ok(!/\.worca-cc\/(runs|store|memory)/.test(r), `${level}: ${r}`);
+      assert.notEqual(r, '~/.claude/**');
+      assert.notEqual(r, 'Read(~/.claude/**)');
+    }
+  }
+});
+
+test('worca state: plugin secrets are protected by exact path, not a blanket secrets.json match', () => {
+  // run worktrees live under <home>/runs/<id>/, so a `.worca-cc/**/secrets.json`
+  // glob would also deny a project's own secrets.json file.
+  for (const level of ['normal', 'secure']) {
+    const paths = GUARDRAIL_PRESETS[level].protectedPaths;
+    assert.ok(paths.includes('//**/.worca-cc/plugins/*/data/secrets.json'), `${level}: plugin secrets path`);
+    assert.ok(!paths.includes('//**/.worca-cc/**/secrets.json'), `${level}: no blanket secrets.json glob`);
+  }
 });
 
 test('legacy-parity chain: unset and permissive both resolve to the empty policy', () => {

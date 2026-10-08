@@ -47,6 +47,19 @@ test('GET /api/fs/dirs lists only visible subdirectories', async () => {
   assert.equal(j.parent, homeDir);
 });
 
+test('GET /api/fs/dirs in local mode lists any folder, unlimited (the hosted limit does not apply)', async () => {
+  const outside = await mkdtemp(join(tmpdir(), 'worca-cc-fsapi-out-'));
+  try {
+    await mkdir(join(outside, 'elsewhere'));
+    const r = await fetch(`${base}/api/fs/dirs?path=${encodeURIComponent(outside)}`);
+    assert.equal(r.status, 200);
+    const j = await r.json();
+    assert.deepEqual(j.dirs.map((d) => d.name), ['elsewhere']);
+    assert.equal(j.limited, undefined);
+    assert.equal(j.roots, undefined);
+  } finally { await rm(outside, { recursive: true, force: true }); }
+});
+
 test('GET /api/fs/dirs rejects a missing path with 400 + error envelope', async () => {
   const r = await fetch(`${base}/api/fs/dirs?path=${encodeURIComponent(join(fixture, 'nope'))}`);
   assert.equal(r.status, 400);

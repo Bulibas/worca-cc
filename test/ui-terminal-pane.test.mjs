@@ -14,15 +14,16 @@ function fakeXterm() {
   const made = {};
   class Terminal {
     constructor(o) { this.options = { ...o }; this.cols = 80; this.rows = 24; made.options = this.options; }
-    loadAddon() {} open(el) { made.openedIn = el; } focus() {} dispose() {}
-    write(d) { writes.push(d); } reset() { writes.length = 0; }
+    loadAddon() {} open(el) { made.openedIn = el; } focus() { made.focus = (made.focus || 0) + 1; } dispose() {}
+    write(d, cb) { writes.push(d); made.log?.push(`write:${d}`); if (cb) { if (made.held) made.held.push(cb); else cb(); } } reset() { writes.length = 0; }
+    resize(c, r) { this.cols = c; this.rows = r; made.log?.push(`resize:${c}x${r}`); }
     onData(cb) { onKeys = cb; return { dispose() {} }; }
   }
-  class FitAddon { fit() {} }
+  class FitAddon { fit() { made.log?.push('fit'); } }
   return { load: async () => ({ Terminal, FitAddon }), writes, made, type: (d) => onKeys(d) };
 }
 
-function makePane({ ctx, routes, url = 'http://localhost:4317/', env = {}, beforeCreate = null }) {
+function makePane({ ctx, routes, url = 'http://localhost:4317/', env = {}, beforeCreate = null, confirm = null }) {
   const dom = new JSDOM('<!doctype html><body></body>', { url });
   if (beforeCreate) beforeCreate(dom.window);
   env.ctx ??= ctx;
@@ -41,7 +42,7 @@ function makePane({ ctx, routes, url = 'http://localhost:4317/', env = {}, befor
   // Like app.js: false while /ws is down, and then nothing is sent.
   const sendWs = (m) => { if (!env.online) return false; sent.push(m); return true; };
   const pane = createTerminalPane({ doc: dom.window.document, win: dom.window, fetch, sendWs,
-    getPageContext: () => env.ctx, storage: null, loadXterm: xt.load });
+    getPageContext: () => env.ctx, confirm, storage: null, loadXterm: xt.load });
   dom.window.document.body.append(pane.root);
   return { pane, doc: dom.window.document, sent, calls, xt, env };
 }
@@ -356,6 +357,72 @@ test('the tabs: this page\'s open terminals, then a small (+) tab; other pages\'
   assert.deepEqual(tabTexts(doc), ['r1 · app', 'New terminal'], 'an ended terminal that is not attached leaves');
 });
 
+const deletes = (calls) => calls.filter((c) => c.method === 'DELETE').map((c) => c.url);
+
+test('a tab\'s × closes an unused terminal without asking and hands over to the page\'s next one', async () => {
+  const T2 = { ...SNAP, id: 't-2', commands: 0, createdAt: '2026-10-03T11:00:00.000Z' };
+  const asked = [];
+  const { pane, doc, sent, calls } = makePane({ ctx: RUN_CTX, confirm: async (o) => { asked.push(o); return true; }, routes: attachedRoutes({
+    'GET /api/terminal': { ...INFO, sessions: [SNAP, T2] },
+    'DELETE /api/terminal/sessions/t-2': { ok: true },
+  }) });
+  await pane.open();
+  await tick();
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-2', 'the newest is attached');
+  assert.deepEqual([...doc.querySelectorAll('.term-tab-close')].map((b) => b.getAttribute('aria-label')), ['Close r1 · app', 'Close r1 · app 2']);
+  doc.querySelectorAll('.term-tab-close')[1].click();
+  await tick();
+  assert.equal(asked.length, 0, 'no command ran there: no question');
+  assert.deepEqual(deletes(calls), ['/api/terminal/sessions/t-2']);
+  assert.ok(sent.some((m) => m.type === 'term-detach' && m.sessionId === 't-2'));
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-1');
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'New terminal']);
+  pane.onFrame({ type: 'term-status', snapshot: { ...T2, status: 'closed' } });
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'New terminal']);
+});
+
+test('a tab\'s × on a terminal that ran a command asks first; No keeps it, Yes closes it and offers Enter', async () => {
+  const used = { ...SNAP, commands: 2, currentBlock: { seq: 2, command: 'npm test' } };
+  let answer = false;
+  const asked = [];
+  const { pane, doc, calls, xt } = makePane({ ctx: RUN_CTX, confirm: async (o) => { asked.push(o); return answer; }, routes: attachedRoutes({
+    'GET /api/terminal': { ...INFO, sessions: [used] },
+    'GET /api/runs/r1/terminal': { enabled: true, live: true, workspace: false, sessions: [used], members: MEMBERS },
+    'DELETE /api/terminal/sessions/t-1': { ok: true },
+  }) });
+  await pane.open();
+  await tick();
+  doc.querySelector('.term-tab-close').click();
+  await tick();
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].danger, undefined, 'nothing is lost: a plain button, not a red one');
+  assert.match(asked[0].message, /2 commands have run in r1 · app/);
+  assert.match(asked[0].message, /npm test is still running/);
+  assert.deepEqual(deletes(calls), [], 'No: nothing is closed');
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'New terminal']);
+  answer = true;
+  doc.querySelector('.term-tab-close').click();
+  await tick();
+  assert.deepEqual(deletes(calls), ['/api/terminal/sessions/t-1']);
+  assert.deepEqual(tabTexts(doc), ['New terminal']);
+  assert.match(xt.writes.join(''), /terminal closed — press Enter for a new one/);
+  assert.equal(posts(calls).length, 0, 'no new shell unasked');
+});
+
+test('a failed close keeps the tab attached and says why', async () => {
+  const { pane, doc, sent } = makePane({ ctx: RUN_CTX, routes: attachedRoutes({
+    'DELETE /api/terminal/sessions/t-1': { __status: 404, error: 'No running terminal with that id.' },
+  }) });
+  await pane.open();
+  await tick();
+  doc.querySelector('.term-tab-close').click();
+  await tick();
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'New terminal']);
+  assert.equal(doc.querySelector('.term-tab[aria-selected="true"]').textContent, 'r1 · app');
+  assert.ok(!sent.some((m) => m.type === 'term-detach'));
+  assert.match(doc.querySelector('.term-error').textContent, /No running terminal/);
+});
+
 test('the (+) tab starts another shell in the same folder and attaches it; a tab click switches back', async () => {
   const T2 = { ...SNAP, id: 't-2', createdAt: '2026-10-03T11:00:00.000Z' };
   const { pane, doc, sent, calls } = makePane({ ctx: RUN_CTX, routes: attachedRoutes({ 'POST /api/runs/r1/terminal': { session: T2, warning: null } }) });
@@ -633,4 +700,136 @@ test('hiding and reopening the pane after the shell exited starts one new shell 
   await tick();
   assert.equal(posts(calls).length, 1);
   assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-2');
+});
+
+test('an Ask session on this run (agent mode, #574) is an ordinary tab with its own label', async () => {
+  const { pane, doc } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
+  await pane.open();
+  await tick();
+  pane.onFrame({ type: 'term-status', snapshot: { ...SNAP, id: 't-a', label: 'Ask · Fix tests · demo · main', createdBy: 'ask:ask_0000aaaa',
+    createdAt: '2026-10-03T11:00:00.000Z' } });
+  assert.deepEqual(tabTexts(doc), ['r1 · app', 'Ask · Fix tests · demo · main', 'New terminal']);
+});
+
+// ── shared terminal: Ask's tabs everywhere, the pane follows Ask, a card shows its tab ──────────────────────
+const ASK = { ...SNAP, id: 't-a', scope: 'project', runId: null, member: null, projectKey: 'demo-0000bbbb', label: 'Ask · Fix tests · demo · main',
+  createdBy: 'ask:ask_0000aaaa', createdAt: '2026-10-03T11:00:00.000Z', cwd: '/w/demo' };
+const PROJ_CTX = { view: 'project-detail', projectKey: 'app-0000aaaa' };
+const PROJ_SNAP = { ...SNAP, id: 't-p', scope: 'project', runId: null, member: null, projectKey: 'app-0000aaaa', label: 'app', cwd: '/p/app' };
+
+test('Ask\'s tabs show on every page, next to the page\'s own shell, which the page still starts', async () => {
+  const { pane, doc, calls, sent } = makePane({ ctx: PROJ_CTX, routes: {
+    'GET /api/terminal': { ...INFO, sessions: [ASK] },
+    'GET /api/projects/app-0000aaaa/terminal': { enabled: true, dir: '/p/app', sessions: [] },
+    'POST /api/projects/app-0000aaaa/terminal': { session: PROJ_SNAP, warning: null },
+  } });
+  await pane.open();
+  await tick();
+  assert.equal(posts(calls).length, 1, 'the project\'s own shell starts: an Ask tab is not this page\'s shell');
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-p');
+  assert.deepEqual(tabTexts(doc), ['app', 'Ask · Fix tests · demo · main', 'New terminal']);
+  const run = makePane({ ctx: RUN_CTX, routes: attachedRoutes({ 'GET /api/terminal': { ...INFO, sessions: [SNAP, ASK] } }) });
+  await run.pane.open();
+  await tick();
+  assert.deepEqual(tabTexts(run.doc), ['r1 · app', 'Ask · Fix tests · demo · main', 'New terminal']);
+  assert.equal(run.sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-1');
+});
+
+test('the pane follows Ask: a closed pane opens on Ask\'s tab (once per chat), without taking the keyboard', async () => {
+  const { pane, doc, sent, xt } = makePane({ ctx: RUN_CTX, routes: attachedRoutes({ 'GET /api/terminal': { ...INFO, sessions: [SNAP, ASK] } }) });
+  await pane.showSession('t-a', { auto: true });
+  await tick();
+  assert.equal(pane.isOpen(), true);
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-a');
+  assert.equal(doc.querySelector('.term-tab[aria-selected="true"]').textContent, 'Ask · Fix tests · demo · main');
+  assert.equal(xt.made.focus || 0, 0, 'no focus steal');
+  await pane.onContextChange();
+  await tick();
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-a', 'a page refresh keeps Ask\'s tab');
+  pane.close();
+  await pane.showSession('t-a', { auto: true });
+  await tick();
+  assert.equal(pane.isOpen(), false, 'closed by the user after the first time: a later command of that chat does not reopen it');
+});
+
+test('the pane follows Ask while open, unless the user is typing in another tab', async () => {
+  const ASK2 = { ...ASK, id: 't-b', createdAt: '2026-10-03T12:00:00.000Z' };
+  const { pane, doc, sent } = makePane({ ctx: RUN_CTX, routes: attachedRoutes({ 'GET /api/terminal': { ...INFO, sessions: [SNAP, ASK, ASK2] } }) });
+  await pane.open();
+  await tick();
+  const ta = doc.createElement('textarea');                // xterm's own input lives in the host
+  doc.querySelector('.term-host').append(ta);
+  ta.focus();
+  await pane.showSession('t-a', { auto: true });
+  await tick();
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-1', 'typing in the run\'s shell: stays');
+  ta.blur();
+  await pane.showSession('t-b', { auto: true });
+  await tick();
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-b');
+});
+
+test('a card click (not auto) opens the pane on that tab and focuses it, even after the user closed the pane', async () => {
+  const { pane, sent, xt } = makePane({ ctx: { view: 'stats' }, routes: { 'GET /api/terminal': { ...INFO, sessions: [ASK] } } });
+  await pane.showSession('t-a', { auto: true });
+  await tick();
+  pane.close();
+  await pane.showSession('t-a');
+  await tick();
+  assert.equal(pane.isOpen(), true);
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-a');
+  assert.ok(xt.made.focus >= 1);
+  await pane.showSession('t-gone');                         // a session the server no longer has: nothing happens
+  await tick();
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-a');
+});
+
+test('moving to another page after the pane followed Ask: that page\'s own shell is attached; Ask\'s tab stays a tab', async () => {
+  const { pane, doc, sent, env } = makePane({ ctx: RUN_CTX, routes: attachedRoutes({
+    'GET /api/terminal': { ...INFO, sessions: [SNAP, ASK, PROJ_SNAP] },
+    'GET /api/projects/app-0000aaaa/terminal': { enabled: true, dir: '/p/app', sessions: [PROJ_SNAP] },
+  }) });
+  await pane.showSession('t-a', { auto: true });
+  await tick();
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-a');
+  env.ctx = PROJ_CTX;
+  pane.onContextChange();
+  await tick(12);
+  assert.equal(sent.filter((m) => m.type === 'term-attach').at(-1).sessionId, 't-p');
+  assert.deepEqual(tabTexts(doc), ['app', 'Ask · Fix tests · demo · main', 'New terminal']);
+});
+
+test('a replay is drawn at the width the shell wrote it for, then fitted to the pane (xterm reflows it)', async () => {
+  const { pane, xt } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
+  await pane.open();
+  await tick();
+  xt.made.log = [];
+  // zsh wrapped a long command at its PTY's 100 columns (` \r\e[K`): drawn at another width it erases the line start.
+  pane.onFrame({ type: 'term-replay', sessionId: 't-1', data: 'AB', seq: 2, snapshot: { ...SNAP, cols: 100, rows: 30 } });
+  assert.deepEqual(xt.made.log, ['resize:100x30', 'write:AB', 'fit']);
+  xt.made.log = [];
+  pane.onFrame({ type: 'term-replay', sessionId: 't-1', data: 'CD', seq: 3 });             // no size known: as before
+  assert.deepEqual(xt.made.log, ['write:CD']);
+});
+
+test('replay segments: each part is drawn at its own width, then the screen fits the pane', async () => {
+  const { pane, xt } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
+  await pane.open();
+  await tick();
+  xt.made.log = [];
+  pane.onFrame({ type: 'term-replay', sessionId: 't-1', data: 'AB', seq: 2, snapshot: { ...SNAP, cols: 140, rows: 40 },
+    segments: [{ cols: 100, rows: 30, data: 'A' }, { cols: 140, rows: 40, data: 'B' }] });
+  assert.deepEqual(xt.made.log, ['resize:100x30', 'write:A', 'resize:140x40', 'write:B', 'fit']);
+});
+
+test('replay segments: live data that arrives while the replay is still being drawn waits for it', async () => {
+  const { pane, xt } = makePane({ ctx: RUN_CTX, routes: attachedRoutes() });
+  await pane.open();
+  await tick();
+  xt.made.held = [];                                         // xterm has not parsed the writes yet: callbacks wait
+  pane.onFrame({ type: 'term-replay', sessionId: 't-1', data: 'AB', seq: 2, segments: [{ cols: 100, rows: 30, data: 'A' }, { cols: 140, rows: 40, data: 'B' }] });
+  pane.onFrame({ type: 'term-data', sessionId: 't-1', data: 'C', seq: 3 });
+  assert.equal(xt.writes.join(''), 'A', 'the second part waits for the first one\'s parse; the live chunk waits too');
+  while (xt.made.held.length) xt.made.held.shift()();
+  assert.equal(xt.writes.join(''), 'ABC');
 });

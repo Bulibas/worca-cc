@@ -38,12 +38,13 @@ const envPart = (s) => String(s).toUpperCase().replace(/[^A-Z0-9]+/g, '_').repla
  * run). Read once, at session start.
  */
 export function terminalEnv({ base = process.env, sessionId, mode, runId = null, member = null, projectKey = null, branch = null,
-  cwd, workspace = false, actionSnaps = [], shellEnv = {} }) {
+  cwd, workspace = false, actionSnaps = [], shellEnv = {}, agent = false }) {
   const env = { ...actionBaseEnv(base), ...shellEnv,
     TERM: mode === 'pty' ? 'xterm-256color' : 'dumb', COLORTERM: 'truecolor',
     WORCA_TERMINAL: '1', WORCA_TERMINAL_SESSION: sessionId, WORCA_WORKTREE: cwd };
   delete env.PORT;                   // worca's own port (`worca ui`, the Docker image): an app started here must not bind it
-  if (mode !== 'pty') { env.PAGER = 'cat'; env.GIT_PAGER = 'cat'; }   // no tty: a pager would wait forever
+  if (mode !== 'pty' || agent) { env.PAGER = 'cat'; env.GIT_PAGER = 'cat'; }   // no tty, or a program reading it: a pager would wait forever
+  if (agent) { env.GIT_TERMINAL_PROMPT = '0'; env.WORCA_TERMINAL_NORC = '1'; }  // Ask (#574): no password prompt, none of the person's rc
   if (runId) env.WORCA_RUN_ID = runId;
   if (branch) env.WORCA_BRANCH = branch;
   if (projectKey) env.WORCA_PROJECT_KEY = projectKey;

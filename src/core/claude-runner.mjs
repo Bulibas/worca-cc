@@ -46,7 +46,7 @@ export {
   subagentHooksEnabled, debugSpawnEnabled, ARGV_INLINE_LIMIT, argvLength, redactArgvForLog,
   planClaudeInvocation, stageClaudeInvocation, extractResultCost, BENIGN_STDERR_PATTERNS, isBenignStderrLine, brokerRouteFor, isHookEvent,
 } from './engines/claude.mjs';
-export { DEFAULT_SIGKILL_GRACE_MS, sigkillGraceMs, buildSpawnEnv, cleanRunEnv } from './engines/spawn.mjs';
+export { DEFAULT_SIGKILL_GRACE_MS, sigkillGraceMs, buildSpawnEnv, cleanRunEnv, SPAWN_ENV_BASE } from './engines/spawn.mjs';
 export { MOCK_WRITER_ROLES, MOCK_ROLE_CLARIFY, MOCK_ROLE_DECOMPOSER, MOCK_ROLE_MEMORY_DEFRAG, memoryDirsFromPrompt, mockSpawnLog, recordMockSpawn } from './engines/mock.mjs';
 
 /**
@@ -107,6 +107,10 @@ export function mockEnabled(opts) {
  * @param {string[]} [o.disallowedTools]   --disallowedTools <list>: built-ins withheld from this spawn
  *   (model bridge §5.3: WebSearch/WebFetch for a translated model). Absent/empty ⇒ flag omitted.
  * @param {Record<string, object>} [o.agents]  run-scoped sub-agent definitions (--agents; phases.mjs investigatorAgents)
+ * @param {string[]} [o.pluginDirs]  --plugin-dir <dir> per entry (skills registry §4.1: one generated plugin per set,
+ *   materializeSkillMount). Absent/empty/non-strings ⇒ nothing emitted.
+ * @param {object} [o.extraSettings]  merged into the one --settings payload (skills registry §4.1: Ask's
+ *   `disableSkillShellExecution`); never replaces `permissions` / `hooks`. Absent ⇒ unchanged.
  * @param {Record<string,string>} [o.spawnEnv]  run-level spawn env (wsmap D9: runOpts sets
  *   CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY on every fan-out node, and CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
  *   on the scan's two). Merged OVER the guardrail env and UNDER modelEnv (a catalog entry that sets the
@@ -163,6 +167,8 @@ export async function runClaude(o = {}) {
     askLockdown,
     images,
     agents,
+    pluginDirs,
+    extraSettings,
     argvInlineLimit,
     // A pipeline agent (phases.mjs): runs as WORCA_AGENT_USER when the container set one
     // up (agent-user.mjs). Server-side helpers and Ask Worca leave it unset.
@@ -232,6 +238,8 @@ export async function runClaude(o = {}) {
     askLockdown,
     images,
     agents,
+    pluginDirs,
+    extraSettings,
     argvInlineLimit,
     asAgent,
     billTo,

@@ -146,6 +146,8 @@ Worca exits at startup with a one-line reason, rather than serving, when:
 - `WORCA_ALLOWED_HOSTS` names a non-loopback host but no identity check is configured, and
   `WORCA_INSECURE_NO_IDENTITY_CHECK=1` is not set;
 - only one of `WORCA_CF_ACCESS_TEAM_DOMAIN` / `WORCA_CF_ACCESS_AUD` is set;
+- both Cloudflare Access and `WORCA_IDENTITY_ISSUER` are set, or the issuer setup is incomplete
+  (see [A sign-in service of your own](#a-sign-in-service-of-your-own-identity-issuer));
 - an allowlist entry isn't a plain hostname (a scheme, a port or a `*` wildcard).
 
 When it starts in remote mode it logs
@@ -258,6 +260,66 @@ browser blocks for background requests. Instead of showing a UI that silently st
 shows a *Your sign-in has expired* bar with a **Sign in again** button that reloads the page through
 Access.
 
+## A sign-in service of your own (identity issuer)
+
+Instead of Cloudflare Access, worca can trust a gate that signs its own identity tokens, such as a
+hosting platform's. The gate sends a short-lived JWT (ES256 or RS256) in `X-Worca-Identity` on
+every request, WebSocket upgrades included; worca checks it against the issuer's published keys
+with its own host as the audience. One deployment uses Access **or** an issuer: setting both is a
+startup error. A deployment with only the `WORCA_CF_ACCESS_*` settings is unaffected.
+
+| Variable | Example | What it does |
+| --- | --- | --- |
+| `WORCA_IDENTITY_ISSUER` | `https://app.example.com` | The token's `iss`. Turns on the issuer check. https only (http for localhost). |
+| `WORCA_IDENTITY_JWKS_URL` | `https://app.example.com/.well-known/jwks.json` | Where the public keys are. Default: the issuer + `/.well-known/jwks.json`. Cached 10 min, refetched on an unknown key id. |
+| `WORCA_IDENTITY_AUDIENCE` | `k7m2qz9xwp.example.run` | The `aud` worca accepts, comma-separated. Default: the exact hosts in `WORCA_ALLOWED_HOSTS`. |
+
+Differences from Access:
+
+- **Exact hosts only.** With an issuer, `WORCA_ALLOWED_HOSTS` may not hold `.example.com` entries:
+  every other instance under the same domain shares the issuer, and a suffix entry would accept
+  their pages' `Origin`.
+- **More about the person.** Besides the email, the token carries the user id, display name and
+  team ids (`sub`, `name`, `teams`). Runs, Ask threads and billing stay keyed by the email, as with
+  Access; the sign-in log line also names the user id.
+- **WebSockets end with the token.** A socket closes (code 4001) when the token it opened with
+  expires; the UI reconnects at once through the gate, which checks the session again. Access
+  sockets are not closed.
+- The credential broker's key page accepts the same three variables, with its own host as the
+  audience (default: the host of `WORCA_BROKER_PUBLIC_URL`).
+
+## Heartbeat to a control plane (optional)
+
+A platform that hosts many worca instances (stopping idle ones, starting them again before a
+scheduled run, upgrading them) can ask each one to report in. Set both:
+
+| Variable | Meaning |
+| --- | --- |
+| `WORCA_HEARTBEAT_URL` | Where worca POSTs the heartbeat. https only (http for localhost). |
+| `WORCA_HEARTBEAT_TOKEN` | Sent as `Authorization: Bearer <token>`; the platform's credential for this instance. |
+
+With either unset nothing is sent, which is the right setting for a self-hosted deployment. With
+both set, worca posts a few seconds after start and then every 60 s:
+
+```json
+{ "health": "ok", "version": "1.9.0",
+  "pipelines": { "running": 1, "waiting": 0, "done": 12, "failed": 1, "stopped": 2 },
+  "nextScheduledAt": 1767600000, "suspendable": false,
+  "today": { "done": 3, "failed": 0, "stopped": 0 } }
+```
+
+- `pipelines` always has these five keys. `waiting` is a run with an open question, or paused for
+  cost, a usage limit or an error; `stopped` includes runs paused by hand and interrupted runs.
+  Archived runs aren't counted.
+- `health` is `degraded` when the credential broker doesn't answer, the database refuses writes,
+  less than 5% of the disk is free, start-up maintenance failed or the scheduler has stalled. The
+  reason is in worca's log, not in the heartbeat.
+- `nextScheduledAt` is the next planned start in Unix seconds (runs that wait for another run have
+  no time yet and don't count), or `null`.
+- `suspendable` is `true` when stopping the container now interrupts nothing: no active run, Ask
+  turn, terminal, action or setup job.
+- The body holds counts, the version and true/false values only: no titles, projects or names.
+
 ## Limits
 
 - **Every allowed person is an administrator.** Worca has one user: settings, credentials (the
@@ -273,6 +335,12 @@ Access.
   its key page, agents never hold a key, and costs are charged to whoever caused them.
 - Desktop features act on the server: the folder picker becomes a text field
   (`WORCA_NO_NATIVE_DIALOG=1`).
+- The in-app folder browser, adding a project by path and installing agents into a folder stay inside
+  Worca's own folders (the Worca home and the projects root, hidden folders below them excluded); any
+  other path is refused with `403 FS_OUTSIDE_ALLOWED`, symlinks and `..` included. A projects root of `/`
+  or a one-segment folder such as `/home` is ignored (logged), so point `WORCA_PROJECTS_ROOT` at a deeper
+  folder. Starting the server with
+  `WORCA_TERMINAL_REMOTE=1` or `WORCA_ACTIONS_REMOTE=1` lifts this, since either already grants more.
 - [Actions](actions.md) are refused (`403 ACTIONS_DISABLED`) unless the server starts with
   `WORCA_ACTIONS_REMOTE=1`. Check out, Discard, Copy command and editing the actions config keep
   working; a saved command runs only once actions are on. With agent isolation

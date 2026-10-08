@@ -82,6 +82,24 @@ export function manifestModels(manifest, out = new Set(), depth = 0) {
 }
 
 /**
+ * Whether a run's manifest will call a model at all: an Auto run decides its graph with one, and a
+ * graph with an agent card spawns one. A graph of script and flow cards only never does, so no key
+ * is needed for it. An unknown shape counts as needing one. Pure.
+ */
+export function manifestNeedsModel(manifest) {
+  if (!manifest || typeof manifest !== 'object' || manifest.auto) return true;
+  const nodes = manifest.graph?.nodes ?? manifest.nodes;
+  if (!Array.isArray(nodes)) return true;
+  return nodes.some((n) => n && n.kind === 'agent');
+}
+
+/** The same question for a workflow row before the run starts (the Auto stub has no nodes). Pure. */
+export function workflowNeedsModel(row) {
+  if (!row || typeof row !== 'object' || row.auto || !Array.isArray(row.nodes)) return true;
+  return row.nodes.some((n) => n && n.kind === 'agent');
+}
+
+/**
  * Which credentials a set of models needs, and which of them a person lacks. Pure.
  * @param {string[]} modelIds
  * @param {(id:string)=>({slot:string}|{keyless:true}|{error:string}|null)} slotOf

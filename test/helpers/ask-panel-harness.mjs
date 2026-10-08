@@ -18,6 +18,8 @@ function makeStorage() {
 export function makePanel(overrides = {}) {
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost:4317/' });
   const { window } = dom;
+  // `platform: 'MacIntel'` makes shortcutLabel() read ⌘K (jsdom's navigator.platform is empty → Ctrl K).
+  if (overrides.platform) Object.defineProperty(window.navigator, 'platform', { value: overrides.platform, configurable: true });
   // jsdom has no ResizeObserver. `resizeObserver: true` installs a recording
   // fake BEFORE the panel is built: a test fires an observer's `cb` by hand and
   // reads `disconnected` after destroy().

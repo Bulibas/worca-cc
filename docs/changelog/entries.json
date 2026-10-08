@@ -1,5 +1,23 @@
 [
   {
+    "version": "1.10.0",
+    "since": "1.9.0",
+    "date": "2026-10-08",
+    "artifact": "https://claude.ai/artifact/4zm2H8Vpx63EbvwJdEuR7H"
+  },
+  {
+    "version": "1.9.0",
+    "since": "1.8.0",
+    "date": "2026-10-07",
+    "artifact": "https://claude.ai/artifact/4RrMSiPC4yEP3wqSEZ1fxW"
+  },
+  {
+    "version": "1.8.0",
+    "since": "1.7.0",
+    "date": "2026-10-05",
+    "artifact": "https://claude.ai/artifact/ADSQ6J8qHU9jxEDPg9wowq"
+  },
+  {
     "version": "1.7.0",
     "since": "1.6.0",
     "date": "2026-10-01",

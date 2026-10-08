@@ -14,13 +14,14 @@ import { createThinkingOrb } from './thinking-orb.mjs';
 import { workflowPickerLabel } from './results-view.mjs';
 import { renderAutoProposal, AUTO_PROPOSAL_ORDER_CARD } from './auto-proposal.mjs';
 import { createRunProgressCard, snapshotFromState, PROGRESS_CARD_TYPE } from './ask-run-card.mjs';
+import { createCommandCard, COMMAND_CARD_TYPE } from './ask-command-card.mjs';
 import { buildTrace, scheduleTrace, playAssembly } from './auto-build.mjs';
 import { buildNodeConfigRows, pruneNodeSelection, modifiedFieldsOf } from './node-tunables.mjs';
 import { ENGINE_EFFORTS } from './engine-settings-view.mjs';
 import { classifyLoops } from '../../src/shared/graph/loops.mjs';
 import { portsFnFor } from '../../src/shared/graph/ports.mjs';
 import { parseMcpToolName } from '../../src/shared/mcp-tool-name.mjs';
-import { mcpSkipView, mcpCopyNote } from './mcp-run-picker.mjs';
+import { mcpSkipView, mcpCopyNote, skillSkipView } from './mcp-run-picker.mjs';
 import { engineOfEntry, chatEngineOf, pickerGroups, attachRefusal } from './ask-engine.mjs';
 import { notify } from './feedback.mjs';
 
@@ -251,8 +252,12 @@ const THREADS_REFRESH_MS = 250;
 const PILL_MORPH_IN_MS = 520;
 const PILL_MORPH_OUT_MS = 800;
 const PILL_SETTLE_FALLBACK_MS = PILL_MORPH_OUT_MS + 150;
+const PILL_NAME = 'Ask Worca';
+const PILL_NAME_UNREAD = 'Ask Worca, new reply';
+/** Hover has to rest on the button this long before its tooltip shows. */
+const PILL_TIP_DELAY_MS = 400;
 
-export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null, createVoice = null, voiceLongPressMs = 500 }) {
+export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContext, openNewPipeline, openComposer = null, showTerminal = () => {}, openClaudeSetup = null, loadMarkdown, hljsLoader, storage, raf, now, runStore = null, createVoice = null, voiceLongPressMs = 500 }) {
   const homePick = browserPick();         // hoisted declaration (defined below)
   const st = {
     open: false,
@@ -281,6 +286,12 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // the last POST /api/ask/mcp-preview body and whether it failed; gen drops a stale response, render repaints
     // an open picker, saving chains the PATCHes so they land in toggle order.
     mcp: { off: { sets: [], members: [] }, preview: null, failed: false, gen: 0, queued: false, render: null, saving: Promise.resolve() },
+    // Agent mode (#574): the chat's switch (sent with every message, PATCHed like mcpOff); `available` comes from
+    // GET /api/ask/commands/status once at first open — false hides the switch and nothing is sent.
+    agent: { on: true, saving: Promise.resolve(), available: false },
+    commands: new Map(),      // blockId → command card handle (ask-command-card.mjs)
+    commandFrames: new Map(), // blockId → the last ask-command view that arrived before its card was built
+    commandsShown: new Set(), // blockIds whose start already showed their terminal tab (shared terminal)
     pinned: true,
     prevFocus: null,
     size: readStoredSize(),   // {w,h} the user's persisted sheet size (hoisted reader); null = stylesheet default
@@ -460,8 +471,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
     const pill = make('button', 'ask-pill');
     pill.type = 'button';
+    pill.setAttribute('aria-label', PILL_NAME);
     // The mark slot: the masked logo and the pill's OWN thinking orb stacked in
-    // one 22px host (a CSS mask clips children, so the orb cannot live under
+    // one 26px host (a CSS mask clips children, so the orb cannot live under
     // the masked span). Both exist from birth — .is-live morphs one into the
     // other in CSS and syncPillOrb() runs the canvas only while there is
     // something to paint. Its own instance on purpose: the transcript's orb
@@ -471,7 +483,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const pillLogo = make('span', 'ask-pill-logo');
     pillLogo.setAttribute('aria-hidden', 'true');
     mark.appendChild(pillLogo);
-    el.pillOrb = createThinkingOrb({ doc, win, size: 22 });
+    el.pillOrb = createThinkingOrb({ doc, win, size: 26 });
     el.pillOrb.stop();                 // the factory arms its loop; nothing is lit yet
     el.pillOrb.morphTo(0, 0);          // the dots wait on the centre for the first morph-in
     // The morph-back ends when the orb layer's opacity fade does (the transform
@@ -483,8 +495,29 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     mark.appendChild(el.pillOrb.el);
     pill.appendChild(mark);
     pill.appendChild(make('span', 'ask-pill-label', 'Ask Worca'));
-    pill.appendChild(make('span', 'ask-kbd', shortcutLabel(win)));
     pill.addEventListener('click', openSheet);
+
+    // The tooltip is a sibling of the button (a button's face holds no other widget); style.css .ask-tip
+    // places it to the left. aria-describedby gives assistive tech the shortcut the face no longer shows.
+    const tip = make('div', 'ask-tip');
+    tip.id = 'ask-pill-tip';
+    tip.setAttribute('role', 'tooltip');
+    tip.appendChild(make('span', null, 'Ask Worca'));
+    tip.appendChild(make('span', 'ask-kbd', shortcutLabel(win)));
+    pill.setAttribute('aria-describedby', tip.id);
+    pill.addEventListener('pointerenter', () => {
+      clearTipTimer();
+      st.tipTimer = setTimeout(showTip, PILL_TIP_DELAY_MS);
+      if (st.tipTimer && typeof st.tipTimer.unref === 'function') st.tipTimer.unref();
+    });
+    pill.addEventListener('pointerleave', hideTip);
+    pill.addEventListener('blur', hideTip);
+    pill.addEventListener('focus', () => {
+      // A mouse click focuses the button too; only keyboard focus earns the tooltip at once.
+      let visible = true;
+      try { visible = pill.matches(':focus-visible'); } catch { /* no :focus-visible: treat as keyboard */ }
+      if (visible) showTip();
+    });
 
     const sheet = make('section', 'ask-sheet');
     sheet.hidden = true;
@@ -538,7 +571,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     sheet.appendChild(buildDropTarget(sheet));
     dock.appendChild(sheet);
     dock.appendChild(pill);
+    dock.appendChild(tip);
     el.pill = pill;
+    el.tip = tip;
     el.sheet = sheet;
     el.dock = dock;           // measured by dockInner(); `root` is TDZ here
     return dock;
@@ -704,8 +739,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // The collapsed launcher pill mirrors "Ask Worca is working": a live turn, a
     // snapshot that reports one in flight (load() nulls live until a frame is
     // adopted, so Stop alone would stay dark on a collapsed reload), or the
-    // POST→ask-start window (st.sending). The label shimmer and the mark↔orb
-    // morph are pure CSS on this class (.ask-pill.is-live .ask-pill-label and
+    // POST→ask-start window (st.sending). The thinking ring and the mark↔orb
+    // morph are pure CSS on this class (.ask-pill.is-live::before and
     // .ask-pill.is-live .ask-pill-mark), so a boundary costs one classList
     // write plus syncPillOrb() — local rAF bookkeeping for the pill's canvas,
     // idle when nothing changed. Keep every OTHER side effect out of here, see
@@ -964,6 +999,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         storeThread(id);
       }
       const sentOff = st.mcp.off;
+      const sentAgent = st.agent.on;
       const payload = {
         text,
         model: st.picker.model,
@@ -973,6 +1009,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         // MCP registry §9.4: every message carries the picker's choices, so each turn runs what the picker shows —
         // a refused first message (429/403/400, network) or a PATCH still in flight would leave the stored ones behind.
         mcpOff: sentOff,
+        // Agent mode (#574): like mcpOff, every message carries the switch (only where agent mode exists).
+        ...(st.agent.available ? { agentMode: sentAgent } : {}),
         ...(st.pendingFiles.length ? { attachments: st.pendingFiles.map((f) => ({ name: f.name, dataBase64: f.dataBase64 })) } : {}),
       };
       const model = st.model;
@@ -992,6 +1030,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       }
       // A toggle made while this POST was out PATCHed a value the route then overwrote with sentOff: re-send the latest.
       if (st.mcp.off !== sentOff) patchMcpOff(id, st.mcp.off);
+      if (st.agent.available && st.agent.on !== sentAgent) patchAgentMode(id, st.agent.on);
       const { userMessageId, attachments: stored, contexts } = await res.json();
       if (Array.isArray(contexts)) setContexts(contexts);   // an older server omits it: keep what is shown
       // Prefer the server's rows: they carry the store-minted ids that key the
@@ -1075,19 +1114,35 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     scopeBtn.dataset.minLevel = 'advanced';      // interface mode (docs/ui-levels.md): Auto scope is the simple path
     row.appendChild(scopeBtn);
 
-    // MCP registry §9.4: the per-chat MCP picker — `MCP · N` (N = copies that start next turn), hidden while no
-    // set in play has a member. Styled as the scope pill; opens like the model button's Effort sub-picker.
-    const mcpBtn = make('button', 'ask-scope-btn ask-mcp-btn');
+    // MCP registry §9.4 + skills registry §6.8: the per-chat Sets picker — `Sets · N` (N = copies and skills that start
+    // next turn), hidden while no set in play has a member or a skill. Styled as the scope pill; opens like the model
+    // button's Effort sub-picker.
+    const mcpBtn = make('button', 'ask-scope-btn ask-mcp-btn ask-sets-btn');
     mcpBtn.type = 'button';
     mcpBtn.setAttribute('data-ask-mcp-btn', '');
-    mcpBtn.title = 'MCP servers for this chat';
+    mcpBtn.title = 'Sets for this chat';
     mcpBtn.hidden = true;
     mcpBtn.dataset.minLevel = 'advanced';
-    el.mcpBtnLabel = make('span', 'ask-scope-label', 'MCP · 0');
+    el.mcpBtnLabel = make('span', 'ask-scope-label', 'Sets · 0');
     mcpBtn.appendChild(el.mcpBtnLabel);
     mcpBtn.addEventListener('click', () => openMcpPopover(mcpBtn));
     el.mcpBtn = mcpBtn;
     row.appendChild(mcpBtn);
+
+    // Agent mode (#574): Ask may run commands in a Worca terminal. A safety control, so it shows at every interface
+    // level; hidden where agent mode cannot work (GET /api/ask/commands/status).
+    const agentBtn = make('button', 'ask-scope-btn ask-agent-btn');
+    agentBtn.type = 'button';
+    agentBtn.setAttribute('data-ask-agent-btn', '');
+    agentBtn.title = 'Agent mode: Ask can run commands in a Worca terminal';
+    agentBtn.hidden = true;
+    agentBtn.appendChild(make('span', 'ask-scope-label', 'Agent'));
+    el.agentSwitch = make('span', 'switch on');
+    el.agentSwitch.setAttribute('aria-hidden', 'true');
+    agentBtn.appendChild(el.agentSwitch);
+    agentBtn.addEventListener('click', () => setAgentMode(!st.agent.on));
+    el.agentBtn = agentBtn;
+    row.appendChild(agentBtn);
 
     row.appendChild(make('span', 'ask-composer-spacer'));
 
@@ -1161,10 +1216,31 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     try { el.input.focus({ preventScroll: true }); } catch { try { el.input.focus(); } catch { /* detached */ } }
   }
 
+  function showTip() {
+    clearTipTimer();
+    if (el.tip && !st.open) el.tip.classList.add('is-shown');
+  }
+  function hideTip() {
+    clearTipTimer();
+    if (el.tip) el.tip.classList.remove('is-shown');
+  }
+  function clearTipTimer() {
+    if (st.tipTimer) { clearTimeout(st.tipTimer); st.tipTimer = null; }
+  }
+
+  /** The unread dot: a turn ended while the sheet was closed. Memory only — a reload clears it. */
+  function setUnread(on) {
+    if (!el.pill) return;
+    el.pill.classList.toggle('has-unread', on);
+    el.pill.setAttribute('aria-label', on ? PILL_NAME_UNREAD : PILL_NAME);
+  }
+
   function openSheet() {
     if (st.open || st.destroyed) return;
     st.open = true;
     st.prevFocus = doc.activeElement;
+    hideTip();
+    setUnread(false);
     el.pill.hidden = true;
     syncPillOrb();                                 // nothing to paint behind the sheet
     el.sheet.hidden = false;
@@ -1403,6 +1479,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
 
   function onDocKeydown(e) {
     if (st.destroyed) return;
+    if (e.key === 'Escape' && el.tip && el.tip.classList.contains('is-shown')) hideTip();   // the tooltip yields, the key carries on
     if (st.drag && e.key === 'Escape') { e.preventDefault(); cancelResize(); return; }
     if (isToggleCombo(e)) {
       // The terminal pane (#573) owns its keys: Ctrl+K is the shell's kill-line there.
@@ -1429,7 +1506,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     }
     // `.hd-cmt-card` joins the allowlist: its "Ask Worca" button appends to the
     // composer, and pointerdown lands BEFORE the click that would open the sheet.
-    if (t.closest('.viewer-modal, #confirm-modal, .info-bubble, .mention-popup, .hd-cmt-card')) return;
+    // `.term-pane` too: Ask's terminal is shared, so the user clicks and types there while the chat stays open.
+    if (t.closest('.viewer-modal, #confirm-modal, .info-bubble, .mention-popup, .hd-cmt-card, .term-pane')) return;
     closeSheet();
   }
 
@@ -1768,6 +1846,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.firstOpenDone) return;
     st.firstOpenDone = true;
     loadCatalog();
+    loadAgentStatus();
     const stored = readStoredThread();
     if (stored && !st.threadId) switchThread(stored);
   }
@@ -1960,9 +2039,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     st.mcp.preview = st.mcp.failed ? null : data;
     const p = st.mcp.preview;
     // A failed preview leaves the chip as it was (the open picker says so): the user can reopen it to retry.
-    // §4.6: registry MCP servers are offered in Claude chats only.
-    if (p) el.mcpBtn.hidden = !p.sets.some((x) => x.members > 0) || pickerEngine() === 'codex';
-    el.mcpBtnLabel.textContent = p ? `MCP · ${p.started}` : 'MCP · ?';
+    // §4.6: registry MCP servers and set skills are offered in Claude chats only.
+    if (p) el.mcpBtn.hidden = !p.sets.some((x) => x.members > 0 || (x.skills || 0) > 0) || pickerEngine() === 'codex';
+    el.mcpBtnLabel.textContent = p ? `Sets · ${p.started + ((p.skills && p.skills.started) || 0)}` : 'Sets · ?';
     if (st.mcp.render) st.mcp.render();
   }
 
@@ -1981,6 +2060,37 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     scheduleMcpRefresh();
   }
   const toggle = (list, v) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
+
+  // ---- Agent mode switch (#574) -------------------------------------------------
+  /** Whether agent mode can work here at all (not hosted-off, not agent isolation): once, at first open. */
+  async function loadAgentStatus() {
+    let data = null;
+    try {
+      const r = await fetch('/api/ask/commands/status');
+      data = r && r.ok ? await r.json() : null;
+    } catch { data = null; }
+    if (st.destroyed) return;
+    st.agent.available = !!(data && data.enabled === true);
+    paintAgent();
+  }
+  function paintAgent() {
+    if (!el.agentBtn) return;
+    el.agentBtn.hidden = !st.agent.available;
+    el.agentBtn.setAttribute('aria-pressed', String(st.agent.on));
+    el.agentSwitch.classList.toggle('on', st.agent.on);
+  }
+  /** Same chain as patchMcpOff: one PATCH at a time, in click order. */
+  function patchAgentMode(tid, value) {
+    const body = JSON.stringify({ agentMode: value });
+    st.agent.saving = st.agent.saving
+      .then(() => fetch(`/api/ask/threads/${tid}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }))
+      .catch(() => { /* the switch keeps the choice; the next message carries it */ });
+  }
+  function setAgentMode(on) {
+    st.agent.on = on;
+    if (st.threadId) patchAgentMode(st.threadId, on);
+    paintAgent();
+  }
 
   function mcpSwitch(on, label, onToggle, focusKey) {
     const b = make('button', `switch ask-mcp-switch${on ? ' on' : ''}`);
@@ -2004,6 +2114,38 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return item;
   }
 
+  const plural = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
+  /** Skills registry §6.8: a level-1 set row's small line — "2 servers · 1 skill · pinned". */
+  function setSummary(x) {
+    const route = x.routes[0]?.route;               // the resolver sorts a set's routes by rank
+    return [x.members ? plural(x.members, 'server') : '', x.skills ? plural(x.skills, 'skill') : '',
+      x.group === 'set' && route ? MCP_ROUTE_LABEL[route] || route : ''].filter(Boolean).join(' · ');
+  }
+  /** One level-2 membership: a live switch (started, or switched off in this chat), else a disabled row with its reason
+   *  (§5.7 wording: choices muted, problems amber). `key` is the membership key mcpOff.members holds. */
+  function pickerMember(panel, set, setOff, { name, key, skip, why, problem }) {
+    if (skip && skip.reason !== 'chat-off') {
+      const item = menuItem(`ask-mcp-member is-skipped${problem ? ' is-problem' : ''}`);
+      item.disabled = true;
+      item.appendChild(make('span', 'ask-model-name', name));
+      item.appendChild(make('span', 'ask-pop-row-value', why));
+      panel.appendChild(item);
+      return;
+    }
+    const row = make('div', 'ask-mcp-row');
+    row.setAttribute('role', 'none');
+    row.appendChild(make('span', 'ask-mcp-copy', name));
+    const sw = mcpSwitch(!setOff && !st.mcp.off.members.includes(key), name,
+      () => setMcpOff({ ...st.mcp.off, members: toggle(st.mcp.off.members, key) }), `member:${key}`);
+    if (setOff) { sw.disabled = true; sw.title = `${set.name} is off in this chat`; }   // the whole set is off
+    row.appendChild(sw);
+    panel.appendChild(row);
+  }
+  // Switches first, then the disabled rows (Appendix B 10, P4); by the name each shows.
+  const memberOrder = (a, b) => (Number(!!a.skip && a.skip.reason !== 'chat-off') - Number(!!b.skip && b.skip.reason !== 'chat-off'))
+    || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  const layerLine = (sk) => `skills from sets not loaded on this machine: ${sk.layer.text || sk.layer.blocked}`;
+
   function openMcpPopover(trigger) {
     const panel = openPopover({ panelClass: 'ask-pop-mcp', trigger, build: () => {}, onClose: () => { st.mcp.render = null; } });
     if (!panel) return;
@@ -2011,6 +2153,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     let first = true;
     const render = (focusKey = null) => {
       const p = st.mcp.preview || { sets: [], copies: [], skipped: [] };
+      const sk = p.skills || { mounted: [], skipped: [], started: 0, layer: { blocked: null, text: null } };
       // A re-render (a toggle, a preview landing) keeps keyboard focus on the same control.
       const keep = focusKey ?? (panel.contains(doc.activeElement) ? doc.activeElement.dataset.mcpKey || '' : null);
       panel.replaceChildren();
@@ -2023,35 +2166,35 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
         panel.appendChild(back);
         panel.appendChild(make('div', 'ask-pop-divider'));
         const setOff = st.mcp.off.sets.includes(set.id);
-        const rows = [
-          ...p.copies.filter((c) => c.setId === set.id).map((c) => ({ copy: c.name, serverId: c.serverId, skip: null, note: mcpCopyNote(p, c) })),
-          ...p.skipped.filter((x) => x.setId === set.id).map((x) => ({ copy: mcpSkipView(x).name, serverId: x.serverId, skip: x, note: '' })),
-        ].sort((a, b) => (Number(!!a.skip && a.skip.reason !== 'chat-off') - Number(!!b.skip && b.skip.reason !== 'chat-off'))
-          || (a.copy < b.copy ? -1 : a.copy > b.copy ? 1 : 0));   // switches first, then the disabled rows (Appendix B 10, P4)
-        for (const m of rows) {
-          if (m.skip && m.skip.reason !== 'chat-off') {
-            // §5.7 in the New Pipeline picker's wording: choices (off, needs-consent) muted, problems amber.
-            const v = mcpSkipView(m.skip);
-            const item = menuItem(`ask-mcp-member is-skipped${v.problem ? ' is-problem' : ''}`);
-            item.disabled = true;
-            item.appendChild(make('span', 'ask-model-name', m.copy));
-            item.appendChild(make('span', 'ask-pop-row-value', v.why));
-            panel.appendChild(item);
-            continue;
-          }
-          const k = `${set.id}|${m.serverId}`;
-          const row = make('div', 'ask-mcp-row');
-          row.setAttribute('role', 'none');
-          const shown = m.note ? `${m.copy} · ${m.note}` : m.copy;   // §4.4 name provisional, §5.6 withheld tools
-          row.appendChild(make('span', 'ask-mcp-copy', shown));
-          const sw = mcpSwitch(!setOff && !st.mcp.off.members.includes(k), shown,
-            () => setMcpOff({ ...st.mcp.off, members: toggle(st.mcp.off.members, k) }), `member:${k}`);
-          if (setOff) { sw.disabled = true; sw.title = `${set.name} is off in this chat`; }   // the whole set is off
-          row.appendChild(sw);
-          panel.appendChild(row);
+        const servers = [
+          ...p.copies.filter((c) => c.setId === set.id).map((c) => {
+            const note = mcpCopyNote(p, c);                                     // §4.4 name provisional, §5.6 withheld tools
+            return { name: note ? `${c.name} · ${note}` : c.name, key: `${set.id}|${c.serverId}`, skip: null };
+          }),
+          ...p.skipped.filter((x) => x.setId === set.id).map((x) => {
+            const v = mcpSkipView(x);                                           // §5.7 in the New Pipeline picker's wording
+            return { name: v.name, key: `${set.id}|${x.serverId}`, skip: x, why: v.why, problem: v.problem };
+          }),
+        ].sort(memberOrder);
+        // Skills registry §6.8: then the set's skills; a blocked layer (§2b-14) lists none — one muted line, P4's rule.
+        const blocked = !!(sk.layer && sk.layer.blocked);
+        const skills = blocked ? [] : [
+          ...sk.mounted.filter((m) => m.setId === set.id).map((m) => ({ name: m.qualifiedName, key: `${set.id}|${m.id}`, skip: null })),
+          ...sk.skipped.filter((x) => x.setId === set.id).map((x) => {
+            const v = skillSkipView(x);                                         // P4's New Pipeline wording (needs-consent: "off — …")
+            return { name: v.name, key: `${set.id}|${x.skillId}`, skip: x, why: v.why, problem: x.problem === true };
+          }),
+        ].sort(memberOrder);
+        const hasSkills = skills.length > 0 || (blocked && (set.skills || 0) > 0);
+        if (hasSkills && servers.length) panel.appendChild(make('div', 'ask-pop-caption', 'Servers'));
+        for (const m of servers) pickerMember(panel, set, setOff, m);
+        if (hasSkills) {
+          panel.appendChild(make('div', 'ask-pop-caption', 'Skills'));
+          if (blocked) panel.appendChild(make('div', 'ask-pop-empty', layerLine(sk)));
+          for (const m of skills) pickerMember(panel, set, setOff, m);
         }
         panel.appendChild(make('div', 'ask-pop-divider'));
-        panel.appendChild(mcpManageItem(`Manage ${set.name} in Settings › MCP servers`, `#settings/mcp/sets/${encodeURIComponent(set.id)}`));
+        panel.appendChild(mcpManageItem(`Manage ${set.name} in Settings › Sets`, `#settings/mcp/sets/${encodeURIComponent(set.id)}`));
       } else {
         pane = null;
         // Level 1: one row per set in play, in the resolver's picker order (General, user sets by rank, Team).
@@ -2062,17 +2205,21 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
             () => setMcpOff({ ...st.mcp.off, sets: toggle(st.mcp.off.sets, x.id) }), `set:${x.id}`));
           const drill = menuItem('ask-mcp-set', () => { pane = x.id; render(); });
           drill.dataset.mcpKey = `drill:${x.id}`;
-          const route = x.routes[0]?.route;          // the resolver sorts a set's routes by rank
-          drill.appendChild(make('span', 'ask-model-name', x.group === 'set' && route ? `${x.name} · ${MCP_ROUTE_LABEL[route] || route}` : x.name));
-          drill.appendChild(make('span', 'ask-pop-row-value', `${x.started}/${x.members}`));
+          const name = make('span', 'ask-model-name', x.name);
+          const summary = setSummary(x);
+          if (summary) name.appendChild(make('small', null, summary));
+          drill.appendChild(name);
+          drill.appendChild(make('span', 'ask-pop-row-value', `${x.started + (x.startedSkills || 0)}/${x.members + (x.skills || 0)}`));
           drill.appendChild(make('span', 'ask-pop-row-chev', '›'));
           row.appendChild(drill);
           panel.appendChild(row);
         }
         // Before the first preview lands, or when it failed: say so rather than show an empty menu.
-        if (!p.sets.length) panel.appendChild(make('div', 'ask-pop-empty', st.mcp.failed ? 'Could not load the MCP servers — reopen to retry.' : !st.mcp.preview ? 'Loading…' : 'No MCP servers in play.'));
+        if (!p.sets.length) panel.appendChild(make('div', 'ask-pop-empty', st.mcp.failed ? 'Could not load the sets — reopen to retry.' : !st.mcp.preview ? 'Loading…' : 'No sets in play.'));
+        // Skills registry §4.1: a host whose Claude Code refuses --plugin-dir mounts no skill — one muted line.
+        if (sk.layer && sk.layer.blocked) panel.appendChild(make('div', 'ask-pop-empty', layerLine(sk)));
         panel.appendChild(make('div', 'ask-pop-divider'));
-        panel.appendChild(mcpManageItem('Manage in Settings › MCP servers', '#settings/mcp'));
+        panel.appendChild(mcpManageItem('Manage in Settings › Sets', '#settings/mcp'));
       }
       if (first || keep !== null) {
         const items = menuItems(panel);
@@ -2474,6 +2621,8 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     setContexts([]);
     restoreBrowserPick();               // …and on the browser-level pick, not the last chat's
     st.mcp.off = { sets: [], members: [] };   // …and with every MCP server on
+    st.agent.on = true;                       // …and with Agent mode on (#574)
+    paintAgent();
     scheduleMcpRefresh();
     pruneCardEls();                     // st.model is already null — renderTranscript's keep set cannot see the old ids
     renderTranscript();
@@ -2544,9 +2693,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       n.appendChild(a);
     }
     if (b.mcp) {
-      // MCP registry §9.1 (D17): the worktree join notice's "MCP" opens the per-chat picker.
+      // MCP registry §9.1 (D17): the worktree join notice's "Sets" opens the per-chat picker (skills registry §6.8).
       n.appendChild(doc.createTextNode(' · '));
-      const mcp = make('button', 'ask-notice-mcp', 'MCP');
+      const mcp = make('button', 'ask-notice-mcp', 'Sets');
       mcp.type = 'button';
       mcp.addEventListener('click', () => { if (el.mcpBtn) openMcpPopover(el.mcpBtn); });
       n.appendChild(mcp);
@@ -2968,11 +3117,29 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     return nodes;
   }
 
+  /** The card's target: the workspace (+ member count once proposed), else the project name or key; '' on old cards. */
+  const wfTargetLine = (card) => card.workspaceId
+    ? `workspace · ${card.workspaceName || card.workspaceId}${Array.isArray(card.members) && card.members.length ? ` · ${card.members.length} projects` : ''}`
+    : (card.projectName || card.projectKey || '');
+  function wfTargetEl(text) {
+    const el = make('div', 'ask-wfcard-meta ask-wfcard-target', text);
+    el.setAttribute('data-ask-wf-target', '');
+    return el;
+  }
+
   function buildWorkflowCard(block, prev) {
     const card = block.card || {};
     const name = card.name || '';
-    if (block.state === 'declined') return { el: make('div', 'ask-card-stub', `Declined — ${name || 'workflow proposal'}`) };
-    if (block.state === 'failed') return { el: make('div', 'ask-card-stub ask-card-failed', `Proposal failed: ${block.error || 'unknown error'}`) };
+    const target = wfTargetLine(card);
+    // Old cards (no target fields) stay the bare stub; otherwise the stub keeps its text and the target sits under it.
+    const stub = (el) => {
+      if (!target) return { el };
+      const wrap = make('div', 'ask-wfcard-stubwrap');
+      wrap.append(el, wfTargetEl(target));
+      return { el: wrap };
+    };
+    if (block.state === 'declined') return stub(make('div', 'ask-card-stub', `Declined — ${name || 'workflow proposal'}`));
+    if (block.state === 'failed') return stub(make('div', 'ask-card-stub ask-card-failed', `Proposal failed: ${block.error || 'unknown error'}`));
     // State modifier = `is-<state>` (v6): `ask-wfcard-${state}` would make the SAVED root carry the same class as the check line below.
     const rootEl = make('div', `ask-card ask-wfcard is-${block.state}`);
     rootEl.setAttribute('data-ask-wfcard', block.state);
@@ -2981,6 +3148,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     head.appendChild(make('span', 'ask-wfcard-round', `round ${card.round || 1}`));
     if (block.state === 'saved') { head.appendChild(make('span', 'ask-wfcard-spacer')); head.appendChild(make('span', 'ask-wfcard-tag', 'Auto')); }
     rootEl.appendChild(head);
+    if (target) rootEl.appendChild(wfTargetEl(target));
     if (block.state === 'building') {
       const trace = buildTrace(doc, { mode: card.mode });
       rootEl.appendChild(trace.el);
@@ -3400,7 +3568,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     sum.appendChild(make('span', null, summary));
     body.appendChild(sum);
     if (card.note) body.appendChild(make('div', 'ask-mcard-note', card.note));
-    const rows = [['Repository', card.url], ['Branch', card.branch || 'default branch'], ['Folder', card.dir], ['GitHub', card.github]];
+    const azureCard = /^https:\/\/dev\.azure\.com\//i.test(String(card.url || ''));
+    const rows = [['Repository', card.url], ['Branch', card.branch || 'default branch'], ['Folder', card.dir],
+      [azureCard ? 'Azure DevOps' : 'GitHub', card.github]];
     const ul = make('ul', 'ask-mcard-changes');
     for (const [label, value] of rows) {
       if (!value) continue;
@@ -4280,7 +4450,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
   function isProgressBlock(block) {
     const card = block.card || {};
     if (card.type === PROGRESS_CARD_TYPE) return true;
-    if (card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'actions' || card.type === 'away') return false;
+    if (card.type === COMMAND_CARD_TYPE || card.type === 'workflow' || card.type === 'metrics' || card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'actions' || card.type === 'away') return false;
     return block.state === 'started' || (block.state === 'failed' && !!block.runId);
   }
   function buildCard(block) {
@@ -4296,8 +4466,9 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     const isWeb = !!(block.card && block.card.type === 'web');
     const isActions = !!(block.card && block.card.type === 'actions');
     const isAway = !!(block.card && block.card.type === 'away');
+    const isCommand = !!(block.card && block.card.type === COMMAND_CARD_TYPE);
     const isProgress = isProgressBlock(block);
-    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isWeb || isWorkspace || isActions || isAway || isProgress || block.state === 'proposed')) return cached.el;
+    if (cached && cached.state === block.state && (isWorkflow || isMetrics || isSchedule || isModel || isClone || isWeb || isWorkspace || isActions || isAway || isCommand || isProgress || block.state === 'proposed')) return cached.el;
     if (cached) disposeCardEntry(cached);
     const built = isWorkflow ? buildWorkflowCard(block, cached)
       : isMetrics ? buildMetricsCard(block)
@@ -4308,6 +4479,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       : isWorkspace ? buildWorkspaceCard(block)
       : isActions ? buildActionsCard(block)
       : isAway ? buildAwayCard(block)
+      : isCommand ? buildCommandCard(block)
       : isProgress ? buildProgressCard(block)
         : { el: block.state === 'proposed' ? buildCardForm(block) : buildCardTerminal(block) };
     st.cardEls.set(block.id, { el: built.el, state: block.state, handle: built.handle || null, dispose: built.dispose || null, animate: !!built.animate, cancelAnim: null, lastW: -1 });
@@ -4341,6 +4513,41 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       }
       if (c.animate) { c.animate = false; c.cancelAnim = playAssembly(c.handle, { win, onDone: () => { c.cancelAnim = null; } }); }
     }
+  }
+
+  // ---- command cards (ui/public/ask-command-card.mjs; Ask agent mode, #574) ------------------------------------------
+  /** One command Ask ran: hydrated once over REST (a reload, a finished block), then live from ask-command frames. */
+  function buildCommandCard(block) {
+    const card = block.card || {};
+    const blockId = String(card.blockId || '');
+    const handle = createCommandCard({ doc, card, onStop: (sid) => {
+      fetch(`/api/terminal/sessions/${encodeURIComponent(sid)}/stop`, { method: 'POST' }).catch(() => { /* the next frame says what happened */ });
+    }, onShow: (sid) => showTerminal(sid, { auto: false }) });
+    st.commands.set(blockId, handle);
+    const early = st.commandFrames.get(blockId);
+    if (early) { st.commandFrames.delete(blockId); handle.update(early); }
+    const tid = st.threadId;
+    if (!early && tid) {
+      fetch(`/api/ask/threads/${tid}/commands/${encodeURIComponent(blockId)}`)
+        .then((r) => (r && r.ok ? r.json() : null))
+        .catch(() => null)
+        .then((view) => {
+          if (st.destroyed || st.commands.get(blockId) !== handle) return;
+          // A `running` reply may be older than a frame that already landed (even the final one): it only fills an empty card.
+          if (view && typeof view.status === 'string') { if (!handle.view || view.status !== 'running') handle.update(view); }
+          else if (!handle.view) handle.update({ status: 'done', exitCode: null, tail: '' });   // 404/403: the command, an `ended` pill
+        });
+    }
+    // No `handle` here: relayoutCards() measures a graph on cached handles, and this card has none.
+    return { el: handle.el, dispose: () => { if (st.commands.get(blockId) === handle) st.commands.delete(blockId); handle.destroy(); } };
+  }
+  /** An ask-command frame: the card's live state. Never a row change, so it never reaches the model. */
+  function applyCommandFrame(view) {
+    if (!view || typeof view.blockId !== 'string') return;
+    const handle = st.commands.get(view.blockId);
+    if (handle) { handle.update(view); return; }
+    st.commandFrames.set(view.blockId, view);                  // the turn's card block and the first frames race
+    if (st.commandFrames.size > 50) st.commandFrames.delete(st.commandFrames.keys().next().value);
   }
 
   // ---- run progress cards (ui/public/ask-run-card.mjs; D1 runStore seam, D9 REST hydration, D11 cadence) ------------
@@ -4465,6 +4672,11 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       // input preview — no op cell, since a third-party tool name has no worca verb to show.
       rowEl.appendChild(make('span', 'ask-tool-mcp', `${mcp.server} · ${mcp.tool}`));
       rowEl.appendChild(make('span', 'ask-tool-target', clipInput(block.input)));
+    } else if (block.name === 'Skill' && block.input && typeof block.input.skill === 'string') {
+      // Skills registry §4.4: a set skill the turn loaded — `skill`, then its qualified name (and its args).
+      const args = typeof block.input.args === 'string' && block.input.args ? block.input.args : '';
+      rowEl.appendChild(make('span', 'ask-tool-op', 'skill'));
+      rowEl.appendChild(make('span', 'ask-tool-target', args ? `${block.input.skill} · ${args.length > 60 ? `${args.slice(0, 60)}…` : args}` : block.input.skill));
     } else {
       const short = String(block.name || '').replace(/^mcp__worca__/, '');
       const parts = short.split('_');
@@ -4856,6 +5068,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     // would otherwise clobber a pick the user just made (its PATCH may not have landed).
     if (switched) applyThreadPick(snap.thread);
     if (switched) st.mcp.off = mcpOffOf(snap.thread && snap.thread.mcpOff);   // §9.4: the chat's own choices
+    if (switched) { st.agent.on = snap.thread?.agentMode !== false; paintAgent(); }   // #574: a resync keeps an unsaved click
     scheduleMcpRefresh();
     renderTranscript();
     updateMeters();
@@ -4950,6 +5163,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     }
     if (frame.type === 'ask-done' || frame.type === 'ask-error') {
       stopElapsed(); updateSendStop(); announce('answer finished');
+      if (!st.open) setUnread(true);
       // Conversation chips: the turn's resolved list rides ask-done (an older server omits it: keep what is shown).
       if (frame.type === 'ask-done' && Array.isArray(frame.contexts)) setContexts(frame.contexts);
       // P4: a finished turn may have created/removed/navigated worktrees. This must
@@ -4976,6 +5190,19 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
       // A shared deployment's clear names the threads it removed: only a tab showing one of them resets.
       if (Array.isArray(frame.threadIds) && !frame.threadIds.includes(st.threadId)) { scheduleThreadsRefresh(); return; }
       onHistoryCleared();
+      return;
+    }
+    if (frame.type === 'ask-command') {                         // #574: a command card's live state, this chat only
+      if (frame.threadId !== st.threadId) return;
+      applyCommandFrame(frame.command);
+      // Shared terminal: a command starting in the chat the user is looking at shows its tab in the terminal pane
+      // (the pane decides whether to open or switch); once per block.
+      const c = frame.command;
+      if (st.open && c && c.status === 'running' && typeof c.sessionId === 'string' && !st.commandsShown.has(c.blockId)) {
+        st.commandsShown.add(c.blockId);
+        if (st.commandsShown.size > 200) st.commandsShown.delete(st.commandsShown.values().next().value);
+        showTerminal(c.sessionId, { auto: true });
+      }
       return;
     }
     if (THREADS_REFRESH_FRAMES.has(frame.type)) scheduleThreadsRefresh();
@@ -5137,6 +5364,7 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (st.elapsedTimer) { clearInterval(st.elapsedTimer); st.elapsedTimer = null; }
     if (el.orb) el.orb.stop();
     settlePillOrb();
+    clearTipTimer();
     doc.removeEventListener('keydown', onDocKeydown, true);
     doc.removeEventListener('pointerdown', onDocPointerdown, true);
     win.removeEventListener('resize', onWinResize);

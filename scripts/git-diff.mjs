@@ -1,25 +1,34 @@
 // scripts/git-diff.mjs — the `gitDiff` card (spec §12.3): `git diff <ref>` in the
 // run's checkout, or per member under ctx.repos on a workspace run (one `## <key>`
-// section each), written as fenced markdown for a downstream reader. No verdict.
+// section each, against that member's OWN diff base), written as fenced markdown for
+// a downstream reader. No verdict.
 import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 
 export default async function ({ outputs, params, ctx, log }) {
-  const ref = typeof params.ref === 'string' && params.ref.trim() ? params.ref.trim() : (ctx.checkpointRef || '');
+  const explicit = typeof params.ref === 'string' && params.ref.trim() ? params.ref.trim() : '';
   const stat = params.stat === true;
+  const repos = Array.isArray(ctx.repos) && ctx.repos.length ? ctx.repos : null;
+  // An explicit ref applies to every member; otherwise each member diffs from its own base —
+  // ctx.checkpointRef is the primary's and means nothing in another member's repository.
+  // A member with no base of its own diffs its working tree (no ref): falling back to the primary's
+  // ctx.checkpointRef there would diff it against another repository's commit again.
+  const own = (r) => (typeof r?.checkpointRef === 'string' ? r.checkpointRef.trim() : '');
+  const refs = repos ? repos.map((r) => explicit || own(r)) : [explicit || ctx.checkpointRef || ''];
   // A param is argv, not a shell word — but `--output=<path>` is still a git OPTION, and git runs with worca's privileges.
-  if (ref.startsWith('-')) throw new Error(`a ref must not start with "-": ${ref}`);
-  const args = ['diff', ...(stat ? ['--stat'] : []), ...(ref ? [ref] : [])];
-  const section = (dir, label) => {
+  for (const ref of refs) if (ref.startsWith('-')) throw new Error(`a ref must not start with "-": ${ref}`);
+  const section = (dir, label, ref) => {
+    const args = ['diff', ...(stat ? ['--stat'] : []), ...(ref ? [ref] : [])];
     const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     if (r.status !== 0) log('warn', `git ${args.join(' ')} in ${dir}: ${(r.stderr || '').trim() || `exit ${r.status}`}`);
     const body = (r.stdout || '').trimEnd();
-    return `${label ? `## ${label}\n\n` : ''}\`\`\`${stat ? 'text' : 'diff'}\n${body || '(no changes)'}\n\`\`\`\n`;
+    const head = label ? `## ${label}\n\n${ref ? `Base: \`${ref}\`\n\n` : ''}` : '';
+    return `${head}\`\`\`${stat ? 'text' : 'diff'}\n${body || '(no changes)'}\n\`\`\`\n`;
   };
-  const repos = Array.isArray(ctx.repos) && ctx.repos.length ? ctx.repos : null;
-  const md = repos ? repos.map((r) => section(r.dir, r.key)).join('\n') : section(ctx.cwd, '');
+  const md = repos ? repos.map((r, i) => section(r.dir, r.key, refs[i])).join('\n') : section(ctx.cwd, '', refs[0]);
   const out = outputs.diff?.path;
   if (!out) throw new Error('the diff output has no path');
-  writeFileSync(out, `# Diff against ${ref || 'the working tree'}\n\n${md}`, 'utf8');
+  const against = explicit || (repos ? 'each project\'s diff base' : refs[0]) || 'the working tree';
+  writeFileSync(out, `# Diff against ${against}\n\n${md}`, 'utf8');
   return { summary: `diff written (${md.length} chars${repos ? `, ${repos.length} repos` : ''})` };
 }

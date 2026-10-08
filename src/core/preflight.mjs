@@ -500,7 +500,8 @@ export async function probeClaudeCapabilities(bin = 'claude') {
   const help = await execSafe(exe, ['--help'], { timeout: 8000 });
   const raw = await execSafe(exe, ['--version'], { timeout: 8000 });
   const version = raw ? (/(\d+\.\d+\.\d+)/.exec(raw)?.[1] ?? raw.split(/\s+/)[0] ?? null) : null;
-  return { mcpConfig: !!help && help.includes('--mcp-config'), version };
+  // pluginDir (skills registry §4.1): a set's skills reach a spawn only through --plugin-dir.
+  return { mcpConfig: !!help && help.includes('--mcp-config'), pluginDir: !!help && help.includes('--plugin-dir'), version };
 }
 
 // ── Is the Claude Code CLI signed in? ─────────────────────────────────────────
