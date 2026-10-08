@@ -816,10 +816,11 @@
                   <button type="button" class="hd-pr" hidden data-min-level="advanced">Create PR</button>
                   <!-- Publish branch (#618): push a finished run's branch without a PR. Painted by paintHdPublish. -->
                   <button type="button" class="hd-publish btn-ghost" hidden data-min-level="advanced">Publish branch</button>
-                  <span class="hd-published hint mono" hidden data-min-level="advanced"></span>
                   <span class="act-pill-slot"></span>
                   <a class="hd-pr-link" hidden data-min-level="advanced" target="_blank" rel="noopener"></a>
                 </div>
+                <!-- "Published to <remote>/<branch>" (#618): its own line, so a long branch never squeezes the title. -->
+                <p class="hd-published hint mono" hidden data-min-level="advanced"></p>
                 <!-- Workspace runs: one line per member repo (View PR / Merged / No changes).
                      Painted by paintHdPr; never shown for a single-project run. -->
                 <ul class="hd-pr-repos" hidden data-min-level="advanced" aria-label="Pull requests per repository"></ul>
