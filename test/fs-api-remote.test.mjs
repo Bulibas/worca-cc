@@ -56,6 +56,8 @@ before(async () => {
   await mkdir(join(projects, 'app'), { recursive: true });
   await mkdir(join(projects, 'other'), { recursive: true });
   await mkdir(join(outside, 'secret'), { recursive: true });
+  await mkdir(join(projects, '.secret'), { recursive: true });
+  await mkdir(join(projects, 'app', '.git'), { recursive: true });
   try { await symlink(outside, join(projects, 'escape'), 'dir'); linked = true; } catch { /* no symlink perms */ }
   process.env.WORCA_HOME = homeDir;
   process.env.HOME = base;
@@ -68,6 +70,10 @@ before(async () => {
   process.env.WORCA_CF_ACCESS_AUD = AUD;
   for (const k of ['WORCA_ACTIONS_REMOTE', 'WORCA_TERMINAL_REMOTE', 'WORCA_DATA_DIR', 'WORCA_AGENT_USER', 'WORCA_AGENT_HOME']) delete process.env[k];
   _resetForTests();
+  // Registry entries from before the limit existed (any path could be added): they must not widen it.
+  const { addProject } = await import('../src/core/projects.mjs');
+  await addProject({ name: 'old-outside', path: outside });
+  await addProject({ name: 'old-base', path: base });
   globalThis.fetch = (url, opts) => (String(url) === CERTS_URL ? fakeCerts(url) : realFetch(url, opts));
   const mod = await import('../ui/server.mjs');
   srv = mod.server;
@@ -160,4 +166,46 @@ test('remote mode: WORCA_TERMINAL_REMOTE=1 or WORCA_ACTIONS_REMOTE=1 allows the 
       await remote('DELETE', `/api/projects?name=${encodeURIComponent(`secret-${flag}`)}`);
     } finally { delete process.env[flag]; }
   } })));
+});
+
+test('remote mode: registered projects, broad roots and hidden folders do not widen the limit', async () => {
+  const worcaData = await realpath(join(homeDir, '.worca-cc'));
+  await checkRows([
+    { name: 'a pre-existing registry entry outside (and one for the parent of every root) opens nothing', run: async () => {
+      const r = await dirs('');
+      assert.deepEqual(r.body.roots, [projects, worcaData]);
+      refused(await dirs(outside));
+      refused(await dirs(join(outside, 'secret')));
+      refused(await dirs(base));
+      refused(await remote('POST', '/api/install', { projectDir: outside }));
+    } },
+    { name: 'a projects root of / (or one segment) is ignored: the Worca home stays, the disk does not open', run: async () => {
+      const prevRoot = process.env.WORCA_PROJECTS_ROOT;
+      const warn = console.warn;
+      const warned = [];
+      console.warn = (m) => warned.push(String(m));
+      try {
+        for (const broad of ['/', '/usr']) {
+          process.env.WORCA_PROJECTS_ROOT = broad;
+          const r = await dirs('');
+          assert.equal(r.status, 200, JSON.stringify(r.body));
+          assert.deepEqual(r.body.roots, [worcaData]);
+          assert.equal(r.body.path, worcaData);
+          refused(await dirs('/etc'));
+          refused(await dirs(projects));
+        }
+        assert.ok(warned.some((m) => /too broad/.test(m)), 'the skipped root is logged');
+      } finally {
+        console.warn = warn;
+        process.env.WORCA_PROJECTS_ROOT = prevRoot;
+      }
+    } },
+    { name: 'a hidden folder inside an allowed root is refused for browse, add and install', run: async () => {
+      refused(await dirs(join(projects, '.secret')));
+      refused(await remote('POST', '/api/projects', { name: 'hidden', path: join(projects, '.secret') }));
+      refused(await remote('POST', '/api/projects/bulk', { projects: [{ name: 'hidden', path: join(projects, '.secret') }] }));
+      refused(await remote('POST', '/api/install', { projectDir: join(projects, 'app', '.git') }));
+      refused(await remote('POST', '/api/install', { projectDir: join(projects, '.secret') }));
+    } },
+  ]);
 });

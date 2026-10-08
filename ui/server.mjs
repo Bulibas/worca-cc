@@ -7061,17 +7061,24 @@ registerMemoryRoutes('/api/memory/projects/:key', { family: 'projects' });
 // (global isLocalRequest middleware).
 //
 // Hosted (remote mode) with the terminal and actions off, a signed-in person may
-// browse, add and install into Worca's own folders only: the data dir, the projects
-// root and the registered projects (src/core/fs-scope.mjs). WORCA_TERMINAL_REMOTE=1 or
+// browse, add and install into Worca's own folders only: the projects root and the
+// Worca home (<base>/.worca-cc, the data dir), hidden folders below them excluded
+// (src/core/fs-scope.mjs). Registered projects do NOT widen this: an entry added before
+// the limit existed (even `/`) must not re-open the disk, and hosted projects are cloned
+// under the projects root. WORCA_DATA_DIR itself is not a root either: on a single-volume
+// host it also holds HOME with Claude Code's login. WORCA_TERMINAL_REMOTE=1 or
 // WORCA_ACTIONS_REMOTE=1 already grant more than a listing, so either lifts the limit.
 const fsLimitedHere = (req = null) => REMOTE_MODE && !terminalEnabledHere(req) && !actionsEnabledHere(req);
-/** Worca's own folders as real paths: projects root, WORCA_DATA_DIR, the Worca home, registered projects. */
+const FS_BROAD_WARNED = new Set();
+/** Worca's own folders as real paths: the projects root and the Worca home. A broad one is skipped (logged once). */
 async function fsAllowedRoots() {
   let home = null;
   try { home = worcaHome(); } catch { /* no resolvable home (node:test without WORCA_HOME) */ }
-  let projects = [];
-  try { projects = (await listProjects()).map((p) => p.path); } catch { /* registry unreadable: roots only */ }
-  return realRoots([getProjectsRoot(), process.env.WORCA_DATA_DIR, home, ...projects]);
+  return realRoots([getProjectsRoot(), home], { onSkip: (c, r) => {
+    if (FS_BROAD_WARNED.has(r)) return;
+    FS_BROAD_WARNED.add(r);
+    console.warn(`[worca-ui] folder browser: ${r} (from ${c}) is too broad to browse on a hosted Worca; skipped. Set WORCA_PROJECTS_ROOT to a deeper folder.`);
+  } });
 }
 /** True when every path may be used here; otherwise answers 403 FS_OUTSIDE_ALLOWED and returns false. */
 async function requireFsAllowed(req, res, paths) {

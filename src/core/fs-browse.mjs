@@ -11,7 +11,7 @@ import { readdir, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { normalizeProjectPath } from './projects.mjs';
 import { defaultRoot, getProjectsRoot } from './settings.mjs';
-import { checkInside, isWithin, outsideAllowedError, realOrNull } from './fs-scope.mjs';
+import { checkInside, insideRoots, isWithin, outsideAllowedError, realOrNull } from './fs-scope.mjs';
 
 function err(message, code) { return Object.assign(new Error(message), { code }); }
 
@@ -71,7 +71,7 @@ async function listLimited(input, roots) {
   const dirs = [];
   for (const d of all) {
     const real = await realOrNull(d.path);
-    if (real && roots.some((r) => isWithin(real, r))) dirs.push(d);
+    if (real && insideRoots(real, roots)) dirs.push(d);
   }
   const parent = dirname(path);
   const atRoot = roots.includes(path) || parent === path || !roots.some((r) => isWithin(parent, r));
