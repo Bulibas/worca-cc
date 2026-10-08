@@ -682,6 +682,21 @@ export async function branchPushedTo(projectDir, branch) {
   return { remote: remotes.includes('origin') ? 'origin' : remotes[0] };
 }
 
+/**
+ * The local tip of `branch` and its tip on `remote`'s tracking ref, as { local, remote } shas
+ * (each null when the ref is absent; no remote = local only). Publish branch (#618) compares
+ * them to tell "published" from "local commits since". No network. null on git failure.
+ */
+export async function branchTips(projectDir, branch, remote) {
+  if (!projectDir || !branch) return null;
+  const refs = [`refs/heads/${branch}`, ...(remote ? [`refs/remotes/${remote}/${branch}`] : [])];
+  const r = await _run('git', ['for-each-ref', '--format=%(refname) %(objectname)', ...refs], { cwd: projectDir });
+  if (!r.ok) return null;
+  // for-each-ref also matches refs UNDER a pattern (refs/heads/feat/sub), so keep exact names only.
+  const sha = new Map((r.stdout || '').split(/\r?\n/).map((l) => l.trim().split(' ')).filter((p) => p.length === 2));
+  return { local: sha.get(refs[0]) || null, remote: remote ? sha.get(refs[1]) || null : null };
+}
+
 /** Recreate a local branch from its remote-tracking ref (checkout D7). */
 export async function restoreBranchFromRemote(projectDir, branch, remote) {
   const r = await _run('git', ['branch', '--', branch, `refs/remotes/${remote}/${branch}`], { cwd: projectDir });
