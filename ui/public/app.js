@@ -26037,6 +26037,8 @@ function paintGraphFor(host, stepper, decor, legacySteps) {
     slot.m = mountRunGraph(host, {
       mode: decor.mode || 'monitor',
       onRowClick: (executionId, nodeId) => focusLogExecution(slot.ctx, executionId, nodeId),
+      // Running: a card opens its live log. History links its cards itself (wireHdGraphLogLinks).
+      nodeClicks: !decor.record,
       onGateClick: () => focusQuestionPanel(slot.ctx),
       onResultClick: (path) => openRunArtifact(slot.ctx, path),
     });

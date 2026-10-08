@@ -65,11 +65,12 @@ const nodeSig = (stepper) => manifestNodes(stepper).map((n) => n.id).join(',');
 
 export function mountRunGraph(hostEl, opts = {}) {
   const { mode = 'monitor', doc = hostEl.ownerDocument, raf = null, viewport = null,
-    onRowClick = null, onGateClick = null, onResultClick = null } = opts;
+    onRowClick = null, onGateClick = null, onResultClick = null, nodeClicks = false } = opts;
   const wrap = hostEl.closest('.run-flow-wrap') || hostEl.parentElement || hostEl;
   const win = doc.defaultView || globalThis;
   const isStatic = mode === 'static', isFocus = mode === 'focus', isMonitor = !isStatic && !isFocus;
   const zoomMin = 0.3, zoomMax = isMonitor ? 1.6 : 1;
+  const cardLinks = nodeClicks && isMonitor && !!onRowClick;   // only a monitor host takes clicks
 
   let view = null, stepper = null, decor = null, runId = null, expanded = null, ro = null, lastFit = null, bound = false, nav = null;
   let focus = [];   // focus hosts: the node ids the camera frames (focusNodeIds)
@@ -252,6 +253,41 @@ export function mountRunGraph(hostEl, opts = {}) {
       return;
     }
     if ((structural || revealed) && untouched()) fit();
+    if (cardLinks) linkCards();
+  }
+
+  /** The execution a card click opens: the newest running one, else the latest. */
+  function cardExecution(nodeId) {
+    const rows = (decor && decor.footers && decor.footers[nodeId] && decor.footers[nodeId].rows) || [];
+    return rows.filter((r) => r.led === 'active').pop() || rows[rows.length - 1] || null;
+  }
+  /** A card with an execution behaves as a link to its log; one that never ran stays inert. */
+  function linkCards() {
+    for (const el of hostEl.querySelectorAll('.node[data-node-id]')) {
+      const linked = !!cardExecution(el.dataset.nodeId);
+      if (linked === (el.getAttribute('role') === 'link')) continue;
+      if (linked) {
+        const tt = el.querySelector('.nhead .tt');
+        el.setAttribute('role', 'link');
+        el.tabIndex = 0;
+        el.setAttribute('aria-label', `Show the live log of ${tt ? tt.textContent : el.dataset.nodeId}`);
+        el.classList.add('linked');
+      } else {
+        el.removeAttribute('role');
+        el.removeAttribute('tabindex');
+        el.removeAttribute('aria-label');
+        el.classList.remove('linked');
+      }
+    }
+  }
+  function openCard(e) {
+    if (!cardLinks) return false;
+    const card = e.target.closest && e.target.closest('.node[data-node-id]');
+    if (!card || !hostEl.contains(card)) return false;
+    const row = cardExecution(card.dataset.nodeId);
+    if (!row) return false;
+    onRowClick(row.executionId, card.dataset.nodeId);
+    return true;
   }
 
   function bind() {
@@ -272,8 +308,18 @@ export function mountRunGraph(hostEl, opts = {}) {
         const gate = e.target.closest && e.target.closest('.ngate');
         if (gate) { if (onGateClick) onGateClick(gate.dataset.wireId); return; }
         const row = e.target.closest && e.target.closest('.xrow');
-        if (row && onRowClick) onRowClick(row.dataset.executionId, row.dataset.nodeId);
+        if (row) { if (onRowClick) onRowClick(row.dataset.executionId, row.dataset.nodeId); return; }
+        // The rest of the footer (strip, live line, fan) is not the card body.
+        if (e.target.closest && e.target.closest('.xfoot')) return;
+        openCard(e);
       });
+      if (cardLinks) {
+        on(hostEl, 'keydown', (e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          if (!e.target.matches || !e.target.matches('.node[data-node-id][role="link"]')) return;
+          if (openCard(e)) e.preventDefault();   // Space would scroll the page too
+        });
+      }
     }
     // jsdom has no ResizeObserver — guard through the document's window (P5's idiom).
     if (typeof win.ResizeObserver === 'function') {
