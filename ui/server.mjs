@@ -184,6 +184,7 @@ import { modelSlot, missingCredentials, describeMissing, workflowNeedsModel } fr
 import { syncPluginSlots } from '../src/core/plugin-broker-slots.mjs';
 import { planClone, cloneProject, CloneError } from '../src/core/clone-project.mjs';
 import { listFolders } from '../src/core/fs-browse.mjs';
+import { realRoots, checkInside, outsideAllowedMessage, FS_OUTSIDE_ALLOWED } from '../src/core/fs-scope.mjs';
 import {
   readConfig, setStep, addCustomModel, removeCustomModel, listModels,
   PREDEFINED_MODELS, agentSteps, EFFORTS, catalogHasModel,
@@ -6773,6 +6774,7 @@ app.post('/api/pr/crosslink', async (req, res) => {
 app.post('/api/install', async (req, res) => {
   const projectDir = resolveProjectDir((req.body || {}).projectDir);
   if (!projectDir) return badRequest(res, 'projectDir is required');
+  if (!(await requireFsAllowed(req, res, [projectDir]))) return;
   try {
     const result = await installAgents(projectDir);
     res.json(result);
@@ -6853,6 +6855,7 @@ app.get('/api/projects', async (_req, res) => {
 
 app.post('/api/projects', async (req, res) => {
   const body = req.body || {};
+  if (!(await requireFsAllowed(req, res, [normalizeProjectPath(body.path)]))) return;
   try {
     await pinUiLevel();                        // before the first project ends "fresh install"
     const projects = await addProject({ name: body.name, path: body.path });
@@ -6881,6 +6884,7 @@ app.post('/api/projects/bulk', async (req, res) => {
   const items = req.body && req.body.projects;
   if (!Array.isArray(items) || !items.length) return badRequest(res, 'projects must be a non-empty array of {name, path}');
   if (items.length > MAX_BULK_PROJECTS) return badRequest(res, `at most ${MAX_BULK_PROJECTS} projects per request`);
+  if (!(await requireFsAllowed(req, res, items.map((i) => normalizeProjectPath(i && i.path))))) return;
   try {
     await pinUiLevel();                        // before the first project ends "fresh install"
     const { results, projects } = await addProjects(items);
@@ -7148,8 +7152,44 @@ registerMemoryRoutes('/api/memory/projects/:key', { family: 'projects' });
 // user's machine); when it reports `unsupported` the UI falls back to an
 // in-app modal fed by GET /api/fs/dirs. Localhost-only like every route here
 // (global isLocalRequest middleware).
+//
+// Hosted (remote mode) with the terminal and actions off, a signed-in person may
+// browse, add and install into Worca's own folders only: the projects root and the
+// Worca home (<base>/.worca-cc, the data dir), hidden folders below them excluded
+// (src/core/fs-scope.mjs). Registered projects do NOT widen this: an entry added before
+// the limit existed (even `/`) must not re-open the disk, and hosted projects are cloned
+// under the projects root. WORCA_DATA_DIR itself is not a root either: on a single-volume
+// host it also holds HOME with Claude Code's login. WORCA_TERMINAL_REMOTE=1 or
+// WORCA_ACTIONS_REMOTE=1 already grant more than a listing, so either lifts the limit.
+const fsLimitedHere = (req = null) => REMOTE_MODE && !terminalEnabledHere(req) && !actionsEnabledHere(req);
+const FS_BROAD_WARNED = new Set();
+/** Worca's own folders as real paths: the projects root and the Worca home. A broad one is skipped (logged once). */
+async function fsAllowedRoots() {
+  let home = null;
+  try { home = worcaHome(); } catch { /* no resolvable home (node:test without WORCA_HOME) */ }
+  return realRoots([getProjectsRoot(), home], { onSkip: (c, r) => {
+    if (FS_BROAD_WARNED.has(r)) return;
+    FS_BROAD_WARNED.add(r);
+    console.warn(`[worca-ui] folder browser: ${r} (from ${c}) is too broad to browse on a hosted Worca; skipped. Set WORCA_PROJECTS_ROOT to a deeper folder.`);
+  } });
+}
+/** True when every path may be used here; otherwise answers 403 FS_OUTSIDE_ALLOWED and returns false. */
+async function requireFsAllowed(req, res, paths) {
+  if (!fsLimitedHere(req)) return true;
+  const roots = await fsAllowedRoots();
+  for (const p of paths) {
+    if (!p) continue;
+    if ((await checkInside(p, roots)).inside) continue;
+    res.status(403).json({ error: outsideAllowedMessage(p), code: FS_OUTSIDE_ALLOWED });
+    return false;
+  }
+  return true;
+}
 app.post('/api/fs/pick-folder', async (req, res) => {
   try {
+    // Limited: a native dialog would open on the server with the whole disk in it; the UI
+    // falls back to the in-app browser, which stays inside the allowed folders.
+    if (fsLimitedHere(req)) return res.json({ status: 'unsupported' });
     // `purpose` only picks the dialog title from a closed set (folder-dialog.mjs);
     // `multiple` (strictly true) asks for a multi-select dialog where the OS has one.
     const purpose = typeof req.body?.purpose === 'string' ? req.body.purpose : undefined;
@@ -7162,9 +7202,11 @@ app.post('/api/fs/pick-folder', async (req, res) => {
 
 app.get('/api/fs/dirs', async (req, res) => {
   try {
-    res.json(await listFolders(typeof req.query.path === 'string' ? req.query.path : ''));
+    const roots = fsLimitedHere(req) ? await fsAllowedRoots() : null;
+    res.json(await listFolders(typeof req.query.path === 'string' ? req.query.path : '', { roots }));
   } catch (err) {
     if (err && err.code === 'BAD_REQUEST') return badRequest(res, err.message);
+    if (err && err.code === FS_OUTSIDE_ALLOWED) return res.status(403).json({ error: err.message, code: FS_OUTSIDE_ALLOWED });
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }
 });
@@ -8137,6 +8179,10 @@ app.post('/api/settings', async (req, res) => {
   const hasActionsKey = has('actions');
   // D4: actions.editor / actions.terminal are command paths the built-ins route spawns as the server user.
   if (hasActionsKey && agentMayBeCaller(req)) return refuseAgentCaller(res);
+  // Hosted with browsing limited: the Worca root and projects root move only within Worca's own
+  // folders (both widen what can be browsed, and the setters probe the path). Clearing is fine.
+  if (!(await requireFsAllowed(req, res, [has('root') ? normalizeProjectPath(body.root) : null,
+    has('projectsRoot') ? normalizeProjectPath(body.projectsRoot) : null]))) return;
   const wsScanModels = hasWorkspaceScanKey ? (autoModels || defragModels || await listModels('')) : null;
   // #422: the title model is a SELECT over the catalog, so an id that is not a
   // catalog member is a client bug (or a stale option) — refuse it here rather

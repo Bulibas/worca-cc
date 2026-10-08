@@ -1487,6 +1487,7 @@ button.af-gal-card:focus-visible{outline:2px solid var(--ink);outline-offset:2px
   background:transparent;font-family:inherit;font-size:13px;color:var(--ink);cursor:pointer;}
 .folder-list .folder-item:hover{background:var(--hover-on-field);}
 .folder-empty{padding:10px 12px;}
+.folder-scope{padding:0 0 8px;line-height:1.9;}
 /* Multi mode: a tick box left of each folder name (the name still opens the folder). */
 .folder-list .folder-row{display:flex;align-items:center;gap:2px;padding-left:10px;}
 .folder-list .folder-row .folder-item{flex:1 1 auto;min-width:0;}
